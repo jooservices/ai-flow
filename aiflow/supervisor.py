@@ -111,7 +111,8 @@ class Supervisor:
     def eligible_agents(self, role: str, key: str, field_agent: str | None, pool: list[str]) -> list[str]:
         """The AIs of `pool` that may take `role` now, best first. The reviewer and QA must differ from the developer."""
         cool = self.cooldowns(pool)
-        present = [a for a in pool if a not in cool]
+        # AIs in explicit_only (OpenCode, for very easy tasks) work only when the ticket's Agent field names them as developer.
+        present = [a for a in pool if a not in cool and (a not in self.cfg.explicit_only or (role == "developer" and a == field_agent))]
         preferred = self.role_spec(role)[0]
         if role == "developer":
             if field_agent in present:

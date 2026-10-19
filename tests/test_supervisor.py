@@ -425,6 +425,16 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(sup.pick_agent("reviewer", "K-1", "Codex"), "Claude")  # Grok is not on this machine
         self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Codex", ["Claude", "Codex", "Grok"]), ["Grok"])
 
+    def test_opencode_works_only_when_the_ticket_names_it(self):
+        sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,OpenCode")
+        pool = ["Claude", "Codex", "OpenCode"]
+        self.assertEqual(sup.eligible_agents("developer", "K-1", "OpenCode", pool), ["OpenCode"])
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, pool), ["Claude", "Codex"])
+        sup.redis.data["cooldown:Claude"] = sup.redis.data["cooldown:Codex"] = "1"
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, pool), [])  # never falls back to OpenCode on its own
+        sup.redis.data["dev:K-1"] = "Codex"
+        self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Codex", pool), [])
+
     def test_nobody_waits_when_another_machine_can_take_the_step(self):
         sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,Grok", AIFLOW_QUOTA_BLOCK_MINUTES="0")
         sup.redis.data["ais:mac"] = "Claude,Grok"

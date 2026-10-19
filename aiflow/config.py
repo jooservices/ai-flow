@@ -75,6 +75,7 @@ class Settings:
     blocked_reason_field: str
     require_human_field: str
     opencode_model: str
+    explicit_only: tuple[str, ...]
     quota_block_minutes: int
     recheck_seconds: int
     workspace_name: str
@@ -133,6 +134,7 @@ def load(env: dict[str, str] | None = None) -> Settings:
         blocked_reason_field=merged.get("AIFLOW_BLOCKED_REASON_FIELD", "customfield_10215"),
         require_human_field=merged.get("AIFLOW_REQUIRE_HUMAN_FIELD", "customfield_10216"),
         opencode_model=merged.get("AIFLOW_OPENCODE_MODEL", "openai/gpt-5.4-mini"),
+        explicit_only=_list(merged, "AIFLOW_EXPLICIT_ONLY_AIS", "OpenCode"),
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),
         recheck_seconds=_int(merged, "AIFLOW_RECHECK_SECONDS", 120),
         workspace_name=merged.get("AIFLOW_WORKSPACE_NAME", {"wsl": "WSL", "mac": "Mac"}.get(machine, machine)),

@@ -7,3 +7,7 @@ company = "JOOservices"
 # database = "my-project" # optional: provision an isolated shared database for each ticket
 ci_required = true
 # human_on_deployment = false # opt out of automatic Human review for a Deployment section
+# Optional project-owned post-merge hook. Keep the command empty to disable it.
+deploy_command = ""
+deploy_timeout_minutes = 30
+deploy_on = "base"         # use "all" to include hotfix and release merges

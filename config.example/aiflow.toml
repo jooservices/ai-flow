@@ -16,6 +16,9 @@ max_parallel = 0          # tickets of one Jira project running at the same time
 highest_developer = "Claude"  # developer of the tickets with priority Highest
 release_check = ""        # command that runs the full test suite (and e2e) of a Release ticket, written by the project
 tag_prefix = "v"          # release tags are <prefix><version>
+deploy_command = ""       # optional post-merge command; empty means no change
+deploy_timeout_minutes = 30
+deploy_on = "base"         # "all" also runs after hotfix and release merges
 
 # Number of workers (aiflow-work@1 ... @N) per machine; the name is AIFLOW_MACHINE.
 [machines.wsl]

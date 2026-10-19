@@ -1561,7 +1561,6 @@ def main(argv: list[str] | None = None) -> int:
                                   if project.deploy_command.strip() else "disabled")
                 print(f"{project.jira_key}: repo {project.repo}, base {project.base}, hotfix {project.hotfix_base}, developer {project.developer or '-'}, "
                       f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, "
-                      f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, "
                       f"human on deployment {project.human_on_deployment}, auto-merge {project.auto_merge}, "
                       f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}, deploy {deploy_setting}")
             return 0

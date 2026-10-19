@@ -77,6 +77,20 @@ python3 -m unittest discover -s tests -t .
 
 State lives in one Redis shared by every machine (plain TCP client in `aiflow/lock.py`: reconnects, retries, and the AI is stopped when Redis stays unreachable for three quarters of the lease time). DB 5 is production, DB 6 is for tests; keys are under `aiworkflow:`. Machines that cannot route to the Redis host use `bin/aiflow-redis-tunnel` (launchd template in `deploy/launchd/`). Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
 
+## Troubleshooting
+
+| Blocked reason | What to do |
+|---|---|
+| Quota | Wait for another eligible AI to become available; a developer cooling down remains ineligible for review or QA after cooldown, and rechecks unblock only when an eligible AI is available. |
+| Offline | Make another eligible AI available; if the only online AI is the developer and it is not cooling down, it is still ineligible for review or QA, so rechecks cannot unblock the ticket yet. |
+| Unclear | The owner clarifies the ticket, then unblocks it. |
+| Attempts | The owner reviews the failed attempts and decides the next step, then unblocks the ticket. |
+| Rework | The owner reviews the work after the maximum rework rounds and decides the next step. |
+| CI | The owner resolves CI that never started or timed out, then unblocks the ticket. |
+| Human | The owner resolves the outstanding human review request, then unblocks the ticket. |
+| Config | The owner corrects the repository or pull request configuration, then unblocks the ticket. |
+| Other | The owner checks the recorded reason and decides the next step. |
+
 ## Known limits
 
 - A failed cleanup after a merge is reported in the Jira comment, and the worktree must then be removed by hand.

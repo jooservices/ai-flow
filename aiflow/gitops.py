@@ -81,14 +81,13 @@ class Repo:
         pushed = self.remote_branch(key)
         if pushed:
             git(self.path, "fetch", "origin", pushed)
-            temp = f"aiflow-base-{pushed}"  # the helper only accepts a local base branch
-            git(self.path, "branch", "-f", temp, f"origin/{pushed}")
-            try:
-                info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
-                                    "--ticket", key, "--description", pushed.removeprefix(f"{key}-"), "--base", temp)
-            finally:
-                git(self.path, "branch", "-D", temp, check=False)
-            git(Path(info["path"]), "branch", "--set-upstream-to", f"origin/{pushed}", check=False)
+            # The helper creates the branch from a local base (so its merged-check later uses `base`); the new worktree is
+            # empty, so moving it onto the pushed commit loses nothing.
+            info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
+                                "--ticket", key, "--description", pushed.removeprefix(f"{key}-"), "--base", base)
+            workdir = Path(info["path"])
+            git(workdir, "reset", "--hard", f"origin/{pushed}")
+            git(workdir, "branch", "--set-upstream-to", f"origin/{pushed}", check=False)
             return Path(info["path"]), info["branch"]
         info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
                             "--ticket", key, "--description", slug(summary), "--base", base)

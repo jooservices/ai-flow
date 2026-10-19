@@ -115,6 +115,9 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(make().eligible(self.issue("In Progress", age=10)))
         self.assertTrue(make().eligible(self.issue("In Progress", age=1000)))
 
+    def test_stale_search_result_for_a_finished_ticket(self):
+        self.assertFalse(make().eligible(self.issue("Done")))
+
     def test_hold_label(self):
         self.assertFalse(make().eligible(self.issue(labels=["aiflow-hold"])))
 

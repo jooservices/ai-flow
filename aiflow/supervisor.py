@@ -46,6 +46,8 @@ class Supervisor:
 
     def eligible(self, issue: dict[str, Any]) -> bool:
         key, status = issue["key"], issue["status"]
+        if status not in STAGES:  # the JQL index can lag behind a transition we just made
+            return False
         if "aiflow-hold" in issue.get("labels", []) or self.redis.get(f"lease:{key}"):
             return False
         if status == "To Do":

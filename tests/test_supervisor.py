@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import tempfile
@@ -13,7 +14,10 @@ from aiflow.jira import Jira, JiraError, adf_to_markdown
 from aiflow.gitops import GitError, Repo
 from aiflow.project_database import ProjectDatabase
 from aiflow import health
-from aiflow.supervisor import tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
+from aiflow.supervisor import (
+    tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field,
+    ticket_of_branch, main,
+)
 
 
 class FakeRedis:
@@ -183,7 +187,7 @@ class ProjectSettingsTests(unittest.TestCase):
         (base / "aiflow").mkdir()
         (base / "aiflow.toml").write_text("[defaults]\n")
         (base / "aiflow" / "a.toml").write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\nmax_parallel = 1\nrequire_human = true\n')
-        (base / "aiflow" / "b.toml").write_text('[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmerge_method = "squash"\n')
+        (base / "aiflow" / "b.toml").write_text('[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmerge_method = "squash"\nhuman_on_deployment = false\n')
         self.cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test"}, config_dir=base)
 
     def tearDown(self):
@@ -209,6 +213,41 @@ class ProjectSettingsTests(unittest.TestCase):
         sup = self.sup()
         self.assertTrue(sup.human_required("JAIF-9"))
         self.assertFalse(sup.human_required("JOOCX-9"))
+
+    def test_deployment_requires_a_human_by_default_when_the_key_is_missing(self):
+        sup = self.sup()
+        sup.jira.comments = lambda key, last=6: [{"body": "## Deployment\nRun the migration."}]
+        sup.require_human_for_deployment("JAIF-9")
+        self.assertEqual(sup.jira.fields[("JAIF-9", self.cfg.require_human_field)], {"value": "Yes"})
+
+    def test_deployment_review_skip_is_commented_once_when_project_disables_it(self):
+        sup = self.sup()
+        posted = []
+        sup.jira.comments = lambda key, last=6: [{"body": "## Deployment\nRun the migration."}]
+        sup.jira.comment = lambda key, body: posted.append((key, body))
+
+        sup.require_human_for_deployment("JOOCX-9")
+        sup.require_human_for_deployment("JOOCX-9")
+
+        self.assertEqual(posted, [("JOOCX-9", "Deployment section found; human review skipped by project setting")])
+        self.assertFalse(hasattr(sup.jira, "fields"))
+        self.assertFalse(sup.human_required("JOOCX-9"))
+
+    def test_require_human_yes_still_stops_when_deployment_review_is_disabled(self):
+        sup = self.sup()
+        sup.jira.read_field = lambda key, field: {"value": "Yes"}
+        self.assertEqual(decide(facts(require_human=sup.human_required("JOOCX-9")))[0], "human")
+
+    def test_release_still_requires_a_human_when_deployment_review_is_disabled(self):
+        sup = self.sup()
+        sup.redis.set("isrelease:JOOCX-9", "1", 30)
+        self.assertEqual(decide(facts(require_human=sup.human_required("JOOCX-9")))[0], "human")
+
+    def test_check_prints_the_deployment_review_setting(self):
+        with mock.patch("aiflow.config.load", return_value=self.cfg), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(main(["check"]), 0)
+        self.assertIn("human on deployment True", output.getvalue())
+        self.assertIn("human on deployment False", output.getvalue())
 
     def test_each_project_has_its_repo_and_merge_method(self):
         self.assertEqual((self.cfg.project("JAIF-9").repo, self.cfg.project("JOOCX-9").repo), ("ai-flow", "crawlerx"))

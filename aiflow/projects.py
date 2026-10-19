@@ -16,8 +16,8 @@ from pathlib import Path
 from .config import ConfigError
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
-            "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int, "highest_developer": str,
-            "release_check": str, "tag_prefix": str}
+            "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
+            "highest_developer": str, "release_check": str, "tag_prefix": str}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
@@ -36,6 +36,7 @@ class Project:
     reviewer: str = ""
     qa: str = ""
     require_human: bool = False
+    human_on_deployment: bool = True
     auto_merge: bool = True
     ci_required: bool = False
     merge_method: str = "merge"

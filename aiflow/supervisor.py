@@ -910,12 +910,21 @@ class Supervisor:
         self.jira.transition(key, "In Review")
 
     def require_human_for_deployment(self, key: str) -> None:
-        """A hand-over comment with a Deployment section (migration, deploy) needs a human before the merge."""
+        """A Deployment hand-over needs a human unless the project opts out."""
         try:
             latest = self.jira.comments(key, 3)
-            if any(deployment_needed(str(c.get("body", ""))) for c in latest if "## Deployment" in str(c.get("body", ""))):
-                self.jira.set_field(key, self.cfg.require_human_field, {"value": "Yes"})
-                log(f"{key}: Deployment section found; Require human = Yes")
+            found = any(deployment_needed(str(c.get("body", ""))) for c in latest if "## Deployment" in str(c.get("body", "")))
+            if not found:
+                return
+            if not self.cfg.project(key).human_on_deployment:
+                if not self.state(key, "deployment-skipped"):
+                    message = "Deployment section found; human review skipped by project setting"
+                    if not any(message in str(c.get("body", "")) for c in latest):
+                        self.jira.comment(key, message)
+                    self.redis.set(f"deployment-skipped:{key}", "1", 30 * DAY)
+                return
+            self.jira.set_field(key, self.cfg.require_human_field, {"value": "Yes"})
+            log(f"{key}: Deployment section found; Require human = Yes")
         except (JiraError, ValueError, TypeError) as error:
             log(f"{key}: cannot check the Deployment section: {error}")
 
@@ -1411,7 +1420,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
             for project in config.registry.projects.values():
                 print(f"{project.jira_key}: repo {project.repo}, base {project.base}, hotfix {project.hotfix_base}, developer {project.developer or '-'}, "
-                      f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, auto-merge {project.auto_merge}, "
+                      f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, "
+                      f"human on deployment {project.human_on_deployment}, auto-merge {project.auto_merge}, "
                       f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}")
             return 0
     except ConfigError as error:

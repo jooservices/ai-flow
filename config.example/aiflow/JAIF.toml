@@ -6,3 +6,4 @@ repo = "ai-flow"          # directory under <company>/projects and the GitHub re
 company = "JOOservices"
 # database = "my-project" # optional: provision an isolated shared database for each ticket
 ci_required = true
+# human_on_deployment = false # opt out of automatic Human review for a Deployment section

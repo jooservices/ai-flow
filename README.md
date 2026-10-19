@@ -110,7 +110,7 @@ Every Epic, Story, Task and Sub-task description uses these headings (markdown).
 
 A ticket moved to To Do without AC, Scopes or Tests goes back to Backlog with a comment naming the missing sections; no AI starts. Fields: Type (Feature, Bug, Hotfix, Chore, Docs, Refactor) decides the commit kind and the base branch (Hotfix starts from the project's `hotfix_base`, everything else from `base`); Priority Highest gives the ticket to the project's `highest_developer` (default Claude) unless Agent (AI) or AI Model names an AI; Require human, Agent (AI), AI Model, Workspace and Blocked reason are as before.
 
-The developer's last comment follows a fixed template: What's changed, Why changed, Blocked reason detail, Feature URL, Deployment, Study cases. A Deployment section that is not `None` sets Require human = Yes, so the owner sees the migration or deploy step before the merge.
+The developer's last comment follows a fixed template: What's changed, Why changed, Blocked reason detail, Feature URL, Deployment, Study cases. A Deployment section that is not `None` sets Require human = Yes when the project's `human_on_deployment` setting is true (the default). Set it to `false` to skip this automatic review; the supervisor comments `Deployment section found; human review skipped by project setting` once. Require human = Yes on the ticket and Release tickets still require approval.
 
 ### Who may give feedback
 
@@ -121,7 +121,7 @@ The repositories are public, so only accounts with write, maintain or admin perm
 Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):
 
 - `aiflow.toml`: `[defaults]` for every project and `[machines.<name>] workers = N`, the number of workers of each machine.
-- `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, optional `database`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`).
+- `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, optional `database`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `human_on_deployment`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`). `human_on_deployment` defaults to `true`; set it to `false` to skip only the automatic review caused by a Deployment section. The check command prints its value.
 
 Set `database = "<shared-project-name>"` only for projects that need isolated databases. The target repository must ignore `.env`. Before each developer, reviewer, or QA session uses a ticket worktree, the supervisor confirms `.env` is ignored, provisions PostgreSQL, MongoDB, and Redis resources for the lower-case ticket id, writes that worktree's `.env`, and verifies its worktree mode. It also blocks a developer handoff if `.env` appears in a ticket commit. Rework reuses the same ticket database. The supervisor tears it down when the ticket is Done or its worktree is removed; the health check reports teardown failures. Leaving `database` unset preserves the existing flow.
 

@@ -31,6 +31,19 @@ Backlog -(owner)-> To Do -> In Progress (developer) -> In Review (reviewer) -> I
 6. One pull request per repository is in QA and merge at a time (`qaslot:<repo>`), so a merge does not make the next QA stale twice.
 7. Merge (`gh pr merge --match-head-commit`, method `AIFLOW_MERGE_METHOD`) for repos in `AIFLOW_AUTO_MERGE_REPOS` (`*` = all); other repos wait for the owner to merge. Then Done, and the branch and worktree are removed.
 
+### Choosing the AI and the model per ticket
+
+The Jira field **AI Model** is a list of `<AI>:<Model>`; empty means the default developer, `AIFLOW_DEVELOPER_DEFAULT` (`Codex:gpt-6-luna:xhigh`). The AI part replaces `Agent (AI)` (which the supervisor keeps in sync), the model is passed to the CLI (`-m` for Codex, Grok, OpenCode; `--model` for Claude). The effort is not part of the value: it comes from the role default. Reviewer and QA follow `AIFLOW_REVIEWER_DEFAULT` and `AIFLOW_QA_DEFAULT`. If another AI takes the ticket over (quota), it runs with its own default model.
+
+| AI | Values offered (checked on 2026-10-19) |
+|---|---|
+| Codex | `gpt-6-luna` (default), `gpt-5.6-terra`, `gpt-5.6-luna` (the models the CLI itself lists) |
+| Claude | `fable`, `opus`, `sonnet`, `haiku` (aliases of the latest model; verified) |
+| Grok | `grok-4.7`, `grok-4.7-build-fast`, `grok-4.6`, `grok-4.5` (`grok models`) |
+| OpenCode | `opencode/deepseek-v4.1-flash-free` (easy tasks), other free `opencode/*` models, `opencode-go/*` and `openai/*` models (`opencode models`) |
+
+OpenCode only works on tickets that name it (`AIFLOW_EXPLICIT_ONLY_AIS`). To add a model, add the option to the Jira field in the form `<AI>:<Model>`.
+
 ### Require human
 
 The Jira field **Require human** = Yes makes the gate stop after CI, feedback and QA passed: the supervisor comments the pull request URL and moves the ticket to **Human review** (nothing else happens to the branch while the human looks, except that new feedback sends the ticket back to To Do). The human moves it to **Ready to merge** (approval) or to To Do with a comment (changes). In Ready to merge the supervisor brings the branch up to date if it is outdated (clean merge by `update-branch`), waits for CI, and merges; QA and review are not repeated. If CI fails or a conflict needs the developer, the ticket goes back to To Do and, after the fix, straight back to Ready to merge. A pull request merged by the human himself moves the ticket to Done. Previews for the human are JAIF-28.

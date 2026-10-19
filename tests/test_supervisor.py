@@ -510,6 +510,34 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves, [])
 
 
+class ModelFieldTests(unittest.TestCase):
+    def sup(self, value, **env):
+        sup = make(**env)
+        sup.jira.read_field = lambda key, field: value
+        return sup
+
+    def test_spec_is_split_at_the_first_colon(self):
+        self.assertEqual(self.sup({"value": "Codex:gpt-6-luna"}).ticket_spec("K-1"), ("Codex", "gpt-6-luna"))
+        self.assertEqual(self.sup({"value": "OpenCode:opencode/deepseek-v4.1-flash-free"}).ticket_spec("K-1"),
+                         ("OpenCode", "opencode/deepseek-v4.1-flash-free"))
+
+    def test_empty_or_unknown_values_mean_the_default(self):
+        for value in (None, {"value": ""}, {"value": "Gemini:pro"}, {"value": "Claude"}, {"value": "Claude:"}):
+            self.assertEqual(self.sup(value).ticket_spec("K-1"), ("", ""), value)
+
+    def test_the_ticket_model_wins_for_the_ai_that_was_chosen(self):
+        sup = make(AIFLOW_DEVELOPER_DEFAULT="Codex:gpt-6-luna:xhigh")
+        self.assertEqual(sup.model_for("developer", "Codex", "K-1"), ("gpt-6-luna", "xhigh"))
+        sup.redis.data["devmodel:K-1"] = "Codex:gpt-5.6-terra"
+        self.assertEqual(sup.model_for("developer", "Codex", "K-1"), ("gpt-5.6-terra", "xhigh"))
+        self.assertEqual(sup.model_for("developer", "Claude", "K-1"), ("", ""))  # a takeover by another AI uses its default
+
+    def test_other_roles_ignore_the_ticket_model(self):
+        sup = make(AIFLOW_REVIEWER_DEFAULT="Grok:grok-4.7")
+        sup.redis.data["devmodel:K-1"] = "Grok:grok-4.5"
+        self.assertEqual(sup.model_for("reviewer", "Grok", "K-1"), ("grok-4.7", ""))
+
+
 class AgentCommandTests(unittest.TestCase):
     def test_grok_uses_a_prompt_file_and_the_plain_format(self):
         with tempfile.TemporaryDirectory() as tmp:

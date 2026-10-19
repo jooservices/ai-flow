@@ -31,6 +31,18 @@ def child_env() -> dict[str, str]:
     return env
 
 
+def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
+    """Environment of an AI process. PWD must be the worktree: some CLIs (OpenCode) take the project directory from PWD, not from
+    the real working directory, and then treat the worktree as an external directory and reject every command in it."""
+    env = child_env()
+    env["PWD"] = str(workdir)
+    if agent == "OpenCode":  # the files outside the worktree that the prompt sends it to: the Jira adapter, the shared runtime, comment files
+        allow = {str(workdir): "allow", f"{workdir}/*": "allow", f"{root}/scripts/*": "allow", f"{root}/.tmp/*": "allow",
+                 f"{root}/AGENTS.md": "allow", f"{root}/JOOservices/AGENTS.md": "allow"}
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": {"external_directory": allow}})
+    return env
+
+
 def available(order: tuple[str, ...]) -> list[str]:
     path = child_env()["PATH"]
     binaries = {"Claude": "claude", "Codex": "codex", "Grok": "grok", "OpenCode": "opencode"}

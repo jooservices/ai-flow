@@ -75,6 +75,12 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
+### Hotfix and release
+
+Type Hotfix starts from and targets the production branch (`hotfix_base`, master). When a pull request that targets the production branch is merged and the integration branch lacks it, the supervisor creates a ticket "Merge master back into develop after <KEY>" (Type Chore, linked to the original): its developer runs `git merge origin/master`, keeps the merge commit and resolves conflicts, and it goes through review, CI, QA and merge like any other ticket.
+
+A **Release** ticket (issue type Release, field Version `x.y.z` higher than the last tag `v*`, otherwise Blocked as Unclear) uses the release prompt: its branch is cut from the integration branch and its pull request targets production. The AI only runs the project's full check (`release_check` in the project TOML, or the documented full test command and e2e) and reads the result: a failure creates one Bug ticket per failure in Backlog, linked as blocking the release, and blocks the release; otherwise it prepares CHANGELOG, README and manifest versions. Release always waits in Human review: after you move it to Ready to merge the supervisor merges it, creates the tag and the GitHub release (`tag_prefix` + version, generated notes) and opens the merge-back ticket.
+
 ### Operations
 
 One page for the owner: [docs/RUNBOOK.md](docs/RUNBOOK.md). Every `AIFLOW_PROBE_HOURS` (3) each installed AI is asked for one word; one that is signed out or out of balance leaves the pool (and the health check says so). `bin/aiflow-work pause` / `resume` stop and restart the pickup of new work. Each AI run is logged in Redis (`usage:<day>:...`) and the health check posts yesterday's summary on the health ticket; each machine publishes its tool versions daily and the health check reports a difference between machines.

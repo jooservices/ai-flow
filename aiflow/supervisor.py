@@ -62,6 +62,41 @@ def deployment_needed(comment: str) -> bool:
     return body.strip(" .-*").lower() not in EMPTY_NOTES
 
 
+SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+BACKMERGE = """## Business requirements
+{base} holds {key} (a merged hotfix or release) and {develop} does not yet. {develop} must contain it, otherwise the next release loses it.
+
+## AC
+- [ ] `git merge origin/{base}` was run on this branch (a merge commit: no squash, no rebase) and every conflict is resolved keeping the intent of both sides.
+- [ ] After the merge {develop} contains every commit of {base} and the repository tests pass.
+
+## Scopes
+Only the merge and the resolution of its conflicts. No new features, no refactoring.
+
+## Tests
+- The repository's own tests and CI.
+
+## Technical
+The branch starts from {develop}. Run `git merge origin/{base}`; keep the merge commit (do not rebase this branch). Commit message of a resolution: `chore: Merge {base} back into {develop} ({key})`.
+"""
+
+
+def parse_semver(text: str) -> tuple[int, int, int] | None:
+    found = SEMVER.match((text or "").strip())
+    return (int(found.group(1)), int(found.group(2)), int(found.group(3))) if found else None
+
+
+def branches(project: Any, change: str, issue_type: str, description: str) -> tuple[str, str]:
+    """(base, start): the branch the pull request targets and the branch the ticket branch starts from.
+    A hotfix starts from and targets the production branch; a release starts from the integration branch and targets production."""
+    if change == "Hotfix":
+        return project.hotfix_base, project.hotfix_base
+    if issue_type == "Release":
+        return project.hotfix_base, project.base
+    base = ticket_field(description, "Base", project.base)
+    return base, base
+
+
 def ticket_of_branch(branch: str) -> str | None:
     """`JAIF-42-pr-gate-v2` -> `JAIF-42`; None for a branch that does not start with a Jira key."""
     match = re.match(r"^([A-Z][A-Z0-9]*-\d+)-", branch)
@@ -398,7 +433,9 @@ class Supervisor:
             return True
         repo = Repo(self.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
         change = self.change_type(key)
-        base = project.hotfix_base if change == "Hotfix" else ticket_field(description, "Base", project.base)
+        base, start = branches(project, change, str(view.get("type", "")), description)
+        if str(view.get("type", "")) == "Release":
+            self.redis.set(f"isrelease:{key}", "1", 60 * DAY)
         if role in ("developer", "reviewer"):
             log(f"{key} [{issue['status']}] {role} -> {agent}")
         if not repo.exists():
@@ -413,7 +450,7 @@ class Supervisor:
             log(f"{key}: worktree lives on {home} and the branch was never pushed; leaving it")
             return False
         if role == "developer":
-            return self.develop(key, issue, view, repo, base, agent or "")
+            return self.develop(key, issue, view, repo, base, agent or "", start)
         if role == "reviewer":
             return self.review(key, view, repo, base, agent or "")
         if role == "pr":
@@ -434,6 +471,53 @@ class Supervisor:
         if not self.jira.transition(key, "Backlog"):
             self.block(key, "The description misses " + ", ".join(missing) + ".", kind="Unclear")
         return True
+
+    def release_ready(self, key: str, repo: Repo) -> bool:
+        """A Release ticket needs a version (field Version, x.y.z) higher than the last tag; otherwise it is blocked as unclear."""
+        project = self.cfg.project(key)
+        try:
+            version = str(self.jira.read_field(key, self.cfg.version_field) or "").strip()
+        except JiraError as error:
+            log(f"{key}: cannot read Version: {error}")
+            return False
+        wanted, last = parse_semver(version), repo.last_tag(project.tag_prefix)
+        if wanted is None:
+            self.block(key, f"The field Version must be a semantic version such as 1.2.0, not `{version}`.", kind="Unclear")
+            return False
+        if last and parse_semver(last) is not None and wanted <= parse_semver(last):
+            self.block(key, f"Version {version} is not higher than the last release {last}.", kind="Unclear")
+            return False
+        self.redis.set(f"version:{key}", ".".join(map(str, wanted)), 60 * DAY)
+        self.redis.set(f"lasttag:{key}", last, 60 * DAY)
+        return True
+
+    def backmerge(self, key: str, repo: Repo, project: Any, base: str) -> None:
+        """After a merge into the production branch (hotfix, release) the integration branch must get it back: open a ticket whose
+        developer merges and resolves conflicts, and which then goes through the normal flow."""
+        develop = project.base
+        if base != project.hotfix_base or base == develop or self.state(key, "backmerge") or repo.contains(develop, base):
+            return
+        new = self.jira.create_issue(project.jira_key, f"Merge {base} back into {develop} after {key}",
+                                     BACKMERGE.format(base=base, develop=develop, key=key), "Task")
+        self.jira.set_field(new, self.cfg.type_field, {"value": "Chore"})
+        self.jira.link(key, new)
+        self.redis.set(f"backmerge:{key}", new, 60 * DAY)
+        self.jira.transition(new, "To Do")
+        self.jira.comment(key, f"AI Flow: {base} holds changes that {develop} does not; {new} merges {base} back into {develop}.")
+
+    def after_merge(self, key: str, repo: Repo, base: str) -> None:
+        """What follows a merge: the tag and GitHub release of a Release ticket, and the merge back of the production branch."""
+        project = self.cfg.project(key)
+        try:
+            if self.state(key, "isrelease"):
+                tag = project.tag_prefix + self.state(key, "version")
+                url = GitHub(repo.github_slug()).release(tag, base, f"{project.name or repo.name} {tag}")
+                self.jira.comment(key, f"AI Flow: released {tag}: {url}")
+            self.backmerge(key, repo, project, base)
+        except (GitHubError, GitError, JiraError) as error:
+            log(f"{key}: follow-up after the merge failed: {error}")
+            self.jira.comment(key, f"AI Flow: the pull request is merged, but the follow-up (release tag or merge back) failed: {error}. "
+                                   f"Finish it by hand or tell the supervisor.")
 
     def attempts(self, key: str, role: str) -> int:
         return int(self.redis.get(f"attempts:{key}:{role}") or 0)
@@ -583,8 +667,11 @@ class Supervisor:
         values = dict(machine=self.cfg.machine, key=key, summary=view.get("summary", ""), role=role, agent=agent, repo=repo.name,
                       worktree=str(workdir), branch=branch, base=base, root=str(self.cfg.root), description=description, comments=comments,
                       rework=self.rework_text(key), pr=self.pr_text(key), replies_file=str(self.replies_file(key)),
-                      type=self.change_type(key) or str(view.get("type", "")), parent=view.get("parent") or "none")
-        prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8") for name in ("common", role))
+                      type=self.change_type(key) or str(view.get("type", "")), parent=view.get("parent") or "none",
+                      version=self.state(key, "version"), last_tag=self.state(key, "lasttag") or "(none yet)",
+                      release_check=self.cfg.project(key).release_check or "(none configured)", project=key.rsplit("-", 1)[0])
+        prompt_role = "release" if role == "developer" and self.state(key, "isrelease") else role
+        prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8") for name in ("common", prompt_role))
         for name, value in values.items():
             prompt = prompt.replace("{" + name + "}", str(value))
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -643,9 +730,11 @@ class Supervisor:
             self.block(key, f"{self.cfg.max_attempts} failed {role} attempts; needs the owner.", kind="Attempts")
 
     # ---- developer -------------------------------------------------------------------------------------------
-    def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str) -> bool:
+    def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str, start: str = "") -> bool:
         if self.attempts(key, "developer") >= self.cfg.max_attempts:
             self.block(key, "Too many failed developer attempts.", kind="Attempts")
+            return True
+        if self.state(key, "isrelease") and not self.release_ready(key, repo):
             return True
         if issue["status"] == "To Do" and not self.jira.transition(key, "In Progress"):
             log(f"{key}: could not start (someone else did?)")
@@ -665,7 +754,7 @@ class Supervisor:
         self.redis.set(f"dev:{key}", agent, 30 * DAY)
         self.redis.set(f"home:{key}", self.cfg.machine, 30 * DAY)
         try:
-            workdir, branch = repo.ensure_worktree(key, view.get("summary", key), base)
+            workdir, branch = repo.ensure_worktree(key, view.get("summary", key), start or base)
             repo.adopt_remote(workdir, branch)
         except GitError as error:
             self.failed(key, "developer", agent, "worktree", str(error))
@@ -980,6 +1069,8 @@ class Supervisor:
         return info
 
     def human_required(self, key: str) -> bool:
+        if self.state(key, "isrelease"):
+            return True  # a release always waits for the owner before it is merged and tagged
         try:
             value = self.jira.read_field(key, self.cfg.require_human_field)
         except JiraError as error:
@@ -1188,6 +1279,7 @@ class Supervisor:
         self.release_slot(key, repo.name)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
+        self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",
                      "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel"):

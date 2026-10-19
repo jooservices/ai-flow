@@ -86,6 +86,18 @@ class Repo:
                 return text
         return ""
 
+    def last_tag(self, prefix: str = "v") -> str:
+        """The newest release tag (highest version) of origin, '' when there is none."""
+        if self.has_remote():
+            git(self.path, "fetch", "--tags", "--force", "origin", check=False)
+        tags = git(self.path, "tag", "--list", f"{prefix}*", "--sort=-v:refname", check=False).splitlines()
+        return tags[0] if tags else ""
+
+    def contains(self, branch: str, other: str) -> bool:
+        """True when origin/<branch> already holds every commit of origin/<other>."""
+        self.fetch(branch, other)
+        return subprocess.run(["git", "-C", str(self.path), "merge-base", "--is-ancestor", f"origin/{other}", f"origin/{branch}"]).returncode == 0
+
     def github_slug(self) -> str:
         """`owner/name` of the origin repository on GitHub."""
         url = git(self.path, "remote", "get-url", "origin")

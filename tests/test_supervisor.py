@@ -11,7 +11,7 @@ from aiflow.config import load
 from aiflow.jira import JiraError, adf_to_markdown
 from aiflow.gitops import GitError
 from aiflow import health
-from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
+from aiflow.supervisor import branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
 
 class FakeRedis:
@@ -482,10 +482,95 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves, [])
 
 
+class HotfixAndReleaseTests(unittest.TestCase):
+    project = type("P", (), {"base": "develop", "hotfix_base": "master", "jira_key": "K", "tag_prefix": "v", "name": "Proj", "release_check": ""})()
+
+    def sup(self, version="1.2.0", last_tag="v1.1.0"):
+        sup = make()
+        sup.jira.read_field = lambda key, field: version
+        sup.jira.create_issue = lambda project, summary, description, issue_type="Task", labels="": sup.created.append((project, summary, description)) or "K-99"
+        sup.jira.link = lambda a, b, kind="Relates": sup.links.append((a, b))
+        sup.created, sup.links = [], []
+        sup.repo = type("R", (), {"last_tag": lambda self, prefix: last_tag, "contains": lambda self, branch, other: sup.contained,
+                                   "github_slug": lambda self: "o/r", "name": "r"})()
+        sup.contained = False
+        return sup
+
+    def test_semver(self):
+        self.assertEqual(parse_semver("1.2.3"), (1, 2, 3))
+        self.assertEqual(parse_semver(" v10.0.1 "), (10, 0, 1))
+        for bad in ("1.2", "1.2.3-rc1", "", "latest", "1.2.x"):
+            self.assertIsNone(parse_semver(bad))
+
+    def test_branches(self):
+        self.assertEqual(branches(self.project, "Hotfix", "Task", ""), ("master", "master"))
+        self.assertEqual(branches(self.project, "", "Release", ""), ("master", "develop"))
+        self.assertEqual(branches(self.project, "Feature", "Task", ""), ("develop", "develop"))
+        self.assertEqual(branches(self.project, "Feature", "Task", "Base: release/2"), ("release/2", "release/2"))
+
+    def test_release_needs_a_higher_semantic_version(self):
+        sup = self.sup("1.2.0")
+        self.assertTrue(sup.release_ready("K-1", sup.repo))
+        self.assertEqual(sup.redis.data["version:K-1"], "1.2.0")
+        self.assertEqual(sup.redis.data["lasttag:K-1"], "v1.1.0")
+        for version in ("1.1.0", "1.0.9", "banana", ""):
+            sup = self.sup(version)
+            self.assertFalse(sup.release_ready("K-1", sup.repo), version)
+            self.assertEqual(sup.jira.moves[-1], ("K-1", "Blocked"))
+        sup = self.sup("0.1.0", last_tag="")  # the first release
+        self.assertTrue(sup.release_ready("K-1", sup.repo))
+
+    def test_a_release_always_waits_for_the_owner(self):
+        sup = self.sup()
+        sup.redis.data["isrelease:K-1"] = "1"
+        self.assertTrue(sup.human_required("K-1"))
+
+    def test_backmerge_ticket_after_a_hotfix(self):
+        sup = self.sup()
+        sup.jira.set_field = lambda *a: None
+        sup.backmerge("K-1", sup.repo, self.project, "master")
+        self.assertEqual(len(sup.created), 1)
+        project, summary, description = sup.created[0]
+        self.assertEqual((project, summary), ("K", "Merge master back into develop after K-1"))
+        for section in ("## AC", "## Scopes", "## Tests", "git merge origin/master"):
+            self.assertIn(section, description)
+        self.assertEqual(sup.links, [("K-1", "K-99")])
+        self.assertEqual(sup.jira.moves, [("K-99", "To Do")])
+        self.assertEqual(sup.redis.data["backmerge:K-1"], "K-99")
+        sup.backmerge("K-1", sup.repo, self.project, "master")  # not twice
+        self.assertEqual(len(sup.created), 1)
+
+    def test_no_backmerge_when_it_is_not_needed(self):
+        sup = self.sup()
+        sup.backmerge("K-1", sup.repo, self.project, "develop")  # a normal merge
+        sup.contained = True
+        sup.backmerge("K-2", sup.repo, self.project, "master")  # develop already holds master
+        self.assertEqual(sup.created, [])
+
+    def test_after_merge_tags_a_release_and_merges_back(self):
+        sup = self.sup()
+        sup.redis.data["isrelease:K-1"] = "1"
+        sup.redis.data["version:K-1"] = "1.2.0"
+        sup.jira.set_field = lambda *a: None
+        with mock.patch.object(github.GitHub, "release", return_value="https://example/release") as release:
+            sup.after_merge("K-1", sup.repo, "master")
+        release.assert_called_once_with("v1.2.0", "master", "r v1.2.0")
+        self.assertEqual(len(sup.created), 1)
+        self.assertIn("released v1.2.0", sup.jira.comments[0][1])
+
+    def test_a_failing_follow_up_is_reported_not_fatal(self):
+        sup = self.sup()
+        sup.redis.data["isrelease:K-1"] = "1"
+        sup.redis.data["version:K-1"] = "1.2.0"
+        with mock.patch.object(github.GitHub, "release", side_effect=github.GitHubError("422 tag exists")):
+            sup.after_merge("K-1", sup.repo, "master")
+        self.assertIn("follow-up", sup.jira.comments[0][1])
+
+
 class OperationsTests(unittest.TestCase):
     def test_probe_classification(self):
         self.assertEqual(agents.probe_state(0, "OK", False), "ok")
-        self.assertEqual(agents.probe_state(1, "Error: not signed in\n", True), "down: Error: not signed in")
+        self.assertEqual(agents.probe_state(1, "Error: not signed in\n", True), "down: not signed in")
         self.assertEqual(agents.probe_state(None, "", False), "unknown")  # a timeout leaves the AI in the pool
         self.assertEqual(agents.probe_state(1, "segfault", False), "unknown")
 

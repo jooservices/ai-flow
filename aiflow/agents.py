@@ -7,6 +7,7 @@ import re
 import shutil
 from pathlib import Path
 
+NAMES = ("Claude", "Codex", "Grok", "OpenCode")
 TOOL_PATHS = (Path.home() / ".local" / "bin", Path.home() / ".opencode" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"))
 DENIED_BASH = (
     "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)",

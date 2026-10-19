@@ -106,8 +106,23 @@ class Supervisor:
     def role_spec(self, role: str) -> tuple[str, str, str]:
         return agents.parse_spec(self.cfg.role_defaults.get(role, ""))
 
-    def model_for(self, role: str, agent: str) -> tuple[str, str]:
+    def ticket_spec(self, key: str) -> tuple[str, str]:
+        """(AI, model) from the Jira field AI Model, written `<AI>:<Model>`; ('', '') when empty or not understood."""
+        try:
+            value = self.jira.read_field(key, self.cfg.model_field)
+        except JiraError as error:
+            log(f"{key}: cannot read AI Model: {error}")
+            return "", ""
+        agent, _, model = str((value or {}).get("value", "")).partition(":")
+        return (agent, model) if agent in agents.NAMES and model else ("", "")
+
+    def model_for(self, role: str, agent: str, key: str = "") -> tuple[str, str]:
         name, model, effort = self.role_spec(role)
+        chosen = self.state(key, "devmodel") if key and role == "developer" else ""
+        if chosen:
+            chosen_agent, _, chosen_model = chosen.partition(":")
+            if chosen_agent == agent:
+                return chosen_model, effort if name == agent else ""
         if name == agent:
             return model, effort
         return (self.cfg.opencode_model, "") if agent == "OpenCode" else ("", "")
@@ -187,6 +202,10 @@ class Supervisor:
                 view = self.jira.view(issue["key"])
                 role = STAGES[issue["status"]]
                 agent = None
+                if role == "developer":
+                    spec_agent, spec_model = self.ticket_spec(issue["key"])
+                    if spec_agent:
+                        view = {**view, "agent": spec_agent, "spec_model": spec_model}
                 if role in ("developer", "reviewer"):
                     agent = self.pick_agent(role, issue["key"], view.get("agent"))
                     if agent is None:
@@ -336,7 +355,7 @@ class Supervisor:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         log_dir = self.cfg.root / ".tmp" / "aiflow" / "logs"
         log_file, result_file = log_dir / f"{key}-{role}-{stamp}.log", log_dir / f"{key}-{role}-{stamp}.result"
-        model, effort = self.model_for(role, agent)
+        model, effort = self.model_for(role, agent, key)
         argv, stdin_text = agents.build_command(agent, workdir, result_file, prompt, self.cfg.root, model, effort)
         pushed_at = [time.monotonic()]
 
@@ -396,6 +415,10 @@ class Supervisor:
             return False
         if view.get("agent") != agent:
             self.jira.set_agent(key, agent)
+        if view.get("spec_model") and view.get("agent") == agent:
+            self.redis.set(f"devmodel:{key}", f"{agent}:{view['spec_model']}", 30 * DAY)
+        else:
+            self.redis.delete(f"devmodel:{key}")  # another AI took over: it runs with its own default model
         self.label_workspace(key)
         if "rework" in issue.get("labels", []):
             self.jira.remove_label(key, "rework")
@@ -857,7 +880,7 @@ class Supervisor:
         self.jira.transition(key, "Done")
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",
-                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked"):
+                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel"):
             self.redis.delete(f"{name}:{key}")
 
 

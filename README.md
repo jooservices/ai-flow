@@ -31,6 +31,10 @@ Backlog -(owner)-> To Do -> In Progress (developer) -> In Review (reviewer) -> I
 6. One pull request per repository is in QA and merge at a time (`qaslot:<repo>`), so a merge does not make the next QA stale twice.
 7. Merge (`gh pr merge --match-head-commit`, method `AIFLOW_MERGE_METHOD`) for repos in `AIFLOW_AUTO_MERGE_REPOS` (`*` = all); other repos wait for the owner to merge. Then Done, and the branch and worktree are removed.
 
+### No AI available (quota, offline)
+
+An AI that is out of quota, has an empty balance or is not signed in goes on a cooldown (`AIFLOW_QUOTA_COOLDOWN_MINUTES`, shared by all machines) and the step goes to another AI. Each supervisor publishes the AIs of its machine (`ais:<machine>` in Redis), so a step that this machine cannot serve but another online machine can is simply left to it. When no online machine can serve a step for `AIFLOW_QUOTA_BLOCK_MINUTES`, the ticket is Blocked, the field **Blocked reason** says `Quota: ...` (some AI cooling) or `Offline: ...` (nobody has the AI), and every `AIFLOW_RECHECK_SECONDS` one supervisor re-checks Blocked tickets of those two kinds and moves them back (`Unblock to <status>`) as soon as an AI is available. Other blocks (Unclear, Attempts, Rework, CI, Human, Config) wait for the owner.
+
 ### Rework
 
 A ticket sent back gets the label `rework`, goes to To Do (the Jira workflow of JAIF allows `Review failed` and `QA failed` to To Do) and the reason is kept for the next AI. The developer rebases on the latest base and answers **every** feedback item in a JSON file (`fixed` or `rejected`, with a reason). The supervisor posts the answers on the pull request and resolves the threads. A rejected request from a human is Blocked for the owner. After `AIFLOW_MAX_CYCLES` rounds the ticket is Blocked.

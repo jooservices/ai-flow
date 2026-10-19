@@ -12,7 +12,12 @@ DENIED_BASH = (
     "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)",
     "Bash(docker run:*)", "Bash(docker compose run:*)", "Bash(docker system prune:*)", "Bash(docker volume rm:*)",
 )
-QUOTA_PATTERN = re.compile(r"usage limit|rate.?limit|quota|\b429\b|credit balance|too many requests|overloaded|resets? (at|in)", re.I)
+# Usage limits and unusable accounts alike: both mean "this AI cannot work now", so the ticket moves to another AI.
+QUOTA_PATTERN = re.compile(
+    r"usage limit|rate.?limit|quota|\b429\b|credit balance|too many requests|overloaded|resets? (at|in)|"
+    r"status 402|http 402|payment required|balance exhausted|usage balance|"
+    r"not signed in|api key has expired|api_key_expired|invalid api key|please log ?in|authentication_error", re.I)
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TITLE_PATTERN = re.compile(r"^PR_TITLE:\s*(.+?)\s*$", re.M)
 VERDICT_PATTERN = re.compile(r"^(RESULT|VERDICT):\s*(DONE|PASS|FAIL|BLOCKED)\b[:\s-]*(.*)$", re.M)
 
@@ -27,7 +32,7 @@ def child_env() -> dict[str, str]:
 
 def available(order: tuple[str, ...]) -> list[str]:
     path = child_env()["PATH"]
-    binaries = {"Claude": "claude", "Codex": "codex", "OpenCode": "opencode"}
+    binaries = {"Claude": "claude", "Codex": "codex", "Grok": "grok", "OpenCode": "opencode"}
     return [name for name in order if name in binaries and shutil.which(binaries[name], path=path)]
 
 
@@ -62,8 +67,17 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
         argv = ["codex", "exec", "-C", str(workdir), "-s", "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
                 *(["-m", model] if model else []), *(["-c", f'model_reasoning_effort="{effort}"'] if effort else []), "-"]
         return argv, prompt
+    if agent == "Grok":
+        prompt_file = result_file.with_suffix(".prompt")
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+        prompt_file.write_text(prompt, encoding="utf-8")
+        # plain output keeps the final message readable; the allowlist is the same as Claude's (Grok accepts --allowedTools rules)
+        return ["grok", "--cwd", str(workdir), "--permission-mode", "dontAsk", "--output-format", "plain",
+                "--allowedTools", claude_allowed(root), "--disallowedTools", ",".join(DENIED_BASH),
+                *(["-m", model] if model else []), *(["--reasoning-effort", effort] if effort else []),
+                "--prompt-file", str(prompt_file)], None
     if agent == "OpenCode":
-        return ["opencode", "run", prompt], None
+        return ["opencode", "run", *(["-m", model] if model else []), prompt], None
     raise ValueError(f"unknown agent {agent!r}")
 
 
@@ -80,7 +94,7 @@ def final_text(agent: str, log_file: Path, result_file: Path) -> str:
                 continue
             if event.get("type") == "result":
                 return str(event.get("result", ""))
-    return text[-8000:]
+    return ANSI.sub("", text)[-8000:]
 
 
 def verdict(text: str) -> tuple[str, str] | None:

@@ -51,7 +51,7 @@ def adf_to_markdown(node: dict[str, Any], depth: int = 0) -> str:
                 parts = [adf_inline(item).strip()]
             first, *rest = "\n".join(p for p in parts if p).split("\n") or [""]
             lines.append("  " * depth + f"{mark} {first}")
-            lines += [("  " + line if line.startswith(("-", "1.")) or line.startswith("  ") else "  " * (depth + 1) + line) for line in rest]
+            lines += [line if line.startswith(" ") else "  " * (depth + 1) + line for line in rest]  # nested lists carry their own indent
         return "\n".join(lines)
     if kind == "blockquote":
         return "\n".join("> " + line for line in "\n\n".join(adf_to_markdown(c) for c in children).splitlines())

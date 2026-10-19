@@ -8,7 +8,7 @@ from pathlib import Path
 
 from aiflow import agents, github
 from aiflow.config import load
-from aiflow.jira import adf_to_markdown
+from aiflow.jira import JiraError, adf_to_markdown
 from aiflow.gitops import GitError
 from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
@@ -418,6 +418,67 @@ class ClearBlockTests(unittest.TestCase):
 
 
 AI_FLOW_TEMPLATE = "## Summary\n<!-- What and why -->\n\n## Test plan\n- [ ] CI green\n"
+
+
+class ContainerTests(unittest.TestCase):
+    def sup(self, tickets):
+        sup = make()
+        calls = []
+
+        def search(jql, limit=50):
+            calls.append(jql)
+            if jql.startswith("parent in"):
+                keys = jql[jql.index("(") + 1:jql.index(")")].split(", ")
+                return [t for t in tickets if t.get("parent") in keys]
+            if jql.startswith("key ="):
+                return [t for t in tickets if t["key"] == jql.split("= ")[1]]
+            if "parent is not EMPTY" in jql:
+                return [t for t in tickets if t.get("parent")]
+            return tickets
+        sup.jira.search = search
+        sup.calls = calls
+        return sup
+
+    def test_a_ticket_with_children_is_not_worked(self):
+        tickets = [{"key": "K-1", "status": "To Do", "labels": [], "parent": None}, {"key": "K-2", "status": "To Do", "labels": [], "parent": "K-1"},
+                   {"key": "K-3", "status": "To Do", "labels": [], "parent": None}]
+        self.assertEqual([i["key"] for i in self.sup(tickets).candidates()], ["K-2", "K-3"])
+
+    def test_a_failed_child_lookup_works_nothing(self):
+        sup = self.sup([{"key": "K-1", "status": "To Do", "labels": [], "parent": None}])
+        original = sup.jira.search
+
+        def broken(jql, limit=50):
+            if jql.startswith("parent in"):
+                raise JiraError("down")
+            return original(jql, limit)
+        sup.jira.search = broken
+        self.assertEqual(sup.candidates(), [])
+
+    def test_the_jql_orders_by_priority(self):
+        sup = self.sup([{"key": "K-1", "status": "To Do", "labels": [], "parent": None}])
+        sup.candidates()
+        self.assertIn("ORDER BY priority DESC, created ASC", sup.calls[0])
+
+    def test_rework_still_comes_first(self):
+        tickets = [{"key": "K-1", "status": "To Do", "labels": [], "parent": None}, {"key": "K-2", "status": "To Do", "labels": ["rework"], "parent": None}]
+        self.assertEqual([i["key"] for i in self.sup(tickets).candidates()], ["K-2", "K-1"])
+
+    def test_container_closes_when_all_children_are_done(self):
+        tickets = [{"key": "K-1", "status": "In Progress", "labels": [], "parent": None, "summary": "story"},
+                   {"key": "K-2", "status": "Done", "labels": [], "parent": "K-1", "summary": "a"},
+                   {"key": "K-3", "status": "Declined", "labels": [], "parent": "K-1", "summary": "b"}]
+        sup = self.sup(tickets)
+        sup.sweep_containers()
+        self.assertEqual(sup.jira.moves, [("K-1", s) for s in ("In Review", "Review passed", "In QA", "Done")])
+        self.assertIn("K-2", sup.jira.comments[0][1])
+
+    def test_container_with_an_open_child_stays(self):
+        tickets = [{"key": "K-1", "status": "To Do", "labels": [], "parent": None},
+                   {"key": "K-2", "status": "Done", "labels": [], "parent": "K-1"}, {"key": "K-3", "status": "To Do", "labels": [], "parent": "K-1"}]
+        sup = self.sup(tickets)
+        sup.sweep_containers()
+        self.assertEqual(sup.jira.moves, [])
 
 
 class PullRequestGateV2Tests(unittest.TestCase):

@@ -116,9 +116,22 @@ class Supervisor:
     def candidates(self) -> list[dict[str, Any]]:
         projects = ", ".join(self.cfg.projects)
         statuses = ", ".join(f'"{s}"' for s in STAGES)
-        jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY created ASC"
+        jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
         found = self.jira.search(jql)
-        return sorted(found, key=lambda issue: "rework" not in issue.get("labels", []))  # stable: rework first, then oldest
+        found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
+        return sorted(found, key=lambda issue: "rework" not in issue.get("labels", []))  # stable: rework first, then Highest priority, then oldest
+
+    def parents_of_open_work(self, found: list[dict[str, Any]]) -> set[str]:
+        """Keys among `found` that have child issues: a ticket with children is a container, only its leaves are worked."""
+        keys = [issue["key"] for issue in found]
+        if not keys:
+            return set()
+        try:
+            children = self.jira.search(f"parent in ({', '.join(keys)})", 200)
+        except JiraError as error:
+            log(f"cannot look for child issues: {error}")
+            return set(keys)  # when unsure, work nothing rather than a container
+        return {child["parent"] for child in children if child.get("parent")}
 
     def eligible(self, issue: dict[str, Any]) -> bool:
         key, status = issue["key"], issue["status"]
@@ -310,6 +323,7 @@ class Supervisor:
                 self.publish_ais()
                 self.recheck_blocked()
                 self.sweep_worktrees()
+                self.sweep_containers()
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
@@ -429,6 +443,46 @@ class Supervisor:
             self.jira.set_field(key, self.cfg.blocked_reason_field, None)
         except JiraError as error:
             log(f"{key}: cannot clear Blocked reason: {error}")
+
+    def sweep_containers(self) -> None:
+        """A ticket whose children are all Done is Done too: close it with a summary of the children."""
+        if not self.redis.acquire("containers", self.cfg.owner, 600):
+            return
+        projects = ", ".join(self.cfg.projects)
+        try:
+            children = self.jira.search(f"project in ({projects}) AND parent is not EMPTY", 500)
+        except JiraError as error:
+            log(f"container sweep: {error}")
+            return
+        by_parent: dict[str, list[dict[str, Any]]] = {}
+        for child in children:
+            by_parent.setdefault(child["parent"], []).append(child)
+        for parent, kids in by_parent.items():
+            alive = [k for k in kids if k["status"] != "Declined"]
+            if not alive or any(k["status"] != "Done" for k in alive):
+                continue
+            try:
+                state = self.jira.search(f"key = {parent}", 1)
+                if not state or state[0]["status"] in ("Done", "Declined") or self.redis.get(f"lease:{parent}"):
+                    continue
+                if self.close_container(parent, state[0]["status"]):
+                    lines = "\n".join(f"- {k['key']} {k.get('summary', '')}" for k in alive)
+                    self.jira.comment(parent, f"AI Flow: all {len(alive)} child ticket(s) are Done, so this ticket is Done.\n\n{lines}")
+            except JiraError as error:
+                log(f"{parent}: cannot close the container: {error}")
+
+    def close_container(self, key: str, status: str) -> bool:
+        """Walk a container through the workflow to Done. A project whose workflow lacks a step is left alone."""
+        path = ["Backlog", "To Do", "In Progress", "In Review", "Review passed", "In QA", "Done"]
+        if status not in path:
+            return False
+        for step in path[path.index(status) + 1:]:
+            if step == "Review passed" and not self.jira.transition(key, step):
+                continue  # a workflow without that status goes on to In QA
+            elif step != "Review passed" and not self.jira.transition(key, step):
+                log(f"{key}: cannot move to {step}; the container stays where it is")
+                return False
+        return True
 
     def sweep_worktrees(self) -> None:
         """Remove the worktrees of tickets that are Done (and their branches) or Declined (the branch stays) on this machine."""

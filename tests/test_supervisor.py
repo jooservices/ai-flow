@@ -10,7 +10,7 @@ from aiflow import agents, github
 from aiflow.config import load
 from aiflow.jira import adf_to_markdown
 from aiflow.gitops import GitError
-from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field
+from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
 
 class FakeRedis:
@@ -258,6 +258,17 @@ class GateDecisionTests(unittest.TestCase):
         self.assertEqual(decide(facts(ci="pending", ci_waited_minutes=30)),
                          ("block", "CI is still running after 30 minutes"))
 
+    def test_a_draft_is_taken_out_of_draft_only_when_ci_is_green(self):
+        self.assertEqual(decide(facts(draft=True))[0], "ready")
+        self.assertEqual(decide(facts(draft=True, ci="none"))[0], "ready")
+        self.assertEqual(decide(facts(draft=True, ci="pending"))[0], "wait")
+        self.assertEqual(decide(facts(draft=True, ci="failed"))[0], "rework")
+        self.assertEqual(decide(facts(draft=True, behind=True))[0], "update")
+        self.assertEqual(decide(facts(draft=False))[0], "merge")
+
+    def test_bots_get_their_time_after_the_draft_is_ready(self):
+        self.assertEqual(decide(facts(draft=False, settled=False))[0], "wait")
+
     def test_feedback_blocks_qa_and_merge(self):
         self.assertEqual(decide(facts(feedback=[{"id": "x"}], qa_ok=False))[0], "rework")
         self.assertEqual(decide(facts(settled=False, feedback=[{"id": "x"}]))[0], "wait")
@@ -407,6 +418,23 @@ class ClearBlockTests(unittest.TestCase):
 
 
 AI_FLOW_TEMPLATE = "## Summary\n<!-- What and why -->\n\n## Test plan\n- [ ] CI green\n"
+
+
+class PullRequestGateV2Tests(unittest.TestCase):
+    def test_branch_to_ticket(self):
+        self.assertEqual(ticket_of_branch("JAIF-42-pr-gate-v2"), "JAIF-42")
+        self.assertEqual(ticket_of_branch("JOOCX-7-fix"), "JOOCX-7")
+        for other in ("develop", "feature/x", "release/1.0.0", "jaif-1-x"):
+            self.assertIsNone(ticket_of_branch(other))
+
+    def test_a_failing_comment_on_the_pull_request_is_not_fatal(self):
+        sup = make()
+        repo = type("R", (), {"github_slug": lambda self: "o/r"})()
+        with mock.patch.object(github.GitHub, "comment", side_effect=github.GitHubError("502")):
+            sup.pr_comment(repo, 5, "text")  # must not raise
+
+    def test_ci_waits_up_to_ninety_minutes_by_default(self):
+        self.assertEqual(make().cfg.ci_wait_minutes, 90)
 
 
 class PullRequestBodyTests(unittest.TestCase):

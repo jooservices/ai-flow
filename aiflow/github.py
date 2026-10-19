@@ -11,7 +11,7 @@ from . import agents
 MARKER = "<!-- aiflow -->"
 BAD_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
 OK_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-PR_FIELDS = "number,state,url,title,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergedAt,statusCheckRollup"
+PR_FIELDS = "number,state,url,title,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,mergedAt,statusCheckRollup,isDraft"
 CONVENTIONAL = re.compile(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)\s]+\))?!?: [A-Z]\S.*[^.]$")
 
 THREADS_QUERY = """
@@ -211,12 +211,16 @@ class GitHub:
     def view(self, number: int) -> dict[str, Any]:
         return json.loads(self._gh("pr", "view", str(number), "-R", self.slug, "--json", PR_FIELDS))
 
-    def create(self, branch: str, base: str, title: str, body: str) -> dict[str, Any]:
-        self._gh("pr", "create", "-R", self.slug, "--base", base, "--head", branch, "--title", title, "--body", body)
+    def create(self, branch: str, base: str, title: str, body: str, draft: bool = False) -> dict[str, Any]:
+        self._gh("pr", "create", "-R", self.slug, "--base", base, "--head", branch, "--title", title, "--body", body, *(["--draft"] if draft else []))
         found = self.find(branch)
         if not found:
             raise GitHubError("pull request was created but cannot be read back")
         return found
+
+    def ready(self, number: int) -> None:
+        """Take the pull request out of draft: from now on the review bots look at it."""
+        self._gh("pr", "ready", str(number), "-R", self.slug)
 
     def update_branch(self, number: int, head_sha: str) -> None:
         self._gh("api", "-X", "PUT", f"repos/{self.slug}/pulls/{number}/update-branch", "-f", f"expected_head_sha={head_sha}")

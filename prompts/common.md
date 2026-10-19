@@ -39,7 +39,7 @@ Your LAST comment (before you finish) is written in this template instead, with 
 
 ```
 ## What's changed
-<files and behaviour, the latest commit>
+<every file you changed (path, one line each), the behaviour, the latest commit>
 ## Why changed
 <the reason, in one or two sentences>
 ## Blocked reason detail

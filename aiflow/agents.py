@@ -43,6 +43,17 @@ def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
     env = child_env()
     env.pop("OPENCODE_CONFIG_CONTENT", None)
     env["PWD"] = str(workdir)
+    # No AI may write to GitHub: every AI acts as the owner's account, so its comments would be read back as the owner's own
+    # feedback. An empty gh configuration and no token make every gh call fail to authenticate; the supervisor keeps its login.
+    empty = root / ".tmp" / "aiflow" / "gh-empty"
+    try:
+        empty.mkdir(parents=True, exist_ok=True)
+    except OSError:  # an unwritable root: gh then finds no configuration at that path either
+        pass
+    env["GH_CONFIG_DIR"] = str(empty)
+    env["GH_PROMPT_DISABLED"] = "1"
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        env.pop(name, None)
     if agent == "OpenCode":  # the files outside the worktree that the prompt sends it to: the Jira adapter, the shared runtime, comment files
         allow = {str(workdir): "allow", f"{workdir}/*": "allow", f"{root}/scripts/*": "allow", f"{root}/.tmp/*": "allow",
                  f"{root}/AGENTS.md": "allow", f"{root}/JOOservices/AGENTS.md": "allow"}

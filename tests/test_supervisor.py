@@ -614,6 +614,17 @@ class DrillD1FindingsTests(unittest.TestCase):
         self.assertIn("Never write to GitHub", (prompts / "common.md").read_text())
         self.assertIn("behind the base", (prompts / "reviewer.md").read_text())
 
+    def test_ai_processes_have_no_github_login(self):
+        root = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "x", "GITHUB_TOKEN": "y"}):
+            ai_env = agents.run_env("Codex", root, root)
+            supervisor_env = agents.child_env()
+        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(name, ai_env)
+            self.assertIn(name, supervisor_env)  # the supervisor keeps its own login
+        self.assertEqual(Path(ai_env["GH_CONFIG_DIR"]), root / ".tmp" / "aiflow" / "gh-empty")
+        self.assertEqual(list(Path(ai_env["GH_CONFIG_DIR"]).iterdir()), [])
+
     def test_a_quote_starts_at_a_line_boundary(self):
         text = "first line is long\nsecond line\nthird line"
         self.assertEqual(tail(text, 100), text)

@@ -1,12 +1,12 @@
 ## Your task: review the developer's work (you are not the developer)
 1. Read the ticket, its acceptance criteria, the developer's comments and the rework context above.
 2. For a ticket of Type Release the diff against the base is the whole release: the features were reviewed in their own tickets, so review the release preparation (changelog, version, documents, the commit `chore(release)`), that the changelog covers the tickets since the last tag and that the checks the developer reports are real. Otherwise review the diff against the base: `git diff origin/{base}...HEAD` and the commits. Check correctness, scope (no extras), tests, security, repository conventions and that the commit messages follow Conventional Commits.
-3. When the rework context lists CI failures or feedback, check that each item was really fixed, and that every rejection in the replies is justified. A weak rejection is a FAIL.
+3. Never fail a change because the branch is behind the base, because CI has not run, or because no pull request exists yet: the supervisor updates the branch, opens the pull request and checks CI after your review. When the rework context lists CI failures or feedback, check that each item was really fixed, and that every rejection in the replies is justified. A weak rejection is a FAIL.
 4. Do not edit code. Record your findings in ONE ticket comment shaped as a checklist, one line per item, `- [x]` when it passes and `- [ ]` when it does not, each with a short evidence (file, command, test):
    - one line for every acceptance criterion of the ticket (and of the parents that apply),
    - correct scope (nothing extra), tests added and passing, security, repository conventions, Conventional Commits, no secrets, the Deployment section of the developer's comment is true.
    End with `Required fixes:` listing, for every `- [ ]` item, the file and the reason.
 
-Your last message is posted on the pull request as it is: make it that same checklist (every `- [x]` / `- [ ]` item with its evidence and the `Required fixes:` list), in English, and end it with exactly one line:
+The supervisor posts your last message on the pull request (do NOT post it yourself): make it that same checklist (every `- [x]` / `- [ ]` item with its evidence and the `Required fixes:` list), in English, and end it with exactly one line:
 - `VERDICT: PASS` when the change is acceptable as is.
 - `VERDICT: FAIL: <one-line summary>` when anything required is wrong or missing.

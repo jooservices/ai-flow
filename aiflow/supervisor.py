@@ -97,6 +97,15 @@ def branches(project: Any, change: str, issue_type: str, description: str) -> tu
     return base, base
 
 
+def tail(text: str, size: int) -> str:
+    """The last `size` characters of `text`, starting at a line boundary so a quote never begins in the middle of a line."""
+    if len(text) <= size:
+        return text
+    cut = text[-size:]
+    newline = cut.find("\n")
+    return cut[newline + 1:] if 0 <= newline < size // 2 else cut
+
+
 def ticket_of_branch(branch: str) -> str | None:
     """`JAIF-42-pr-gate-v2` -> `JAIF-42`; None for a branch that does not start with a Jira key."""
     match = re.match(r"^([A-Z][A-Z0-9]*-\d+)-", branch)
@@ -807,10 +816,10 @@ class Supervisor:
             return
         if self.state(key, "humanok"):  # a human already approved: no review, no QA again, only CI
             self.jira.comment(key, f"AI Flow: {agent} finished the rework on {self.cfg.machine}. Branch {branch} pushed; the human approved "
-                                   f"this ticket before, so it goes back to Ready to merge (CI must pass).\n\n{text[-1000:]}")
+                                   f"this ticket before, so it goes back to Ready to merge (CI must pass).\n\n{tail(text, 1000)}")
             self.jira.transition(key, "Ready to merge")
             return
-        self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{text[-1500:]}")
+        self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{tail(text, 1500)}")
         self.jira.transition(key, "In Review")
 
     def require_human_for_deployment(self, key: str) -> None:
@@ -898,7 +907,7 @@ class Supervisor:
             self.send_back(key, repo, f"reviewer {agent} FAILED the change: {reason}", text[-3000:], [])
             return True
         self.redis.set(f"reviewtext:{key}", text[-6000:], 30 * DAY)
-        self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED.\n\n{text[-1500:]}")
+        self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED.\n\n{tail(text, 1500)}")
         if not self.jira.transition(key, "Review passed"):  # a project whose workflow has no such status opens the pull request at once
             self.open_pull_request(key, view, repo, base, branch, agent, text, role="pr")
         return True
@@ -1151,7 +1160,7 @@ class Supervisor:
             self.send_back(key, repo, f"QA {agent} FAILED the pull request: {found[1]}", text[-3000:], [])
             return True
         self.redis.set(f"qa:{key}", pr["headRefOid"], 30 * DAY)
-        self.jira.comment(key, f"AI Flow: QA {agent} PASSED at {pr['headRefOid'][:10]}.\n\n{text[-800:]}")
+        self.jira.comment(key, f"AI Flow: QA {agent} PASSED at {pr['headRefOid'][:10]}.\n\n{tail(text, 800)}")
         self.pr_comment(repo, pr["number"], f"### QA by {agent}: PASS at {pr['headRefOid'][:10]}\n\n{text[-6000:]}")
         return True
 

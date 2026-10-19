@@ -5,6 +5,6 @@ The pull request is open, CI is green, it is up to date with `{base}` and its fe
 3. Do not edit code. Remove only artifacts you created while testing.
 4. Record the evidence in ONE ticket comment shaped as a checklist: one line per acceptance criterion, `- [x]` PASS or `- [ ]` FAIL, each with the command you ran and its outcome.
 
-Your last message is posted on the pull request as it is: make it that same checklist (one `- [x]` / `- [ ]` line per acceptance criterion with the command and its outcome), in English, and end it with exactly one line:
+The supervisor posts your last message on the pull request (do NOT post it yourself): make it that same checklist (one `- [x]` / `- [ ]` line per acceptance criterion with the command and its outcome), in English, and end it with exactly one line:
 - `VERDICT: PASS` when all acceptance criteria are verified.
 - `VERDICT: FAIL: <one-line summary>` otherwise.

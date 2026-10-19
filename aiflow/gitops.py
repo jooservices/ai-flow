@@ -48,6 +48,19 @@ class Repo:
                 return Path(fields["worktree"]), branch
         return None
 
+    def worktrees(self) -> list[tuple[Path, str]]:
+        """(path, branch) of every extra worktree of the repository."""
+        found = []
+        for block in git(self.path, "worktree", "list", "--porcelain").split("\n\n")[1:]:  # the first block is the main checkout
+            fields = dict(line.split(" ", 1) for line in block.splitlines() if " " in line)
+            if fields.get("branch"):
+                found.append((Path(fields["worktree"]), fields["branch"].removeprefix("refs/heads/")))
+        return found
+
+    def remove_worktree(self, path: Path) -> None:
+        """Remove a worktree but keep its branch (a declined ticket's work may still be wanted)."""
+        self._helper("remove", "--path", str(path))
+
     def refresh_base(self, base: str) -> None:
         """Bring the local base branch up to date with origin (fast-forward only)."""
         if not self.has_remote():

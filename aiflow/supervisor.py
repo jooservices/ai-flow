@@ -62,6 +62,12 @@ def deployment_needed(comment: str) -> bool:
     return body.strip(" .-*").lower() not in EMPTY_NOTES
 
 
+def ticket_of_branch(branch: str) -> str | None:
+    """`JAIF-42-pr-gate-v2` -> `JAIF-42`; None for a branch that does not start with a Jira key."""
+    match = re.match(r"^([A-Z][A-Z0-9]*-\d+)-", branch)
+    return match.group(1) if match else None
+
+
 def ticket_field(description: str, name: str, default: str) -> str:
     match = re.search(rf"\b{name}:\s*([\w./-]+)", description or "")
     return match.group(1) if match else default
@@ -70,7 +76,7 @@ def ticket_field(description: str, name: str, default: str) -> str:
 def decide(info: dict[str, Any]) -> tuple[str, str]:
     """What the pull-request gate does next. Pure: `info` holds facts only.
 
-    Returns (action, detail) with action one of done, closed, update, rework, block, wait, qa, human, awaiting, merge."""
+    Returns (action, detail) with action one of done, closed, update, rework, block, wait, ready, qa, human, awaiting, merge."""
     if info["state"] == "MERGED":
         return "done", ""
     if info["state"] == "CLOSED":
@@ -85,6 +91,8 @@ def decide(info: dict[str, Any]) -> tuple[str, str]:
         return "wait", "CI is running"
     if info["ci"] == "none" and info["ci_required"]:
         return ("block", "no CI result appeared in time") if info["ci_waited_minutes"] >= info["ci_wait_minutes"] else ("wait", "waiting for CI to start")
+    if info.get("draft"):
+        return "ready", ""  # CI is green: take the draft out of draft so the review bots comment
     if not info["settled"]:
         return "wait", "waiting for review bots to comment"
     if info["stuck"]:
@@ -301,6 +309,7 @@ class Supervisor:
                 self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
                 self.publish_ais()
                 self.recheck_blocked()
+                self.sweep_worktrees()
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
@@ -420,6 +429,29 @@ class Supervisor:
             self.jira.set_field(key, self.cfg.blocked_reason_field, None)
         except JiraError as error:
             log(f"{key}: cannot clear Blocked reason: {error}")
+
+    def sweep_worktrees(self) -> None:
+        """Remove the worktrees of tickets that are Done (and their branches) or Declined (the branch stays) on this machine."""
+        if not self.redis.acquire("sweep:" + self.cfg.machine, self.cfg.owner, 1800):
+            return
+        for project in self.cfg.registry.projects.values():
+            repo = Repo(self.cfg.root, project.repo, project.company)
+            if not repo.exists():
+                continue
+            try:
+                trees = {ticket_of_branch(branch): (path, branch) for path, branch in repo.worktrees() if ticket_of_branch(branch)}
+                if not trees:
+                    continue
+                for issue in self.jira.search(f"key in ({', '.join(trees)})", 100):
+                    path, branch = trees[issue["key"]]
+                    if issue["status"] == "Done":
+                        repo.cleanup(issue["key"])
+                        log(f"{issue['key']}: removed the worktree and branch of a finished ticket")
+                    elif issue["status"] == "Declined":
+                        repo.remove_worktree(path)
+                        log(f"{issue['key']}: removed the worktree of a declined ticket (branch {branch} kept)")
+            except (GitError, JiraError, OSError) as error:
+                log(f"sweep {project.repo}: {error}")
 
     def label_workspace(self, key: str) -> None:
         try:
@@ -679,7 +711,7 @@ class Supervisor:
         if word == "FAIL":
             self.send_back(key, repo, f"reviewer {agent} FAILED the change: {reason}", text[-3000:], [])
             return True
-        self.redis.set(f"reviewtext:{key}", text[-800:], 30 * DAY)
+        self.redis.set(f"reviewtext:{key}", text[-6000:], 30 * DAY)
         self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED.\n\n{text[-1500:]}")
         if not self.jira.transition(key, "Review passed"):  # a project whose workflow has no such status opens the pull request at once
             self.open_pull_request(key, view, repo, base, branch, agent, text, role="pr")
@@ -724,7 +756,11 @@ class Supervisor:
         try:
             found = gh.find(branch)
             if found is None or found["state"] != "OPEN":
-                found = gh.create(branch, base, title, self.pr_body(key, view, repo, base, agent))
+                found = gh.create(branch, base, title, self.pr_body(key, view, repo, base, agent), draft=True)
+                self.redis.delete(f"readyat:{key}")
+                review = self.state(key, "reviewtext")
+                if review:
+                    gh.comment(found["number"], f"### Review by {agent}\n\n{review}")
         except GitHubError as error:
             self.failed(key, role, agent, f"could not open the pull request: {error}", text)
             return
@@ -807,6 +843,10 @@ class Supervisor:
         elif action == "wait":
             self.note_gate(key, f"{detail} ({pr['url']})")
             return False
+        elif action == "ready":
+            gh.ready(pr["number"])
+            self.redis.set(f"readyat:{key}", str(int(time.time())), 30 * DAY)
+            self.jira.comment(key, f"AI Flow: CI is green; {pr['url']} is ready for review. Waiting for the review bots, then QA.")
         elif action == "qa":
             return self.run_qa(key, view, repo, base, branch, pr)
         elif action == "human":
@@ -826,8 +866,9 @@ class Supervisor:
         required = project.ci_required
         entry = int(self.state(key, "gateentry", str(int(time.time()))))
         pushed = int(self.state(key, "pushed", "0"))
+        ready = int(self.state(key, "readyat", "0"))
         info.update(ci_required=required, ci_wait_minutes=self.cfg.ci_wait_minutes, ci_waited_minutes=(time.time() - max(entry, pushed)) / 60,
-                    settled=time.time() - pushed >= self.cfg.feedback_settle_minutes * 60,
+                    draft=bool(pr.get("isDraft")), settled=time.time() - max(pushed, ready) >= self.cfg.feedback_settle_minutes * 60,
                     qa_ok=self.state(key, "qa") == pr["headRefOid"], auto_merge=project.auto_merge)
         if pr["state"] != "OPEN":
             return info
@@ -918,11 +959,20 @@ class Supervisor:
             return True
         self.redis.delete(f"attempts:{key}:qa")
         if found[0] == "FAIL":
+            self.pr_comment(repo, pr["number"], f"### QA by {agent}: FAIL at {pr['headRefOid'][:10]}\n\n{text[-6000:]}")
             self.send_back(key, repo, f"QA {agent} FAILED the pull request: {found[1]}", text[-3000:], [])
             return True
         self.redis.set(f"qa:{key}", pr["headRefOid"], 30 * DAY)
         self.jira.comment(key, f"AI Flow: QA {agent} PASSED at {pr['headRefOid'][:10]}.\n\n{text[-800:]}")
+        self.pr_comment(repo, pr["number"], f"### QA by {agent}: PASS at {pr['headRefOid'][:10]}\n\n{text[-6000:]}")
         return True
+
+    def pr_comment(self, repo: Repo, number: int, body: str) -> None:
+        """A checklist on the pull request itself (marked, so it is never read back as feedback); never fatal."""
+        try:
+            GitHub(repo.github_slug()).comment(number, body)
+        except (GitHubError, GitError) as error:
+            log(f"pull request #{number}: could not post the comment: {error}")
 
     def merge(self, key: str, repo: Repo, gh: GitHub, pr: dict[str, Any], base: str, approved: bool = False) -> bool:
         """Merge the head that passed QA. `approved` (a human approved it): merge whatever head is current, QA is not repeated."""

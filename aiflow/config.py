@@ -186,7 +186,7 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         role_defaults=role_defaults,
         auto_merge_repos=auto_merge_repos,
         ci_required_repos=ci_required_repos,
-        ci_wait_minutes=_int(merged, "AIFLOW_CI_WAIT_MINUTES", 30),
+        ci_wait_minutes=_int(merged, "AIFLOW_CI_WAIT_MINUTES", 90),
         feedback_settle_minutes=_int(merged, "AIFLOW_FEEDBACK_SETTLE_MINUTES", 5),
         gate_poll_seconds=_int(merged, "AIFLOW_GATE_POLL_SECONDS", 60),
         max_cycles=_int(merged, "AIFLOW_MAX_CYCLES", 6),

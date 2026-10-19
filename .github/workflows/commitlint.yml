@@ -1,0 +1,53 @@
+name: Commitlint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commitlint:
+    name: Validate commit messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEPENDABOT_PR: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject human-authored commits in Dependabot PR
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            const humanCommits = commits.filter(
+              ({ author }) => author?.login !== 'dependabot[bot]',
+            );
+
+            if (humanCommits.length > 0) {
+              core.setFailed(
+                `Dependabot PR contains ${humanCommits.length} non-Dependabot commit(s).`,
+              );
+            }
+
+      - name: Validate PR commits
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
+        with:
+          configFile: .github/commitlint.config.mjs

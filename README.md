@@ -1,23 +1,49 @@
 # ai-flow
 
-Jira-driven multi-AI delivery flow for Workspaces (Jira project `JAIF`). Supervisors on the Mac and the WSL workstation poll Jira, start a developer AI for each ready ticket, then a reviewer AI and a QA AI, merge and move the ticket to Done. The owner works only in Backlog.
+Jira-driven multi-AI delivery flow for Workspaces (Jira project `JAIF`). Supervisors on the Mac and the WSL workstation poll Jira, run a developer AI for each ready ticket, a reviewer AI, then drive the pull request through CI, feedback and QA, merge it and move the ticket to Done. The owner works only in Backlog.
 
 ## Flow
 
+```
+Backlog -(owner)-> To Do -> In Progress (developer) -> In Review (reviewer) -> In QA (pull-request gate) -> Done
+                      ^           |                         |                        |
+                      |           +-- Blocked <-------------+------------------------+   (owner: Unblock)
+                      +---- Review failed / QA failed / CI failed / feedback / conflict  (label `rework`, reason in a comment)
+```
+
 | Jira status | Who | Next |
 |---|---|---|
-| Backlog | owner / any AI creates and refines | owner or AI moves to **To Do** when the ticket is complete (that means "ready") |
-| To Do | supervisor claims it (Redis lease), moves to In Progress | developer AI (the `Agent (AI)` field) works in a ticket worktree |
-| In Progress | developer AI; no lease for `AIFLOW_ORPHAN_GRACE_SECONDS` means the AI died, so another AI continues | `RESULT: DONE` with commits moves to In Review |
-| In Review | reviewer AI (never the developer) | `VERDICT: PASS` moves to In QA; `FAIL` moves back to In Progress |
-| In QA | QA AI (never the developer, not the reviewer when possible) | `PASS` merges the branch into the base and moves to Done; `FAIL` moves back to In Progress |
-| Blocked | needs the owner | too many failed attempts or `RESULT: BLOCKED` |
+| Backlog | owner / any AI creates and refines | owner moves to **To Do** when the ticket is complete (that means "ready") |
+| To Do | supervisor claims it (Redis lease), when no "is blocked by" ticket is open; `rework` tickets first | developer AI starts, status becomes In Progress |
+| In Progress | developer AI (`Agent (AI)` field, else `AIFLOW_DEVELOPER_DEFAULT`), always from the latest base; no lease for `AIFLOW_ORPHAN_GRACE_SECONDS` means the AI died, so another AI continues | `RESULT: DONE` with valid commits: In Review. `RESULT: BLOCKED: <reason>`: Blocked |
+| In Review | reviewer AI (never the developer; `AIFLOW_REVIEWER_DEFAULT` first) | PASS: the supervisor opens the pull request, status In QA. FAIL: To Do + `rework` |
+| In QA | the **gate**, run by the supervisor (no AI) except the QA step | see below |
+| Blocked | needs the owner | too many attempts or rounds, a human review that still requests changes, a rejected human request, CI that never started |
+| Done | | the pull request is merged |
 
-The ticket may name `Repo: <name>` (under `JOOservices/projects`) and `Base: <branch>`; defaults come from `.env`. Tickets with unfinished "is blocked by" links are skipped. A ticket with label `aiflow-hold` is never picked up.
+### The gate (status In QA), checked in this order
+
+1. Pull request merged (also by a human): Done. Closed without merging: Declined.
+2. Behind the base: a clean merge is made by the supervisor (`update-branch`), a conflict goes back to the developer. Any head change discards the QA result.
+3. CI: failed goes back to the developer with the failing log, pending waits. A repo in `AIFLOW_CI_REQUIRED_REPOS` with no CI result after `AIFLOW_CI_WAIT_MINUTES` is Blocked.
+4. After the last push, wait `AIFLOW_FEEDBACK_SETTLE_MINUTES` for review bots (CodeRabbit, Copilot), then read the feedback: unresolved review threads, new human comments, "changes requested" reviews. Anything open goes back to the developer.
+5. QA AI (never the developer, not the reviewer when possible) on the exact pull request head. FAIL goes back to the developer.
+6. One pull request per repository is in QA and merge at a time (`qaslot:<repo>`), so a merge does not make the next QA stale twice.
+7. Merge (`gh pr merge --match-head-commit`, method `AIFLOW_MERGE_METHOD`) for repos in `AIFLOW_AUTO_MERGE_REPOS` (`*` = all); other repos wait for the owner to merge. Then Done, and the branch and worktree are removed.
+
+### Rework
+
+A ticket sent back gets the label `rework`, goes to To Do (the Jira workflow of JAIF allows `Review failed` and `QA failed` to To Do) and the reason is kept for the next AI. The developer rebases on the latest base and answers **every** feedback item in a JSON file (`fixed` or `rejected`, with a reason). The supervisor posts the answers on the pull request and resolves the threads. A rejected request from a human is Blocked for the owner. After `AIFLOW_MAX_CYCLES` rounds the ticket is Blocked.
+
+### Conventions
+
+Commits and the pull request title follow Conventional Commits (`type(scope): Subject (KEY)`, uppercase first letter, no final period, at most 120 characters), as the jooservices repositories enforce in CI. The supervisor checks the commit subjects before it pushes; if the developer gave no valid `PR_TITLE:` it builds one from the Jira summary.
+
+The ticket may name `Repo: <name>` (under `JOOservices/projects`) and `Base: <branch>`; defaults come from `.env`. A ticket with label `aiflow-hold` is never picked up. The Jira field `Workspace` shows which machine works on the ticket now.
 
 ## Hand-over
 
-Every AI comments on the ticket (format in `prompts/common.md`). The supervisor also comments at start, end, failure and quota events. Activity (log output or a new commit) is watched; no activity for `AIFLOW_IDLE_MINUTES` kills the AI and the ticket is reassigned. A usage-limit error puts that AI on a cooldown (`AIFLOW_QUOTA_COOLDOWN_MINUTES`) and the next AI continues from the branch and the comments.
+Every AI comments on the ticket (format in `prompts/common.md`). The supervisor also comments at start, end, failure and quota events. Activity (log output or a new commit) is watched; no activity for `AIFLOW_IDLE_MINUTES` kills the AI and the ticket is reassigned. A usage-limit error puts that AI on a cooldown (`AIFLOW_QUOTA_COOLDOWN_MINUTES`) and the next AI continues from the branch and the comments. The branch is pushed to origin every two minutes during development, so the other machine can continue.
 
 ## Run
 
@@ -28,10 +54,10 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
-State lives in the shared Redis (database from `scripts/docker/shared provision-project ai-flow --redis`, `REDIS_DB`), keys under `aiflow:` (lease, attempts, cooldown, dev, reviewer, home, heartbeat). Logs: `Workspaces/.tmp/aiflow/logs/`.
+State lives in the shared Redis (database from `scripts/docker/shared provision-project ai-flow --redis`, `REDIS_DB`), keys under `aiflow:`. Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
 
-## Known limits (v1)
+## Known limits
 
-- Developer AIs run with broad tool access inside the ticket worktree and a deny list for destructive commands; a narrower allowlist is JAIF-7.
-- A repo without a remote can only continue on the machine that holds the worktree (`home:<KEY>`). Cross-machine continuation needs a pushed branch and a fetch-based checkout (JAIF-3).
-- One Redis: the supervisor on the Mac needs a tunnel to the WSL Redis (JAIF-8).
+- Codex runs with `danger-full-access` (its workspace-write mode makes `.git` read-only, so it cannot commit); Claude runs with an allowlist.
+- The PR title check of a repository must accept the Conventional Commits form above. Repositories with other rules need a per-repo setting (not built yet).
+- A pull request is read through the GitHub CLI of the machine that runs the gate; `gh` must be logged in as the account that owns the pull requests.

@@ -76,3 +76,24 @@ class Jira:
 
     def set_agent(self, key: str, agent: str) -> None:
         self._run("edit", key, "--agent", agent)
+
+    def labels(self, key: str) -> list[str]:
+        return list(self.view(key).get("labels", []))
+
+    def add_label(self, key: str, label: str) -> None:
+        current = self.labels(key)
+        if label not in current:
+            self._run("edit", key, "--labels", ",".join(current + [label]))
+
+    def remove_label(self, key: str, label: str) -> None:
+        current = self.labels(key)
+        if label in current:
+            self._run("edit", key, "--labels", ",".join(x for x in current if x != label))
+
+    def set_workspace(self, key: str, field: str, value: str) -> None:
+        status, body = self._library().call("PUT", f"/rest/api/3/issue/{key}", {"fields": {field: value}})
+        if status not in (200, 204):
+            raise JiraError(f"set workspace HTTP {status}: {str(body)[:200]}")
+
+    def issue_type(self, key: str) -> str:
+        return str(self.view(key).get("type", ""))

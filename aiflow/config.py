@@ -27,6 +27,14 @@ def _int(env: dict[str, str], key: str, default: int) -> int:
     return int(env.get(key, default))
 
 
+def _list(env: dict[str, str], key: str, default: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in env.get(key, default).split(",") if item.strip())
+
+
+def repo_listed(names: tuple[str, ...], repo: str) -> bool:
+    return "*" in names or repo in names
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -48,11 +56,21 @@ class Settings:
     default_repo: str
     default_base: str
     agent_order: tuple[str, ...]
-    direct_merge_repos: tuple[str, ...]
     wait_note_minutes: int
     expected_slots: tuple[str, ...]
     health_ticket: str
     heartbeat_stale_seconds: int
+    role_defaults: dict
+    auto_merge_repos: tuple[str, ...]
+    ci_required_repos: tuple[str, ...]
+    ci_wait_minutes: int
+    feedback_settle_minutes: int
+    gate_poll_seconds: int
+    max_cycles: int
+    merge_method: str
+    ignored_authors: tuple[str, ...]
+    workspace_field: str
+    workspace_name: str
 
     @property
     def owner(self) -> str:
@@ -63,10 +81,11 @@ def load(env: dict[str, str] | None = None) -> Settings:
     merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
     merged.update(read_env_file(PROJECT_DIR / ".env"))
     merged.update(os.environ if env is None else env)
+    machine = merged.get("AIFLOW_MACHINE", socket.gethostname().lower())
     return Settings(
         root=WORKSPACES_ROOT,
         projects=tuple(p.strip() for p in merged.get("AIFLOW_PROJECTS", "JAIF").split(",") if p.strip()),
-        machine=merged.get("AIFLOW_MACHINE", socket.gethostname().lower()),
+        machine=machine,
         slot=_int(merged, "AIFLOW_SLOT", 1),
         poll_seconds=_int(merged, "AIFLOW_POLL_SECONDS", 30),
         heartbeat_seconds=_int(merged, "AIFLOW_HEARTBEAT_SECONDS", 20),
@@ -83,9 +102,20 @@ def load(env: dict[str, str] | None = None) -> Settings:
         default_repo=merged.get("AIFLOW_DEFAULT_REPO", "ai-flow"),
         default_base=merged.get("AIFLOW_DEFAULT_BASE", "develop"),
         agent_order=tuple(a.strip() for a in merged.get("AIFLOW_AGENT_ORDER", "Claude,Codex,OpenCode").split(",") if a.strip()),
-        direct_merge_repos=tuple(r.strip() for r in merged.get("AIFLOW_DIRECT_MERGE_REPOS", "ai-flow").split(",") if r.strip()),
         wait_note_minutes=_int(merged, "AIFLOW_WAIT_NOTE_MINUTES", 20),
         expected_slots=tuple(r.strip() for r in merged.get("AIFLOW_EXPECTED_SLOTS", "wsl:1,wsl:2").split(",") if r.strip()),
         health_ticket=merged.get("AIFLOW_HEALTH_TICKET", ""),
         heartbeat_stale_seconds=_int(merged, "AIFLOW_HEARTBEAT_STALE_SECONDS", 300),
+        role_defaults={role: merged.get(f"AIFLOW_{role.upper()}_DEFAULT", "") for role in ("developer", "reviewer", "qa")},
+        auto_merge_repos=_list(merged, "AIFLOW_AUTO_MERGE_REPOS", "*"),
+        ci_required_repos=_list(merged, "AIFLOW_CI_REQUIRED_REPOS", ""),
+        ci_wait_minutes=_int(merged, "AIFLOW_CI_WAIT_MINUTES", 30),
+        feedback_settle_minutes=_int(merged, "AIFLOW_FEEDBACK_SETTLE_MINUTES", 5),
+        gate_poll_seconds=_int(merged, "AIFLOW_GATE_POLL_SECONDS", 60),
+        max_cycles=_int(merged, "AIFLOW_MAX_CYCLES", 6),
+        merge_method=merged.get("AIFLOW_MERGE_METHOD", "merge"),
+        ignored_authors=tuple(a.lower() for a in _list(merged, "AIFLOW_IGNORED_AUTHORS",
+                              "codecov-commenter,github-actions,sonarqubecloud,sonarcloud,dependabot,codeql,github-advanced-security")),
+        workspace_field=merged.get("AIFLOW_WORKSPACE_FIELD", "customfield_10214"),
+        workspace_name=merged.get("AIFLOW_WORKSPACE_NAME", {"wsl": "WSL", "mac": "Mac"}.get(machine, machine)),
     )

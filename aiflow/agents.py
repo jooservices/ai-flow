@@ -13,6 +13,7 @@ DENIED_BASH = (
     "Bash(docker run:*)", "Bash(docker compose run:*)", "Bash(docker system prune:*)", "Bash(docker volume rm:*)",
 )
 QUOTA_PATTERN = re.compile(r"usage limit|rate.?limit|quota|\b429\b|credit balance|too many requests|overloaded|resets? (at|in)", re.I)
+TITLE_PATTERN = re.compile(r"^PR_TITLE:\s*(.+?)\s*$", re.M)
 VERDICT_PATTERN = re.compile(r"^(RESULT|VERDICT):\s*(DONE|PASS|FAIL|BLOCKED)\b[:\s-]*(.*)$", re.M)
 
 
@@ -41,16 +42,25 @@ def claude_allowed(root: Path) -> str:
     return ",".join(["Read", "Edit", "Write", "Glob", "Grep", *bash])
 
 
-def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, root: Path) -> tuple[list[str], str | None]:
+def parse_spec(spec: str) -> tuple[str, str, str]:
+    """`Agent[:model[:effort]]` from the environment -> (agent, model, effort); missing parts are empty."""
+    parts = [p.strip() for p in (spec or "").split(":")] + ["", ""]
+    return parts[0], parts[1], parts[2]
+
+
+def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, root: Path,
+                  model: str = "", effort: str = "") -> tuple[list[str], str | None]:
     """Return (argv, stdin_text). The AI works only inside `workdir`; scripts/jira lives under `root`."""
     if agent == "Claude":
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose",
+                *(["--model", model] if model else []), *(["--effort", effort] if effort else []),
                 "--allowedTools", claude_allowed(root),
                 "--disallowedTools", ",".join(DENIED_BASH),
                 "--add-dir", str(root / ".tmp")]
         return argv, prompt
     if agent == "Codex":
-        argv = ["codex", "exec", "-C", str(workdir), "-s", "danger-full-access", "--skip-git-repo-check", "-o", str(result_file), "-"]
+        argv = ["codex", "exec", "-C", str(workdir), "-s", "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
+                *(["-m", model] if model else []), *(["-c", f'model_reasoning_effort="{effort}"'] if effort else []), "-"]
         return argv, prompt
     if agent == "OpenCode":
         return ["opencode", "run", prompt], None
@@ -80,6 +90,12 @@ def verdict(text: str) -> tuple[str, str] | None:
         return None
     _, word, reason = found[-1]
     return word.upper(), reason.strip()
+
+
+def pr_title(text: str) -> str | None:
+    """Last `PR_TITLE:` line of the developer's final message."""
+    found = TITLE_PATTERN.findall(text)
+    return found[-1].strip("` ") if found else None
 
 
 def looks_like_quota(log_file: Path, text: str) -> bool:

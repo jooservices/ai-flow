@@ -26,5 +26,11 @@ Blockers: <errors and the command to reproduce / resume>
 ## Ticket description
 {description}
 
+## Pull request
+{pr}
+
+## Rework context
+{rework}
+
 ## Earlier comments on the ticket (newest last)
 {comments}

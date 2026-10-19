@@ -65,6 +65,14 @@ class Repo:
         else:
             git(self.path, "update-ref", f"refs/heads/{base}", git(self.path, "rev-parse", remote))
 
+    def github_slug(self) -> str:
+        """`owner/name` of the origin repository on GitHub."""
+        url = git(self.path, "remote", "get-url", "origin")
+        match = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
+        if not match:
+            raise GitError(f"origin of {self.name} is not a GitHub repository: {url}")
+        return match.group(1)
+
     def remote_branch(self, key: str) -> str | None:
         """Name of the ticket branch already pushed to origin (work started on another machine)."""
         if not self.has_remote():
@@ -96,49 +104,51 @@ class Repo:
     def ahead(self, workdir: Path, base: str) -> int:
         return int(git(workdir, "rev-list", "--count", f"{base}..HEAD"))
 
-    def push(self, workdir: Path, branch: str) -> bool:
+    def push(self, workdir: Path, branch: str, lease: bool = False) -> bool:
+        """Push the ticket branch. `lease` allows rewriting it (after a rebase) but only if nobody else moved it."""
         if not self.has_remote():
             return False
-        git(workdir, "push", "-u", "origin", branch)
+        git(workdir, "push", "-u", *(["--force-with-lease"] if lease else []), "origin", branch)
         return True
 
-    def merge(self, key: str, branch: str, base: str) -> str:
-        """Merge `branch` into `base` (no-ff) in a throw-away worktree; never checks out in the main checkout."""
-        self.refresh_base(base)
-        tmp = self.root / ".tmp" / f"aiflow-merge-{key}"
-        git(self.path, "worktree", "add", "--detach", str(tmp), base)
-        try:
-            try:
-                git(tmp, "merge", "--no-ff", "-m", f"{key}: merge {branch}", branch)
-            except GitError as error:
-                git(tmp, "merge", "--abort", check=False)
-                raise GitError(f"merge conflict or failure: {error}") from error
-            merged = git(tmp, "rev-parse", "HEAD")
-        finally:
-            git(self.path, "worktree", "remove", "--force", str(tmp), check=False)
-        current = git(self.path, "symbolic-ref", "--short", "-q", "HEAD", check=False)
-        clean = not git(self.path, "status", "--porcelain")
-        if current == base and clean:
-            git(self.path, "merge", "--ff-only", merged)
-        else:
-            git(self.path, "update-ref", f"refs/heads/{base}", merged)
+    def fetch(self, *refs: str) -> None:
         if self.has_remote():
-            git(self.path, "push", "origin", base)
-        return merged
+            git(self.path, "fetch", "origin", *refs)
 
-    def cleanup(self, key: str) -> None:
+    def behind(self, base: str, branch: str) -> bool:
+        """True when origin/<base> has commits that origin/<branch> lacks (the PR is not up to date)."""
+        self.fetch(base, branch)
+        return subprocess.run(["git", "-C", str(self.path), "merge-base", "--is-ancestor", f"origin/{base}", f"origin/{branch}"]).returncode != 0
+
+    def remote_head(self, branch: str) -> str:
+        return git(self.path, "rev-parse", f"origin/{branch}")
+
+    def sync_worktree(self, workdir: Path, branch: str) -> None:
+        """Make a clean worktree equal to origin/<branch> (the PR head may have moved: update-branch, rebase on another machine)."""
+        self.fetch(branch)
+        if git(workdir, "status", "--porcelain"):
+            raise GitError(f"worktree {workdir} has uncommitted changes")
+        git(workdir, "reset", "--hard", f"origin/{branch}")
+
+    def adopt_remote(self, workdir: Path, branch: str) -> None:
+        """Move a clean worktree forward to origin/<branch> when another machine pushed more commits; never discard local work."""
+        if not self.has_remote() or not git(self.path, "ls-remote", "--heads", "origin", branch, check=False):
+            return
+        self.fetch(branch)
+        local, remote = git(workdir, "rev-parse", "HEAD"), git(workdir, "rev-parse", f"origin/{branch}")
+        ancestor = subprocess.run(["git", "-C", str(workdir), "merge-base", "--is-ancestor", local, remote]).returncode == 0
+        if local != remote and ancestor and not git(workdir, "status", "--porcelain"):
+            git(workdir, "reset", "--hard", remote)
+
+    def commit_subjects(self, workdir: Path, base: str) -> list[str]:
+        out = git(workdir, "log", "--no-merges", "--format=%s", f"{base}..HEAD")
+        return [line for line in out.splitlines() if line.strip()]
+
+    def cleanup(self, key: str, remote: bool = True) -> None:
+        """Remove the ticket worktree and local branch; the remote branch too unless `remote` is false."""
         found = self.find_worktree(key)
         if found:
             self._helper("remove", "--path", str(found[0]), "--delete-branch")
-        pushed = self.remote_branch(key)
+        pushed = self.remote_branch(key) if remote else None
         if pushed:
             git(self.path, "push", "origin", "--delete", pushed, check=False)
-
-    def open_pr(self, key: str, branch: str, base: str, title: str, body: str) -> str:
-        """Push the ticket branch and open a pull request with gh; returns the PR URL."""
-        git(self.path, "push", "-u", "origin", branch)
-        result = subprocess.run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", f"{key}: {title}", "--body", body],
-                                capture_output=True, text=True, cwd=self.path)
-        if result.returncode != 0:
-            raise GitError((result.stdout + result.stderr).strip()[:400])
-        return result.stdout.strip().splitlines()[-1]

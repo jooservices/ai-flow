@@ -75,18 +75,25 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
-### Workers and profiles (like `queue:work`)
+### Configuration and workers (like `queue:work`)
 
-systemd keeps N `aiflow-work` processes alive; each worker is the orchestrator for the Jira projects of ONE profile file in `JOOservices/config/aiflow/<profile>.env` (see `profiles/*.env.example`). The common settings stay in `.env`; the profile adds `AIFLOW_PROJECTS` (one or many keys), `AIFLOW_WORKERS` and optional `AIFLOW_WORKER_MAX_MINUTES`.
+Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):
+
+- `aiflow.toml`: `[defaults]` for every project and `[machines.<name>] workers = N`, the number of workers of each machine.
+- `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`).
+
+A project value beats `[defaults]`, which beats the old `.env` value (`AIFLOW_*_DEFAULT`, `AIFLOW_AUTO_MERGE_REPOS`...). A machine without these files keeps working with `.env` alone. A ticket can still name `Repo:` and `Base:` in its description as an exception. An empty Require human field means the project's `require_human`.
+
+systemd keeps N `aiflow-work` processes alive per machine; every worker serves all projects and takes the next ticket that is free (`max_parallel` limits one project).
 
 ```
-bin/aiflow-work --id B-2        # profile B, worker 2 (what aiflow-work@B-2.service runs)
-bin/aiflow-work check           # validate all profiles
+bin/aiflow-work --id 2          # worker 2 of this machine (what aiflow-work@2.service runs)
+bin/aiflow-work check           # validate the configuration, print what was understood
 bin/aiflow-work restart         # graceful restart of every worker (like queue:restart)
-bin/install-wsl-service --profiles
+bin/install-wsl-service --workers
 ```
 
-A Jira project belongs to one profile: a worker refuses to start (exit 2, not retried) when its project is also in another profile, or when its number exceeds `AIFLOW_WORKERS`. Heartbeats are `hb:<machine>:<profile>-<n>` and the health check expects every worker of every profile. Without profile files the old `aiflow-supervisor@<slot>` keeps working unchanged.
+A mistake (unknown setting, the same Jira key in two files, a worker number above the machine's `workers`) stops the worker with exit 2, which systemd does not retry. Heartbeats are `hb:<machine>:<n>` and the health check expects every worker of its machine. The old `aiflow-supervisor@<slot>` keeps working with `.env` only.
 
 State lives in one Redis shared by every machine (plain TCP client in `aiflow/lock.py`: reconnects, retries, and the AI is stopped when Redis stays unreachable for three quarters of the lease time). DB 5 is production, DB 6 is for tests; keys are under `aiworkflow:`. Machines that cannot route to the Redis host use `bin/aiflow-redis-tunnel` (launchd template in `deploy/launchd/`). Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
 

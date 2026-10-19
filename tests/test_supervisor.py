@@ -268,6 +268,13 @@ class GitHubParsingTests(unittest.TestCase):
         self.assertEqual((state, len(failing)), ("failed", 1))
         self.assertEqual(github.checks_state([{"__typename": "StatusContext", "context": "ci", "state": "PENDING"}])[0], "pending")
 
+    def test_a_cancelled_run_replaced_by_a_newer_one_does_not_count(self):
+        run = lambda conclusion, started: {"__typename": "CheckRun", "name": "Validate PR Title", "workflowName": "Semantic PR Title",
+                                           "status": "COMPLETED", "conclusion": conclusion, "startedAt": started, "detailsUrl": "u"}
+        self.assertEqual(github.checks_state([run("CANCELLED", "2026-10-19T04:20:00Z"), run("SUCCESS", "2026-10-19T04:20:30Z")])[0], "passed")
+        self.assertEqual(github.checks_state([run("SUCCESS", "2026-10-19T04:20:30Z"), run("CANCELLED", "2026-10-19T04:20:00Z")])[0], "passed")
+        self.assertEqual(github.checks_state([run("SUCCESS", "2026-10-19T04:20:00Z"), run("FAILURE", "2026-10-19T04:20:30Z")])[0], "failed")
+
     def test_feedback_split(self):
         bot, human = {"login": "coderabbitai", "__typename": "Bot"}, {"login": "jooservices", "__typename": "User"}
         data = {

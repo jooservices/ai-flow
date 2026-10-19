@@ -46,8 +46,15 @@ def checks_state(rollup: list[dict[str, Any]] | None) -> tuple[str, list[dict[st
     """('none'|'pending'|'failed'|'passed', failing checks) from a statusCheckRollup."""
     if not rollup:
         return "none", []
-    failed, pending = [], False
+    # A superseded run (title edited, new push) stays in the list as CANCELLED next to its replacement: only the newest run of a check counts.
+    newest: dict[str, dict[str, Any]] = {}
     for item in rollup:
+        name = item.get("name") or item.get("context") or "?"
+        key = f"{item.get('workflowName', '')}/{name}"
+        if key not in newest or str(item.get("startedAt") or "") >= str(newest[key].get("startedAt") or ""):
+            newest[key] = item
+    failed, pending = [], False
+    for item in newest.values():
         if item.get("__typename") == "StatusContext":
             state = item.get("state", "")
             name, link = item.get("context", "?"), item.get("targetUrl", "")

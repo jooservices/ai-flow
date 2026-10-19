@@ -15,7 +15,7 @@ from pathlib import Path
 from .config import ConfigError
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
-            "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int}
+            "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int, "highest_developer": str}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 
@@ -36,6 +36,7 @@ class Project:
     ci_required: bool = False
     merge_method: str = "merge"
     max_parallel: int = 0  # tickets of the project that may run at the same time, 0 = no limit
+    highest_developer: str = "Claude"  # developer of the tickets with priority Highest (the Agent (AI) / AI Model fields still win)
 
     def role(self, role: str) -> str:
         return {"developer": self.developer, "reviewer": self.reviewer, "qa": self.qa}.get(role, "")

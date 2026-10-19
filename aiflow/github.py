@@ -31,8 +31,12 @@ def valid_title(title: str) -> bool:
     return 10 <= len(title) <= 120 and bool(CONVENTIONAL.match(title))
 
 
-def fallback_title(key: str, summary: str, issue_type: str) -> str:
-    kind = {"Bug": "fix", "Story": "feat"}.get(issue_type, "chore")
+CHANGE_KINDS = {"Feature": "feat", "Bug": "fix", "Hotfix": "fix", "Chore": "chore", "Docs": "docs", "Refactor": "refactor"}
+
+
+def fallback_title(key: str, summary: str, issue_type: str, change_type: str = "") -> str:
+    """Conventional Commits title; the Jira field Type decides the kind, the issue type is the fallback."""
+    kind = CHANGE_KINDS.get(change_type) or {"Bug": "fix", "Story": "feat"}.get(issue_type, "chore")
     subject = re.sub(r"\s+", " ", summary).strip().rstrip(".")
     subject = subject[:1].upper() + subject[1:]
     return f"{kind}: {subject[:120 - len(kind) - len(key) - 6]} ({key})"

@@ -75,6 +75,23 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
+### Ticket template
+
+Every Epic, Story, Task and Sub-task description uses these headings (markdown). A child ticket does not repeat its parent's business: the AI reads the parent chain up to the Epic first (`scripts/jira view`).
+
+```
+## Business requirements   what and why of THIS ticket
+## AC                      acceptance criteria (QA decides PASS or FAIL with them)
+## Scopes                  what is in and out
+## Tests                   the test cases needed
+## Technical               high level; ### Infrastructure when it matters
+## Code structure          Task only: files, classes, layers (the owner defines it while brainstorming)
+```
+
+A ticket moved to To Do without AC, Scopes or Tests goes back to Backlog with a comment naming the missing sections; no AI starts. Fields: Type (Feature, Bug, Hotfix, Chore, Docs, Refactor) decides the commit kind and the base branch (Hotfix starts from the project's `hotfix_base`, everything else from `base`); Priority Highest gives the ticket to the project's `highest_developer` (default Claude) unless Agent (AI) or AI Model names an AI; Require human, Agent (AI), AI Model, Workspace and Blocked reason are as before.
+
+The developer's last comment follows a fixed template: What's changed, Why changed, Blocked reason detail, Feature URL, Deployment, Study cases. A Deployment section that is not `None` sets Require human = Yes, so the owner sees the migration or deploy step before the merge.
+
 ### Configuration and workers (like `queue:work`)
 
 Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):

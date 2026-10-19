@@ -32,6 +32,36 @@ def parse_time(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
 
 
+REQUIRED_SECTIONS = {"AC": ("ac", "acceptance criteria"), "Scopes": ("scope", "scopes"), "Tests": ("test", "tests")}
+EMPTY_NOTES = {"", "none", "n/a", "na", "-", "no", "nothing", "not needed", "not required"}
+
+
+def sections(text: str) -> dict[str, str]:
+    """Markdown sections of a Jira text: lower-case heading (without #, ** and a final colon) -> its body."""
+    found: dict[str, list[str]] = {}
+    current = ""
+    for line in (text or "").splitlines():
+        match = re.match(r"^\s*#{1,6}\s*(.*?)\s*$", line)
+        if match:
+            current = match.group(1).strip("*_ :").lower()
+            found.setdefault(current, [])
+        elif current:
+            found[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in found.items()}
+
+
+def missing_sections(description: str) -> list[str]:
+    """Names of the template sections (AC, Scopes, Tests) that are absent or empty in a ticket description."""
+    parsed = sections(description)
+    return [label for label, names in REQUIRED_SECTIONS.items() if not any(parsed.get(name, "") for name in names)]
+
+
+def deployment_needed(comment: str) -> bool:
+    """True when a hand-over comment has a Deployment section that says something (migration, deploy, ...)."""
+    body = sections(comment).get("deployment", "")
+    return body.strip(" .-*").lower() not in EMPTY_NOTES
+
+
 def ticket_field(description: str, name: str, default: str) -> str:
     match = re.search(rf"\b{name}:\s*([\w./-]+)", description or "")
     return match.group(1) if match else default
@@ -72,6 +102,7 @@ class Supervisor:
     def __init__(self, cfg: Settings, jira: Jira, redis: Redis) -> None:
         self.cfg, self.jira, self.redis = cfg, jira, redis
         self.stop = False
+        self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
     def candidates(self) -> list[dict[str, Any]]:
@@ -110,8 +141,32 @@ class Supervisor:
         """The AIs on cooldown, in one round trip (the shared Redis can be far away)."""
         return {n for n, v in zip(names, self.redis.get_many([f"cooldown:{n}" for n in names])) if v is not None}
 
+    def priority(self, key: str) -> str:
+        """Jira priority name, read at most once a minute per ticket (the agent choice asks for it several times)."""
+        seen = self._priorities.get(key)
+        if seen and time.time() - seen[0] < 60:
+            return seen[1]
+        try:
+            value = str(self.jira.view(key).get("priority") or "")
+        except (JiraError, ValueError, TypeError):
+            return ""
+        self._priorities[key] = (time.time(), value)
+        return value
+
+    def change_type(self, key: str) -> str:
+        """The Jira field Type (Feature, Bug, Hotfix, ...); empty when it is not set or cannot be read."""
+        try:
+            value = self.jira.read_field(key, self.cfg.type_field)
+        except JiraError as error:
+            log(f"{key}: cannot read Type: {error}")
+            return ""
+        return str((value or {}).get("value", ""))
+
     def role_spec(self, role: str, key: str = "") -> tuple[str, str, str]:
-        return agents.parse_spec(self.cfg.project(key).role(role))
+        project = self.cfg.project(key)
+        if role == "developer" and key and project.highest_developer and self.priority(key) == "Highest":
+            return agents.parse_spec(project.highest_developer)  # a Highest ticket goes to the strongest AI unless the ticket names one
+        return agents.parse_spec(project.role(role))
 
     def ticket_spec(self, key: str) -> tuple[str, str]:
         """(AI, model) from the Jira field AI Model, written `<AI>:<Model>`; ('', '') when empty or not understood."""
@@ -206,7 +261,7 @@ class Supervisor:
             try:
                 if not self.eligible(issue):
                     continue
-                view = self.jira.view(issue["key"])
+                view = self.jira.view(issue["key"], full=True)
                 role = STAGES[issue["status"]]
                 agent = None
                 if role == "developer":
@@ -275,8 +330,11 @@ class Supervisor:
         key = issue["key"]
         description = view.get("description", "")
         project = self.cfg.project(key)
+        if issue["status"] == "To Do" and self.incomplete(key, view):
+            return True
         repo = Repo(self.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
-        base = ticket_field(description, "Base", project.base)
+        change = self.change_type(key)
+        base = project.hotfix_base if change == "Hotfix" else ticket_field(description, "Base", project.base)
         if role in ("developer", "reviewer"):
             log(f"{key} [{issue['status']}] {role} -> {agent}")
         if not repo.exists():
@@ -299,6 +357,17 @@ class Supervisor:
         if role == "finalize":
             return self.finalize(key, repo, base)
         return self.gate(key, view, repo, base)
+
+    def incomplete(self, key: str, view: dict[str, Any]) -> bool:
+        """A ticket in To Do must carry AC, Scopes and Tests; otherwise it goes back to Backlog with a note and no AI starts."""
+        missing = missing_sections(view.get("description", ""))
+        if not missing:
+            return False
+        self.jira.comment(key, "AI Flow: this ticket cannot start. The description misses the section(s): " + ", ".join(f"## {m}" for m in missing)
+                          + ". Add them (template: README, \"Ticket template\") and move the ticket to To Do again.")
+        if not self.jira.transition(key, "Backlog"):
+            self.block(key, "The description misses " + ", ".join(missing) + ".", kind="Unclear")
+        return True
 
     def attempts(self, key: str, role: str) -> int:
         return int(self.redis.get(f"attempts:{key}:{role}") or 0)
@@ -374,7 +443,8 @@ class Supervisor:
             comments = "(unavailable)"
         values = dict(machine=self.cfg.machine, key=key, summary=view.get("summary", ""), role=role, agent=agent, repo=repo.name,
                       worktree=str(workdir), branch=branch, base=base, root=str(self.cfg.root), description=description, comments=comments,
-                      rework=self.rework_text(key), pr=self.pr_text(key), replies_file=str(self.replies_file(key)))
+                      rework=self.rework_text(key), pr=self.pr_text(key), replies_file=str(self.replies_file(key)),
+                      type=self.change_type(key) or str(view.get("type", "")), parent=view.get("parent") or "none")
         prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8") for name in ("common", role))
         for name, value in values.items():
             prompt = prompt.replace("{" + name + "}", str(value))
@@ -490,7 +560,7 @@ class Supervisor:
             return
         title = agents.pr_title(text) or ""
         if not github.valid_title(title):
-            title = github.fallback_title(key, view.get("summary", key), str(view.get("type", "")))
+            title = github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
         self.redis.set(f"prtitle:{key}", github.with_key(title, key), 30 * DAY)
         try:
             repo.push(workdir, branch, lease=True)
@@ -498,6 +568,7 @@ class Supervisor:
             self.failed(key, "developer", agent, f"push failed: {error}", text)
             return
         self.redis.set(f"pushed:{key}", str(int(time.time())), 30 * DAY)
+        self.require_human_for_deployment(key)
         for name in ("attempts:%s:developer", "qa:%s"):
             self.redis.delete(name % key)
         if answers and self.post_replies(key, repo, answers):
@@ -509,6 +580,16 @@ class Supervisor:
             return
         self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{text[-1500:]}")
         self.jira.transition(key, "In Review")
+
+    def require_human_for_deployment(self, key: str) -> None:
+        """A hand-over comment with a Deployment section (migration, deploy) needs a human before the merge."""
+        try:
+            latest = self.jira.comments(key, 3)
+            if any(deployment_needed(str(c.get("body", ""))) for c in latest if "## Deployment" in str(c.get("body", ""))):
+                self.jira.set_field(key, self.cfg.require_human_field, {"value": "Yes"})
+                log(f"{key}: Deployment section found; Require human = Yes")
+        except (JiraError, ValueError, TypeError) as error:
+            log(f"{key}: cannot check the Deployment section: {error}")
 
     def read_replies(self, key: str) -> list[tuple[dict[str, Any], dict[str, Any]]] | str:
         """The developer's answers paired with the feedback items, or a problem text when an item has no valid answer."""
@@ -586,7 +667,7 @@ class Supervisor:
 
     def open_pull_request(self, key: str, view: dict[str, Any], repo: Repo, base: str, branch: str, agent: str, text: str) -> None:
         gh = GitHub(repo.github_slug())
-        title = self.state(key, "prtitle") or github.fallback_title(key, view.get("summary", key), str(view.get("type", "")))
+        title = self.state(key, "prtitle") or github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
         try:
             found = gh.find(branch)
             if found is None or found["state"] != "OPEN":

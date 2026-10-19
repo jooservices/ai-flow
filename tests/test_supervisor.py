@@ -7,8 +7,9 @@ from pathlib import Path
 
 from aiflow import agents, github
 from aiflow.config import load
+from aiflow.jira import adf_to_markdown
 from aiflow.gitops import GitError
-from aiflow.supervisor import Supervisor, decide, ticket_field
+from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field
 
 
 class FakeRedis:
@@ -68,7 +69,7 @@ class FakeJira:
         self.moves.append((key, status))
         return True
 
-    def view(self, key):
+    def view(self, key, full=False):
         return {"key": key, "status": getattr(self, "status", "In Progress"), "agent": getattr(self, "agent", None)}
 
     def set_field(self, key, field, value):
@@ -688,3 +689,79 @@ class LeaseRaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GOOD = "## Business requirements\nWhy.\n## AC\n- [ ] it works\n## Scopes\nOnly this.\n## Tests\n- case one\n## Technical\nsmall\n"
+
+
+class TemplateTests(unittest.TestCase):
+    def test_complete_description(self):
+        self.assertEqual(missing_sections(GOOD), [])
+        self.assertEqual(missing_sections(GOOD.replace("## AC", "## Acceptance criteria")), [])
+        self.assertEqual(missing_sections(GOOD.replace("## Scopes", "### **Scopes:**")), [])
+
+    def test_missing_or_empty_sections(self):
+        self.assertEqual(missing_sections(""), ["AC", "Scopes", "Tests"])
+        self.assertEqual(missing_sections(GOOD.replace("- case one\n", "")), ["Tests"])
+        self.assertEqual(missing_sections("Repo: x\nJust a sentence."), ["AC", "Scopes", "Tests"])
+
+    def test_sections_split(self):
+        self.assertEqual(sections("## A\none\n## B b\ntwo\nthree")["b b"], "two\nthree")
+
+    def test_deployment_section(self):
+        self.assertFalse(deployment_needed("## What's changed\nx\n## Deployment\nNone\n## Study cases\nNone"))
+        self.assertFalse(deployment_needed("## Deployment\nN/A."))
+        self.assertTrue(deployment_needed("## Deployment\nRun the migration 2026_10_19 before the release.\n## Study cases\nNone"))
+        self.assertFalse(deployment_needed("no sections at all"))
+
+
+class TypeAndPriorityTests(unittest.TestCase):
+    def sup(self, priority="Medium", type_value=None, **env):
+        sup = make(**env)
+        sup.jira.view = lambda key: {"key": key, "priority": priority, "summary": "s"}
+        sup.jira.read_field = lambda key, field: type_value
+        return sup
+
+    def test_ticket_without_the_sections_goes_back_to_backlog(self):
+        sup = self.sup()
+        self.assertTrue(sup.incomplete("K-1", {"description": "just text"}))
+        self.assertEqual(sup.jira.moves, [("K-1", "Backlog")])
+        self.assertIn("## AC", sup.jira.comments[0][1])
+        sup = self.sup()
+        self.assertFalse(sup.incomplete("K-1", {"description": GOOD}))
+        self.assertEqual(sup.jira.moves, [])
+
+    def test_highest_priority_goes_to_claude(self):
+        self.assertEqual(self.sup("Highest", AIFLOW_DEVELOPER_DEFAULT="Codex:gpt-6-luna:xhigh").role_spec("developer", "K-1")[0], "Claude")
+        self.assertEqual(self.sup("High", AIFLOW_DEVELOPER_DEFAULT="Codex:gpt-6-luna:xhigh").role_spec("developer", "K-1")[0], "Codex")
+        self.assertEqual(self.sup("Highest", AIFLOW_REVIEWER_DEFAULT="Grok").role_spec("reviewer", "K-1")[0], "Grok")
+
+    def test_the_agent_field_beats_the_priority(self):
+        sup = self.sup("Highest")
+        self.assertEqual(sup.eligible_agents("developer", "K-1", "Codex", ["Claude", "Codex"]), ["Codex"])
+
+    def test_type_field(self):
+        self.assertEqual(self.sup(type_value={"value": "Hotfix"}).change_type("K-1"), "Hotfix")
+        self.assertEqual(self.sup(type_value=None).change_type("K-1"), "")
+
+    def test_commit_kind_from_type(self):
+        self.assertTrue(github.fallback_title("K-1", "Add it", "Story", "Hotfix").startswith("fix: "))
+        self.assertTrue(github.fallback_title("K-1", "Add it", "Story", "Docs").startswith("docs: "))
+        self.assertTrue(github.fallback_title("K-1", "Add it", "Story").startswith("feat: "))
+        self.assertTrue(github.fallback_title("K-1", "Add it", "Task").startswith("chore: "))
+
+
+class AdfTests(unittest.TestCase):
+    def test_headings_lists_and_code_survive(self):
+        text = lambda s: {"type": "text", "text": s}
+        doc = {"type": "doc", "content": [
+            {"type": "heading", "attrs": {"level": 2}, "content": [text("AC")]},
+            {"type": "bulletList", "content": [
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [text("one")]}]},
+                {"type": "listItem", "content": [{"type": "paragraph", "content": [text("two")]},
+                                                 {"type": "bulletList", "content": [{"type": "listItem", "content": [{"type": "paragraph", "content": [text("deep")]}]}]}]}]},
+            {"type": "paragraph", "content": [text("plain "), text("text")]},
+            {"type": "codeBlock", "content": [text("make test")]}]}
+        out = adf_to_markdown(doc)
+        self.assertEqual(out, "## AC\n\n- one\n- two\n  - deep\n\nplain text\n\n```\nmake test\n```")
+        self.assertEqual(missing_sections(out), ["Scopes", "Tests"])

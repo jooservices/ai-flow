@@ -15,7 +15,7 @@ from .config import PROJECT_DIR, Settings, repo_listed
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
-from .lock import Redis
+from .lock import Redis, RedisError
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "In QA": "gate"}
 DAY = 86400
@@ -95,6 +95,10 @@ class Supervisor:
     def cooling(self, agent: str) -> bool:
         return self.redis.get(f"cooldown:{agent}") is not None
 
+    def cooldowns(self, names: list[str]) -> set[str]:
+        """The AIs on cooldown, in one round trip (the shared Redis can be far away)."""
+        return {n for n, v in zip(names, self.redis.get_many([f"cooldown:{n}" for n in names])) if v is not None}
+
     def role_spec(self, role: str) -> tuple[str, str, str]:
         return agents.parse_spec(self.cfg.role_defaults.get(role, ""))
 
@@ -104,7 +108,8 @@ class Supervisor:
 
     def pick_agent(self, role: str, key: str, field_agent: str | None) -> str | None:
         installed = agents.available(self.cfg.agent_order)
-        present = [a for a in installed if not self.cooling(a)]
+        cool = self.cooldowns(installed)
+        present = [a for a in installed if a not in cool]
         preferred = self.role_spec(role)[0]
         if role == "developer":
             if field_agent in present:
@@ -157,7 +162,10 @@ class Supervisor:
             try:
                 worked = self.process(issue, view, role, agent)
             finally:
-                self.redis.release(f"lease:{issue['key']}", self.cfg.owner)
+                try:
+                    self.redis.release(f"lease:{issue['key']}", self.cfg.owner)
+                except RedisError as error:
+                    log(f"{issue['key']}: could not release the lease ({error}); it expires by itself")
             if worked:
                 return True
         return False
@@ -258,6 +266,8 @@ class Supervisor:
         argv, stdin_text = agents.build_command(agent, workdir, result_file, prompt, self.cfg.root, model, effort)
         pushed_at = [time.monotonic()]
 
+        last_ok = [time.monotonic()]
+
         def beat() -> bool:
             if role == "developer" and time.monotonic() - pushed_at[0] > 120:
                 pushed_at[0] = time.monotonic()
@@ -265,10 +275,19 @@ class Supervisor:
                     repo.push(workdir, branch)
                 except GitError:
                     pass
-            self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
-            if slot_owner:
-                self.redis.renew(f"qaslot:{repo.name}", slot_owner, SLOT_SECONDS)
-            return self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds)
+            try:
+                self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
+                if slot_owner:
+                    self.redis.renew(f"qaslot:{repo.name}", slot_owner, SLOT_SECONDS)
+                alive = self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds)
+            except RedisError as error:
+                # A short outage is tolerated, but the lease expires lease_seconds after the last renewal and another
+                # supervisor may then take the ticket, so stop the AI before that.
+                silent = time.monotonic() - last_ok[0]
+                log(f"{key}: redis unreachable for {int(silent)}s during {role}: {error}")
+                return silent < self.cfg.lease_seconds * 0.75
+            last_ok[0] = time.monotonic()
+            return alive
 
         code, why = runner.run(
             argv, stdin_text, workdir, log_file, agents.child_env(),
@@ -667,7 +686,7 @@ class Supervisor:
 def main(argv: list[str] | None = None) -> int:
     from .config import load
     cfg = load()
-    supervisor = Supervisor(cfg, Jira(cfg.root), Redis(cfg.redis_container, cfg.redis_db, cfg.redis_prefix, cfg.redis_password))
+    supervisor = Supervisor(cfg, Jira(cfg.root), Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user))
     (cfg.root / ".tmp").mkdir(exist_ok=True)
     if "--once" in (argv if argv is not None else sys.argv[1:]):
         return 0 if supervisor.tick() else 3

@@ -54,7 +54,7 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
-State lives in the shared Redis (database from `scripts/docker/shared provision-project ai-flow --redis`, `REDIS_DB`), keys under `aiflow:`. Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
+State lives in one Redis shared by every machine (plain TCP client in `aiflow/lock.py`: reconnects, retries, and the AI is stopped when Redis stays unreachable for three quarters of the lease time). DB 5 is production, DB 6 is for tests; keys are under `aiworkflow:`. Machines that cannot route to the Redis host use `bin/aiflow-redis-tunnel` (launchd template in `deploy/launchd/`). Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
 
 ## Known limits
 

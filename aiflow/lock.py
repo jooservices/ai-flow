@@ -1,52 +1,137 @@
-"""Leases, counters and cooldowns in the shared Redis (through `docker exec redis-cli`).
+"""Leases, counters and cooldowns in the shared Redis, over a plain TCP connection (RESP).
 
 A lease is `SET key owner NX EX ttl`; it is renewed by the owner as a heartbeat and disappears when the
-supervisor dies, which is how an orphaned ticket is detected.
+supervisor dies, which is how an orphaned ticket is detected. Every machine talks to the same Redis, so the
+client reconnects and retries on network errors and raises `RedisError` when the server stays unreachable.
 """
 from __future__ import annotations
 
-import os
-import subprocess
+import socket
+import time
 
 RENEW = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end"
 RELEASE = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end"
 
 
+class RedisError(RuntimeError):
+    pass
+
+
+def encode(*parts: object) -> bytes:
+    out = [f"*{len(parts)}\r\n".encode()]
+    for part in parts:
+        data = str(part).encode()
+        out.append(b"$" + str(len(data)).encode() + b"\r\n" + data + b"\r\n")
+    return b"".join(out)
+
+
+def decode(stream) -> object:
+    """Read one RESP reply from a binary file-like object."""
+    line = stream.readline()
+    if not line:
+        raise ConnectionError("connection closed by the server")
+    kind, rest = line[:1], line[1:].rstrip(b"\r\n")
+    if kind == b"+":
+        return rest.decode()
+    if kind == b"-":
+        raise RedisError(rest.decode())
+    if kind == b":":
+        return int(rest)
+    if kind == b"$":
+        size = int(rest)
+        if size < 0:
+            return None
+        data = stream.read(size + 2)
+        if len(data) != size + 2:
+            raise ConnectionError("short read")
+        return data[:size].decode(errors="replace")
+    if kind == b"*":
+        count = int(rest)
+        return None if count < 0 else [decode(stream) for _ in range(count)]
+    raise RedisError(f"unexpected reply {line!r}")
+
+
 class Redis:
-    def __init__(self, container: str, db: int, prefix: str, password: str) -> None:
-        self.container, self.db, self.prefix, self.password = container, db, prefix, password
+    def __init__(self, host: str, port: int, db: int, prefix: str, password: str, user: str = "",
+                 timeout: float = 8.0, retries: int = 3) -> None:
+        self.host, self.port, self.db, self.prefix = host, port, db, prefix
+        self.password, self.user, self.timeout, self.retries = password, user, timeout, retries
+        self._sock: socket.socket | None = None
+        self._stream = None
 
-    def _run(self, *args: str) -> str:
-        env = dict(os.environ, REDISCLI_AUTH=self.password)
-        cmd = ["docker", "exec", "-e", "REDISCLI_AUTH", self.container, "redis-cli", "-n", str(self.db), "--no-auth-warning", *args]
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
-        if result.returncode != 0:
-            raise RuntimeError(f"redis-cli failed: {result.stderr.strip()[:200]}")
-        return result.stdout.strip()
+    # ---- connection ------------------------------------------------------------------------------------------
+    def _connect(self) -> None:
+        self.close()
+        sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        sock.settimeout(self.timeout)
+        self._sock, self._stream = sock, sock.makefile("rb")
+        if self.password:
+            self._send(*(["AUTH", self.user, self.password] if self.user else ["AUTH", self.password]))
+        if self.db:
+            self._send("SELECT", self.db)
 
+    def close(self) -> None:
+        for resource in (self._stream, self._sock):
+            try:
+                if resource is not None:
+                    resource.close()
+            except OSError:
+                pass
+        self._sock = self._stream = None
+
+    def _send(self, *parts: object) -> object:
+        assert self._sock is not None
+        self._sock.sendall(encode(*parts))
+        return decode(self._stream)
+
+    def command(self, *parts: object) -> object:
+        """Run one command; reconnect and retry on network errors (errors reported by Redis are not retried)."""
+        last: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                if self._sock is None:
+                    self._connect()
+                return self._send(*parts)
+            except RedisError:
+                raise
+            except (OSError, ConnectionError, ValueError) as error:
+                last = error
+                self.close()
+                if attempt + 1 < self.retries:
+                    time.sleep(0.5 * (attempt + 1))
+        raise RedisError(f"redis {self.host}:{self.port} unreachable: {last}")
+
+    # ---- the operations the supervisor needs ----------------------------------------------------------------
     def key(self, name: str) -> str:
         return self.prefix + name
 
     def acquire(self, name: str, owner: str, ttl: int) -> bool:
-        return self._run("SET", self.key(name), owner, "NX", "EX", str(ttl)) == "OK"
+        if self.command("SET", self.key(name), owner, "NX", "EX", ttl) == "OK":
+            return True
+        return self.command("GET", self.key(name)) == owner  # a lost reply to an earlier retry must not strand our own lease
 
     def renew(self, name: str, owner: str, ttl: int) -> bool:
-        return self._run("EVAL", RENEW, "1", self.key(name), owner, str(ttl)) == "1"
+        return self.command("EVAL", RENEW, 1, self.key(name), owner, ttl) == 1
 
     def release(self, name: str, owner: str) -> bool:
-        return self._run("EVAL", RELEASE, "1", self.key(name), owner) == "1"
+        return self.command("EVAL", RELEASE, 1, self.key(name), owner) == 1
 
     def get(self, name: str) -> str | None:
-        value = self._run("GET", self.key(name))
-        return value or None
+        return self.command("GET", self.key(name)) or None
+
+    def get_many(self, names: list[str]) -> list[str | None]:
+        if not names:
+            return []
+        values = self.command("MGET", *[self.key(n) for n in names])
+        return [v or None for v in values]  # type: ignore[union-attr]
 
     def set(self, name: str, value: str, ttl: int) -> None:
-        self._run("SET", self.key(name), value, "EX", str(ttl))
+        self.command("SET", self.key(name), value, "EX", ttl)
 
     def incr(self, name: str, ttl: int) -> int:
-        count = int(self._run("INCR", self.key(name)))
-        self._run("EXPIRE", self.key(name), str(ttl))
+        count = int(self.command("INCR", self.key(name)))  # type: ignore[arg-type]
+        self.command("EXPIRE", self.key(name), ttl)
         return count
 
     def delete(self, name: str) -> None:
-        self._run("DEL", self.key(name))
+        self.command("DEL", self.key(name))

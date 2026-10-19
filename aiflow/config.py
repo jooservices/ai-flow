@@ -49,7 +49,9 @@ class Settings:
     orphan_grace_seconds: int
     max_attempts: int
     quota_cooldown_minutes: int
-    redis_container: str
+    redis_host: str
+    redis_port: int
+    redis_user: str
     redis_db: int
     redis_prefix: str
     redis_password: str
@@ -80,6 +82,7 @@ class Settings:
 def load(env: dict[str, str] | None = None) -> Settings:
     if env is None:  # an explicit environment (tests) must not pick up the machine's .env files
         merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
+        merged.update(read_env_file(WORKSPACES_ROOT / "JOOservices" / ".env"))
         merged.update(read_env_file(PROJECT_DIR / ".env"))
         merged.update(os.environ)
     else:
@@ -98,10 +101,12 @@ def load(env: dict[str, str] | None = None) -> Settings:
         orphan_grace_seconds=_int(merged, "AIFLOW_ORPHAN_GRACE_SECONDS", 180),
         max_attempts=_int(merged, "AIFLOW_MAX_ATTEMPTS", 3),
         quota_cooldown_minutes=_int(merged, "AIFLOW_QUOTA_COOLDOWN_MINUTES", 30),
-        redis_container=merged.get("AIFLOW_REDIS_CONTAINER", "workspaces-shared-redis-1"),
-        redis_db=_int(merged, "AIFLOW_REDIS_DB", int(merged.get("REDIS_DB", 0))),
-        redis_prefix=merged.get("AIFLOW_REDIS_PREFIX", "aiflow:"),
-        redis_password=merged.get("WORKSPACES_REDIS_PASSWORD", ""),
+        redis_host=merged.get("AIFLOW_REDIS_HOST", "127.0.0.1"),
+        redis_port=_int(merged, "AIFLOW_REDIS_PORT", 16382),
+        redis_user=merged.get("AIFLOW_REDIS_USER", ""),
+        redis_db=_int(merged, "AIFLOW_REDIS_DB", int(merged.get("REDIS_DB", 5))),
+        redis_prefix=merged.get("AIFLOW_REDIS_PREFIX", "aiworkflow:"),
+        redis_password=merged.get(merged.get("AIFLOW_REDIS_PASSWORD_VAR", "WORKSPACES_REDIS_PASSWORD"), ""),
         default_repo=merged.get("AIFLOW_DEFAULT_REPO", "ai-flow"),
         default_base=merged.get("AIFLOW_DEFAULT_BASE", "develop"),
         agent_order=tuple(a.strip() for a in merged.get("AIFLOW_AGENT_ORDER", "Claude,Codex,OpenCode").split(",") if a.strip()),

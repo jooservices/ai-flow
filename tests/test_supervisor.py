@@ -39,6 +39,9 @@ class FakeRedis:
     def delete(self, name):
         self.data.pop(name, None)
 
+    def get_many(self, names):
+        return [self.data.get(n) for n in names]
+
 
 class FakeJira:
     def __init__(self, blockers=None):

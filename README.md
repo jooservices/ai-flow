@@ -68,8 +68,8 @@ State lives in one Redis shared by every machine (plain TCP client in `aiflow/lo
 
 | Blocked reason | What to do |
 |---|---|
-| Quota | Wait for an AI to finish cooling down; supervisors recheck and unblock when one is available. |
-| Offline | Wait for an AI to come online; supervisors recheck and unblock when one is available. |
+| Quota | Wait for another eligible AI to become available; a developer cooling down remains ineligible for review or QA after cooldown, and rechecks unblock only when an eligible AI is available. |
+| Offline | Make another eligible AI available; if the only online AI is the developer and it is not cooling down, it is still ineligible for review or QA, so rechecks cannot unblock the ticket yet. |
 | Unclear | The owner clarifies the ticket, then unblocks it. |
 | Attempts | The owner reviews the failed attempts and decides the next step, then unblocks the ticket. |
 | Rework | The owner reviews the work after the maximum rework rounds and decides the next step. |

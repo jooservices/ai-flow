@@ -81,8 +81,14 @@ class Repo:
         pushed = self.remote_branch(key)
         if pushed:
             git(self.path, "fetch", "origin", pushed)
-            info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
-                                "--ticket", key, "--description", pushed.removeprefix(f"{key}-"), "--base", f"origin/{pushed}")
+            temp = f"aiflow-base-{pushed}"  # the helper only accepts a local base branch
+            git(self.path, "branch", "-f", temp, f"origin/{pushed}")
+            try:
+                info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
+                                    "--ticket", key, "--description", pushed.removeprefix(f"{key}-"), "--base", temp)
+            finally:
+                git(self.path, "branch", "-D", temp, check=False)
+            git(Path(info["path"]), "branch", "--set-upstream-to", f"origin/{pushed}", check=False)
             return Path(info["path"]), info["branch"]
         info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
                             "--ticket", key, "--description", slug(summary), "--base", base)

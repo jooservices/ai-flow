@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 import re
 import signal
+import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, github, runner
+from . import agents, deploy, github, runner
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -152,9 +154,12 @@ def decide(info: dict[str, Any]) -> tuple[str, str]:
 
 
 class Supervisor:
-    def __init__(self, cfg: Settings, jira: Jira, redis: Redis, project_database: ProjectDatabase | None = None) -> None:
+    def __init__(self, cfg: Settings, jira: Jira, redis: Redis, project_database: ProjectDatabase | None = None,
+                 process_factory=None, deploy_log_dir: Path | None = None) -> None:
         self.cfg, self.jira, self.redis = cfg, jira, redis
         self.project_database = project_database or ProjectDatabase(cfg.root)
+        self.deploy_process_factory = process_factory or subprocess.Popen
+        self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
         self._priorities: dict[str, tuple[float, str]] = {}
 
@@ -445,6 +450,8 @@ class Supervisor:
         repo = Repo(self.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
         change = self.change_type(key)
         base, start = branches(project, change, str(view.get("type", "")), description)
+        if change == "Hotfix":
+            self.redis.set(f"ishotfix:{key}", "1", 60 * DAY)
         if str(view.get("type", "")) == "Release":
             self.redis.set(f"isrelease:{key}", "1", 60 * DAY)
         if role in ("developer", "reviewer"):
@@ -520,6 +527,16 @@ class Supervisor:
         """What follows a merge: the tag and GitHub release of a Release ticket, and the merge back of the production branch."""
         project = self.cfg.project(key)
         try:
+            self.deploy_after_merge(key, repo, base, project)
+        except Exception as error:  # A post-merge hook must never undo or block an already completed merge.
+            log(f"{key}: deploy hook failed after merge ({type(error).__name__})")
+            self.record_deploy_failure(key, project, f"runner error ({type(error).__name__})",
+                                       "not created; post-merge runner failed before writing output")
+            try:
+                self.jira.comment(key, f"AI Flow post-merge command could not complete ({type(error).__name__}); the merge remains complete.")
+            except JiraError:
+                pass
+        try:
             if self.state(key, "isrelease"):
                 tag = project.tag_prefix + self.state(key, "version")
                 url = GitHub(repo.github_slug()).release(tag, base, f"{project.name or repo.name} {tag}")
@@ -529,6 +546,125 @@ class Supervisor:
             log(f"{key}: follow-up after the merge failed: {error}")
             self.jira.comment(key, f"AI Flow: the pull request is merged, but the follow-up (release tag or merge back) failed: {error}. "
                                    f"Finish it by hand or tell the supervisor.")
+
+    def record_deploy_failure(self, key: str, project: Any, outcome: str, log_reference: str) -> None:
+        state = json.dumps({"ticket": key, "outcome": outcome, "log": log_reference,
+                            "at": datetime.now(timezone.utc).isoformat()})
+        try:
+            self.redis.set(f"deploy-failure:{project.jira_key}", state, 30 * DAY)
+        except RedisError:
+            log(f"{key}: could not record deploy failure because Redis was unavailable")
+
+    def deploy_after_merge(self, key: str, repo: Repo, base: str, project: Any) -> None:
+        """Serialize main-clone refreshes and coalesce eligible post-merge commands per project."""
+        if not project.deploy_command.strip():
+            return
+        special_merge = self.state(key, "ishotfix") or self.state(key, "isrelease")
+        eligible = project.deploy_on == "all" or not (special_merge or base != project.base)
+        lock_name = f"deploy-lock:{project.jira_key}"
+        pending_name = f"deploy-pending:{project.jira_key}"
+        active_name = f"deploy-active:{project.jira_key}"
+        seen_name = f"deploy-seen:{project.jira_key}:{key}"
+        owner = f"{self.cfg.owner}:{uuid.uuid4().hex}"
+        ttl = project.deploy_timeout_minutes * 60 + 300
+        event = json.dumps({"ticket": key, "base": base, "eligible": eligible}, separators=(",", ":"))
+        try:
+            queued = self.redis.enqueue_deploy(lock_name, pending_name, active_name, seen_name, owner, key, event, ttl, 30 * DAY)
+        except RedisError:
+            log(f"{key}: deploy hook skipped because Redis was unavailable for the project lock")
+            if eligible:
+                try:
+                    self.jira.comment(key, "AI Flow post-merge command was skipped because its project lock was unavailable; the merge remains complete.")
+                except JiraError:
+                    pass
+            return
+        if queued == 2:
+            log(f"{key}: duplicate post-merge event was already queued for project {project.jira_key}")
+            return
+        if queued == 0:
+            log(f"{key}: queued post-merge work for project {project.jira_key}")
+            return
+
+        events = [event]
+        comments: list[tuple[str, str]] = []
+        while events:
+            parsed_events = [json.loads(item) for item in events]
+            eligible_events = [item for item in parsed_events if item["eligible"]]
+            deploy_base = eligible_events[-1]["base"] if eligible_events else ""
+            for refresh_base in dict.fromkeys(item["base"] for item in parsed_events if item["base"] != deploy_base):
+                try:
+                    repo.refresh_base(refresh_base)
+                except GitError as error:
+                    log(f"{key}: queued merge base refresh failed ({type(error).__name__})")
+
+            refresh_failed = False
+            if deploy_base:
+                try:
+                    repo.checkout_deploy_base(deploy_base)
+                except GitError as error:
+                    refresh_failed = True
+                    log(f"{key}: deploy skipped because the main clone could not be prepared ({type(error).__name__})")
+
+            if eligible_events and not refresh_failed:
+                def heartbeat() -> bool:
+                    try:
+                        self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
+                        return self.redis.renew(lock_name, owner, ttl)
+                    except RedisError:
+                        log(f"{key}: deploy stopped because Redis heartbeat renewal failed")
+                        return False
+
+                try:
+                    result = deploy.run(project.deploy_command, repo.path, project.deploy_timeout_minutes,
+                                        self.deploy_log_dir, self.deploy_process_factory,
+                                        heartbeat_seconds=self.cfg.heartbeat_seconds, heartbeat=heartbeat)
+                except Exception as error:
+                    outcome = f"runner error ({type(error).__name__})"
+                    self.record_deploy_failure(eligible_events[-1]["ticket"], project, outcome,
+                                               "not created; post-merge runner failed before writing output")
+                    summary = f"AI Flow post-merge command could not complete ({type(error).__name__}); the merge remains complete."
+                    comments.extend((item["ticket"], summary) for item in eligible_events)
+                else:
+                    try:
+                        log_reference = str(result.log_path.relative_to(self.cfg.root))
+                    except ValueError:
+                        log_reference = str(result.log_path)
+                    if result.succeeded:
+                        try:
+                            self.redis.delete(f"deploy-failure:{project.jira_key}")
+                        except RedisError:
+                            log(f"{key}: could not clear deployment health state because Redis was unavailable")
+                    else:
+                        outcome = (f"timeout after {project.deploy_timeout_minutes} minute(s)" if result.timed_out
+                                   else f"exit code {result.exit_code}")
+                        self.record_deploy_failure(eligible_events[-1]["ticket"], project, outcome, log_reference)
+                    summary = deploy.comment(result, project.deploy_timeout_minutes, log_reference)
+                    comments.extend((item["ticket"], summary) for item in eligible_events)
+            elif eligible_events and refresh_failed:
+                state = json.dumps({"ticket": eligible_events[-1]["ticket"], "outcome": "main clone refresh failed",
+                                    "log": "not created; main clone could not be prepared",
+                                    "at": datetime.now(timezone.utc).isoformat()})
+                try:
+                    self.redis.set(f"deploy-failure:{project.jira_key}", state, 30 * DAY)
+                except RedisError:
+                    log(f"{key}: could not record deploy health state because Redis was unavailable")
+                comments.extend((item["ticket"], "AI Flow post-merge command was skipped because the main clone could not be prepared; the merge remains complete.")
+                                for item in eligible_events)
+
+            try:
+                pending = self.redis.finish_deploy(lock_name, pending_name, active_name, owner, ttl, "\n".join(events))
+            except RedisError:
+                log(f"{key}: could not finish the project deployment lock; it expires automatically")
+                pending = ""
+            if pending == -1:
+                log(f"{key}: project deployment lock ownership was lost")
+                break
+            events = pending.splitlines() if isinstance(pending, str) and pending else []
+        for ticket, summary in comments:
+            try:
+                self.jira.comment(ticket, summary)
+            except JiraError:
+                log(f"{ticket}: could not post the post-merge command result")
 
     def attempts(self, key: str, role: str) -> int:
         return int(self.redis.get(f"attempts:{key}:{role}") or 0)
@@ -1381,8 +1517,10 @@ class Supervisor:
     def finish(self, key: str, repo: Repo, base: str, pr: dict[str, Any], message: str) -> None:
         cleanup_status = "Worktree and branch removed."
         step = "refresh base"
+        defer_refresh = bool(self.cfg.project(key).deploy_command.strip())
         try:
-            repo.refresh_base(base)
+            if not defer_refresh:
+                repo.refresh_base(base)
             step = "cleanup"
             repo.cleanup(key)
         except GitError as error:
@@ -1394,7 +1532,7 @@ class Supervisor:
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
-        for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",
+        for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
                      "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel"):
             self.redis.delete(f"{name}:{key}")
 
@@ -1419,10 +1557,12 @@ def main(argv: list[str] | None = None) -> int:
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
             print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
             for project in config.registry.projects.values():
+                deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
+                                  if project.deploy_command.strip() else "disabled")
                 print(f"{project.jira_key}: repo {project.repo}, base {project.base}, hotfix {project.hotfix_base}, developer {project.developer or '-'}, "
                       f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, "
                       f"human on deployment {project.human_on_deployment}, auto-merge {project.auto_merge}, "
-                      f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}")
+                      f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}, deploy {deploy_setting}")
             return 0
     except ConfigError as error:
         print(f"CONFIG ERROR: {error}", file=sys.stderr)

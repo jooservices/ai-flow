@@ -38,6 +38,14 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual((ai.human_on_deployment, crawler.human_on_deployment), (True, False))
         self.assertEqual((ai.database, crawler.database), ("ai-flow", ""))
 
+    def test_deploy_settings_default_and_project_override(self):
+        write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\n'
+              'deploy_command = "./deploy.sh"\ndeploy_timeout_minutes = 12\ndeploy_on = "all"\n')
+        cfg = self.load()
+        ai, crawler = cfg.project("JAIF-3"), cfg.project("JOOCX-9")
+        self.assertEqual((ai.deploy_command, ai.deploy_timeout_minutes, ai.deploy_on), ("", 30, "base"))
+        self.assertEqual((crawler.deploy_command, crawler.deploy_timeout_minutes, crawler.deploy_on), ("./deploy.sh", 12, "all"))
+
     def test_workers_of_the_machine(self):
         cfg = self.load()
         self.assertEqual((cfg.workers, cfg.expected_slots), (2, ("wsl:1", "wsl:2")))
@@ -63,6 +71,8 @@ class RegistryTest(unittest.TestCase):
             "norepo": ('[project]\njira_key = "ABC"\n', "`repo` is required"),
             "database": ('[project]\njira_key = "ABC"\nrepo = "x"\ndatabase = "Invalid Name"\n', "database must be"),
             "method": ('[project]\njira_key = "ABC"\nrepo = "x"\nmerge_method = "ff"\n', "merge_method"),
+            "deploy timeout": ('[project]\njira_key = "ABC"\nrepo = "x"\ndeploy_timeout_minutes = 0\n', "deploy_timeout_minutes"),
+            "deploy scope": ('[project]\njira_key = "ABC"\nrepo = "x"\ndeploy_on = "release"\n', "deploy_on must be"),
             "section": ('[proj]\njira_key = "ABC"\n', "[project]"),
             "syntax": ("[project\n", "aiflow"),
         }

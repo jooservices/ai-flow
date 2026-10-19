@@ -36,6 +36,16 @@ def problems(cfg, redis, jira) -> list[tuple[str, str]]:
     if blocked:
         keys = ", ".join(issue["key"] for issue in blocked)
         found.append(("blocked", f"Tickets waiting for the owner (Blocked): {keys}."))
+    for name in sorted(redis.scan("deploy-failure:*")):
+        project_key = name.split(":", 1)[1]
+        try:
+            state = json.loads(redis.get(name) or "{}")
+            ticket = state.get("ticket", "unknown ticket")
+            outcome = state.get("outcome", "failed")
+            log_file = state.get("log", "unknown log")
+        except (TypeError, ValueError):
+            ticket, outcome, log_file = "unknown ticket", "failed", "unknown log"
+        found.append((f"deploy-{project_key}", f"Post-merge command for {project_key} failed after {ticket} ({outcome}); log: {log_file}."))
     return found
 
 

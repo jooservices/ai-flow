@@ -17,7 +17,8 @@ from .config import ConfigError
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
-            "highest_developer": str, "release_check": str, "tag_prefix": str}
+            "highest_developer": str, "release_check": str, "tag_prefix": str, "deploy_command": str,
+            "deploy_timeout_minutes": int, "deploy_on": str}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
@@ -44,6 +45,9 @@ class Project:
     release_check: str = ""  # command that runs the full test suite (and e2e) of a release, written by the project
     tag_prefix: str = "v"
     highest_developer: str = "Claude"  # developer of the tickets with priority Highest (the Agent (AI) / AI Model fields still win)
+    deploy_command: str = ""
+    deploy_timeout_minutes: int = 30
+    deploy_on: str = "base"  # "all" also runs after hotfix and release merges
 
     def role(self, role: str) -> str:
         return {"developer": self.developer, "reviewer": self.reviewer, "qa": self.qa}.get(role, "")
@@ -121,6 +125,10 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
             raise ConfigError(f"{path}: database must be 2-24 lowercase letters, digits, '-' or '_', starting with a letter.")
         if project.merge_method not in MERGE_METHODS:
             raise ConfigError(f"{path}: merge_method must be one of {', '.join(MERGE_METHODS)}.")
+        if project.deploy_timeout_minutes < 1:
+            raise ConfigError(f"{path}: deploy_timeout_minutes must be a whole number of at least 1.")
+        if project.deploy_on not in ("base", "all"):
+            raise ConfigError(f"{path}: deploy_on must be 'base' or 'all'.")
         if project.jira_key in projects:
             raise ConfigError(f"Jira project {project.jira_key} is declared in {owners[project.jira_key].name} and in {path.name}.")
         projects[project.jira_key], owners[project.jira_key] = project, path

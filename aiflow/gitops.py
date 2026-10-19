@@ -78,6 +78,22 @@ class Repo:
         else:
             git(self.path, "update-ref", f"refs/heads/{base}", git(self.path, "rev-parse", remote))
 
+    def checkout_deploy_base(self, base: str) -> None:
+        """Prepare a clean main-clone checkout of the exact merged base before running a deploy command."""
+        if not self.has_remote():
+            raise GitError("repository has no remote")
+        self.refresh_base(base)
+        if git(self.path, "status", "--porcelain"):
+            raise GitError("main clone has uncommitted changes")
+        current = git(self.path, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+        if current != base:
+            git(self.path, "checkout", base)
+        local = git(self.path, "rev-parse", base)
+        remote = git(self.path, "rev-parse", f"origin/{base}")
+        head = git(self.path, "rev-parse", "HEAD")
+        if local != remote or head != remote:
+            raise GitError("main clone is not at the latest origin base commit")
+
     def pr_template(self, base: str) -> str:
         """The repository's own pull request template as committed on origin/<base> ('' when it has none)."""
         for path in (".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md", "pull_request_template.md"):

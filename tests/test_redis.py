@@ -130,6 +130,47 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(server.commands[-1], ["SET", "p:dbticket:JAIF-7", "my-project"])
         client.close()
 
+    def test_deploy_enqueue_uses_atomic_lock_pending_and_dedupe_keys(self):
+        def handler(number, parts):
+            if parts[0] == "EVAL":
+                return b":0\r\n"  # another worker owns the project lock, so the merge was queued
+            return ok(number, parts)
+
+        server = FakeServer(handler)
+        self.addCleanup(server.stop)
+        client = Redis("127.0.0.1", server.port, 0, "p:", "", retries=1)
+
+        queued = client.enqueue_deploy("deploy-lock:JAIF", "deploy-pending:JAIF", "deploy-active:JAIF",
+                                       "deploy-seen:JAIF:JAIF-3", "owner", "JAIF-3", '{"ticket":"JAIF-3"}',
+                                       300, 2592000)
+
+        self.assertEqual(queued, 0)
+        command = server.commands[-1]
+        self.assertEqual(command[:8], ["EVAL", command[1], "4", "p:deploy-lock:JAIF", "p:deploy-pending:JAIF",
+                                        "p:deploy-active:JAIF", "p:deploy-seen:JAIF:JAIF-3", "owner"])
+        self.assertEqual(command[8:], ["JAIF-3", '{"ticket":"JAIF-3"}', "300", "2592000"])
+        client.close()
+
+    def test_deploy_finish_transfers_an_active_batch_atomically(self):
+        def handler(number, parts):
+            if parts[0] == "EVAL":
+                return b"$12\r\nsecond-event\r\n"
+            return ok(number, parts)
+
+        server = FakeServer(handler)
+        self.addCleanup(server.stop)
+        client = Redis("127.0.0.1", server.port, 0, "p:", "", retries=1)
+
+        pending = client.finish_deploy("deploy-lock:JAIF", "deploy-pending:JAIF", "deploy-active:JAIF",
+                                       "owner", 300, "first-event")
+
+        self.assertEqual(pending, "second-event")
+        command = server.commands[-1]
+        self.assertEqual(command[:7], ["EVAL", command[1], "3", "p:deploy-lock:JAIF", "p:deploy-pending:JAIF",
+                                        "p:deploy-active:JAIF", "owner"])
+        self.assertEqual(command[7:], ["300", "first-event"])
+        client.close()
+
 
 class RunnerSafetyTests(unittest.TestCase):
     def test_ai_is_stopped_when_the_heartbeat_raises(self):

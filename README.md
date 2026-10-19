@@ -31,6 +31,10 @@ Backlog -(owner)-> To Do -> In Progress (developer) -> In Review (reviewer) -> I
 6. One pull request per repository is in QA and merge at a time (`qaslot:<repo>`), so a merge does not make the next QA stale twice.
 7. Merge (`gh pr merge --match-head-commit`, method `AIFLOW_MERGE_METHOD`) for repos in `AIFLOW_AUTO_MERGE_REPOS` (`*` = all); other repos wait for the owner to merge. Then Done, and the branch and worktree are removed.
 
+### Require human
+
+The Jira field **Require human** = Yes makes the gate stop after CI, feedback and QA passed: the supervisor comments the pull request URL and moves the ticket to **Human review** (nothing else happens to the branch while the human looks, except that new feedback sends the ticket back to To Do). The human moves it to **Ready to merge** (approval) or to To Do with a comment (changes). In Ready to merge the supervisor brings the branch up to date if it is outdated (clean merge by `update-branch`), waits for CI, and merges; QA and review are not repeated. If CI fails or a conflict needs the developer, the ticket goes back to To Do and, after the fix, straight back to Ready to merge. A pull request merged by the human himself moves the ticket to Done. Previews for the human are JAIF-28.
+
 ### No AI available (quota, offline)
 
 An AI that is out of quota, has an empty balance or is not signed in goes on a cooldown (`AIFLOW_QUOTA_COOLDOWN_MINUTES`, shared by all machines) and the step goes to another AI. Each supervisor publishes the AIs of its machine (`ais:<machine>` in Redis), so a step that this machine cannot serve but another online machine can is simply left to it. When no online machine can serve a step for `AIFLOW_QUOTA_BLOCK_MINUTES`, the ticket is Blocked, the field **Blocked reason** says `Quota: ...` (some AI cooling) or `Offline: ...` (nobody has the AI), and every `AIFLOW_RECHECK_SECONDS` one supervisor re-checks Blocked tickets of those two kinds and moves them back (`Unblock to <status>`) as soon as an AI is available. Other blocks (Unclear, Attempts, Rework, CI, Human, Config) wait for the owner.

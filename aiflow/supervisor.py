@@ -17,7 +17,9 @@ from .gitops import GitError, Repo
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 
-STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "In QA": "gate"}
+STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "In QA": "gate",
+          "Human review": "human", "Ready to merge": "finalize"}
+PR_STAGES = ("In QA", "Human review", "Ready to merge")  # checked on GitHub by the supervisor, no AI to pick
 DAY = 86400
 SLOT_SECONDS = 600
 
@@ -38,7 +40,7 @@ def ticket_field(description: str, name: str, default: str) -> str:
 def decide(info: dict[str, Any]) -> tuple[str, str]:
     """What the pull-request gate does next. Pure: `info` holds facts only.
 
-    Returns (action, detail) with action one of done, closed, update, rework, block, wait, qa, awaiting, merge."""
+    Returns (action, detail) with action one of done, closed, update, rework, block, wait, qa, human, awaiting, merge."""
     if info["state"] == "MERGED":
         return "done", ""
     if info["state"] == "CLOSED":
@@ -61,6 +63,8 @@ def decide(info: dict[str, Any]) -> tuple[str, str]:
         return "rework", "feedback to resolve"
     if not info["qa_ok"]:
         return "qa", ""
+    if info.get("require_human"):
+        return "human", ""
     return ("merge", "") if info["auto_merge"] else ("awaiting", "")
 
 
@@ -88,7 +92,7 @@ class Supervisor:
         if status == "In Progress":
             age = (datetime.now(timezone.utc) - parse_time(issue["updated"])).total_seconds()
             return age >= self.cfg.orphan_grace_seconds
-        if status == "In QA":
+        if status in PR_STAGES:
             return not self.redis.get(f"gatepoll:{key}")
         return True
 
@@ -183,7 +187,7 @@ class Supervisor:
                 view = self.jira.view(issue["key"])
                 role = STAGES[issue["status"]]
                 agent = None
-                if role != "gate":
+                if role in ("developer", "reviewer"):
                     agent = self.pick_agent(role, issue["key"], view.get("agent"))
                     if agent is None:
                         self.unserved(issue["key"], role, view.get("agent"))
@@ -230,7 +234,7 @@ class Supervisor:
         description = view.get("description", "")
         repo = Repo(self.cfg.root, ticket_field(description, "Repo", self.cfg.default_repo))
         base = ticket_field(description, "Base", self.cfg.default_base)
-        if role != "gate":
+        if role in ("developer", "reviewer"):
             log(f"{key} [{issue['status']}] {role} -> {agent}")
         if not repo.exists():
             self.block(key, f"Repository `{repo.name}` was not found under JOOservices/projects.", kind="Config")
@@ -247,6 +251,10 @@ class Supervisor:
             return self.develop(key, issue, view, repo, base, agent or "")
         if role == "reviewer":
             return self.review(key, view, repo, base, agent or "")
+        if role == "human":
+            return self.human_wait(key, repo, base)
+        if role == "finalize":
+            return self.finalize(key, repo, base)
         return self.gate(key, view, repo, base)
 
     def attempts(self, key: str, role: str) -> int:
@@ -445,6 +453,11 @@ class Supervisor:
             self.redis.delete(name % key)
         if answers and self.post_replies(key, repo, answers):
             return
+        if self.state(key, "humanok"):  # a human already approved: no review, no QA again, only CI
+            self.jira.comment(key, f"AI Flow: {agent} finished the rework on {self.cfg.machine}. Branch {branch} pushed; the human approved "
+                                   f"this ticket before, so it goes back to Ready to merge (CI must pass).\n\n{text[-1000:]}")
+            self.jira.transition(key, "Ready to merge")
+            return
         self.jira.comment(key, f"AI Flow: {agent} finished on {self.cfg.machine}. Branch {branch} pushed to origin; sending to review.\n\n{text[-1500:]}")
         self.jira.transition(key, "In Review")
 
@@ -615,6 +628,8 @@ class Supervisor:
             return False
         elif action == "qa":
             return self.run_qa(key, view, repo, base, branch, pr)
+        elif action == "human":
+            self.to_human_review(key, repo, pr)
         elif action == "awaiting":
             self.release_slot(key, repo.name)
             self.note_gate(key, f"QA passed; auto-merge is off for {repo.name}, waiting for the owner to merge {pr['url']}")
@@ -639,7 +654,16 @@ class Supervisor:
         seen = set(json.loads(self.state(key, "seen", "[]")))
         found = gh.feedback(pr["number"], seen, self.cfg.ignored_authors)
         info["feedback"], info["stuck"] = found["items"], found["stuck"]
+        info["require_human"] = self.human_required(key)
         return info
+
+    def human_required(self, key: str) -> bool:
+        try:
+            value = self.jira.read_field(key, self.cfg.require_human_field)
+        except JiraError as error:
+            log(f"{key}: cannot read Require human: {error}")
+            return False
+        return bool(value) and value.get("value") == "Yes"
 
     def take_slot(self, key: str, repo: Repo) -> bool:
         """One pull request per repository is in QA/merge at a time, so a merge never makes the next QA stale twice."""
@@ -714,10 +738,11 @@ class Supervisor:
         self.jira.comment(key, f"AI Flow: QA {agent} PASSED at {pr['headRefOid'][:10]}.\n\n{text[-800:]}")
         return True
 
-    def merge(self, key: str, repo: Repo, gh: GitHub, pr: dict[str, Any], base: str) -> bool:
+    def merge(self, key: str, repo: Repo, gh: GitHub, pr: dict[str, Any], base: str, approved: bool = False) -> bool:
+        """Merge the head that passed QA. `approved` (a human approved it): merge whatever head is current, QA is not repeated."""
         try:
             fresh = gh.view(pr["number"])
-            if fresh["headRefOid"] != self.state(key, "qa") or repo.behind(base, pr["headRefName"]):
+            if (not approved and fresh["headRefOid"] != self.state(key, "qa")) or repo.behind(base, pr["headRefName"]):
                 self.redis.delete(f"qa:{key}")  # something moved since QA: start over
                 return True
             gh.merge(pr["number"], fresh["headRefOid"], self.cfg.merge_method)
@@ -727,7 +752,94 @@ class Supervisor:
             if count >= 3:
                 self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.", kind="Other")
             return count >= 3
-        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and QA.")
+        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and {'the human approval' if approved else 'QA'}.")
+        return True
+
+    # ---- Require human: Human review -> Ready to merge ------------------------------------------------------
+    def to_human_review(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
+        self.release_slot(key, repo.name)
+        self.redis.set(f"humanreview:{key}", "1", 30 * DAY)
+        self.jira.comment(key, f"AI Flow: CI, feedback and QA passed on {pr['url']} (head {pr['headRefOid'][:10]}). This ticket requires a human: "
+                               f"review the pull request, then move the ticket to Ready to merge (the supervisor updates the branch if it is "
+                               f"outdated and merges it) or to To Do with a comment to ask for changes. No preview deployment yet (JAIF-28).")
+        self.jira.transition(key, "Human review")
+
+    def declined(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
+        repo.cleanup(key, remote=False)
+        self.release_slot(key, repo.name)
+        self.jira.comment(key, f"AI Flow: pull request {pr['url']} was closed without merging; declining the ticket.")
+        self.jira.transition(key, "Declined")
+
+    def pr_of(self, key: str, repo: Repo) -> tuple[GitHub, str, dict[str, Any]] | None:
+        branch = repo.remote_branch(key)
+        if not branch:
+            self.block(key, "The ticket branch is not on origin, so there is no pull request to check.", kind="Config")
+            return None
+        gh = GitHub(repo.github_slug())
+        pr = gh.find(branch)
+        if pr is None:
+            self.block(key, f"No pull request exists for branch {branch}.", kind="Config")
+            return None
+        return gh, branch, pr
+
+    def human_wait(self, key: str, repo: Repo, base: str) -> bool:
+        """Status Human review: leave the branch alone; only notice a merge, a close or new feedback."""
+        self.redis.set(f"gatepoll:{key}", "1", self.cfg.gate_poll_seconds)
+        try:
+            found = self.pr_of(key, repo)
+            if found is None:
+                return True
+            gh, _, pr = found
+            if pr["state"] == "MERGED":
+                self.finish(key, repo, base, pr, f"Pull request {pr['url']} was merged by a human into {base}.")
+                return True
+            if pr["state"] == "CLOSED":
+                self.declined(key, repo, pr)
+                return True
+            feedback = gh.feedback(pr["number"], set(json.loads(self.state(key, "seen", "[]"))), self.cfg.ignored_authors)["items"]
+        except (GitHubError, GitError, ValueError) as error:
+            log(f"{key}: human review check failed: {error}")
+            return False
+        if feedback:
+            self.send_back(key, repo, f"{len(feedback)} feedback item(s) on {pr['url']} during the human review",
+                           "Fix or answer every item; the branch must also be rebased on the latest base.", feedback)
+            return True
+        self.note_gate(key, f"waiting for the human review of {pr['url']}")
+        return False
+
+    def finalize(self, key: str, repo: Repo, base: str) -> bool:
+        """Status Ready to merge: the human approved. Bring the branch up to date and merge it once CI passes; QA is not repeated."""
+        self.redis.set(f"gatepoll:{key}", "1", self.cfg.gate_poll_seconds)
+        self.redis.set(f"humanok:{key}", "1", 30 * DAY)
+        try:
+            found = self.pr_of(key, repo)
+            if found is None:
+                return True
+            gh, branch, pr = found
+            info = self.gate_facts(key, repo, gh, base, branch, pr)
+        except (GitHubError, GitError, ValueError) as error:
+            log(f"{key}: ready-to-merge check failed: {error}")
+            return False
+        info.update(qa_ok=True, settled=True, require_human=False, auto_merge=True)
+        action, detail = decide(info)
+        if action == "done":
+            self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.")
+        elif action == "closed":
+            self.declined(key, repo, pr)
+        elif action == "update":
+            return self.update_branch(key, gh, pr, base)
+        elif action == "rework":
+            self.rework_from_gate(key, repo, gh, pr, info, detail)
+        elif action == "block":
+            self.block(key, f"{detail} ({pr['url']}).", kind="CI" if "CI" in detail else "Human")
+        elif action == "merge":
+            if not self.take_slot(key, repo):
+                self.note_gate(key, "waiting for another pull request of this repository to finish its merge")
+                return False
+            return self.merge(key, repo, gh, pr, base, approved=True)
+        else:
+            self.note_gate(key, f"{detail} ({pr['url']})")
+            return False
         return True
 
     def finish(self, key: str, repo: Repo, base: str, pr: dict[str, Any], message: str) -> None:
@@ -745,7 +857,7 @@ class Supervisor:
         self.jira.transition(key, "Done")
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",
-                     "gatenote", "mergefail", "gatepoll", "repo"):
+                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked"):
             self.redis.delete(f"{name}:{key}")
 
 

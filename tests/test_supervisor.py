@@ -165,6 +165,15 @@ class GateEligibilityTests(unittest.TestCase):
         sup.redis.data["gatepoll:JAIF-9"] = "1"
         self.assertFalse(sup.eligible(issue))
 
+    def test_human_stages_need_no_ai_and_are_polled(self):
+        sup = make()
+        for status in ("Human review", "Ready to merge"):
+            issue = {"key": "JAIF-9", "status": status, "updated": stamp(10), "labels": []}
+            self.assertTrue(sup.eligible(issue))
+            sup.redis.data["gatepoll:JAIF-9"] = "1"
+            self.assertFalse(sup.eligible(issue))
+            sup.redis.data.pop("gatepoll:JAIF-9")
+
     def test_rework_tickets_come_first(self):
         sup = make()
         sup.jira.search = lambda jql, limit=50: [{"key": "A-1", "labels": []}, {"key": "A-2", "labels": ["rework"]}, {"key": "A-3", "labels": []}]
@@ -216,6 +225,18 @@ class GateDecisionTests(unittest.TestCase):
 
     def test_qa_runs_on_a_new_head_only(self):
         self.assertEqual(decide(facts(qa_ok=False))[0], "qa")
+
+    def test_a_ticket_that_requires_a_human_stops_after_qa(self):
+        self.assertEqual(decide(facts(require_human=True))[0], "human")
+        self.assertEqual(decide(facts(require_human=True, qa_ok=False))[0], "qa")  # QA first
+        self.assertEqual(decide(facts(require_human=True, ci="failed"))[0], "rework")  # CI and feedback first
+
+    def test_after_the_approval_only_ci_and_the_base_matter(self):
+        approved = facts(require_human=False, qa_ok=True, settled=True, auto_merge=True)
+        self.assertEqual(decide(approved)[0], "merge")
+        self.assertEqual(decide({**approved, "behind": True})[0], "update")
+        self.assertEqual(decide({**approved, "ci": "pending"})[0], "wait")
+        self.assertEqual(decide({**approved, "ci": "failed"})[0], "rework")
 
     def test_base_update_beats_a_stale_qa(self):
         self.assertEqual(decide(facts(behind=True, qa_ok=True))[0], "update")

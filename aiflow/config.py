@@ -74,6 +74,7 @@ class Settings:
     workspace_field: str
     blocked_reason_field: str
     require_human_field: str
+    model_field: str
     opencode_model: str
     explicit_only: tuple[str, ...]
     quota_block_minutes: int
@@ -133,6 +134,7 @@ def load(env: dict[str, str] | None = None) -> Settings:
         workspace_field=merged.get("AIFLOW_WORKSPACE_FIELD", "customfield_10214"),
         blocked_reason_field=merged.get("AIFLOW_BLOCKED_REASON_FIELD", "customfield_10215"),
         require_human_field=merged.get("AIFLOW_REQUIRE_HUMAN_FIELD", "customfield_10216"),
+        model_field=merged.get("AIFLOW_MODEL_FIELD", "customfield_10217"),
         opencode_model=merged.get("AIFLOW_OPENCODE_MODEL", "opencode/deepseek-v4.1-flash-free"),
         explicit_only=_list(merged, "AIFLOW_EXPLICIT_ONLY_AIS", "OpenCode"),
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),

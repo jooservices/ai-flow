@@ -58,6 +58,7 @@ State lives in the shared Redis (database from `scripts/docker/shared provision-
 
 ## Known limits
 
+- A failed cleanup after a merge is reported in the Jira comment, and the worktree must then be removed by hand.
 - Codex runs with `danger-full-access` (its workspace-write mode makes `.git` read-only, so it cannot commit); Claude runs with an allowlist.
 - The PR title check of a repository must accept the Conventional Commits form above. Repositories with other rules need a per-repo setting (not built yet).
 - A pull request is read through the GitHub CLI of the machine that runs the gate; `gh` must be logged in as the account that owns the pull requests.

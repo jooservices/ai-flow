@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Keeps an SSH tunnel from this machine to the shared Redis (192.168.10.14:6379) through the jump host.
+# For machines that cannot route to 192.168.10.x (the Mac). The supervisor then uses AIFLOW_REDIS_HOST=127.0.0.1, AIFLOW_REDIS_PORT=16379.
+set -Eeuo pipefail
+JUMP="${AIFLOW_REDIS_JUMP:-jump1}"
+LOCAL_PORT="${AIFLOW_REDIS_TUNNEL_PORT:-16379}"
+TARGET="${AIFLOW_REDIS_TARGET:-192.168.10.14:6379}"
+while true; do
+  ssh -N -L "127.0.0.1:${LOCAL_PORT}:${TARGET}" -o BatchMode=yes -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10 "$JUMP" || true
+  sleep 5
+done

@@ -27,24 +27,28 @@ def run(argv: list[str], stdin_text: str | None, workdir: Path, log_file: Path, 
             proc.stdin.close()
         started = last_activity = last_beat = time.monotonic()
         seen_size, seen_head = 0, head(workdir)
-        while True:
-            try:
-                code = proc.wait(timeout=5)
-                return code, "ok" if code == 0 else "exit"
-            except subprocess.TimeoutExpired:
-                pass
-            now = time.monotonic()
-            size, current = log_file.stat().st_size, head(workdir)
-            if size != seen_size or current != seen_head:
-                seen_size, seen_head, last_activity = size, current, now
-            if now - last_beat >= heartbeat_seconds:
-                last_beat = now
-                if not heartbeat():
-                    return _stop(proc), "lost-lease"
-            if now - last_activity > idle_seconds:
-                return _stop(proc), "idle"
-            if now - started > max_seconds:
-                return _stop(proc), "timeout"
+        try:
+            while True:
+                try:
+                    code = proc.wait(timeout=5)
+                    return code, "ok" if code == 0 else "exit"
+                except subprocess.TimeoutExpired:
+                    pass
+                now = time.monotonic()
+                size, current = log_file.stat().st_size, head(workdir)
+                if size != seen_size or current != seen_head:
+                    seen_size, seen_head, last_activity = size, current, now
+                if now - last_beat >= heartbeat_seconds:
+                    last_beat = now
+                    if not heartbeat():
+                        return _stop(proc), "lost-lease"
+                if now - last_activity > idle_seconds:
+                    return _stop(proc), "idle"
+                if now - started > max_seconds:
+                    return _stop(proc), "timeout"
+        except BaseException:  # never leave an AI running unsupervised, whatever went wrong here
+            _stop(proc)
+            raise
 
 
 def _stop(proc: subprocess.Popen) -> int | None:

@@ -27,7 +27,7 @@ def problems(cfg, redis, jira) -> list[tuple[str, str]]:
 
 def main() -> int:
     cfg = load()
-    redis = Redis(cfg.redis_container, cfg.redis_db, cfg.redis_prefix, cfg.redis_password)
+    redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     jira = Jira(cfg.root)
     found = problems(cfg, redis, jira)
     for kind, message in found:

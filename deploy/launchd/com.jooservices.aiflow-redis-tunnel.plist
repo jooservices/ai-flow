@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.jooservices.aiflow-redis-tunnel</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/vietvu/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-redis-tunnel</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/Users/vietvu/Workspaces/.tmp/aiflow/redis-tunnel.log</string>
+</dict>
+</plist>

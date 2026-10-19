@@ -135,3 +135,13 @@ class Redis:
 
     def delete(self, name: str) -> None:
         self.command("DEL", self.key(name))
+
+    def scan(self, pattern: str) -> list[str]:
+        """Names (without the prefix) of the keys matching `pattern`."""
+        found: list[str] = []
+        cursor = "0"
+        while True:
+            cursor, batch = self.command("SCAN", cursor, "MATCH", self.key(pattern), "COUNT", 200)  # type: ignore[misc]
+            found += [k[len(self.prefix):] for k in batch]
+            if cursor == "0":
+                return found

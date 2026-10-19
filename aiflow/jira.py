@@ -90,10 +90,20 @@ class Jira:
         if label in current:
             self._run("edit", key, "--labels", ",".join(x for x in current if x != label))
 
-    def set_workspace(self, key: str, field: str, value: str) -> None:
+    def set_field(self, key: str, field: str, value: Any) -> None:
+        """Set a custom field (text value, {"value": "Yes"} for a select) or clear it with None."""
         status, body = self._library().call("PUT", f"/rest/api/3/issue/{key}", {"fields": {field: value}})
         if status not in (200, 204):
-            raise JiraError(f"set workspace HTTP {status}: {str(body)[:200]}")
+            raise JiraError(f"set {field} HTTP {status}: {str(body)[:200]}")
+
+    def set_workspace(self, key: str, field: str, value: str) -> None:
+        self.set_field(key, field, value)
+
+    def read_field(self, key: str, field: str) -> Any:
+        status, body = self._library().call("GET", f"/rest/api/3/issue/{key}?fields={field}")
+        if status != 200:
+            raise JiraError(f"read {field} HTTP {status}")
+        return body["fields"].get(field)
 
     def issue_type(self, key: str) -> str:
         return str(self.view(key).get("type", ""))

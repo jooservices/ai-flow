@@ -104,29 +104,63 @@ class Supervisor:
 
     def model_for(self, role: str, agent: str) -> tuple[str, str]:
         name, model, effort = self.role_spec(role)
-        return (model, effort) if name == agent else ("", "")
+        if name == agent:
+            return model, effort
+        return (self.cfg.opencode_model, "") if agent == "OpenCode" else ("", "")
 
-    def pick_agent(self, role: str, key: str, field_agent: str | None) -> str | None:
-        installed = agents.available(self.cfg.agent_order)
-        cool = self.cooldowns(installed)
-        present = [a for a in installed if a not in cool]
+    def eligible_agents(self, role: str, key: str, field_agent: str | None, pool: list[str]) -> list[str]:
+        """The AIs of `pool` that may take `role` now, best first. The reviewer and QA must differ from the developer."""
+        cool = self.cooldowns(pool)
+        # AIs in explicit_only (OpenCode, for very easy tasks) work only when the ticket's Agent field names them as developer.
+        present = [a for a in pool if a not in cool and (a not in self.cfg.explicit_only or (role == "developer" and a == field_agent))]
         preferred = self.role_spec(role)[0]
         if role == "developer":
             if field_agent in present:
-                return field_agent
-            if field_agent in installed:
-                return present[0] if present else None
-            if field_agent:
-                return None  # the field names an AI this machine does not have; another machine may take it
-            if preferred in present:
-                return preferred
-            return present[0] if present else None
+                return [field_agent]  # type: ignore[list-item]
+            if field_agent and field_agent not in pool:
+                return []  # the field names an AI nobody in this pool has
+            return sorted(present, key=lambda a: a != preferred)  # empty field, or its AI is cooling: any other AI
         dev = self.redis.get(f"dev:{key}") or field_agent or ""
         reviewer = self.redis.get(f"reviewer:{key}")
         avoid = (reviewer,) if role == "qa" and reviewer else ()
         if preferred in present and preferred != dev and preferred not in avoid:
-            return preferred
-        return agents.choose_other(dev, present, avoid=avoid)
+            return [preferred]
+        other = agents.choose_other(dev, present, avoid=avoid)
+        return [other] if other else []
+
+    def pick_agent(self, role: str, key: str, field_agent: str | None) -> str | None:
+        found = self.eligible_agents(role, key, field_agent, agents.available(self.cfg.agent_order))
+        return found[0] if found else None
+
+    def publish_ais(self) -> None:
+        """Tell the other machines which AIs this one has (the entry expires when the machine stops beating)."""
+        self.redis.set(f"ais:{self.cfg.machine}", ",".join(agents.available(self.cfg.agent_order)), 600)
+
+    def online_pool(self) -> list[str]:
+        """AIs installed on this machine or on any machine that published recently."""
+        pool = list(agents.available(self.cfg.agent_order))
+        for name in self.redis.scan("ais:*"):
+            for ai in (self.redis.get(name) or "").split(","):
+                if ai and ai not in pool:
+                    pool.append(ai)
+        return sorted(pool, key=lambda a: self.cfg.agent_order.index(a) if a in self.cfg.agent_order else 99)
+
+    def unserved(self, key: str, role: str, field_agent: str | None) -> None:
+        """No AI on this machine can take the step. Another online machine may; if nobody can for long, block with the reason."""
+        pool = self.online_pool()
+        if self.eligible_agents(role, key, field_agent, pool):
+            return  # a supervisor on another machine will take it
+        self.note_waiting(key, role)
+        since = self.redis.get(f"waiting:{key}:{role}")
+        if since is None or time.time() - int(since) < self.cfg.quota_block_minutes * 60:
+            return
+        cooling = sorted(self.cooldowns(pool))
+        if cooling:
+            self.block(key, f"No AI can take the {role} step: {', '.join(cooling)} out of quota (cooling down), the others are offline "
+                            f"or not allowed for this step. The supervisor re-checks and continues when one is back.", kind="Quota")
+        else:
+            self.block(key, f"No online machine has an AI for the {role} step (online AIs: {', '.join(pool) or 'none'}). "
+                            f"The supervisor continues when one comes online.", kind="Offline")
 
     def note_waiting(self, key: str, role: str) -> None:
         """Say so on the ticket when it has waited too long because no suitable AI is available."""
@@ -152,7 +186,7 @@ class Supervisor:
                 if role != "gate":
                     agent = self.pick_agent(role, issue["key"], view.get("agent"))
                     if agent is None:
-                        self.note_waiting(issue["key"], role)
+                        self.unserved(issue["key"], role, view.get("agent"))
                         continue
                 if not self.redis.acquire(f"lease:{issue['key']}", self.cfg.owner, self.cfg.lease_seconds):
                     continue
@@ -177,6 +211,8 @@ class Supervisor:
         while not self.stop:
             try:
                 self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
+                self.publish_ais()
+                self.recheck_blocked()
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
@@ -197,10 +233,10 @@ class Supervisor:
         if role != "gate":
             log(f"{key} [{issue['status']}] {role} -> {agent}")
         if not repo.exists():
-            self.block(key, f"Repository `{repo.name}` was not found under JOOservices/projects.")
+            self.block(key, f"Repository `{repo.name}` was not found under JOOservices/projects.", kind="Config")
             return True
         if not repo.has_remote():
-            self.block(key, f"Repository `{repo.name}` has no remote; the flow needs GitHub pull requests.")
+            self.block(key, f"Repository `{repo.name}` has no remote; the flow needs GitHub pull requests.", kind="Config")
             return True
         self.redis.set(f"repo:{key}", repo.name, 30 * DAY)
         home = self.redis.get(f"home:{key}")
@@ -216,10 +252,40 @@ class Supervisor:
     def attempts(self, key: str, role: str) -> int:
         return int(self.redis.get(f"attempts:{key}:{role}") or 0)
 
-    def block(self, key: str, reason: str) -> None:
+    def block(self, key: str, reason: str, kind: str = "Other") -> None:
+        """Move the ticket to Blocked, say why on the ticket and in the field Blocked reason, and remember where it came from."""
         self.release_slot(key)
-        self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine}. {reason}")
+        try:
+            status = str(self.jira.view(key).get("status", ""))
+            self.redis.set(f"blocked:{key}", json.dumps({"status": status, "kind": kind}), 30 * DAY)
+            self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
+        except (JiraError, RedisError) as error:
+            log(f"{key}: could not record the block reason: {error}")
+        self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine} ({kind}). {reason}")
         self.jira.transition(key, "Blocked")
+
+    def recheck_blocked(self) -> None:
+        """Tickets blocked for lack of an AI (Quota, Offline) continue by themselves when an AI is available again."""
+        if not self.redis.acquire("recheck", self.cfg.owner, self.cfg.recheck_seconds):
+            return
+        projects = ", ".join(self.cfg.projects)
+        for issue in self.jira.search(f"project in ({projects}) AND status = Blocked AND issuetype != Epic ORDER BY created ASC"):
+            key = issue["key"]
+            raw = self.redis.get(f"blocked:{key}")
+            if not raw or "aiflow-hold" in issue.get("labels", []):
+                continue
+            info = json.loads(raw)
+            role = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "In QA": "qa"}.get(info["status"])
+            if info["kind"] not in ("Quota", "Offline") or not role:
+                continue
+            view = self.jira.view(key)
+            if not self.eligible_agents(role, key, view.get("agent"), self.online_pool()):
+                continue
+            if self.jira.transition(key, info["status"]):
+                self.jira.set_field(key, self.cfg.blocked_reason_field, None)
+                self.jira.comment(key, f"AI Flow: an AI for the {role} step is available again; the ticket returns to {info['status']}.")
+                for name in (f"blocked:{key}", f"waiting:{key}:{role}", f"waitnote:{key}:{role}"):
+                    self.redis.delete(name)
 
     def label_workspace(self, key: str) -> None:
         try:
@@ -301,7 +367,7 @@ class Supervisor:
 
     def quota_hit(self, key: str, agent: str, role: str) -> None:
         self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
-        self.jira.comment(key, f"AI Flow: {agent} hit its usage limit on {self.cfg.machine} during {role}. "
+        self.jira.comment(key, f"AI Flow: {agent} is not usable on {self.cfg.machine} during {role} (usage limit, empty balance or sign-in problem). "
                                f"Cooling it down for {self.cfg.quota_cooldown_minutes} min; the ticket will be reassigned to another AI "
                                f"and continues from the branch and the hand-over comments.")
 
@@ -310,12 +376,12 @@ class Supervisor:
         self.jira.comment(key, f"AI Flow: {agent} on {self.cfg.machine} ended the {role} run without a usable result ({why}); "
                                f"attempt {count}/{self.cfg.max_attempts}. Last output: {text[-600:]!r}")
         if count >= self.cfg.max_attempts:
-            self.block(key, f"{self.cfg.max_attempts} failed {role} attempts; needs the owner.")
+            self.block(key, f"{self.cfg.max_attempts} failed {role} attempts; needs the owner.", kind="Attempts")
 
     # ---- developer -------------------------------------------------------------------------------------------
     def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str) -> bool:
         if self.attempts(key, "developer") >= self.cfg.max_attempts:
-            self.block(key, "Too many failed developer attempts.")
+            self.block(key, "Too many failed developer attempts.", kind="Attempts")
             return True
         if issue["status"] == "To Do" and not self.jira.transition(key, "In Progress"):
             log(f"{key}: could not start (someone else did?)")
@@ -350,7 +416,7 @@ class Supervisor:
         elif found and found[0] == "DONE" and repo.ahead(workdir, base) > 0:
             self.finish_development(key, view, repo, base, agent, workdir, branch, text)
         elif found and found[0] == "BLOCKED":
-            self.block(key, f"{agent} reported: {found[1]}")
+            self.block(key, f"{agent} reported: {found[1]}", kind="Unclear")
         else:
             self.failed(key, "developer", agent, why if why != "ok" else "no DONE result or no commits", text)
         return True
@@ -417,24 +483,24 @@ class Supervisor:
         if rejected_human:
             who = ", ".join(sorted({i["who"] for i in rejected_human}))
             self.block(key, f"The developer rejected feedback from {who}; the owner decides (dismiss the review or ask for the change). "
-                            "Reasons are in the replies on the pull request.")
+                            "Reasons are in the replies on the pull request.", kind="Human")
             return True
         return False
 
     # ---- reviewer --------------------------------------------------------------------------------------------
     def review(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str) -> bool:
         if self.attempts(key, "reviewer") >= self.cfg.max_attempts:
-            self.block(key, "Too many failed reviewer attempts.")
+            self.block(key, "Too many failed reviewer attempts.", kind="Attempts")
             return True
         try:
             workdir, branch = repo.ensure_worktree(key, view.get("summary", key), base)
             repo.sync_worktree(workdir, branch)
             repo.fetch(base)
         except GitError as error:
-            self.block(key, f"Cannot get the ticket branch on {self.cfg.machine}: {error}")
+            self.block(key, f"Cannot get the ticket branch on {self.cfg.machine}: {error}", kind="Config")
             return True
         if repo.ahead(workdir, base) == 0:
-            self.block(key, "The ticket branch has no commits ahead of the base; developer output is missing.")
+            self.block(key, "The ticket branch has no commits ahead of the base; developer output is missing.", kind="Other")
             return True
         self.redis.set(f"reviewer:{key}", agent, 30 * DAY)
         self.label_workspace(key)
@@ -498,7 +564,7 @@ class Supervisor:
         self.redis.delete(f"qa:{key}")
         self.jira.comment(key, f"AI Flow: {text[:6000]}")
         if cycles > self.cfg.max_cycles:
-            self.block(key, f"{cycles - 1} rework rounds without success; needs the owner.")
+            self.block(key, f"{cycles - 1} rework rounds without success; needs the owner.", kind="Rework")
             return
         self.jira.add_label(key, "rework")
         self.jira.transition(key, "To Do")
@@ -514,13 +580,13 @@ class Supervisor:
     def _gate(self, key: str, view: dict[str, Any], repo: Repo, base: str) -> bool:
         branch = repo.remote_branch(key)
         if not branch:
-            self.block(key, "The ticket branch is not on origin, so there is no pull request to check.")
+            self.block(key, "The ticket branch is not on origin, so there is no pull request to check.", kind="Config")
             return True
         gh = GitHub(repo.github_slug())
         try:
             pr = gh.find(branch)
             if pr is None:
-                self.block(key, f"No pull request exists for branch {branch}.")
+                self.block(key, f"No pull request exists for branch {branch}.", kind="Config")
                 return True
             info = self.gate_facts(key, repo, gh, base, branch, pr)
         except (GitHubError, GitError, ValueError) as error:
@@ -543,7 +609,7 @@ class Supervisor:
         elif action == "rework":
             self.rework_from_gate(key, repo, gh, pr, info, detail)
         elif action == "block":
-            self.block(key, f"{detail} ({pr['url']}).")
+            self.block(key, f"{detail} ({pr['url']}).", kind="CI" if "CI" in detail else "Human")
         elif action == "wait":
             self.note_gate(key, f"{detail} ({pr['url']})")
             return False
@@ -613,18 +679,18 @@ class Supervisor:
 
     def run_qa(self, key: str, view: dict[str, Any], repo: Repo, base: str, branch: str, pr: dict[str, Any]) -> bool:
         if self.attempts(key, "qa") >= self.cfg.max_attempts:
-            self.block(key, "Too many failed QA attempts.")
+            self.block(key, "Too many failed QA attempts.", kind="Attempts")
             return True
         agent = self.pick_agent("qa", key, view.get("agent"))
         if agent is None:
-            self.note_waiting(key, "qa")
+            self.unserved(key, "qa", view.get("agent"))
             self.release_slot(key, repo.name)
             return False
         try:
             workdir, _ = repo.ensure_worktree(key, view.get("summary", key), base)
             repo.sync_worktree(workdir, branch)
         except GitError as error:
-            self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}")
+            self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
             return True
         self.label_workspace(key)
         self.jira.comment(key, f"AI Flow: QA {agent} on {self.cfg.machine} started on {pr['url']} at {pr['headRefOid'][:10]} "
@@ -659,7 +725,7 @@ class Supervisor:
             count = self.redis.incr(f"mergefail:{key}", DAY)
             self.jira.comment(key, f"AI Flow: merging {pr['url']} failed ({count}/3): {str(error)[:400]}")
             if count >= 3:
-                self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.")
+                self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.", kind="Other")
             return count >= 3
         self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and QA.")
         return True

@@ -42,6 +42,10 @@ class FakeRedis:
     def get_many(self, names):
         return [self.data.get(n) for n in names]
 
+    def scan(self, pattern):
+        import fnmatch
+        return [n for n in self.data if fnmatch.fnmatch(n, pattern)]
+
 
 class FakeJira:
     def __init__(self, blockers=None):
@@ -54,7 +58,7 @@ class FakeJira:
         self.comments.append((key, body))
 
     def search(self, jql, limit=50):
-        return []
+        return getattr(self, "found", [])
 
     def blockers(self, key):
         return self._blockers
@@ -62,6 +66,13 @@ class FakeJira:
     def transition(self, key, status):
         self.moves.append((key, status))
         return True
+
+    def view(self, key):
+        return {"key": key, "status": getattr(self, "status", "In Progress"), "agent": getattr(self, "agent", None)}
+
+    def set_field(self, key, field, value):
+        self.fields = getattr(self, "fields", {})
+        self.fields[(key, field)] = value
 
     def add_label(self, key, label):
         self.labels.append((key, label))
@@ -393,6 +404,116 @@ class RepliesTests(unittest.TestCase):
 
     def test_no_feedback_means_nothing_to_answer(self):
         self.assertEqual(make().read_replies("JAIF-9"), [])
+
+
+class PoolTests(unittest.TestCase):
+    def setUp(self):
+        self.original = agents.available
+        agents.available = lambda order: ["Claude", "Codex"]
+
+    def tearDown(self):
+        agents.available = self.original
+
+    def test_online_pool_adds_the_ais_of_other_machines(self):
+        sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,Grok,OpenCode")
+        sup.redis.data["ais:mac"] = "Claude,Grok,OpenCode"
+        self.assertEqual(sup.online_pool(), ["Claude", "Codex", "Grok", "OpenCode"])
+
+    def test_reviewer_default_grok_is_taken_when_some_machine_has_it(self):
+        sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,Grok", AIFLOW_REVIEWER_DEFAULT="Grok")
+        sup.redis.data["dev:K-1"] = "Codex"
+        self.assertEqual(sup.pick_agent("reviewer", "K-1", "Codex"), "Claude")  # Grok is not on this machine
+        self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Codex", ["Claude", "Codex", "Grok"]), ["Grok"])
+
+    def test_opencode_works_only_when_the_ticket_names_it(self):
+        sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,OpenCode")
+        pool = ["Claude", "Codex", "OpenCode"]
+        self.assertEqual(sup.eligible_agents("developer", "K-1", "OpenCode", pool), ["OpenCode"])
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, pool), ["Claude", "Codex"])
+        sup.redis.data["cooldown:Claude"] = sup.redis.data["cooldown:Codex"] = "1"
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, pool), [])  # never falls back to OpenCode on its own
+        sup.redis.data["dev:K-1"] = "Codex"
+        self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Codex", pool), [])
+
+    def test_nobody_waits_when_another_machine_can_take_the_step(self):
+        sup = make(AIFLOW_AGENT_ORDER="Claude,Codex,Grok", AIFLOW_QUOTA_BLOCK_MINUTES="0")
+        sup.redis.data["ais:mac"] = "Claude,Grok"
+        sup.redis.data["dev:K-1"] = "Codex"
+        sup.redis.data["waiting:K-1:reviewer"] = "1"
+        sup.unserved("K-1", "reviewer", "Codex")
+        self.assertEqual(sup.jira.moves, [])
+
+    def test_blocks_with_reason_quota_when_every_candidate_is_cooling(self):
+        sup = make(AIFLOW_QUOTA_BLOCK_MINUTES="0")
+        sup.redis.data.update({"dev:K-1": "Codex", "cooldown:Claude": "1", "waiting:K-1:reviewer": "1"})
+        sup.unserved("K-1", "reviewer", "Codex")
+        self.assertEqual(sup.jira.moves, [("K-1", "Blocked")])
+        self.assertTrue(sup.jira.fields[("K-1", sup.cfg.blocked_reason_field)].startswith("Quota:"))
+        self.assertEqual(json.loads(sup.redis.data["blocked:K-1"])["kind"], "Quota")
+
+    def test_blocks_with_reason_offline_when_no_machine_has_the_ai(self):
+        sup = make(AIFLOW_QUOTA_BLOCK_MINUTES="0", AIFLOW_AGENT_ORDER="Claude,Codex,OpenCode")
+        sup.redis.data["waiting:K-1:developer"] = "1"
+        sup.unserved("K-1", "developer", "OpenCode")
+        self.assertTrue(sup.jira.fields[("K-1", sup.cfg.blocked_reason_field)].startswith("Offline:"))
+
+    def test_waits_before_blocking(self):
+        sup = make()
+        sup.redis.data.update({"dev:K-1": "Codex", "cooldown:Claude": "1"})
+        sup.unserved("K-1", "reviewer", "Codex")
+        sup.unserved("K-1", "reviewer", "Codex")
+        self.assertEqual(sup.jira.moves, [])
+
+    def test_recheck_returns_a_quota_ticket_when_an_ai_is_back(self):
+        sup = make()
+        sup.jira.found = [{"key": "K-1", "labels": []}]
+        sup.jira.status = "Blocked"
+        sup.redis.data.update({"blocked:K-1": json.dumps({"status": "In Review", "kind": "Quota"}), "dev:K-1": "Codex"})
+        sup.recheck_blocked()
+        self.assertEqual(sup.jira.moves, [("K-1", "In Review")])
+        self.assertIsNone(sup.jira.fields[("K-1", sup.cfg.blocked_reason_field)])
+        self.assertNotIn("blocked:K-1", sup.redis.data)
+
+    def test_recheck_keeps_a_ticket_blocked_while_every_ai_is_cooling(self):
+        sup = make()
+        sup.jira.found = [{"key": "K-1", "labels": []}]
+        sup.redis.data.update({"blocked:K-1": json.dumps({"status": "In Review", "kind": "Quota"}), "dev:K-1": "Codex", "cooldown:Claude": "1"})
+        sup.recheck_blocked()
+        self.assertEqual(sup.jira.moves, [])
+
+    def test_recheck_ignores_blocks_that_need_a_human(self):
+        sup = make()
+        sup.jira.found = [{"key": "K-1", "labels": []}]
+        sup.redis.data["blocked:K-1"] = json.dumps({"status": "In Progress", "kind": "Unclear"})
+        sup.recheck_blocked()
+        self.assertEqual(sup.jira.moves, [])
+
+
+class AgentCommandTests(unittest.TestCase):
+    def test_grok_uses_a_prompt_file_and_the_plain_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv, stdin = agents.build_command("Grok", Path(tmp), Path(tmp) / "r.result", "the prompt", Path(tmp))
+            self.assertIsNone(stdin)
+            self.assertIn("--prompt-file", argv)
+            self.assertEqual(Path(argv[argv.index("--prompt-file") + 1]).read_text(), "the prompt")
+            self.assertEqual(argv[argv.index("--output-format") + 1], "plain")
+
+    def test_opencode_gets_the_model(self):
+        argv, _ = agents.build_command("OpenCode", Path("/tmp"), Path("/tmp/r"), "p", Path("/tmp"), "openai/gpt-5.4-mini")
+        self.assertEqual(argv[:4], ["opencode", "run", "-m", "openai/gpt-5.4-mini"])
+
+    def test_opencode_model_default_comes_from_the_settings(self):
+        self.assertEqual(make(AIFLOW_OPENCODE_MODEL="opencode/big-pickle").model_for("developer", "OpenCode"), ("opencode/big-pickle", ""))
+
+    def test_unusable_account_messages_count_as_quota(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "x.log"
+            for text in ("API error (status 402 Payment Required): Grok Build usage balance exhausted",
+                         "Error: Not signed in. To authenticate", "This API key has expired.", "rate limit reached"):
+                log.write_text(text)
+                self.assertTrue(agents.looks_like_quota(log, ""), text)
+            log.write_text("reviewed line 402 of the file; 4020 bytes")
+            self.assertFalse(agents.looks_like_quota(log, "all good"))
 
 
 class WaitingNoteTests(unittest.TestCase):

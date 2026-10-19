@@ -17,6 +17,9 @@ Workspaces root: `{root}`
 - NEVER change the operating system, the machine environment or Docker. That means: no `sudo`, no installing or upgrading packages or tools (`apt`, `brew`, `npm -g`, `pip` outside the project runtime), no changes to shell profiles, system or user configuration, services (`systemctl`, `launchctl`), cron, network or firewall, and nothing on Docker itself (no `docker run/stop/rm/prune`, no new containers, networks or volumes, no edits of Docker files outside the repository). These changes hit every ticket and every machine. Use `{root}/scripts/docker/runtime` for tests and tools.
 - If the ticket truly cannot be done without such a change, finish with `RESULT: BLOCKED: <the exact change that would be needed>` (developer) or `VERDICT: FAIL: <the same>` (reviewer, QA).
 
+## Skills
+Load the Workspaces skills that fit your role before you start (`workspaces_skill_list` / `workspaces_skill_load`, or read `{root}/.agents/skills/<name>/SKILL.md`): developer: `coding-practice`, `change-verification`, `git-conventions`, the language skills of the repository (`php-`, `node-`, `python-`, `go-`) and `workspace-project-databases` when a database is involved; reviewer: `code-review`; QA: `qa` and `change-verification`.
+
 ## Read the parents first
 A ticket does not repeat the business of its parents. If the parent above is not `none`, read it with `{root}/scripts/jira view <parent>`, then its parent in turn, up to the Epic, before you start. The Business requirements of the parents explain why; this ticket's AC, Scopes and Tests say what to do.
 

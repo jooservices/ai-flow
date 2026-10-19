@@ -17,7 +17,7 @@ from .gitops import GitError, Repo
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 
-STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "In QA": "gate",
+STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
 PR_STAGES = ("In QA", "Human review", "Ready to merge")  # checked on GitHub by the supervisor, no AI to pick
 DAY = 86400
@@ -352,6 +352,8 @@ class Supervisor:
             return self.develop(key, issue, view, repo, base, agent or "")
         if role == "reviewer":
             return self.review(key, view, repo, base, agent or "")
+        if role == "pr":
+            return self.pr_step(key, view, repo, base)
         if role == "human":
             return self.human_wait(key, repo, base)
         if role == "finalize":
@@ -674,25 +676,55 @@ class Supervisor:
         if word == "FAIL":
             self.send_back(key, repo, f"reviewer {agent} FAILED the change: {reason}", text[-3000:], [])
             return True
-        self.open_pull_request(key, view, repo, base, branch, agent, text)
+        self.redis.set(f"reviewtext:{key}", text[-800:], 30 * DAY)
+        self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED.\n\n{text[-1500:]}")
+        if not self.jira.transition(key, "Review passed"):  # a project whose workflow has no such status opens the pull request at once
+            self.open_pull_request(key, view, repo, base, branch, agent, text)
         return True
 
-    def open_pull_request(self, key: str, view: dict[str, Any], repo: Repo, base: str, branch: str, agent: str, text: str) -> None:
+    def pr_step(self, key: str, view: dict[str, Any], repo: Repo, base: str) -> bool:
+        """Review passed: the supervisor opens the pull request (no AI runs); a failure here never counts against the reviewer."""
+        if self.attempts(key, "pr") >= self.cfg.max_attempts:
+            self.block(key, "The pull request could not be opened after several tries.", kind="Attempts")
+            return True
+        branch = repo.remote_branch(key)
+        if not branch:
+            self.block(key, "The ticket branch is not on origin; the developer output was never pushed.", kind="Config")
+            return True
+        self.open_pull_request(key, view, repo, base, branch, self.state(key, "reviewer", "?"), self.state(key, "reviewtext"), role="pr")
+        return True
+
+    def pr_body(self, key: str, view: dict[str, Any], repo: Repo, base: str, reviewer: str) -> str:
+        """The repository's pull request template filled from the developer's template comment."""
+        said: dict[str, str] = {}
+        try:
+            for comment in self.jira.comments(key, 12):
+                found = sections(str(comment.get("body", "")))
+                if "what's changed" in found:
+                    said = found  # the newest comment that follows the template wins
+        except (JiraError, ValueError, TypeError) as error:
+            log(f"{key}: cannot read the developer comment for the PR body: {error}")
+        developer = self.state(key, "dev", "?")
+        done = said.get("what's changed", "").strip() or str(view.get("summary", key))
+        tests = (f"- [x] Reviewed by {reviewer} (AI Flow; developed by {developer})\n- [ ] CI green\n- [ ] QA on the pull request head")
+        return github.fill_template(repo.pr_template(base), {
+            "summary": done, "why": said.get("why changed", "").strip(), "tests": tests, "deployment": said.get("deployment", "").strip(),
+            "ticket": key, "footer": github.MARKER})
+
+    def open_pull_request(self, key: str, view: dict[str, Any], repo: Repo, base: str, branch: str, agent: str, text: str, role: str = "reviewer") -> None:
         gh = GitHub(repo.github_slug())
         title = self.state(key, "prtitle") or github.fallback_title(key, view.get("summary", key), str(view.get("type", "")), self.change_type(key))
         try:
             found = gh.find(branch)
             if found is None or found["state"] != "OPEN":
-                body = (f"## Summary\n{view.get('summary', key)}\n\nTicket: {key}\n\n## Test plan\n"
-                        f"- [x] Reviewed by {agent} (AI Flow)\n- [ ] CI green\n- [ ] QA on the pull request head\n\n{github.MARKER}")
-                found = gh.create(branch, base, title, body)
+                found = gh.create(branch, base, title, self.pr_body(key, view, repo, base, agent))
         except GitHubError as error:
-            self.failed(key, "reviewer", agent, f"could not open the pull request: {error}", text)
+            self.failed(key, role, agent, f"could not open the pull request: {error}", text)
             return
         self.redis.set(f"pr:{key}", str(found["number"]), 30 * DAY)
         self.redis.set(f"pushed:{key}", self.state(key, "pushed", str(int(time.time()))), 30 * DAY)
         self.redis.set(f"gateentry:{key}", str(int(time.time())), 30 * DAY)
-        self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED. Pull request: {found['url']}. Waiting for CI, feedback and QA.\n\n{text[-800:]}")
+        self.jira.comment(key, f"AI Flow: pull request opened by the supervisor: {found['url']}. Waiting for CI, feedback and QA.")
         self.jira.transition(key, "In QA")
 
     # ---- send back (rework) ----------------------------------------------------------------------------------

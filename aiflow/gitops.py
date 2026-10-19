@@ -65,6 +65,14 @@ class Repo:
         else:
             git(self.path, "update-ref", f"refs/heads/{base}", git(self.path, "rev-parse", remote))
 
+    def pr_template(self, base: str) -> str:
+        """The repository's own pull request template as committed on origin/<base> ('' when it has none)."""
+        for path in (".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md", "pull_request_template.md"):
+            text = git(self.path, "show", f"origin/{base}:{path}", check=False)
+            if text:
+                return text
+        return ""
+
     def github_slug(self) -> str:
         """`owner/name` of the origin repository on GitHub."""
         url = git(self.path, "remote", "get-url", "origin")

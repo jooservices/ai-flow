@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -403,6 +404,68 @@ class ClearBlockTests(unittest.TestCase):
         sup = make()
         sup.clear_block("K-1")
         self.assertFalse(hasattr(sup.jira, "fields"))
+
+
+AI_FLOW_TEMPLATE = "## Summary\n<!-- What and why -->\n\n## Test plan\n- [ ] CI green\n"
+
+
+class PullRequestBodyTests(unittest.TestCase):
+    values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",
+              "deployment": "None", "ticket": "JAIF-9", "footer": github.MARKER}
+
+    def test_the_repository_template_is_filled(self):
+        body = github.fill_template(AI_FLOW_TEMPLATE, self.values)
+        self.assertEqual(body.count("## "), 2)  # Summary and Test plan, as the template has them
+        self.assertIn("Adds the thing.\n\nWhy: Because it is needed.", body)  # no Why section: it joins the summary
+        self.assertNotIn("What and why", body)  # the template hint is replaced
+        self.assertEqual(body.count("CI green"), 1)  # the template checkbox is not repeated
+        self.assertIn("Ticket: JAIF-9", body)
+        self.assertTrue(body.rstrip().endswith(github.MARKER))
+        self.assertNotIn("## Deployment", body)  # "None" is not worth a section
+
+    def test_sections_the_template_lacks_are_added_when_they_say_something(self):
+        body = github.fill_template(AI_FLOW_TEMPLATE, {**self.values, "deployment": "Run migration 12 first."})
+        self.assertIn("## Deployment\nRun migration 12 first.", body)
+
+    def test_a_richer_template_keeps_its_own_sections(self):
+        template = "## Description\n\n## Why\n\n## Screenshots\nnone yet\n\n## Checklist\n- [ ] Docs updated\n"
+        body = github.fill_template(template, self.values)
+        self.assertIn("## Description\nAdds the thing.\n", body)
+        self.assertIn("## Why\nBecause it is needed.\n", body)
+        self.assertIn("## Screenshots\nnone yet", body)
+        self.assertIn("- [ ] Docs updated", body)  # template checkboxes survive in the test section
+        self.assertIn("Reviewed by Grok", body)
+
+    def test_no_template_uses_the_default(self):
+        body = github.fill_template("", self.values)
+        for heading in ("## Summary", "## Why", "## Test plan", "## Deployment"):
+            self.assertIn(heading, body)
+
+
+class ReviewPassedTests(unittest.TestCase):
+    def sup(self, can_move=True):
+        sup = make()
+        sup.jira.transition = lambda key, status: (sup.jira.moves.append((key, status)) or can_move)
+        sup.jira.read_field = lambda key, field: None
+        return sup
+
+    def test_stage_map(self):
+        from aiflow.supervisor import STAGES
+        self.assertEqual(STAGES["Review passed"], "pr")
+
+    def test_pr_step_blocks_without_a_pushed_branch(self):
+        sup = self.sup()
+        repo = type("R", (), {"remote_branch": lambda self, key: None, "name": "x"})()
+        self.assertTrue(sup.pr_step("K-1", {"summary": "s"}, repo, "develop"))
+        self.assertEqual(sup.jira.moves, [("K-1", "Blocked")])
+
+    def test_open_pull_request_failures_count_as_pr_attempts_not_reviewer_attempts(self):
+        sup = self.sup()
+        repo = type("R", (), {"github_slug": lambda self: "o/r"})()
+        with mock.patch.object(github.GitHub, "find", side_effect=github.GitHubError("502")):
+            sup.open_pull_request("K-1", {"summary": "s"}, repo, "develop", "K-1-b", "Grok", "", role="pr")
+        self.assertEqual(sup.attempts("K-1", "pr"), 1)
+        self.assertEqual(sup.attempts("K-1", "reviewer"), 0)
 
 
 class RoleDefaultTests(unittest.TestCase):

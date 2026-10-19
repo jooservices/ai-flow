@@ -282,6 +282,8 @@ class Supervisor:
     def block(self, key: str, reason: str, kind: str = "Other") -> None:
         """Move the ticket to Blocked, say why on the ticket and in the field Blocked reason, and remember where it came from."""
         self.release_slot(key)
+        for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
+            self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
         try:
             status = str(self.jira.view(key).get("status", ""))
             self.redis.set(f"blocked:{key}", json.dumps({"status": status, "kind": kind}), 30 * DAY)
@@ -388,7 +390,7 @@ class Supervisor:
             heartbeat=beat)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
-        quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text)
+        quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
         log(f"{key} {role} {agent}: exit={code} why={why} verdict={found} quota={quota}")
         return why, text, found, quota
 

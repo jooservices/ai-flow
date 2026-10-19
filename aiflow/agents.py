@@ -13,11 +13,15 @@ DENIED_BASH = (
     "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)",
     "Bash(docker run:*)", "Bash(docker compose run:*)", "Bash(docker system prune:*)", "Bash(docker volume rm:*)",
 )
-# Usage limits and unusable accounts alike: both mean "this AI cannot work now", so the ticket moves to another AI.
+# Usage limits and unusable accounts alike: both mean "this AI cannot work now", so the step moves to another AI.
+# Phrases, not bare words: a log also holds file contents and commit names ("roles-quota") that must not count.
 QUOTA_PATTERN = re.compile(
-    r"usage limit|rate.?limit|quota|\b429\b|credit balance|too many requests|overloaded|resets? (at|in)|"
+    r"usage limit (reached|exceeded|hit)|hit your (usage )?limit|rate.?limit(ed| exceeded| reached| hit)|"
+    r"quota (exceeded|exhausted|reached)|exceeded (your )?(current )?quota|insufficient[_ ]quota|quota_exceeded|out of quota|"
+    r"too many requests|credit balance|resets? (at|in) \d|"
     r"status 402|http 402|payment required|balance exhausted|usage balance|"
     r"not signed in|api key has expired|api_key_expired|invalid api key|please log ?in|authentication_error", re.I)
+SMALL_LOG = 6000  # a run that dies on a usage or sign-in error leaves a short log; a long one is a run that wandered
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TITLE_PATTERN = re.compile(r"^PR_TITLE:\s*(.+?)\s*$", re.M)
 VERDICT_PATTERN = re.compile(r"^(RESULT|VERDICT):\s*(DONE|PASS|FAIL|BLOCKED)\b[:\s-]*(.*)$", re.M)
@@ -35,6 +39,7 @@ def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
     """Environment of an AI process. PWD must be the worktree: some CLIs (OpenCode) take the project directory from PWD, not from
     the real working directory, and then treat the worktree as an external directory and reject every command in it."""
     env = child_env()
+    env.pop("OPENCODE_CONFIG_CONTENT", None)
     env["PWD"] = str(workdir)
     if agent == "OpenCode":  # the files outside the worktree that the prompt sends it to: the Jira adapter, the shared runtime, comment files
         allow = {str(workdir): "allow", f"{workdir}/*": "allow", f"{root}/scripts/*": "allow", f"{root}/.tmp/*": "allow",
@@ -125,14 +130,20 @@ def pr_title(text: str) -> str | None:
     return found[-1].strip("` ") if found else None
 
 
-def looks_like_quota(log_file: Path, text: str) -> bool:
-    tail = ""
-    if log_file.is_file():
-        with log_file.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            handle.seek(max(0, handle.tell() - 20000))
-            tail = handle.read().decode("utf-8", errors="replace")
-    return bool(QUOTA_PATTERN.search(tail) or QUOTA_PATTERN.search(text[-2000:]))
+def looks_like_quota(log_file: Path, text: str, code: int | None = None) -> bool:
+    """Did the AI stop because it cannot work now (usage limit, empty balance, not signed in)?
+
+    A short log is searched whole. A long log only counts when the process failed, and then only its last lines."""
+    if not log_file.is_file():
+        return bool(QUOTA_PATTERN.search(text[-2000:]))
+    size = log_file.stat().st_size
+    with log_file.open("rb") as handle:
+        if size > SMALL_LOG:
+            if not code:
+                return False
+            handle.seek(size - 1500)
+        tail = handle.read().decode("utf-8", errors="replace")
+    return bool(QUOTA_PATTERN.search(tail)) or (size <= SMALL_LOG and bool(QUOTA_PATTERN.search(text[-2000:])))
 
 
 def choose_other(dev: str, present: list[str], avoid: tuple[str, ...] = ()) -> str | None:

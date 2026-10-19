@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -267,6 +268,13 @@ class GitHubParsingTests(unittest.TestCase):
         self.assertEqual((state, len(failing)), ("failed", 1))
         self.assertEqual(github.checks_state([{"__typename": "StatusContext", "context": "ci", "state": "PENDING"}])[0], "pending")
 
+    def test_a_cancelled_run_replaced_by_a_newer_one_does_not_count(self):
+        run = lambda conclusion, started: {"__typename": "CheckRun", "name": "Validate PR Title", "workflowName": "Semantic PR Title",
+                                           "status": "COMPLETED", "conclusion": conclusion, "startedAt": started, "detailsUrl": "u"}
+        self.assertEqual(github.checks_state([run("CANCELLED", "2026-10-19T04:20:00Z"), run("SUCCESS", "2026-10-19T04:20:30Z")])[0], "passed")
+        self.assertEqual(github.checks_state([run("SUCCESS", "2026-10-19T04:20:30Z"), run("CANCELLED", "2026-10-19T04:20:00Z")])[0], "passed")
+        self.assertEqual(github.checks_state([run("SUCCESS", "2026-10-19T04:20:00Z"), run("FAILURE", "2026-10-19T04:20:30Z")])[0], "failed")
+
     def test_feedback_split(self):
         bot, human = {"login": "coderabbitai", "__typename": "Bot"}, {"login": "jooservices", "__typename": "User"}
         data = {
@@ -401,6 +409,14 @@ class SendBackTests(unittest.TestCase):
         for _ in range(3):
             sup.send_back("JAIF-9", FakeRepo(), "again", "x", [])
         self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+
+    def test_blocking_resets_the_counters_so_an_unblock_starts_fresh(self):
+        sup = make()
+        sup.redis.data.update({"attempts:K-1:developer": "3", "attempts:K-1:qa": "2", "cycles:K-1": "7", "dev:K-1": "Codex"})
+        sup.block("K-1", "needs the owner", kind="Attempts")
+        for name in ("attempts:K-1:developer", "attempts:K-1:qa", "cycles:K-1"):
+            self.assertNotIn(name, sup.redis.data)
+        self.assertIn("dev:K-1", sup.redis.data)  # who developed it is still known
 
     def test_review_items_are_remembered_as_sent(self):
         sup = make()
@@ -549,7 +565,14 @@ class RunEnvTests(unittest.TestCase):
         self.assertEqual(allowed["/r/scripts/*"], "allow")
         self.assertEqual(allowed["/r/.tmp/*"], "allow")
         self.assertNotIn("/r/*", allowed)
-        self.assertNotIn("OPENCODE_CONFIG_CONTENT", agents.run_env("Codex", Path("/w"), Path("/r")))
+        original = os.environ.get("OPENCODE_CONFIG_CONTENT")
+        os.environ["OPENCODE_CONFIG_CONTENT"] = "{}"  # an OpenCode parent process (a test run by OpenCode) must not leak it
+        try:
+            self.assertNotIn("OPENCODE_CONFIG_CONTENT", agents.run_env("Codex", Path("/w"), Path("/r")))
+        finally:
+            os.environ.pop("OPENCODE_CONFIG_CONTENT", None)
+            if original is not None:
+                os.environ["OPENCODE_CONFIG_CONTENT"] = original
 
 
 class AgentCommandTests(unittest.TestCase):
@@ -577,6 +600,22 @@ class AgentCommandTests(unittest.TestCase):
                 self.assertTrue(agents.looks_like_quota(log, ""), text)
             log.write_text("reviewed line 402 of the file; 4020 bytes")
             self.assertFalse(agents.looks_like_quota(log, "all good"))
+
+    def test_words_in_file_contents_and_branch_names_are_not_quota(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "x.log"
+            log.write_text("7c91f22 Merge pull request #5 from jooservices/JAIF-26-roles-quota\nthe quota of the day\nrate limit table")
+            self.assertFalse(agents.looks_like_quota(log, ""))
+
+    def test_a_long_log_counts_only_when_the_process_failed_and_only_at_its_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "x.log"
+            log.write_text("usage limit reached (quoted from a README)\n" + "work\n" * 3000)
+            self.assertFalse(agents.looks_like_quota(log, "", 0))
+            self.assertFalse(agents.looks_like_quota(log, "", 1))  # the phrase is far from the end
+            log.write_text("work\n" * 3000 + "Error: usage limit reached, resets at 5pm")
+            self.assertFalse(agents.looks_like_quota(log, "", 0))
+            self.assertTrue(agents.looks_like_quota(log, "", 1))
 
 
 class WaitingNoteTests(unittest.TestCase):

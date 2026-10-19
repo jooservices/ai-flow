@@ -127,6 +127,21 @@ class Jira:
         finally:
             Path(name).unlink(missing_ok=True)
 
+    def create_issue(self, project: str, summary: str, description: str, issue_type: str = "Task", labels: str = "") -> str:
+        """Create an issue (in Backlog) and return its key."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", dir=self.root / ".tmp", delete=False) as handle:
+            handle.write(description)
+            name = handle.name
+        try:
+            out = self._run("create", "--project", project, "--type", issue_type, "--summary", summary, "--description-file", name,
+                            *(["--labels", labels] if labels else []), "--format", "markdown")
+        finally:
+            Path(name).unlink(missing_ok=True)
+        return str(json.loads(out)["key"])
+
+    def link(self, source: str, target: str, link_type: str = "Relates") -> None:
+        self._run("link", "--type", link_type, source, target)
+
     def set_agent(self, key: str, agent: str) -> None:
         self._run("edit", key, "--agent", agent)
 

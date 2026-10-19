@@ -228,6 +228,10 @@ class GitHub:
     def merge(self, number: int, head_sha: str, method: str = "merge") -> None:
         self._gh("pr", "merge", str(number), "-R", self.slug, f"--{method}", "--match-head-commit", head_sha)
 
+    def release(self, tag: str, target: str, title: str) -> str:
+        """Create the tag on `target` and a GitHub release with generated notes; returns its URL."""
+        return self._gh("release", "create", tag, "-R", self.slug, "--target", target, "--title", title, "--generate-notes").strip()
+
     def comment(self, number: int, body: str) -> None:
         self._gh("pr", "comment", str(number), "-R", self.slug, "--body", f"{body}\n\n{MARKER}")
 

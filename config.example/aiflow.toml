@@ -13,6 +13,8 @@ ci_required = false       # true: a PR without CI checks is not merged
 merge_method = "merge"    # merge | squash | rebase
 max_parallel = 0          # tickets of one Jira project running at the same time, 0 = no limit
 highest_developer = "Claude"  # developer of the tickets with priority Highest
+release_check = ""        # command that runs the full test suite (and e2e) of a Release ticket, written by the project
+tag_prefix = "v"          # release tags are <prefix><version>
 
 # Number of workers (aiflow-work@1 ... @N) per machine; the name is AIFLOW_MACHINE.
 [machines.wsl]

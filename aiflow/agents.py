@@ -122,7 +122,8 @@ def probe_state(code: int | None, text: str, quota: bool) -> str:
     if code == 0 and "ok" in text.lower():
         return "ok"
     if quota:
-        return "down: " + (ANSI.sub("", text).strip().splitlines() or ["no answer"])[-1][:120]
+        found = QUOTA_PATTERN.search(ANSI.sub("", text))
+        return "down: " + (found.group(0) if found else "no answer")
     return "unknown"
 
 

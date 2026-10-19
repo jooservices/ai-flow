@@ -285,6 +285,28 @@ class Supervisor:
         found = self.eligible_agents(role, key, field_agent, self.usable_ais())
         return found[0] if found else None
 
+    def reserve_agent(self, role: str, key: str, field_agent: str | None) -> tuple[str | None, str | None]:
+        """Choose by the normal role rules and atomically reserve a local AI session slot."""
+        pool = self.usable_ais()
+        while pool:
+            found = self.eligible_agents(role, key, field_agent, pool)
+            if not found:
+                return None, None
+            for agent in found:
+                owner = f"{self.cfg.owner}:{key}:{role}:{uuid.uuid4().hex}"
+                if self.redis.acquire_session(
+                    self.cfg.machine, agent, owner, self.cfg.lease_seconds, self.cfg.ai_limits.get(agent.casefold())
+                ):
+                    return agent, owner
+                pool.remove(agent)
+        return None, None
+
+    def release_agent_session(self, key: str, role: str, agent: str, owner: str) -> None:
+        try:
+            self.redis.release_session(self.cfg.machine, agent, owner)
+        except RedisError as error:
+            log(f"{key}: could not release the {agent} {role} session slot ({error}); it expires by itself")
+
     def usable_ais(self) -> list[str]:
         """The installed AIs of this machine, without those the last probe found signed out or out of balance."""
         installed = agents.available(self.cfg.agent_order)
@@ -369,33 +391,41 @@ class Supervisor:
         if self.paused():  # `aiflow-work pause`: no new work; resume with `aiflow-work resume`
             return False
         for issue in self.candidates():
+            session_owner = None
+            session_agent = None
+            ticket_lease = False
             try:
-                if not self.eligible(issue):
-                    continue
-                view = self.jira.view(issue["key"], full=True)
-                role = STAGES[issue["status"]]
-                agent = None
-                if role == "developer":
-                    spec_agent, spec_model = self.ticket_spec(issue["key"])
-                    if spec_agent:
-                        view = {**view, "agent": spec_agent, "spec_model": spec_model, "agent_field": view.get("agent")}
-                if role in ("developer", "reviewer"):
-                    agent = self.pick_agent(role, issue["key"], view.get("agent"))
-                    if agent is None:
-                        self.unserved(issue["key"], role, view.get("agent"))
-                        continue
-                if not self.redis.acquire(f"lease:{issue['key']}", self.cfg.owner, self.cfg.lease_seconds):
-                    continue
-            except (JiraError, RuntimeError) as error:
-                log(f"skip {issue.get('key')}: {error}")
-                continue
-            try:
-                worked = self.process(issue, view, role, agent)
-            finally:
                 try:
-                    self.redis.release(f"lease:{issue['key']}", self.cfg.owner)
-                except RedisError as error:
-                    log(f"{issue['key']}: could not release the lease ({error}); it expires by itself")
+                    if not self.eligible(issue):
+                        continue
+                    view = self.jira.view(issue["key"], full=True)
+                    role = STAGES[issue["status"]]
+                    agent = None
+                    if role == "developer":
+                        spec_agent, spec_model = self.ticket_spec(issue["key"])
+                        if spec_agent:
+                            view = {**view, "agent": spec_agent, "spec_model": spec_model, "agent_field": view.get("agent")}
+                    if not self.redis.acquire(f"lease:{issue['key']}", self.cfg.owner, self.cfg.lease_seconds):
+                        continue
+                    ticket_lease = True
+                    if role in ("developer", "reviewer"):
+                        agent, session_owner = self.reserve_agent(role, issue["key"], view.get("agent"))
+                        if agent is None:
+                            self.unserved(issue["key"], role, view.get("agent"))
+                            continue
+                        session_agent = agent
+                except (JiraError, RuntimeError) as error:
+                    log(f"skip {issue.get('key')}: {error}")
+                    continue
+                worked = self.process(issue, view, role, agent, session_owner)
+            finally:
+                if session_owner and session_agent:
+                    self.release_agent_session(issue["key"], role, session_agent, session_owner)
+                if ticket_lease:
+                    try:
+                        self.redis.release(f"lease:{issue['key']}", self.cfg.owner)
+                    except RedisError as error:
+                        log(f"{issue['key']}: could not release the lease ({error}); it expires by itself")
             if worked:
                 return True
         return False
@@ -440,7 +470,8 @@ class Supervisor:
         return False
 
     # ---- one ticket ------------------------------------------------------------------------------------------
-    def process(self, issue: dict[str, Any], view: dict[str, Any], role: str, agent: str | None) -> bool:
+    def process(self, issue: dict[str, Any], view: dict[str, Any], role: str, agent: str | None,
+                session_owner: str | None = None) -> bool:
         """Returns True when something was done (so the loop does not sleep), False when the ticket only waits."""
         key = issue["key"]
         description = view.get("description", "")
@@ -468,9 +499,9 @@ class Supervisor:
             log(f"{key}: worktree lives on {home} and the branch was never pushed; leaving it")
             return False
         if role == "developer":
-            return self.develop(key, issue, view, repo, base, agent or "", start)
+            return self.develop(key, issue, view, repo, base, agent or "", start, session_owner)
         if role == "reviewer":
-            return self.review(key, view, repo, base, agent or "")
+            return self.review(key, view, repo, base, agent or "", session_owner)
         if role == "pr":
             return self.pr_step(key, view, repo, base)
         if role == "human":
@@ -878,7 +909,7 @@ class Supervisor:
         return path
 
     def execute(self, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path, branch: str, base: str,
-                repo: Repo, slot_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
+                repo: Repo, slot_owner: str | None = None, session_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
         """Run one AI. Returns (why, final text, verdict, quota)."""
         description = view.get("description", "")
         try:
@@ -916,7 +947,10 @@ class Supervisor:
                 self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
                 if slot_owner:
                     self.redis.renew(f"qaslot:{repo.name}", slot_owner, SLOT_SECONDS)
-                alive = self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds)
+                session_alive = True
+                if session_owner:
+                    session_alive = self.redis.renew_session(self.cfg.machine, agent, session_owner, self.cfg.lease_seconds)
+                alive = self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds) and session_alive
             except RedisError as error:
                 # A short outage is tolerated, but the lease expires lease_seconds after the last renewal and another
                 # supervisor may then take the ticket, so stop the AI before that.
@@ -927,6 +961,8 @@ class Supervisor:
             return alive
 
         began = time.monotonic()
+        if session_owner and not self.redis.renew_session(self.cfg.machine, agent, session_owner, self.cfg.lease_seconds):
+            return "lost-lease", "", None, False
         code, why = runner.run(
             argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
@@ -952,7 +988,8 @@ class Supervisor:
             self.block(key, f"{self.cfg.max_attempts} failed {role} attempts; needs the owner.", kind="Attempts")
 
     # ---- developer -------------------------------------------------------------------------------------------
-    def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str, start: str = "") -> bool:
+    def develop(self, key: str, issue: dict[str, Any], view: dict[str, Any], repo: Repo, base: str, agent: str,
+                start: str = "", session_owner: str | None = None) -> bool:
         if self.attempts(key, "developer") >= self.cfg.max_attempts:
             self.block(key, "Too many failed developer attempts.", kind="Attempts")
             return True
@@ -991,7 +1028,8 @@ class Supervisor:
         self.jira.comment(key, f"AI: {agent} on {self.cfg.machine}   Branch: {branch}   Worktree: {workdir}\n"
                                f"Now: starting {kind} run (resumes from existing commits if any).{takeover}")
         self.replies_file(key).unlink(missing_ok=True)
-        why, text, found, quota = self.execute("developer", agent, key, view, workdir, branch, base, repo)
+        why, text, found, quota = self.execute("developer", agent, key, view, workdir, branch, base, repo,
+                                               session_owner=session_owner)
         if why == "lost-lease":
             return True
         if quota:
@@ -1104,7 +1142,7 @@ class Supervisor:
         return False
 
     # ---- reviewer --------------------------------------------------------------------------------------------
-    def review(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str) -> bool:
+    def review(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, session_owner: str | None = None) -> bool:
         if self.attempts(key, "reviewer") >= self.cfg.max_attempts:
             self.block(key, "Too many failed reviewer attempts.", kind="Attempts")
             return True
@@ -1126,7 +1164,8 @@ class Supervisor:
         self.redis.set(f"reviewer:{key}", agent, 30 * DAY)
         self.label_workspace(key)
         self.jira.comment(key, f"AI Flow: reviewer {agent} on {self.cfg.machine} started (developer was {self.redis.get(f'dev:{key}') or '?'}).")
-        why, text, found, quota = self.execute("reviewer", agent, key, view, workdir, branch, base, repo)
+        why, text, found, quota = self.execute("reviewer", agent, key, view, workdir, branch, base, repo,
+                                               session_owner=session_owner)
         if why == "lost-lease":
             return True
         if quota:
@@ -1364,24 +1403,29 @@ class Supervisor:
         if self.attempts(key, "qa") >= self.cfg.max_attempts:
             self.block(key, "Too many failed QA attempts.", kind="Attempts")
             return True
-        agent = self.pick_agent("qa", key, view.get("agent"))
+        agent, session_owner = self.reserve_agent("qa", key, view.get("agent"))
         if agent is None:
             self.unserved(key, "qa", view.get("agent"))
             self.release_slot(key, repo.name)
             return False
         try:
-            workdir, _ = repo.ensure_worktree(key, view.get("summary", key), base)
-            repo.sync_worktree(workdir, branch)
-        except GitError as error:
-            self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
-            return True
-        if not self.prepare_ticket_database(key, workdir):
-            self.release_slot(key, repo.name)
-            return True
-        self.label_workspace(key)
-        self.jira.comment(key, f"AI Flow: QA {agent} on {self.cfg.machine} started on {pr['url']} at {pr['headRefOid'][:10]} "
-                               f"(developer was {self.redis.get(f'dev:{key}') or '?'}).")
-        why, text, found, quota = self.execute("qa", agent, key, view, workdir, branch, base, repo, slot_owner=key)
+            try:
+                workdir, _ = repo.ensure_worktree(key, view.get("summary", key), base)
+                repo.sync_worktree(workdir, branch)
+            except GitError as error:
+                self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
+                return True
+            if not self.prepare_ticket_database(key, workdir):
+                self.release_slot(key, repo.name)
+                return True
+            self.label_workspace(key)
+            self.jira.comment(key, f"AI Flow: QA {agent} on {self.cfg.machine} started on {pr['url']} at {pr['headRefOid'][:10]} "
+                                   f"(developer was {self.redis.get(f'dev:{key}') or '?'}).")
+            why, text, found, quota = self.execute("qa", agent, key, view, workdir, branch, base, repo,
+                                                   slot_owner=key, session_owner=session_owner)
+        finally:
+            if session_owner:
+                self.release_agent_session(key, "qa", agent, session_owner)
         if why == "lost-lease":
             return True
         if quota:
@@ -1556,6 +1600,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
             print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
+            limits = ", ".join(f"{name}={value}" for name, value in sorted(config.ai_limits.items())) or "none (all unlimited)"
+            print(f"  AI session limits: {limits}; omitted AIs are unlimited")
             for project in config.registry.projects.values():
                 deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
                                   if project.deploy_command.strip() else "disabled")

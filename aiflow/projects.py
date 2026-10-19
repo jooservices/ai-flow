@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .config import ConfigError
@@ -22,6 +22,7 @@ SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, 
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
+AI_LIMIT_NAMES = ("claude", "codex", "grok", "opencode")
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class Registry:
     projects: dict[str, Project]
     workers: dict[str, int]  # machine -> number of workers; empty when the machine is not listed
     from_files: bool
+    ai_limits: dict[str, dict[str, int]] = field(default_factory=dict)  # machine -> AI name -> concurrent session limit
 
     def get(self, key: str) -> Project | None:
         return self.projects.get(key)
@@ -105,11 +107,22 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
             raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines).")
     defaults = replace(fallback, **_typed(general.get("defaults", {}), SETTINGS, f"{general_file} [defaults]"))
     workers: dict[str, int] = {}
+    ai_limits: dict[str, dict[str, int]] = {}
     for machine, table in general.get("machines", {}).items():
-        count = table.get("workers") if isinstance(table, dict) else None
-        if not isinstance(count, int) or isinstance(count, bool) or count < 1 or set(table) != {"workers"}:
-            raise ConfigError(f"{general_file} [machines.{machine}]: needs `workers` as a whole number of at least 1 and nothing else.")
+        if not isinstance(table, dict) or set(table) - {"workers", "ai_limits"}:
+            raise ConfigError(f"{general_file} [machines.{machine}]: only `workers` and `ai_limits` are allowed.")
+        count = table.get("workers")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ConfigError(f"{general_file} [machines.{machine}]: needs `workers` as a whole number of at least 1.")
         workers[machine] = count
+        limits = table.get("ai_limits", {})
+        if not isinstance(limits, dict):
+            raise ConfigError(f"{general_file} [machines.{machine}.ai_limits]: must be a table.")
+        limits = _typed(limits, {name: int for name in AI_LIMIT_NAMES}, f"{general_file} [machines.{machine}.ai_limits]")
+        if any(value < 0 for value in limits.values()):
+            raise ConfigError(f"{general_file} [machines.{machine}.ai_limits]: limits must be zero or greater.")
+        if limits:
+            ai_limits[machine] = dict(limits)
     projects: dict[str, Project] = {}
     owners: dict[str, Path] = {}
     for path in sorted((config_dir / "aiflow").glob("*.toml")):
@@ -134,5 +147,5 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
         projects[project.jira_key], owners[project.jira_key] = project, path
     if not projects:
         raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
-    return Registry(projects, workers, from_files=True)
+    return Registry(projects, workers, from_files=True, ai_limits=ai_limits)
 

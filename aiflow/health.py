@@ -63,9 +63,10 @@ def version_drift(redis) -> list[tuple[str, str]]:
 
 
 def usage_summary(redis, day: str) -> str | None:
-    """One line per AI and role for the runs of `day` (UTC): runs, minutes, runs that did not end cleanly."""
+    """Summarize runs and per-machine AI session peaks for `day` (UTC)."""
     names = redis.scan(f"usage:{day}:*")
-    if not names:
+    peak_names = sorted(redis.scan(f"sessionpeak:{day}:*"))
+    if not names and not peak_names:
         return None
     totals: dict[tuple[str, str], list[float]] = {}
     for raw in redis.get_many(names):
@@ -77,6 +78,13 @@ def usage_summary(redis, day: str) -> str | None:
         row[1] += run["minutes"]
         row[2] += 0 if run["why"] == "ok" else 1
     lines = [f"- {ai} {role}: {int(row[0])} run(s), {row[1]:.0f} min, {int(row[2])} not clean" for (ai, role), row in sorted(totals.items())]
+    labels = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
+    for name, peak in zip(peak_names, redis.get_many(peak_names)):
+        if not peak:
+            continue
+        _, _, peak_machine, ai = name.split(":", 3)
+        label = labels.get(ai, ai)
+        lines.append(f"- {label} on {peak_machine}: peak {int(peak)} concurrent session(s)")
     return f"AI usage on {day} (UTC):\n" + "\n".join(lines)
 
 

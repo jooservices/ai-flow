@@ -106,6 +106,11 @@ class Settings:
     def owner(self) -> str:
         return f"{self.machine}:{self.worker_label}:{os.getpid()}"
 
+    @property
+    def ai_limits(self) -> dict[str, int]:
+        """Concurrent AI session limits for this machine; an omitted AI has no limit."""
+        return self.registry.ai_limits.get(self.machine, {})
+
     def project(self, issue_key: str = ""):
         """The registry entry of the Jira project an issue belongs to (the first project when no issue is given)."""
         return self.registry.of_issue(issue_key) if issue_key else next(iter(self.registry.projects.values()))

@@ -171,6 +171,21 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(command[7:], ["300", "first-event"])
         client.close()
 
+    def test_ai_session_operations_use_prefixed_atomic_redis_scripts(self):
+        server = FakeServer(lambda _number, parts: b":1\r\n" if parts[0] == "EVAL" else ok(_number, parts))
+        self.addCleanup(server.stop)
+        client = Redis("127.0.0.1", server.port, 0, "aiworkflow:", "", retries=1)
+        self.addCleanup(client.close)
+        self.assertTrue(client.acquire_session("wsl", "Codex", "worker-1", 120, limit=4))
+        self.assertTrue(client.renew_session("wsl", "Codex", "worker-1", 120))
+        self.assertTrue(client.release_session("wsl", "Codex", "worker-1"))
+        scripts = [parts for parts in server.commands if parts[0] == "EVAL"]
+        self.assertEqual(len(scripts), 3)
+        self.assertIn("ZREMRANGEBYSCORE", scripts[0][1])
+        self.assertEqual(scripts[0][2:4], ["2", "aiworkflow:sessions:wsl:codex"])
+        self.assertIn("aiworkflow:sessionpeak:", scripts[0][4])
+        self.assertEqual(scripts[0][6:], ["120", "4", "worker-1", str(10 * 24 * 60 * 60)])
+
 
 class RunnerSafetyTests(unittest.TestCase):
     def test_ai_is_stopped_when_the_heartbeat_raises(self):

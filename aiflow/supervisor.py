@@ -608,6 +608,14 @@ class Supervisor:
     def close_container(self, key: str, status: str) -> bool:
         """Walk a container through the workflow to Done. A project whose workflow lacks a step is left alone."""
         path = ["Backlog", "To Do", "In Progress", "In Review", "Review passed", "In QA", "Done"]
+        if status == "Blocked":  # a container that was blocked (for example worked before it had children) goes back to To Do first
+            if not self.jira.transition(key, "To Do"):
+                return False
+            try:
+                self.jira.set_field(key, self.cfg.blocked_reason_field, None)
+            except JiraError as error:
+                log(f"{key}: cannot clear Blocked reason: {error}")
+            status = "To Do"
         if status not in path:
             return False
         for step in path[path.index(status) + 1:]:

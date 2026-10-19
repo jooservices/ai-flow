@@ -120,6 +120,16 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.get_many(["a", "b"]), ["1", None])
         self.assertEqual(client.get_many([]), [])
 
+    def test_persistent_values_are_written_without_expiry(self):
+        server = FakeServer(ok)
+        self.addCleanup(server.stop)
+        client = Redis("127.0.0.1", server.port, 0, "p:", "", retries=1)
+
+        client.set_persistent("dbticket:JAIF-7", "my-project")
+
+        self.assertEqual(server.commands[-1], ["SET", "p:dbticket:JAIF-7", "my-project"])
+        client.close()
+
 
 class RunnerSafetyTests(unittest.TestCase):
     def test_ai_is_stopped_when_the_heartbeat_raises(self):

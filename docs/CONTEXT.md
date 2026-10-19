@@ -10,7 +10,7 @@ AI Flow is a hands-off delivery line. The owner writes tickets and decides. When
 
 - Routine delivery work is repetitive, depends on who is free, loses context between people and tools, and stops when people stop. A fixed, checked path removes that.
 - Success is measured by: the share of tickets that reach Done with no human action, the number of rework rounds per ticket, the time from "ready" to merged, and traceability (every decision visible in the tracker, no merge without passing checks).
-- Not in this version: preview environments for approvers, automatic database cleanup, more than one worker machine, publishing to a wiki.
+- Not in this version: preview environments for approvers, more than one worker machine, publishing to a wiki.
 
 ## 3. Words that mean something specific
 
@@ -101,7 +101,7 @@ Ticket names an AI: that one. Priority Highest: the strongest AI. Otherwise the 
 
 - Proven on real tickets: the whole path with no human step, human approval before merge, two tickets editing the same file, a ticket without the template, Highest priority routing, an unclear ticket then an answer, a container closing itself, a hotfix with the automatic merge-back.
 - Running continuously on one worker machine with health checks, a pause switch, AI sign-in probes and a daily usage summary.
-- Not built: preview environments for approvers (a staging deployment is planned), database cleanup after a merge (to be designed with the owner), a second worker machine, wiki publishing. The shared state store moves to the production one only when the owner announces the release of ai-flow.
+- Not built: preview environments for approvers (a staging deployment is planned), a second worker machine, wiki publishing. Projects may opt into isolated per-ticket databases with their `database` TOML setting; the shared state store moves to the production one only when the owner announces the release of ai-flow.
 - Next: the first real project (javmeta) will be used to test the flow, in another working session, starting with approval on and auto-merge off for the first week.
 
 ## 13. Where to look

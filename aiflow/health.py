@@ -27,6 +27,9 @@ def problems(cfg, redis, jira) -> list[tuple[str, str]]:
         if state.startswith("down"):
             _, machine, agent = name.split(":", 2)
             found.append((f"ai-{machine}-{agent}", f"{agent} on {machine} cannot work and is out of the pool: {state}"))
+    for name in redis.scan("dbcleanup:*"):
+        key = name.removeprefix("dbcleanup:")
+        found.append((f"dbcleanup-{key}", f"Ticket database teardown failed for {key}; shared cleanup needs attention."))
     found += version_drift(redis)
     watched = sorted(cfg.projects)
     blocked = jira.search(f"project in ({', '.join(watched)}) AND status = Blocked", 20)

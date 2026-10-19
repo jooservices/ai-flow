@@ -15,7 +15,7 @@ class RegistryTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         write(self.dir / "aiflow.toml", '[defaults]\nqa = "Claude:sonnet"\nmerge_method = "squash"\n[machines.wsl]\nworkers = 2\n')
-        write(self.dir / "aiflow" / "ai.toml", '[project]\njira_key = "JAIF"\nrepo = "ai-flow"\nci_required = true\nmax_parallel = 1\n')
+        write(self.dir / "aiflow" / "ai.toml", '[project]\njira_key = "JAIF"\nrepo = "ai-flow"\ndatabase = "ai-flow"\nci_required = true\nmax_parallel = 1\n')
         write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nreviewer = "Codex"\nauto_merge = false\n')
 
     def tearDown(self):
@@ -35,6 +35,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual((ai.qa, ai.reviewer, ai.merge_method), ("Claude:sonnet", "Grok", "squash"))  # toml default, env, toml default
         self.assertEqual((crawler.reviewer, crawler.auto_merge, ai.auto_merge), ("Codex", False, True))
         self.assertEqual((ai.ci_required, crawler.ci_required, ai.max_parallel), (True, False, 1))
+        self.assertEqual((ai.database, crawler.database), ("ai-flow", ""))
 
     def test_workers_of_the_machine(self):
         cfg = self.load()
@@ -59,6 +60,7 @@ class RegistryTest(unittest.TestCase):
             "typo": ('[project]\njira_key = "ABC"\nrepo = "x"\nauto_mrege = true\n', "unknown setting"),
             "type": ('[project]\njira_key = "ABC"\nrepo = "x"\nmax_parallel = "2"\n', "must be int"),
             "norepo": ('[project]\njira_key = "ABC"\n', "`repo` is required"),
+            "database": ('[project]\njira_key = "ABC"\nrepo = "x"\ndatabase = "Invalid Name"\n', "database must be"),
             "method": ('[project]\njira_key = "ABC"\nrepo = "x"\nmerge_method = "ff"\n', "merge_method"),
             "section": ('[proj]\njira_key = "ABC"\n', "[project]"),
             "syntax": ("[project\n", "aiflow"),

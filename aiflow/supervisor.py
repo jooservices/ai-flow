@@ -16,6 +16,7 @@ from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
+from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
@@ -151,8 +152,9 @@ def decide(info: dict[str, Any]) -> tuple[str, str]:
 
 
 class Supervisor:
-    def __init__(self, cfg: Settings, jira: Jira, redis: Redis) -> None:
+    def __init__(self, cfg: Settings, jira: Jira, redis: Redis, project_database: ProjectDatabase | None = None) -> None:
         self.cfg, self.jira, self.redis = cfg, jira, redis
+        self.project_database = project_database or ProjectDatabase(cfg.root)
         self.stop = False
         self._priorities: dict[str, tuple[float, str]] = {}
 
@@ -545,6 +547,43 @@ class Supervisor:
         self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine} ({kind}). {reason}")
         self.jira.transition(key, "Blocked")
 
+    def prepare_ticket_database(self, key: str, worktree: Path) -> bool:
+        """Provision the configured project database before an AI uses its ticket worktree."""
+        project = self.cfg.project(key)
+        if not project.database:
+            return True
+        if not self.project_database.env_is_ignored(worktree):
+            log(f"{key}: ticket database setup failed (worktree .env is not ignored)")
+            self.block(key, "Worktree .env is not ignored by Git; refusing to write shared credentials.", kind="Config")
+            return False
+        try:
+            ticket_database_id(key)
+        except ValueError:
+            self.block(key, "Ticket key cannot be mapped to a 1-12 character database id.", kind="Config")
+            return False
+        self.redis.set_persistent(f"dbticket:{key}", project.database)
+        self.redis.set_persistent(f"dbworktree:{key}:{self.cfg.machine}", "1")
+        failure = self.project_database.prepare(project.database, key, worktree)
+        if failure is None:
+            return True
+        log(f"{key}: ticket database setup failed ({failure})")
+        self.block(key, f"Ticket database setup failed: {failure}.", kind="Config")
+        return False
+
+    def teardown_ticket_database(self, key: str) -> None:
+        """Remove a configured ticket database and leave failures for the health check to report."""
+        database_name = self.redis.get(f"dbticket:{key}")
+        if not database_name:
+            return
+        if self.project_database.teardown(database_name, key):
+            self.redis.delete(f"dbticket:{key}")
+            self.redis.delete(f"dbcleanup:{key}")
+            for marker in self.redis.scan(f"dbworktree:{key}:*"):
+                self.redis.delete(marker)
+            return
+        self.redis.set_persistent(f"dbcleanup:{key}", "1")
+        log(f"{key}: ticket database teardown failed; health check will report it")
+
     def recheck_blocked(self) -> None:
         """Tickets blocked for lack of an AI (Quota, Offline) continue by themselves when an AI is available again."""
         if not self.redis.acquire("recheck", self.cfg.owner, self.cfg.recheck_seconds):
@@ -648,6 +687,36 @@ class Supervisor:
                         log(f"{issue['key']}: removed the worktree of a declined ticket (branch {branch} kept)")
             except (GitError, JiraError, OSError) as error:
                 log(f"sweep {project.repo}: {error}")
+        self.sweep_ticket_databases()
+
+    def sweep_ticket_databases(self) -> None:
+        """Tear down terminal tickets and tickets whose last registered worktree was removed."""
+        for marker in self.redis.scan("dbticket:*"):
+            key = marker.removeprefix("dbticket:")
+            try:
+                status = str(self.jira.view(key).get("status", ""))
+            except JiraError as error:
+                log(f"{key}: cannot check ticket database cleanup status: {error}")
+                continue
+            if status in ("Done", "Declined"):
+                self.teardown_ticket_database(key)
+                continue
+            local_marker = f"dbworktree:{key}:{self.cfg.machine}"
+            if self.redis.get(local_marker) is None:
+                continue
+            project = self.cfg.project(key)
+            repo = Repo(self.cfg.root, project.repo, project.company)
+            if not repo.exists():
+                continue
+            try:
+                if repo.find_worktree(key) is not None:
+                    continue
+            except GitError as error:
+                log(f"{key}: cannot check ticket worktree for database cleanup: {error}")
+                continue
+            self.redis.delete(local_marker)
+            if not self.redis.scan(f"dbworktree:{key}:*"):
+                self.teardown_ticket_database(key)
 
     def label_workspace(self, key: str) -> None:
         try:
@@ -776,6 +845,8 @@ class Supervisor:
         except GitError as error:
             self.failed(key, "developer", agent, "worktree", str(error))
             return True
+        if not self.prepare_ticket_database(key, workdir):
+            return True
         takeover = ""
         if issue["status"] == "In Progress" and previous:
             reason = "hit its usage limit" if self.cooling(previous) else "stopped (died, lost its lease or showed no activity)"
@@ -798,6 +869,14 @@ class Supervisor:
         return True
 
     def finish_development(self, key: str, view: dict[str, Any], repo: Repo, base: str, agent: str, workdir: Path, branch: str, text: str) -> None:
+        if self.cfg.project(key).database:
+            try:
+                if repo.ticket_env_committed(workdir, base):
+                    self.block(key, "The ticket worktree .env was committed; remove it from the branch before continuing.", kind="Config")
+                    return
+            except GitError as error:
+                self.failed(key, "developer", agent, "worktree .env safety check", str(error))
+                return
         bad = [s for s in repo.commit_subjects(workdir, base) if not github.valid_title(s)]
         if bad:
             self.failed(key, "developer", agent, "commit messages break Conventional Commits "
@@ -893,6 +972,8 @@ class Supervisor:
             repo.fetch(base)
         except GitError as error:
             self.block(key, f"Cannot get the ticket branch on {self.cfg.machine}: {error}", kind="Config")
+            return True
+        if not self.prepare_ticket_database(key, workdir):
             return True
         if repo.ahead(workdir, base) == 0:
             self.block(key, "The ticket branch has no commits ahead of the base; developer output is missing.", kind="Other")
@@ -1034,6 +1115,7 @@ class Supervisor:
             self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.")
         elif action == "closed":
             repo.cleanup(key, remote=False)
+            self.teardown_ticket_database(key)
             self.release_slot(key, repo.name)
             self.jira.comment(key, f"AI Flow: pull request {pr['url']} was closed without merging; declining the ticket.")
             self.jira.transition(key, "Declined")
@@ -1148,6 +1230,9 @@ class Supervisor:
         except GitError as error:
             self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
             return True
+        if not self.prepare_ticket_database(key, workdir):
+            self.release_slot(key, repo.name)
+            return True
         self.label_workspace(key)
         self.jira.comment(key, f"AI Flow: QA {agent} on {self.cfg.machine} started on {pr['url']} at {pr['headRefOid'][:10]} "
                                f"(developer was {self.redis.get(f'dev:{key}') or '?'}).")
@@ -1207,6 +1292,7 @@ class Supervisor:
 
     def declined(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
         repo.cleanup(key, remote=False)
+        self.teardown_ticket_database(key)
         self.release_slot(key, repo.name)
         self.jira.comment(key, f"AI Flow: pull request {pr['url']} was closed without merging; declining the ticket.")
         self.jira.transition(key, "Declined")
@@ -1296,6 +1382,7 @@ class Supervisor:
         self.release_slot(key, repo.name)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
+        self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",

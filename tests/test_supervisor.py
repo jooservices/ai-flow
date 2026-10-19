@@ -5,11 +5,13 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from aiflow import agents, github, runner
 from aiflow.config import load
 from aiflow.jira import Jira, JiraError, adf_to_markdown
-from aiflow.gitops import GitError
+from aiflow.gitops import GitError, Repo
+from aiflow.project_database import ProjectDatabase
 from aiflow import health
 from aiflow.supervisor import tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
@@ -22,6 +24,9 @@ class FakeRedis:
         return self.data.get(name)
 
     def set(self, name, value, ttl):
+        self.data[name] = value
+
+    def set_persistent(self, name, value):
         self.data[name] = value
 
     def acquire(self, name, owner, ttl):
@@ -83,6 +88,16 @@ class FakeJira:
 
     def remove_label(self, key, label):
         pass
+
+
+class FakeCommandRunner:
+    def __init__(self, returncodes=()):
+        self.returncodes = list(returncodes)
+        self.calls = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        return SimpleNamespace(returncode=self.returncodes.pop(0) if self.returncodes else 0)
 
 
 def stamp(seconds_ago):
@@ -1124,6 +1139,134 @@ class WaitingNoteTests(unittest.TestCase):
         sup.note_waiting("JAIF-9", "reviewer")
         sup.note_waiting("JAIF-9", "reviewer")
         self.assertEqual(len(sup.jira.comments), 1)
+
+
+class TicketDatabaseLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        config = self.root / "config"
+        (config / "aiflow").mkdir(parents=True)
+        (config / "aiflow.toml").write_text("[defaults]\n")
+        self.project_file = config / "aiflow" / "jaif.toml"
+        self.project_file.write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\ndatabase = "my-project"\n')
+        self.commands = FakeCommandRunner()
+        self.cfg = load({"AIFLOW_ROOT": str(self.root), "AIFLOW_MACHINE": "test"}, config_dir=config)
+        self.redis = FakeRedis()
+        self.jira = FakeJira()
+        self.sup = Supervisor(self.cfg, self.jira, self.redis, ProjectDatabase(self.cfg.root, self.commands))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_database_setup_failure_blocks_before_developer_starts(self):
+        self.commands.returncodes = [0, 1]
+        worktree = self.root / "ticket"
+
+        class WorktreeRepo(FakeRepo):
+            def ensure_worktree(self, key, summary, base):
+                return worktree, "JAIF-7-isolated-db"
+
+            def adopt_remote(self, path, branch):
+                pass
+
+        with mock.patch.object(self.sup, "label_workspace"), mock.patch.object(self.sup, "execute") as execute:
+            self.sup.develop(
+                "JAIF-7",
+                {"key": "JAIF-7", "status": "In Progress", "labels": []},
+                {"summary": "Database setup", "agent": "Codex"},
+                WorktreeRepo(),
+                "develop",
+                "Codex",
+            )
+
+        execute.assert_not_called()
+        self.assertEqual([move for _, move in self.jira.moves], ["Blocked"])
+        self.assertIn("Config", self.jira.comments[-1][1])
+        self.assertNotIn("test-only-value-not-used-by-the-command", self.jira.comments[-1][1])
+        self.assertEqual(len(self.commands.calls), 2)
+
+    def test_check_failure_blocks_and_does_not_expose_command_output(self):
+        self.commands.returncodes = [0, 0, 0, 1]
+
+        self.assertFalse(self.sup.prepare_ticket_database("JAIF-7", self.root / "ticket"))
+
+        self.assertIn("Config", self.jira.comments[-1][1])
+        self.assertNotIn("DB_PASSWORD", self.jira.comments[-1][1])
+        self.assertEqual(len(self.commands.calls), 4)
+
+    def test_unignored_env_blocks_before_database_provisioning(self):
+        self.commands.returncodes = [1]
+
+        self.assertFalse(self.sup.prepare_ticket_database("JAIF-7", self.root / "ticket"))
+
+        self.assertIn("Config", self.jira.comments[-1][1])
+        self.assertIsNone(self.redis.get("dbticket:JAIF-7"))
+        self.assertEqual(len(self.commands.calls), 1)
+
+    def test_unconfigured_project_keeps_database_flow_disabled(self):
+        self.project_file.write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\n')
+        self.cfg = load({"AIFLOW_ROOT": str(self.root), "AIFLOW_MACHINE": "test"}, config_dir=self.root / "config")
+        self.sup = Supervisor(self.cfg, self.jira, self.redis, ProjectDatabase(self.cfg.root, self.commands))
+
+        self.assertTrue(self.sup.prepare_ticket_database("JAIF-7", self.root / "ticket"))
+        self.assertEqual(self.commands.calls, [])
+
+    def test_done_ticket_tears_down_its_database(self):
+        repo = RecordingCleanupRepo()
+        self.redis.set_persistent("dbticket:JAIF-7", "my-project")
+
+        self.sup.finish("JAIF-7", repo, "develop", {}, "Merged pull request.")
+
+        self.assertEqual(self.commands.calls[0][0][1:],
+                         ["teardown-project", "my-project", "--confirm", "my-project", "--db", "jaif7"])
+        self.assertIn(("JAIF-7", "Done"), self.jira.moves)
+
+    def test_teardown_failure_is_reported_by_health(self):
+        self.commands.returncodes = [1]
+        self.redis.set_persistent("dbticket:JAIF-7", "my-project")
+
+        self.sup.finish("JAIF-7", RecordingCleanupRepo(), "develop", {}, "Merged pull request.")
+        problems = health.problems(self.cfg, self.redis, self.jira)
+
+        self.assertIn(("dbcleanup-JAIF-7", "Ticket database teardown failed for JAIF-7; shared cleanup needs attention."), problems)
+
+    def test_database_cleanup_sweep_retries_a_done_ticket(self):
+        self.redis.set_persistent("dbticket:JAIF-7", "my-project")
+        self.jira.status = "Done"
+
+        self.sup.sweep_ticket_databases()
+
+        self.assertEqual(self.commands.calls[0][0][1], "teardown-project")
+        self.assertIsNone(self.redis.get("dbticket:JAIF-7"))
+
+    def test_removed_last_worktree_triggers_teardown(self):
+        self.redis.set_persistent("dbticket:JAIF-7", "my-project")
+        self.redis.set_persistent("dbworktree:JAIF-7:test", "1")
+        self.jira.status = "Blocked"
+        repo = type("RepoStub", (), {"exists": lambda self: True, "find_worktree": lambda self, key: None})()
+
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo):
+            self.sup.sweep_ticket_databases()
+
+        self.assertEqual(self.commands.calls[0][0][1], "teardown-project")
+        self.assertIsNone(self.redis.get("dbticket:JAIF-7"))
+
+
+class TicketEnvCommitTests(unittest.TestCase):
+    def test_detects_a_ticket_commit_that_contains_the_generated_env(self):
+        repo = Repo(Path("/workspaces"), "project")
+
+        with mock.patch("aiflow.gitops.git", return_value=".env\n") as command:
+            self.assertTrue(repo.ticket_env_committed(Path("/worktree"), "develop"))
+
+        command.assert_called_once_with(Path("/worktree"), "log", "--format=", "--name-only", "develop..HEAD", "--", ".env")
+
+    def test_unrelated_ticket_commits_do_not_match_the_env_guard(self):
+        repo = Repo(Path("/workspaces"), "project")
+
+        with mock.patch("aiflow.gitops.git", return_value="src/app.py\n"):
+            self.assertFalse(repo.ticket_env_committed(Path("/worktree"), "develop"))
 
 
 class HealthTests(unittest.TestCase):

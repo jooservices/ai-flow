@@ -231,9 +231,12 @@ class Supervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: setattr(self, "stop", True))
         log(f"supervisor {self.cfg.owner} watching {','.join(self.cfg.projects)}")
+        started = int(time.time())
         while not self.stop:
+            if self.should_exit(started):
+                break
             try:
-                self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
+                self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
                 self.publish_ais()
                 self.recheck_blocked()
                 worked = self.tick()
@@ -245,6 +248,19 @@ class Supervisor:
                     if self.stop:
                         break
                     time.sleep(1)
+
+    def should_exit(self, started: int) -> bool:
+        """Graceful exit between two tickets: after `aiflow-work restart` or after the maximum run time. systemd
+        starts the worker again, so it runs the newest code and configuration."""
+        asked = self.redis.get("restart")
+        if asked is not None and int(asked) > started:
+            log("restart requested; leaving after the current ticket step")
+            return True
+        limit = self.cfg.worker_max_minutes
+        if limit > 0 and time.time() - started > limit * 60:
+            log(f"worker ran for {limit} minutes; leaving so systemd starts a fresh one")
+            return True
+        return False
 
     # ---- one ticket ------------------------------------------------------------------------------------------
     def process(self, issue: dict[str, Any], view: dict[str, Any], role: str, agent: str | None) -> bool:
@@ -371,7 +387,7 @@ class Supervisor:
                 except GitError:
                     pass
             try:
-                self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
+                self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
                 if slot_owner:
                     self.redis.renew(f"qaslot:{repo.name}", slot_owner, SLOT_SECONDS)
                 alive = self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds)
@@ -886,12 +902,38 @@ class Supervisor:
             self.redis.delete(f"{name}:{key}")
 
 
+def option(args: list[str], name: str) -> str | None:
+    for index, value in enumerate(args):
+        if value == name and index + 1 < len(args):
+            return args[index + 1]
+        if value.startswith(name + "="):
+            return value.split("=", 1)[1]
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    from .config import load
-    cfg = load()
-    supervisor = Supervisor(cfg, Jira(cfg.root), Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user))
+    from .config import ConfigError, all_profiles, check_profiles, load
+    args = list(argv if argv is not None else sys.argv[1:])
+    try:
+        if "check" in args:  # validate every profile file without starting anything
+            profiles = all_profiles()
+            check_profiles(profiles)
+            for name, values in profiles.items():
+                print(f"{name}: projects {values.get('AIFLOW_PROJECTS')} workers {values.get('AIFLOW_WORKERS', 1)}")
+            return 0
+        config = option(args, "--config")
+        cfg = load(worker_id=option(args, "--id"), config=Path(config) if config else None)
+    except ConfigError as error:
+        print(f"CONFIG ERROR: {error}", file=sys.stderr)
+        return 2
+    redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
+    if "restart" in args:  # every worker leaves after its current step and systemd starts it again
+        redis.set("restart", str(int(time.time())), 3600)
+        print("restart requested for all workers")
+        return 0
+    supervisor = Supervisor(cfg, Jira(cfg.root), redis)
     (cfg.root / ".tmp").mkdir(exist_ok=True)
-    if "--once" in (argv if argv is not None else sys.argv[1:]):
+    if "--once" in args:
         return 0 if supervisor.tick() else 3
     supervisor.run_forever()
     return 0

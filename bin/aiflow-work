@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# AI Flow worker (what systemd keeps alive, like `queue:work`):
+#   bin/aiflow-work --id B-2        profile B, worker 2  (reads JOOservices/config/aiflow/B.env)
+#   bin/aiflow-work --config FILE   one profile file
+#   bin/aiflow-work check           validate all profiles (a Jira project in two profiles is refused)
+#   bin/aiflow-work restart         every worker leaves after its current step and systemd starts it again
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$DIR"
+exec python3 -m aiflow.supervisor "$@"

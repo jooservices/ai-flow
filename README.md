@@ -121,7 +121,9 @@ The repositories are public, so only accounts with write, maintain or admin perm
 Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):
 
 - `aiflow.toml`: `[defaults]` for every project and `[machines.<name>] workers = N`, the number of workers of each machine.
-- `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`).
+- `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, optional `database`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`).
+
+Set `database = "<shared-project-name>"` only for projects that need isolated databases. The target repository must ignore `.env`. Before each developer, reviewer, or QA session uses a ticket worktree, the supervisor confirms `.env` is ignored, provisions PostgreSQL, MongoDB, and Redis resources for the lower-case ticket id, writes that worktree's `.env`, and verifies its worktree mode. It also blocks a developer handoff if `.env` appears in a ticket commit. Rework reuses the same ticket database. The supervisor tears it down when the ticket is Done or its worktree is removed; the health check reports teardown failures. Leaving `database` unset preserves the existing flow.
 
 A project value beats `[defaults]`, which beats the old `.env` value (`AIFLOW_*_DEFAULT`, `AIFLOW_AUTO_MERGE_REPOS`...). A machine without these files keeps working with `.env` alone. A ticket can still name `Repo:` and `Base:` in its description as an exception. An empty Require human field means the project's `require_human`.
 

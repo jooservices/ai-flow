@@ -183,6 +183,11 @@ class Repo:
         out = git(workdir, "log", "--no-merges", "--format=%s", f"{base}..HEAD")
         return [line for line in out.splitlines() if line.strip()]
 
+    def ticket_env_committed(self, workdir: Path, base: str) -> bool:
+        """Whether any ticket commit added, changed, or removed the worktree's generated .env."""
+        out = git(workdir, "log", "--format=", "--name-only", f"{base}..HEAD", "--", ".env")
+        return ".env" in out.splitlines()
+
     def cleanup(self, key: str, remote: bool = True) -> None:
         """Remove the ticket worktree and local branch; the remote branch too unless `remote` is false."""
         found = self.find_worktree(key)

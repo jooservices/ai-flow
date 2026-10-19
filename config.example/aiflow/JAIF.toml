@@ -4,4 +4,5 @@ name = "AI Flow"
 jira_key = "JAIF"
 repo = "ai-flow"          # directory under <company>/projects and the GitHub repository
 company = "JOOservices"
+# database = "my-project" # optional: provision an isolated shared database for each ticket
 ci_required = true

@@ -8,6 +8,7 @@ Every file of the directory is loaded. A project value beats `[defaults]`, which
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -17,8 +18,9 @@ from .config import ConfigError
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int, "highest_developer": str,
             "release_check": str, "tag_prefix": str}
-IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str}
+IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
+DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class Project:
     repo: str
     name: str = ""
     company: str = "JOOservices"
+    database: str = ""  # empty disables per-ticket database provisioning
     base: str = "develop"
     hotfix_base: str = "master"
     developer: str = ""
@@ -113,6 +116,8 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
             if not table.get(needed):
                 raise ConfigError(f"{path} [project]: `{needed}` is required.")
         project = replace(defaults, **table)
+        if project.database and not DATABASE_NAME.fullmatch(project.database):
+            raise ConfigError(f"{path}: database must be 2-24 lowercase letters, digits, '-' or '_', starting with a letter.")
         if project.merge_method not in MERGE_METHODS:
             raise ConfigError(f"{path}: merge_method must be one of {', '.join(MERGE_METHODS)}.")
         if project.jira_key in projects:

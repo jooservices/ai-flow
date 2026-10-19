@@ -128,6 +128,10 @@ class Redis:
     def set(self, name: str, value: str, ttl: int) -> None:
         self.command("SET", self.key(name), value, "EX", ttl)
 
+    def set_persistent(self, name: str, value: str) -> None:
+        """Store lifecycle state until its owning workflow explicitly removes it."""
+        self.command("SET", self.key(name), value)
+
     def incr(self, name: str, ttl: int) -> int:
         count = int(self.command("INCR", self.key(name)))  # type: ignore[arg-type]
         self.command("EXPIRE", self.key(name), ttl)

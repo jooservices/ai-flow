@@ -513,7 +513,7 @@ class Supervisor:
             return False
         self.redis.set(f"pr:{key}", str(pr["number"]), 30 * DAY)
         if action == "done":
-            self.finish(key, repo, pr, f"Pull request {pr['url']} is merged into {base}.")
+            self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.")
         elif action == "closed":
             repo.cleanup(key, remote=False)
             self.release_slot(key, repo.name)
@@ -642,16 +642,21 @@ class Supervisor:
             if count >= 3:
                 self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.")
             return count >= 3
-        self.finish(key, repo, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and QA.")
+        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and QA.")
         return True
 
-    def finish(self, key: str, repo: Repo, pr: dict[str, Any], message: str) -> None:
+    def finish(self, key: str, repo: Repo, base: str, pr: dict[str, Any], message: str) -> None:
+        cleanup_status = "Worktree and branch removed."
+        step = "refresh base"
         try:
+            repo.refresh_base(base)
+            step = "cleanup"
             repo.cleanup(key)
         except GitError as error:
-            log(f"{key}: cleanup: {error}")
+            log(f"{key}: {step}: {error}")
+            cleanup_status = f"Cleanup failed ({error}); remove the worktree by hand."
         self.release_slot(key, repo.name)
-        self.jira.comment(key, f"AI Flow: {message} Worktree and branch removed.")
+        self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry",

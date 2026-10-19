@@ -6,6 +6,7 @@ from pathlib import Path
 
 from aiflow import agents, github
 from aiflow.config import load
+from aiflow.gitops import GitError
 from aiflow.supervisor import Supervisor, decide, ticket_field
 
 
@@ -292,6 +293,59 @@ class RoleDefaultTests(unittest.TestCase):
 
 class FakeRepo:
     name = "ai-flow"
+
+
+class RecordingCleanupRepo(FakeRepo):
+    def __init__(self, refresh_error=None, cleanup_error=None):
+        self.calls = []
+        self.refresh_error = refresh_error
+        self.cleanup_error = cleanup_error
+
+    def refresh_base(self, base):
+        self.calls.append(("refresh_base", base))
+        if self.refresh_error:
+            raise self.refresh_error
+
+    def cleanup(self, key):
+        self.calls.append(("cleanup", key))
+        if self.cleanup_error:
+            raise self.cleanup_error
+
+
+class FinishTests(unittest.TestCase):
+    def test_refreshes_base_before_cleanup(self):
+        sup = make()
+        repo = RecordingCleanupRepo()
+
+        sup.finish("JAIF-9", repo, "develop", {}, "Merged pull request.")
+
+        self.assertEqual(repo.calls, [("refresh_base", "develop"), ("cleanup", "JAIF-9")])
+        self.assertIn("Worktree and branch removed.", sup.jira.comments[-1][1])
+
+    def test_refresh_error_is_reported_and_finish_continues(self):
+        sup = make()
+        repo = RecordingCleanupRepo(refresh_error=GitError("fetch failed"))
+
+        sup.finish("JAIF-9", repo, "develop", {}, "Merged pull request.")
+
+        self.assertIn(
+            "Cleanup failed (fetch failed); remove the worktree by hand.",
+            sup.jira.comments[-1][1],
+        )
+        self.assertEqual(sup.jira.moves, [("JAIF-9", "Done")])
+
+    def test_cleanup_error_is_reported_in_the_ticket_comment(self):
+        sup = make()
+        repo = RecordingCleanupRepo(cleanup_error=GitError("not fully merged"))
+
+        sup.finish("JAIF-9", repo, "develop", {}, "Merged pull request.")
+
+        self.assertIn(
+            "Cleanup failed (not fully merged); remove the worktree by hand.",
+            sup.jira.comments[-1][1],
+        )
+        self.assertEqual(repo.calls, [("refresh_base", "develop"), ("cleanup", "JAIF-9")])
+        self.assertEqual(sup.jira.moves, [("JAIF-9", "Done")])
 
 
 class SendBackTests(unittest.TestCase):

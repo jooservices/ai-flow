@@ -390,7 +390,7 @@ class Supervisor:
             heartbeat=beat)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
-        quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text)
+        quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
         log(f"{key} {role} {agent}: exit={code} why={why} verdict={found} quota={quota}")
         return why, text, found, quota
 

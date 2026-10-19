@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -557,7 +558,14 @@ class RunEnvTests(unittest.TestCase):
         self.assertEqual(allowed["/r/scripts/*"], "allow")
         self.assertEqual(allowed["/r/.tmp/*"], "allow")
         self.assertNotIn("/r/*", allowed)
-        self.assertNotIn("OPENCODE_CONFIG_CONTENT", agents.run_env("Codex", Path("/w"), Path("/r")))
+        original = os.environ.get("OPENCODE_CONFIG_CONTENT")
+        os.environ["OPENCODE_CONFIG_CONTENT"] = "{}"  # an OpenCode parent process (a test run by OpenCode) must not leak it
+        try:
+            self.assertNotIn("OPENCODE_CONFIG_CONTENT", agents.run_env("Codex", Path("/w"), Path("/r")))
+        finally:
+            os.environ.pop("OPENCODE_CONFIG_CONTENT", None)
+            if original is not None:
+                os.environ["OPENCODE_CONFIG_CONTENT"] = original
 
 
 class AgentCommandTests(unittest.TestCase):
@@ -585,6 +593,22 @@ class AgentCommandTests(unittest.TestCase):
                 self.assertTrue(agents.looks_like_quota(log, ""), text)
             log.write_text("reviewed line 402 of the file; 4020 bytes")
             self.assertFalse(agents.looks_like_quota(log, "all good"))
+
+    def test_words_in_file_contents_and_branch_names_are_not_quota(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "x.log"
+            log.write_text("7c91f22 Merge pull request #5 from jooservices/JAIF-26-roles-quota\nthe quota of the day\nrate limit table")
+            self.assertFalse(agents.looks_like_quota(log, ""))
+
+    def test_a_long_log_counts_only_when_the_process_failed_and_only_at_its_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "x.log"
+            log.write_text("usage limit reached (quoted from a README)\n" + "work\n" * 3000)
+            self.assertFalse(agents.looks_like_quota(log, "", 0))
+            self.assertFalse(agents.looks_like_quota(log, "", 1))  # the phrase is far from the end
+            log.write_text("work\n" * 3000 + "Error: usage limit reached, resets at 5pm")
+            self.assertFalse(agents.looks_like_quota(log, "", 0))
+            self.assertTrue(agents.looks_like_quota(log, "", 1))
 
 
 class WaitingNoteTests(unittest.TestCase):

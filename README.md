@@ -75,6 +75,10 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
+### Review, Review passed and the pull request
+
+The reviewer comments a checklist (every AC, scope, tests, security, conventions) and moves the ticket to **Review passed**; a FAIL sends it to To Do with label `rework`. In Review passed the supervisor, with no AI run, opens the pull request: its body is the repository's own `.github/pull_request_template.md` filled from the developer's last comment (What's changed, Why changed, Deployment) plus the ticket link and the AIs involved. A failure to open it is retried (`attempts:<KEY>:pr`) and never counts against the reviewer. The developer posts a `## Plan` comment before coding; nobody reviews it.
+
 ### Ticket template
 
 Every Epic, Story, Task and Sub-task description uses these headings (markdown). A child ticket does not repeat its parent's business: the AI reads the parent chain up to the Epic first (`scripts/jira view`).

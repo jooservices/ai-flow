@@ -46,6 +46,58 @@ def with_key(title: str, key: str) -> str:
     return title if f"({key})" in title or len(title) + len(key) + 3 > 120 else f"{title} ({key})"
 
 
+SECTION_KINDS = {
+    "summary": ("summary", "description", "overview", "what", "changes", "what changed", "whats changed", "what's changed", "changes made"),
+    "why": ("why", "why changed", "motivation", "context", "reason", "rationale"),
+    "tests": ("test plan", "tests", "testing", "how to test", "verification", "checklist"),
+    "deployment": ("deployment", "migration", "rollout", "deploy", "release notes", "notes"),
+    "ticket": ("ticket", "jira", "issue", "related issues", "related", "links"),
+}
+DEFAULT_TEMPLATE = "## Summary\n\n## Why\n\n## Test plan\n\n## Deployment\n"
+NOTHING = {"", "none", "n/a", "na", "-"}
+
+
+def _kind(heading: str) -> str:
+    name = re.sub(r"[^a-z' ]", "", heading.lower().replace("’", "'")).strip()
+    return next((kind for kind, names in SECTION_KINDS.items() if name in names), "")
+
+
+def fill_template(template: str, values: dict[str, str]) -> str:
+    """Fill a repository's pull request template. Sections are recognised by heading (Summary/Description/What, Why,
+    Test plan, Deployment, Ticket); `values` has summary, why, tests, deployment, ticket and footer. A section the template
+    does not have is appended when it says something; sections of the template we know nothing about stay as written."""
+    parts: list[tuple[str, str]] = [("", "")]  # (heading line, body)
+    for line in (template or DEFAULT_TEMPLATE).splitlines():
+        if re.match(r"^#{1,6}\s+\S", line):
+            parts.append((line, ""))
+        else:
+            parts[-1] = (parts[-1][0], parts[-1][1] + line + "\n")
+    kinds = {_kind(re.sub(r"^#+\s*", "", heading)) for heading, _ in parts if heading} - {""}
+    said = lambda kind: values.get(kind, "").strip().lower() not in NOTHING
+    values = dict(values)
+    if "why" not in kinds and said("why"):
+        values["summary"] = (values.get("summary", "").strip() + "\n\nWhy: " + values["why"].strip()).strip()
+    out: list[str] = []
+    for heading, body in parts:
+        kind = _kind(re.sub(r"^#+\s*", "", heading)) if heading else ""
+        if kind and (said(kind) or kind in ("tests", "deployment")) and values.get(kind) is not None:
+            new = values[kind].strip() or "None"
+            if kind == "tests":
+                have = {re.sub(r"^- \[[ xX]\]\s*", "", line.strip()).lower() for line in new.splitlines()}
+                extra = [line for line in body.splitlines() if re.match(r"^\s*- \[[ xX]\]", line)
+                         and re.sub(r"^\s*- \[[ xX]\]\s*", "", line).strip().lower() not in have]
+                new = "\n".join([new] + extra)
+            body = new + "\n"
+        out.append((heading + "\n" if heading else "") + body)
+    text = "\n".join(part.rstrip("\n") + "\n" for part in out if part.strip()).rstrip("\n") + "\n"
+    if "ticket" not in kinds:
+        text += f"\nTicket: {values.get('ticket', '')}\n"
+    for kind, title in (("summary", "Summary"), ("deployment", "Deployment"), ("tests", "Test plan")):
+        if kind not in kinds and said(kind):
+            text += f"\n## {title}\n{values[kind].strip()}\n"
+    return text + (f"\n{values['footer']}\n" if values.get("footer") else "")
+
+
 def checks_state(rollup: list[dict[str, Any]] | None) -> tuple[str, list[dict[str, str]]]:
     """('none'|'pending'|'failed'|'passed', failing checks) from a statusCheckRollup."""
     if not rollup:

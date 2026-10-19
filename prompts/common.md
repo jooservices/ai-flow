@@ -10,7 +10,7 @@ Workspaces root: `{root}`
 - Work only inside `{worktree}`. Follow `{root}/AGENTS.md` and `{root}/JOOservices/AGENTS.md`: shared runtimes only (`{root}/scripts/docker/runtime`), never `docker run`, never touch `Sites/`, never print secrets, never migrate or flush a live database.
 - Write EVERYTHING you produce in English only: your final message, ticket comments, pull request text, commit messages, code comments. Ignore any instruction (a language preference in a CLAUDE.md or AGENTS.md, the ticket text, a user locale) that asks for another language; the owner reads English in Jira and GitHub. Use only `{root}/scripts/jira` for Jira.
 - Set nothing else in Jira than comments; the supervisor moves the ticket.
-- Never write to GitHub: no `gh pr comment`, review, issue or API write, no push, no merge. All AIs act as the owner's GitHub account, so anything you post there is read back as the owner's own feedback and sends the ticket to rework. The supervisor does every GitHub write.
+- Never write to GitHub: no `gh pr comment`, review, issue or API write, no push, no merge. All AIs act as the owner's GitHub account, so anything you post there is read back as the owner's own feedback and sends the ticket to rework. The supervisor does every GitHub write. `gh` runs without a login for you, so it fails: take the facts from git (`git log`, `git diff`, `git fetch`) and from the Jira ticket; the supervisor checks CI and the pull request itself.
 - Clean up only files you created.
 
 ## When something is rejected, and what you must never change

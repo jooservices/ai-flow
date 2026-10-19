@@ -1,0 +1,7 @@
+# JOOservices/config/aiflow/<anything>.toml: one file per Jira project.
+[project]
+name = "AI Flow"
+jira_key = "JAIF"
+repo = "ai-flow"          # directory under <company>/projects and the GitHub repository
+company = "JOOservices"
+ci_required = true

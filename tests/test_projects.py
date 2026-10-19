@@ -1,0 +1,92 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from aiflow.config import ConfigError, load, parse_worker_id
+
+
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+class RegistryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        write(self.dir / "aiflow.toml", '[defaults]\nqa = "Claude:sonnet"\nmerge_method = "squash"\n[machines.wsl]\nworkers = 2\n')
+        write(self.dir / "aiflow" / "ai.toml", '[project]\njira_key = "JAIF"\nrepo = "ai-flow"\nci_required = true\nmax_parallel = 1\n')
+        write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nreviewer = "Codex"\nauto_merge = false\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, **env):
+        return load(env={"AIFLOW_MACHINE": "wsl", **env}, config_dir=self.dir)
+
+    def test_every_file_is_loaded(self):
+        cfg = self.load()
+        self.assertEqual(sorted(cfg.projects), ["JAIF", "JOOCX"])
+        self.assertTrue(cfg.registry.from_files)
+
+    def test_project_beats_defaults_and_defaults_beat_env(self):
+        cfg = self.load(AIFLOW_QA_DEFAULT="Grok", AIFLOW_REVIEWER_DEFAULT="Grok", AIFLOW_MERGE_METHOD="rebase")
+        ai, crawler = cfg.project("JAIF-3"), cfg.project("JOOCX-9")
+        self.assertEqual((ai.qa, ai.reviewer, ai.merge_method), ("Claude:sonnet", "Grok", "squash"))  # toml default, env, toml default
+        self.assertEqual((crawler.reviewer, crawler.auto_merge, ai.auto_merge), ("Codex", False, True))
+        self.assertEqual((ai.ci_required, crawler.ci_required, ai.max_parallel), (True, False, 1))
+
+    def test_workers_of_the_machine(self):
+        cfg = self.load()
+        self.assertEqual((cfg.workers, cfg.expected_slots), (2, ("wsl:1", "wsl:2")))
+        self.assertEqual(load(env={"AIFLOW_MACHINE": "mac", "AIFLOW_EXPECTED_SLOTS": "mac:1"}, config_dir=self.dir).expected_slots, ("mac:1",))
+
+    def test_worker_number_is_checked(self):
+        self.assertEqual(load(env={"AIFLOW_MACHINE": "wsl"}, worker_id="2", config_dir=self.dir).slot, 2)
+        with self.assertRaises(ConfigError):
+            load(env={"AIFLOW_MACHINE": "wsl"}, worker_id="3", config_dir=self.dir)
+        for bad in ("0", "x", "B-2"):
+            with self.assertRaises(ConfigError):
+                parse_worker_id(bad)
+
+    def test_unknown_project_is_refused(self):
+        with self.assertRaises(ConfigError):
+            self.load().project("NOPE-1")
+
+    def test_mistakes_are_reported(self):
+        cases = {
+            "twice": ('[project]\njira_key = "JAIF"\nrepo = "x"\n', "declared in"),
+            "typo": ('[project]\njira_key = "ABC"\nrepo = "x"\nauto_mrege = true\n', "unknown setting"),
+            "type": ('[project]\njira_key = "ABC"\nrepo = "x"\nmax_parallel = "2"\n', "must be int"),
+            "norepo": ('[project]\njira_key = "ABC"\n', "`repo` is required"),
+            "method": ('[project]\njira_key = "ABC"\nrepo = "x"\nmerge_method = "ff"\n', "merge_method"),
+            "section": ('[proj]\njira_key = "ABC"\n', "[project]"),
+            "syntax": ("[project\n", "aiflow"),
+        }
+        for name, (text, expected) in cases.items():
+            with self.subTest(name):
+                write(self.dir / "aiflow" / "zz.toml", text)
+                with self.assertRaises(ConfigError) as caught:
+                    self.load()
+                self.assertIn(expected, str(caught.exception))
+
+    def test_bad_general_file(self):
+        for text, expected in (("[machines.wsl]\nworkers = 0\n", "workers"), ("[extra]\n", "unknown section"), ("[defaults]\nbase = 3\n", "must be str")):
+            with self.subTest(text):
+                write(self.dir / "aiflow.toml", text)
+                with self.assertRaises(ConfigError) as caught:
+                    self.load()
+                self.assertIn(expected, str(caught.exception))
+
+    def test_without_files_the_env_applies(self):
+        with tempfile.TemporaryDirectory() as empty:
+            cfg = load(env={"AIFLOW_PROJECTS": "JAIF,JOOS", "AIFLOW_DEFAULT_REPO": "ai-flow", "AIFLOW_CI_REQUIRED_REPOS": "ai-flow",
+                            "AIFLOW_DEVELOPER_DEFAULT": "Codex:gpt-6-luna:xhigh"}, config_dir=Path(empty))
+        self.assertFalse(cfg.registry.from_files)
+        self.assertEqual(cfg.projects, ("JAIF", "JOOS"))
+        project = cfg.project("ANY-1")
+        self.assertEqual((project.repo, project.ci_required, project.developer), ("ai-flow", True, "Codex:gpt-6-luna:xhigh"))
+
+
+if __name__ == "__main__":
+    unittest.main()

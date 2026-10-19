@@ -1,0 +1,21 @@
+# JOOservices/config/aiflow.toml: general settings of AI Flow. Secrets stay in Workspaces/.env.
+# A value of a project file beats [defaults], which beats the legacy .env value.
+
+[defaults]
+base = "develop"          # branch every ticket starts from
+hotfix_base = "master"    # branch of Type Hotfix
+developer = "Codex:gpt-6-luna:xhigh"
+reviewer = "Grok"
+qa = "Claude:sonnet"
+require_human = false     # true: every ticket stops in Human review before the merge
+auto_merge = true         # false: the PR gate stops after QA and waits for the owner
+ci_required = false       # true: a PR without CI checks is not merged
+merge_method = "merge"    # merge | squash | rebase
+max_parallel = 0          # tickets of one Jira project running at the same time, 0 = no limit
+
+# Number of workers (aiflow-work@1 ... @N) per machine; the name is AIFLOW_MACHINE.
+[machines.wsl]
+workers = 2
+
+[machines.mac]
+workers = 1

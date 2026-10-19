@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import agents, github, runner
-from .config import PROJECT_DIR, Settings, repo_listed
+from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
@@ -87,6 +87,8 @@ class Supervisor:
             return False
         if "aiflow-hold" in issue.get("labels", []) or self.redis.get(f"lease:{key}"):
             return False
+        if status in ("To Do", "In Progress") and self.at_capacity(key):
+            return False
         if status == "To Do":
             return all(b["status"] == "Done" for b in self.jira.blockers(key))
         if status == "In Progress":
@@ -96,6 +98,11 @@ class Supervisor:
             return not self.redis.get(f"gatepoll:{key}")
         return True
 
+    def at_capacity(self, key: str) -> bool:
+        """The project already runs as many tickets as its max_parallel allows (0 = no limit)."""
+        project = self.cfg.project(key)
+        return bool(project.max_parallel) and len(self.redis.scan(f"lease:{project.jira_key}-*")) >= project.max_parallel
+
     def cooling(self, agent: str) -> bool:
         return self.redis.get(f"cooldown:{agent}") is not None
 
@@ -103,8 +110,8 @@ class Supervisor:
         """The AIs on cooldown, in one round trip (the shared Redis can be far away)."""
         return {n for n, v in zip(names, self.redis.get_many([f"cooldown:{n}" for n in names])) if v is not None}
 
-    def role_spec(self, role: str) -> tuple[str, str, str]:
-        return agents.parse_spec(self.cfg.role_defaults.get(role, ""))
+    def role_spec(self, role: str, key: str = "") -> tuple[str, str, str]:
+        return agents.parse_spec(self.cfg.project(key).role(role))
 
     def ticket_spec(self, key: str) -> tuple[str, str]:
         """(AI, model) from the Jira field AI Model, written `<AI>:<Model>`; ('', '') when empty or not understood."""
@@ -117,7 +124,7 @@ class Supervisor:
         return (agent, model) if agent in agents.NAMES and model else ("", "")
 
     def model_for(self, role: str, agent: str, key: str = "") -> tuple[str, str]:
-        name, model, effort = self.role_spec(role)
+        name, model, effort = self.role_spec(role, key)
         chosen = self.state(key, "devmodel") if key and role == "developer" else ""
         if chosen:
             chosen_agent, _, chosen_model = chosen.partition(":")
@@ -132,7 +139,7 @@ class Supervisor:
         cool = self.cooldowns(pool)
         # AIs in explicit_only (OpenCode, for very easy tasks) work only when the ticket's Agent field names them as developer.
         present = [a for a in pool if a not in cool and (a not in self.cfg.explicit_only or (role == "developer" and a == field_agent))]
-        preferred = self.role_spec(role)[0]
+        preferred = self.role_spec(role, key)[0]
         if role == "developer":
             if field_agent in present:
                 return [field_agent]  # type: ignore[list-item]
@@ -267,8 +274,9 @@ class Supervisor:
         """Returns True when something was done (so the loop does not sleep), False when the ticket only waits."""
         key = issue["key"]
         description = view.get("description", "")
-        repo = Repo(self.cfg.root, ticket_field(description, "Repo", self.cfg.default_repo))
-        base = ticket_field(description, "Base", self.cfg.default_base)
+        project = self.cfg.project(key)
+        repo = Repo(self.cfg.root, ticket_field(description, "Repo", project.repo), project.company)
+        base = ticket_field(description, "Base", project.base)
         if role in ("developer", "reviewer"):
             log(f"{key} [{issue['status']}] {role} -> {agent}")
         if not repo.exists():
@@ -682,12 +690,13 @@ class Supervisor:
     def gate_facts(self, key: str, repo: Repo, gh: GitHub, base: str, branch: str, pr: dict[str, Any]) -> dict[str, Any]:
         ci, failing = github.checks_state(pr.get("statusCheckRollup"))
         info: dict[str, Any] = dict(state=pr["state"], ci=ci, failing=failing, behind=False, conflicting=False, feedback=[], stuck=[])
-        required = repo_listed(self.cfg.ci_required_repos, repo.name)
+        project = self.cfg.project(key)
+        required = project.ci_required
         entry = int(self.state(key, "gateentry", str(int(time.time()))))
         pushed = int(self.state(key, "pushed", "0"))
         info.update(ci_required=required, ci_wait_minutes=self.cfg.ci_wait_minutes, ci_waited_minutes=(time.time() - max(entry, pushed)) / 60,
                     settled=time.time() - pushed >= self.cfg.feedback_settle_minutes * 60,
-                    qa_ok=self.state(key, "qa") == pr["headRefOid"], auto_merge=repo_listed(self.cfg.auto_merge_repos, repo.name))
+                    qa_ok=self.state(key, "qa") == pr["headRefOid"], auto_merge=project.auto_merge)
         if pr["state"] != "OPEN":
             return info
         info["behind"] = repo.behind(base, branch)
@@ -703,8 +712,10 @@ class Supervisor:
             value = self.jira.read_field(key, self.cfg.require_human_field)
         except JiraError as error:
             log(f"{key}: cannot read Require human: {error}")
-            return False
-        return bool(value) and value.get("value") == "Yes"
+            return self.cfg.project(key).require_human
+        if value:
+            return value.get("value") == "Yes"
+        return self.cfg.project(key).require_human  # the field is empty: the project decides
 
     def take_slot(self, key: str, repo: Repo) -> bool:
         """One pull request per repository is in QA/merge at a time, so a merge never makes the next QA stale twice."""
@@ -786,14 +797,14 @@ class Supervisor:
             if (not approved and fresh["headRefOid"] != self.state(key, "qa")) or repo.behind(base, pr["headRefName"]):
                 self.redis.delete(f"qa:{key}")  # something moved since QA: start over
                 return True
-            gh.merge(pr["number"], fresh["headRefOid"], self.cfg.merge_method)
+            gh.merge(pr["number"], fresh["headRefOid"], self.cfg.project(key).merge_method)
         except (GitHubError, GitError) as error:
             count = self.redis.incr(f"mergefail:{key}", DAY)
             self.jira.comment(key, f"AI Flow: merging {pr['url']} failed ({count}/3): {str(error)[:400]}")
             if count >= 3:
                 self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.", kind="Other")
             return count >= 3
-        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.merge_method}) after CI, feedback and {'the human approval' if approved else 'QA'}.")
+        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.project(key).merge_method}) after CI, feedback and {'the human approval' if approved else 'QA'}.")
         return True
 
     # ---- Require human: Human review -> Ready to merge ------------------------------------------------------
@@ -912,27 +923,24 @@ def option(args: list[str], name: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .config import ConfigError, all_profiles, check_profiles, load, profile_workers
+    from .config import ConfigError, load
     args = list(argv if argv is not None else sys.argv[1:])
     try:
-        if "list" in args:  # worker ids for the installer: <profile>-<n>
-            profiles = all_profiles()
-            check_profiles(profiles)
-            for name, values in profiles.items():
-                for n in range(1, profile_workers(values) + 1):
-                    print(f"{name}-{n}")
+        config = load(worker_id=option(args, "--id"))
+        if "list" in args:  # worker numbers of this machine for the installer
+            print("\n".join(str(n) for n in range(1, config.workers + 1)))
             return 0
-        if "check" in args:  # validate every profile file without starting anything
-            profiles = all_profiles()
-            check_profiles(profiles)
-            for name, values in profiles.items():
-                print(f"{name}: projects {values.get('AIFLOW_PROJECTS')} workers {values.get('AIFLOW_WORKERS', 1)}")
+        if "check" in args:  # the registry is loaded (and validated) above; show what was understood
+            print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
+            for project in config.registry.projects.values():
+                print(f"{project.jira_key}: repo {project.repo}, base {project.base}, hotfix {project.hotfix_base}, developer {project.developer or '-'}, "
+                      f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, auto-merge {project.auto_merge}, "
+                      f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}")
             return 0
-        config = option(args, "--config")
-        cfg = load(worker_id=option(args, "--id"), config=Path(config) if config else None)
     except ConfigError as error:
         print(f"CONFIG ERROR: {error}", file=sys.stderr)
         return 2
+    cfg = config
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     if "restart" in args:  # every worker leaves after its current step and systemd starts it again
         redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it

@@ -158,6 +158,45 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(make().eligible(self.issue(labels=["aiflow-hold"])))
 
 
+class ProjectSettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        (base / "aiflow").mkdir()
+        (base / "aiflow.toml").write_text("[defaults]\n")
+        (base / "aiflow" / "a.toml").write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\nmax_parallel = 1\nrequire_human = true\n')
+        (base / "aiflow" / "b.toml").write_text('[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmerge_method = "squash"\n')
+        self.cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test"}, config_dir=base)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def sup(self, redis=None):
+        jira = FakeJira()
+        jira.read_field = lambda key, field: None
+        return Supervisor(self.cfg, jira, redis or FakeRedis())
+
+    def issue(self, key):
+        return {"key": key, "status": "To Do", "updated": stamp(1000), "labels": []}
+
+    def test_max_parallel_limits_the_tickets_of_one_project(self):
+        redis = FakeRedis()
+        sup = self.sup(redis)
+        self.assertTrue(sup.eligible(self.issue("JAIF-9")))
+        redis.acquire("lease:JAIF-1", "other", 60)
+        self.assertFalse(sup.eligible(self.issue("JAIF-9")))
+        self.assertTrue(sup.eligible(self.issue("JOOCX-9")))  # another project, no limit
+
+    def test_empty_require_human_field_uses_the_project_default(self):
+        sup = self.sup()
+        self.assertTrue(sup.human_required("JAIF-9"))
+        self.assertFalse(sup.human_required("JOOCX-9"))
+
+    def test_each_project_has_its_repo_and_merge_method(self):
+        self.assertEqual((self.cfg.project("JAIF-9").repo, self.cfg.project("JOOCX-9").repo), ("ai-flow", "crawlerx"))
+        self.assertEqual((self.cfg.project("JAIF-9").merge_method, self.cfg.project("JOOCX-9").merge_method), ("merge", "squash"))
+
+
 class GateEligibilityTests(unittest.TestCase):
     def test_in_qa_waits_between_polls(self):
         sup = make()

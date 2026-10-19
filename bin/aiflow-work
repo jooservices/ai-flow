@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # AI Flow worker (what systemd keeps alive, like `queue:work`):
-#   bin/aiflow-work --id B-2        profile B, worker 2  (reads JOOservices/config/aiflow/B.env)
-#   bin/aiflow-work --config FILE   one profile file
-#   bin/aiflow-work check           validate all profiles (a Jira project in two profiles is refused)
+#   bin/aiflow-work --id 2          worker 2 of this machine (settings: JOOservices/config/aiflow.toml and config/aiflow/*.toml)
+#   bin/aiflow-work list            worker numbers of this machine
+#   bin/aiflow-work check           validate the configuration and show what was understood
 #   bin/aiflow-work restart         every worker leaves after its current step and systemd starts it again
 set -Eeuo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"

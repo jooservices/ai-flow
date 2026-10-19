@@ -14,6 +14,52 @@ class JiraError(RuntimeError):
     pass
 
 
+def adf_inline(node: dict[str, Any]) -> str:
+    kind = node.get("type")
+    if kind == "text":
+        return str(node.get("text", ""))
+    if kind == "hardBreak":
+        return "\n"
+    if kind in ("mention", "emoji", "status", "inlineCard"):
+        attrs = node.get("attrs", {})
+        return str(attrs.get("text") or attrs.get("url") or attrs.get("shortName") or "")
+    return "".join(adf_inline(c) for c in node.get("content", []))
+
+
+def adf_to_markdown(node: dict[str, Any], depth: int = 0) -> str:
+    """Atlassian Document Format -> markdown, keeping headings, lists, task lists, code and tables readable."""
+    kind = node.get("type")
+    children = node.get("content", [])
+    if kind == "doc":
+        return "\n\n".join(part for part in (adf_to_markdown(c) for c in children) if part).strip()
+    if kind == "heading":
+        return "#" * int(node.get("attrs", {}).get("level", 2)) + " " + adf_inline(node).strip()
+    if kind == "paragraph":
+        return adf_inline(node).strip()
+    if kind == "codeBlock":
+        return "```\n" + adf_inline(node) + "\n```"
+    if kind == "rule":
+        return "---"
+    if kind in ("bulletList", "orderedList", "taskList"):
+        lines = []
+        for number, item in enumerate(children, 1):
+            mark = f"{number}." if kind == "orderedList" else "-"
+            if kind == "taskList":
+                mark += " [x]" if item.get("attrs", {}).get("state") == "DONE" else " [ ]"
+            parts = [adf_to_markdown(c, depth + 1) for c in item.get("content", [])]
+            if kind == "taskList" and item.get("type") == "taskItem":
+                parts = [adf_inline(item).strip()]
+            first, *rest = "\n".join(p for p in parts if p).split("\n") or [""]
+            lines.append("  " * depth + f"{mark} {first}")
+            lines += [line if line.startswith(" ") else "  " * (depth + 1) + line for line in rest]  # nested lists carry their own indent
+        return "\n".join(lines)
+    if kind == "blockquote":
+        return "\n".join("> " + line for line in "\n\n".join(adf_to_markdown(c) for c in children).splitlines())
+    if kind == "table":
+        return "\n".join("| " + " | ".join(adf_inline(cell).strip() for cell in row.get("content", [])) + " |" for row in children)
+    return "\n\n".join(part for part in (adf_to_markdown(c, depth) for c in children) if part) or adf_inline(node)
+
+
 class Jira:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -39,8 +85,15 @@ class Jira:
     def search(self, jql: str, limit: int = 50) -> list[dict[str, Any]]:
         return json.loads(self._run("search", "--jql", jql, "--limit", str(limit)))["issues"]
 
-    def view(self, key: str) -> dict[str, Any]:
-        return json.loads(self._run("view", key))
+    def view(self, key: str, full: bool = False) -> dict[str, Any]:
+        """The issue as scripts/jira prints it; `full` replaces its flattened description by markdown with the headings kept."""
+        data = json.loads(self._run("view", key))
+        if full:
+            status, body = self._library().call("GET", f"/rest/api/3/issue/{key}?fields=description")
+            document = body["fields"].get("description") if status == 200 else None
+            if isinstance(document, dict):
+                data["description"] = adf_to_markdown(document)
+        return data
 
     def comments(self, key: str, last: int = 6) -> list[dict[str, Any]]:
         data = json.loads(self._run("comments", "--last", str(last), key))

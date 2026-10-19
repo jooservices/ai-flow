@@ -12,6 +12,7 @@ auto_merge = true         # false: the PR gate stops after QA and waits for the 
 ci_required = false       # true: a PR without CI checks is not merged
 merge_method = "merge"    # merge | squash | rebase
 max_parallel = 0          # tickets of one Jira project running at the same time, 0 = no limit
+highest_developer = "Claude"  # developer of the tickets with priority Highest
 
 # Number of workers (aiflow-work@1 ... @N) per machine; the name is AIFLOW_MACHINE.
 [machines.wsl]

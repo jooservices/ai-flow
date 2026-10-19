@@ -8,6 +8,7 @@ developer = "Codex:gpt-6-luna:xhigh"
 reviewer = "Grok"
 qa = "Claude:sonnet"
 require_human = false     # true: every ticket stops in Human review before the merge
+human_on_deployment = true # false: skip automatic Human review for a Deployment section
 auto_merge = true         # false: the PR gate stops after QA and waits for the owner
 ci_required = false       # true: a PR without CI checks is not merged
 merge_method = "merge"    # merge | squash | rebase

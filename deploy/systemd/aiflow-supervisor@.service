@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Flow supervisor slot %i
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Workspaces/JOOservices/projects/ai-flow
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AIFLOW_SLOT=%i
+ExecStart=%h/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-supervisor
+Restart=always
+RestartSec=15
+# On stop the AI process groups are killed with the unit; the lease then expires and another AI continues.
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

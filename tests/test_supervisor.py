@@ -41,6 +41,13 @@ class FakeRedis:
 class FakeJira:
     def __init__(self, blockers=None):
         self._blockers = blockers or []
+        self.comments = []
+
+    def comment(self, key, body):
+        self.comments.append((key, body))
+
+    def search(self, jql, limit=50):
+        return []
 
     def blockers(self, key):
         return self._blockers
@@ -120,6 +127,28 @@ class EligibilityTests(unittest.TestCase):
 
     def test_hold_label(self):
         self.assertFalse(make().eligible(self.issue(labels=["aiflow-hold"])))
+
+
+class WaitingNoteTests(unittest.TestCase):
+    def test_note_is_written_once_after_the_wait(self):
+        sup = make()
+        sup.note_waiting("JAIF-9", "reviewer")
+        self.assertEqual(sup.jira.comments, [])
+        sup.redis.data["waiting:JAIF-9:reviewer"] = "1"  # waiting since 1970
+        sup.note_waiting("JAIF-9", "reviewer")
+        sup.note_waiting("JAIF-9", "reviewer")
+        self.assertEqual(len(sup.jira.comments), 1)
+
+
+class HealthTests(unittest.TestCase):
+    def test_missing_heartbeat_is_a_problem(self):
+        import time
+        from aiflow import health
+        sup = make()
+        cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_EXPECTED_SLOTS": "wsl:1,wsl:2"})
+        sup.redis.data["hb:wsl:1"] = str(int(time.time()))
+        kinds = [kind for kind, _ in health.problems(cfg, sup.redis, sup.jira)]
+        self.assertEqual(kinds, ["slot-wsl:2"])
 
 
 class LeaseRaceTests(unittest.TestCase):

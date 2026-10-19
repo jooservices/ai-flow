@@ -1,0 +1,9 @@
+[Unit]
+Description=AI Flow health check
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Workspaces/JOOservices/projects/ai-flow
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-health
+SuccessExitStatus=0 1

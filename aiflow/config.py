@@ -48,6 +48,11 @@ class Settings:
     default_repo: str
     default_base: str
     agent_order: tuple[str, ...]
+    direct_merge_repos: tuple[str, ...]
+    wait_note_minutes: int
+    expected_slots: tuple[str, ...]
+    health_ticket: str
+    heartbeat_stale_seconds: int
 
     @property
     def owner(self) -> str:
@@ -78,4 +83,9 @@ def load(env: dict[str, str] | None = None) -> Settings:
         default_repo=merged.get("AIFLOW_DEFAULT_REPO", "ai-flow"),
         default_base=merged.get("AIFLOW_DEFAULT_BASE", "develop"),
         agent_order=tuple(a.strip() for a in merged.get("AIFLOW_AGENT_ORDER", "Claude,Codex,OpenCode").split(",") if a.strip()),
+        direct_merge_repos=tuple(r.strip() for r in merged.get("AIFLOW_DIRECT_MERGE_REPOS", "ai-flow").split(",") if r.strip()),
+        wait_note_minutes=_int(merged, "AIFLOW_WAIT_NOTE_MINUTES", 20),
+        expected_slots=tuple(r.strip() for r in merged.get("AIFLOW_EXPECTED_SLOTS", "wsl:1,wsl:2").split(",") if r.strip()),
+        health_ticket=merged.get("AIFLOW_HEALTH_TICKET", ""),
+        heartbeat_stale_seconds=_int(merged, "AIFLOW_HEARTBEAT_STALE_SECONDS", 300),
     )

@@ -48,10 +48,42 @@ class Repo:
                 return Path(fields["worktree"]), branch
         return None
 
+    def refresh_base(self, base: str) -> None:
+        """Bring the local base branch up to date with origin (fast-forward only)."""
+        if not self.has_remote():
+            return
+        git(self.path, "fetch", "origin", base)
+        remote = f"origin/{base}"
+        if git(self.path, "rev-parse", base) == git(self.path, "rev-parse", remote):
+            return
+        ancestor = subprocess.run(["git", "-C", str(self.path), "merge-base", "--is-ancestor", base, remote]).returncode == 0
+        if not ancestor:
+            return  # local base has commits origin lacks; the merge step pushes them
+        current = git(self.path, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+        if current == base and not git(self.path, "status", "--porcelain"):
+            git(self.path, "merge", "--ff-only", remote)
+        else:
+            git(self.path, "update-ref", f"refs/heads/{base}", git(self.path, "rev-parse", remote))
+
+    def remote_branch(self, key: str) -> str | None:
+        """Name of the ticket branch already pushed to origin (work started on another machine)."""
+        if not self.has_remote():
+            return None
+        out = git(self.path, "ls-remote", "--heads", "origin", f"{key}-*", check=False)
+        names = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
+        return names[0] if names else None
+
     def ensure_worktree(self, key: str, summary: str, base: str) -> tuple[Path, str]:
         found = self.find_worktree(key)
         if found:
             return found
+        self.refresh_base(base)
+        pushed = self.remote_branch(key)
+        if pushed:
+            git(self.path, "fetch", "origin", pushed)
+            info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
+                                "--ticket", key, "--description", pushed.removeprefix(f"{key}-"), "--base", f"origin/{pushed}")
+            return Path(info["path"]), info["branch"]
         info = self._helper("create", "--repo", f"{self.company}/projects/{self.name}", "--company", self.company,
                             "--ticket", key, "--description", slug(summary), "--base", base)
         return Path(info["path"]), info["branch"]
@@ -67,6 +99,7 @@ class Repo:
 
     def merge(self, key: str, branch: str, base: str) -> str:
         """Merge `branch` into `base` (no-ff) in a throw-away worktree; never checks out in the main checkout."""
+        self.refresh_base(base)
         tmp = self.root / ".tmp" / f"aiflow-merge-{key}"
         git(self.path, "worktree", "add", "--detach", str(tmp), base)
         try:
@@ -92,3 +125,15 @@ class Repo:
         found = self.find_worktree(key)
         if found:
             self._helper("remove", "--path", str(found[0]), "--delete-branch")
+        pushed = self.remote_branch(key)
+        if pushed:
+            git(self.path, "push", "origin", "--delete", pushed, check=False)
+
+    def open_pr(self, key: str, branch: str, base: str, title: str, body: str) -> str:
+        """Push the ticket branch and open a pull request with gh; returns the PR URL."""
+        git(self.path, "push", "-u", "origin", branch)
+        result = subprocess.run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", f"{key}: {title}", "--body", body],
+                                capture_output=True, text=True, cwd=self.path)
+        if result.returncode != 0:
+            raise GitError((result.stdout + result.stderr).strip()[:400])
+        return result.stdout.strip().splitlines()[-1]

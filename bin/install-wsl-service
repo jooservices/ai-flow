@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Install the AI Flow supervisor slots and the health timer as systemd user services (WSL).
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SLOTS="${*:-1 2}"
+UNITS="$HOME/.config/systemd/user"
+mkdir -p "$UNITS"
+cp "$DIR"/deploy/systemd/aiflow-* "$UNITS/"
+systemctl --user daemon-reload
+for slot in $SLOTS; do systemctl --user enable --now "aiflow-supervisor@$slot.service"; done
+systemctl --user enable --now aiflow-health.timer
+loginctl show-user "$USER" -p Linger
+systemctl --user list-units 'aiflow-*' --no-legend

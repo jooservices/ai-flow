@@ -75,6 +75,18 @@ class Supervisor:
         reviewer = self.redis.get(f"reviewer:{key}")
         return agents.choose_other(dev, present, avoid=(reviewer,) if reviewer else ())
 
+    def note_waiting(self, key: str, role: str) -> None:
+        """Say so on the ticket when it has waited too long because no suitable AI is available."""
+        name = f"waiting:{key}:{role}"
+        since = self.redis.get(name)
+        if since is None:
+            self.redis.set(name, str(int(time.time())), 7 * DAY)
+            return
+        if time.time() - int(since) > self.cfg.wait_note_minutes * 60 and not self.redis.get(f"waitnote:{key}:{role}"):
+            self.redis.set(f"waitnote:{key}:{role}", "1", 2 * 3600)
+            self.jira.comment(key, f"AI Flow: waiting more than {self.cfg.wait_note_minutes} min for an AI to run the {role} step "
+                                   f"(the {role} must differ from the developer, and the other AIs are cooling down or not installed on this machine).")
+
     # ---- main loop -------------------------------------------------------------------------------------------
     def tick(self) -> bool:
         for issue in self.candidates():
@@ -85,6 +97,7 @@ class Supervisor:
                 role = STAGES[issue["status"]]
                 agent = self.pick_agent(role, issue["key"], view.get("agent"))
                 if agent is None:
+                    self.note_waiting(issue["key"], role)
                     continue
                 if not self.redis.acquire(f"lease:{issue['key']}", self.cfg.owner, self.cfg.lease_seconds):
                     continue
@@ -159,10 +172,22 @@ class Supervisor:
         log_dir = self.cfg.root / ".tmp" / "aiflow" / "logs"
         log_file, result_file = log_dir / f"{key}-{role}-{stamp}.log", log_dir / f"{key}-{role}-{stamp}.result"
         argv, stdin_text = agents.build_command(agent, workdir, result_file, prompt, self.cfg.root)
+        pushed_at = [time.monotonic()]
+
+        def beat() -> bool:
+            if role == "developer" and time.monotonic() - pushed_at[0] > 120:
+                pushed_at[0] = time.monotonic()
+                try:  # keep the branch on origin so another machine can continue after a crash
+                    repo.push(workdir, branch)
+                except GitError:
+                    pass
+            self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.slot}", str(int(time.time())), 300)
+            return self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds)
+
         code, why = runner.run(
             argv, stdin_text, workdir, log_file, agents.child_env(),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
-            heartbeat=lambda: self.redis.renew(f"lease:{key}", self.cfg.owner, self.cfg.lease_seconds))
+            heartbeat=beat)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
         quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text)
@@ -191,11 +216,16 @@ class Supervisor:
             return
         if view.get("agent") != agent:
             self.jira.set_agent(key, agent)
+        previous = self.redis.get(f"dev:{key}")
         self.redis.set(f"dev:{key}", agent, 30 * DAY)
         self.redis.set(f"home:{key}", self.cfg.machine, 30 * DAY)
         workdir, branch = repo.ensure_worktree(key, view.get("summary", key), base)
+        takeover = ""
+        if issue["status"] == "In Progress" and previous:
+            reason = "hit its usage limit" if self.cooling(previous) else "stopped (died, lost its lease or showed no activity)"
+            takeover = f" Taking over from {previous}, which {reason}; continuing from the branch and the comments above."
         self.jira.comment(key, f"AI: {agent} on {self.cfg.machine}   Branch: {branch}   Worktree: {workdir}\n"
-                               f"Now: starting developer run (resumes from existing commits if any).")
+                               f"Now: starting developer run (resumes from existing commits if any).{takeover}")
         why, text, found, quota = self.execute("developer", agent, key, view, workdir, branch, base, repo)
         if why == "lost-lease":
             return
@@ -216,11 +246,14 @@ class Supervisor:
         if self.attempts(key, role) >= self.cfg.max_attempts:
             self.block(key, f"Too many failed {role} attempts.")
             return
-        found_tree = repo.find_worktree(key)
-        if not found_tree:
-            self.block(key, "No worktree for the ticket branch; developer output is missing.")
+        try:
+            workdir, branch = repo.ensure_worktree(key, view.get("summary", key), base)
+        except GitError as error:
+            self.block(key, f"Cannot get the ticket branch on {self.cfg.machine}: {error}")
             return
-        workdir, branch = found_tree
+        if repo.ahead(workdir, base) == 0:
+            self.block(key, "The ticket branch has no commits ahead of the base; developer output is missing.")
+            return
         if role == "reviewer":
             self.redis.set(f"reviewer:{key}", agent, 30 * DAY)
         self.jira.comment(key, f"AI Flow: {role} {agent} on {self.cfg.machine} started (developer was {self.redis.get(f'dev:{key}') or '?'}).")
@@ -247,6 +280,17 @@ class Supervisor:
         if role == "reviewer":
             self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED. Sending to QA.\n\n{text[-800:]}")
             self.jira.transition(key, "In QA")
+            return
+        if repo.name not in self.cfg.direct_merge_repos:
+            try:
+                url = repo.open_pr(key, branch, base, view.get("summary", key), f"Opened by AI Flow after QA PASS by {agent}. Ticket {key}.")
+            except GitError as error:
+                self.jira.comment(key, f"AI Flow: QA {agent} passed but opening the pull request failed: {error}")
+                self.jira.transition(key, fail_transition)
+                return
+            self.jira.comment(key, f"AI Flow: QA {agent} PASSED. {repo.name} is merged through pull requests, so the PR was opened: {url}. "
+                                   f"Waiting for the owner to merge it.")
+            self.jira.transition(key, "Blocked")
             return
         try:
             merged = repo.merge(key, branch, base)

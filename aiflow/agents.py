@@ -30,11 +30,22 @@ def available(order: tuple[str, ...]) -> list[str]:
     return [name for name in order if name in binaries and shutil.which(binaries[name], path=path)]
 
 
+SAFE_BASH = ("git", "python3", "ls", "cat", "grep", "find", "sed", "head", "tail", "wc", "od", "diff", "mkdir", "touch", "cp", "mv", "rm",
+             "sleep", "echo", "printf", "test", "cd", "pwd", "date", "sort", "uniq", "tr", "cut", "basename", "dirname", "xargs", "tee")
+
+
+def claude_allowed(root: Path) -> str:
+    """Claude may edit files, search, and run a fixed set of commands plus the Jira adapter and the shared runtimes."""
+    bash = [f"Bash({name}:*)" for name in SAFE_BASH]
+    bash += [f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
+    return ",".join(["Read", "Edit", "Write", "Glob", "Grep", *bash])
+
+
 def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, root: Path) -> tuple[list[str], str | None]:
     """Return (argv, stdin_text). The AI works only inside `workdir`; scripts/jira lives under `root`."""
     if agent == "Claude":
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-                "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep",
+                "--allowedTools", claude_allowed(root),
                 "--disallowedTools", ",".join(DENIED_BASH),
                 "--add-dir", str(root / ".tmp")]
         return argv, prompt

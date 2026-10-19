@@ -11,7 +11,7 @@ from aiflow.config import load
 from aiflow.jira import Jira, JiraError, adf_to_markdown
 from aiflow.gitops import GitError
 from aiflow import health
-from aiflow.supervisor import branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
+from aiflow.supervisor import tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
 
 class FakeRedis:
@@ -610,7 +610,15 @@ class DrillD1FindingsTests(unittest.TestCase):
         prompts = Path(__file__).resolve().parents[1] / "prompts"
         self.assertIn("English only", (prompts / "common.md").read_text())
         for name in ("reviewer", "qa"):
-            self.assertIn("posted on the pull request as it is", (prompts / f"{name}.md").read_text())
+            self.assertIn("posts your last message on the pull request (do NOT post it yourself)", (prompts / f"{name}.md").read_text())
+        self.assertIn("Never write to GitHub", (prompts / "common.md").read_text())
+        self.assertIn("behind the base", (prompts / "reviewer.md").read_text())
+
+    def test_a_quote_starts_at_a_line_boundary(self):
+        text = "first line is long\nsecond line\nthird line"
+        self.assertEqual(tail(text, 100), text)
+        self.assertEqual(tail(text, 25), "second line\nthird line")
+        self.assertEqual(tail("x" * 50, 10), "x" * 10)  # one long line is cut anyway
 
 
 class OperationsTests(unittest.TestCase):

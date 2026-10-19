@@ -402,6 +402,14 @@ class SendBackTests(unittest.TestCase):
             sup.send_back("JAIF-9", FakeRepo(), "again", "x", [])
         self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
 
+    def test_blocking_resets_the_counters_so_an_unblock_starts_fresh(self):
+        sup = make()
+        sup.redis.data.update({"attempts:K-1:developer": "3", "attempts:K-1:qa": "2", "cycles:K-1": "7", "dev:K-1": "Codex"})
+        sup.block("K-1", "needs the owner", kind="Attempts")
+        for name in ("attempts:K-1:developer", "attempts:K-1:qa", "cycles:K-1"):
+            self.assertNotIn(name, sup.redis.data)
+        self.assertIn("dev:K-1", sup.redis.data)  # who developed it is still known
+
     def test_review_items_are_remembered_as_sent(self):
         sup = make()
         review = {"id": "review:R1", "kind": "review", "bot": False, "who": "jooservices", "where": "review", "text": "no"}

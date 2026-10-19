@@ -10,6 +10,7 @@ from aiflow import agents, github
 from aiflow.config import load
 from aiflow.jira import JiraError, adf_to_markdown
 from aiflow.gitops import GitError
+from aiflow import health
 from aiflow.supervisor import Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
 
 
@@ -479,6 +480,73 @@ class ContainerTests(unittest.TestCase):
         sup = self.sup(tickets)
         sup.sweep_containers()
         self.assertEqual(sup.jira.moves, [])
+
+
+class OperationsTests(unittest.TestCase):
+    def test_probe_classification(self):
+        self.assertEqual(agents.probe_state(0, "OK", False), "ok")
+        self.assertEqual(agents.probe_state(1, "Error: not signed in\n", True), "down: Error: not signed in")
+        self.assertEqual(agents.probe_state(None, "", False), "unknown")  # a timeout leaves the AI in the pool
+        self.assertEqual(agents.probe_state(1, "segfault", False), "unknown")
+
+    def test_an_ai_that_failed_its_probe_leaves_the_pool(self):
+        sup = make()
+        with mock.patch.object(agents, "available", return_value=["Claude", "Codex", "Grok"]):
+            self.assertEqual(sup.usable_ais(), ["Claude", "Codex", "Grok"])
+            sup.redis.data["probe:test:Grok"] = "down: not signed in"
+            sup.redis.data["probe:test:Codex"] = "unknown"
+            self.assertEqual(sup.usable_ais(), ["Claude", "Codex"])
+            sup.publish_ais()
+        self.assertEqual(sup.redis.data["ais:test"], "Claude,Codex")
+
+    def test_probe_runs_once_per_period_and_remembers_the_answer(self):
+        sup = make()
+        calls = []
+        with mock.patch.object(agents, "available", return_value=["Claude", "Grok"]), \
+             mock.patch.object(agents, "probe", side_effect=lambda agent, root: calls.append(agent) or ("ok" if agent == "Claude" else "down: signed out")):
+            sup.probe_ais()
+            sup.redis.delete("probing:test")
+            sup.probe_ais()
+        self.assertEqual(calls, ["Claude", "Grok"])  # the second round found both answers cached
+        self.assertEqual(sup.redis.data["probe:test:Grok"], "down: signed out")
+
+    def test_pause_stops_pickup_and_resume_restores_it(self):
+        sup = make()
+        sup.redis.data["paused"] = "1"
+        with mock.patch.object(sup, "candidates", side_effect=AssertionError("must not look for work")):
+            self.assertFalse(sup.tick())
+        sup.redis.delete("paused")
+        self.assertFalse(sup.paused())
+
+    def test_usage_is_logged_and_summarised(self):
+        sup = make()
+        sup.log_usage("K-1", "developer", "Codex", 12.4, "ok", 0)
+        sup.log_usage("K-2", "reviewer", "Grok", 3.0, "exit", 1)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        summary = health.usage_summary(sup.redis, day)
+        self.assertIn("Codex developer: 1 run(s), 12 min, 0 not clean", summary)
+        self.assertIn("Grok reviewer: 1 run(s), 3 min, 1 not clean", summary)
+        self.assertIsNone(health.usage_summary(sup.redis, "2000-01-01"))
+
+    def test_versions_are_published_once_and_drift_is_reported(self):
+        sup = make()
+        with mock.patch.object(agents, "tool_versions", return_value={"codex": "0.163.0", "git": "2.50"}) as versions:
+            sup.publish_versions()
+            sup.publish_versions()
+        self.assertEqual(versions.call_count, 1)
+        self.assertEqual(health.version_drift(sup.redis), [])  # one machine cannot drift
+        sup.redis.data["versions:mac"] = json.dumps({"codex": "0.160.0", "git": "2.50"})
+        found = health.version_drift(sup.redis)
+        self.assertEqual([name for name, _ in found], ["drift-codex"])
+
+    def test_health_reports_pause_and_an_ai_that_is_down(self):
+        sup = make()
+        cfg = sup.cfg.__class__(**{**sup.cfg.__dict__, "expected_slots": ()})
+        sup.redis.data["paused"] = "1"
+        sup.redis.data["probe:wsl:Grok"] = "down: not signed in"
+        kinds = [name for name, _ in health.problems(cfg, sup.redis, sup.jira)]
+        self.assertIn("paused", kinds)
+        self.assertIn("ai-wsl-Grok", kinds)
 
 
 class PullRequestGateV2Tests(unittest.TestCase):

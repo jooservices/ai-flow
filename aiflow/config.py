@@ -90,6 +90,7 @@ class Settings:
     require_human_field: str
     model_field: str
     type_field: str
+    probe_hours: int
     opencode_model: str
     explicit_only: tuple[str, ...]
     quota_block_minutes: int
@@ -198,6 +199,7 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         require_human_field=merged.get("AIFLOW_REQUIRE_HUMAN_FIELD", "customfield_10216"),
         model_field=merged.get("AIFLOW_MODEL_FIELD", "customfield_10217"),
         type_field=merged.get("AIFLOW_TYPE_FIELD", "customfield_10218"),
+        probe_hours=_int(merged, "AIFLOW_PROBE_HOURS", 3),
         opencode_model=merged.get("AIFLOW_OPENCODE_MODEL", "opencode/deepseek-v4.1-flash-free"),
         explicit_only=_list(merged, "AIFLOW_EXPLICIT_ONLY_AIS", "OpenCode"),
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),

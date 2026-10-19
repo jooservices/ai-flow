@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 from pathlib import Path
 
 NAMES = ("Claude", "Codex", "Grok", "OpenCode")
@@ -113,6 +115,50 @@ def final_text(agent: str, log_file: Path, result_file: Path) -> str:
             if event.get("type") == "result":
                 return str(event.get("result", ""))
     return ANSI.sub("", text)[-8000:]
+
+
+def probe_state(code: int | None, text: str, quota: bool) -> str:
+    """Outcome of the one-word probe: `ok`, `down: <why>` (cannot work: signed out, balance, limit) or `unknown`."""
+    if code == 0 and "ok" in text.lower():
+        return "ok"
+    if quota:
+        return "down: " + (ANSI.sub("", text).strip().splitlines() or ["no answer"])[-1][:120]
+    return "unknown"
+
+
+def probe(agent: str, root: Path, timeout: int = 60) -> str:
+    """Ask the AI for one word. Only a clear sign-in, balance or limit error counts as down; a timeout or any other
+    failure is `unknown` and leaves the AI in the pool."""
+    workdir = root / ".tmp" / "aiflow" / "probe"
+    workdir.mkdir(parents=True, exist_ok=True)
+    result, log_file = workdir / f"{agent}.out", workdir / f"{agent}.log"
+    argv, stdin = build_command(agent, workdir, result, "Reply with the single word OK. Do nothing else.", root)
+    try:
+        with log_file.open("wb") as handle:
+            proc = subprocess.Popen(argv, cwd=workdir, env=run_env(agent, workdir, root), stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                    stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.communicate(stdin.encode() if stdin is not None else None, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                return "unknown"
+    except OSError as error:
+        return f"down: {error}"
+    text = final_text(agent, log_file, result)
+    return probe_state(proc.returncode, text, looks_like_quota(log_file, text, proc.returncode))
+
+
+def tool_versions() -> dict[str, str]:
+    """First line of `--version` for the tools the flow depends on."""
+    found = {}
+    for name in ("claude", "codex", "grok", "opencode", "gh", "node", "jq", "git"):
+        try:
+            out = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=15, env=child_env()).stdout.strip().splitlines()
+            found[name] = out[0][:60] if out else "?"
+        except (OSError, subprocess.TimeoutExpired):
+            found[name] = "missing"
+    return found
 
 
 def verdict(text: str) -> tuple[str, str] | None:

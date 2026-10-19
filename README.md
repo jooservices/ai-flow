@@ -75,6 +75,10 @@ bin/aiflow-supervisor             # loop
 python3 -m unittest discover -s tests -t .
 ```
 
+### Operations
+
+One page for the owner: [docs/RUNBOOK.md](docs/RUNBOOK.md). Every `AIFLOW_PROBE_HOURS` (3) each installed AI is asked for one word; one that is signed out or out of balance leaves the pool (and the health check says so). `bin/aiflow-work pause` / `resume` stop and restart the pickup of new work. Each AI run is logged in Redis (`usage:<day>:...`) and the health check posts yesterday's summary on the health ticket; each machine publishes its tool versions daily and the health check reports a difference between machines.
+
 ### What is worked, and in which order
 
 Only leaf tickets are worked: a ticket that has child issues (a Story with Tasks, a Task with Sub-tasks) is a container and the AI never develops it; Epics are never worked. When all children of a container are Done (Declined ones do not count) the supervisor moves the container to Done through the workflow and comments the list of children. The queue is ordered `rework` first, then Priority (Highest to Lowest), then creation time.

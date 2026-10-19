@@ -92,6 +92,10 @@ A ticket moved to To Do without AC, Scopes or Tests goes back to Backlog with a 
 
 The developer's last comment follows a fixed template: What's changed, Why changed, Blocked reason detail, Feature URL, Deployment, Study cases. A Deployment section that is not `None` sets Require human = Yes, so the owner sees the migration or deploy step before the merge.
 
+### Who may give feedback
+
+The repositories are public, so only accounts with write, maintain or admin permission on the repository count as human feedback (comments, change requests, review threads); bots (CodeRabbit, Copilot...) count as before. What anyone else writes never reaches a developer AI: it is left out of the prompt and logged once as `ignored feedback from accounts without write access`. The permission is asked of GitHub once per account and worker.
+
 ### Configuration and workers (like `queue:work`)
 
 Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):

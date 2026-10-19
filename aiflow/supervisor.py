@@ -785,6 +785,8 @@ class Supervisor:
         seen = set(json.loads(self.state(key, "seen", "[]")))
         found = gh.feedback(pr["number"], seen, self.cfg.ignored_authors)
         info["feedback"], info["stuck"] = found["items"], found["stuck"]
+        if found.get("untrusted") and self.redis.acquire(f"untrusted:{key}", self.cfg.owner, 6 * 3600):
+            log(f"{key}: ignored feedback from accounts without write access: {', '.join(found['untrusted'])}")
         info["require_human"] = self.human_required(key)
         return info
 

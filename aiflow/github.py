@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any
+from typing import Any, Callable
 
 from . import agents
 
@@ -81,25 +81,44 @@ def is_bot(author: dict[str, Any] | None) -> bool:
     return bool(author) and (author.get("__typename") == "Bot" or str(author.get("login", "")).endswith("[bot]"))
 
 
-def parse_feedback(pr: dict[str, Any], seen: set[str], ignore: tuple[str, ...] = ()) -> dict[str, Any]:
+def parse_feedback(pr: dict[str, Any], seen: set[str], ignore: tuple[str, ...] = (),
+                   trusted: Callable[[str], bool] | None = None) -> dict[str, Any]:
     """Split a pull request's GraphQL data into what must be answered.
 
     items: open review threads, new human comments (accounts in `ignore` are automation, e.g. codecov) and the latest
     'changes requested' review per author, as
-    {id, kind, bot, who, where, text}. `stuck` lists human reviews that still request changes after they were sent once."""
+    {id, kind, bot, who, where, text}. `stuck` lists human reviews that still request changes after they were sent once.
+    `trusted(login)` says whether a human account may give feedback (write access to the repository): the repositories
+    are public, so what a stranger writes must never reach a developer AI. Bots are accepted; strangers are listed
+    in `untrusted` and left out everywhere (threads, comments, reviews)."""
     items: list[dict[str, Any]] = []
     stuck: list[str] = []
+    untrusted: set[str] = set()
+
+    def allowed(author: dict[str, Any] | None) -> bool:
+        if trusted is None or is_bot(author):
+            return True
+        login = (author or {}).get("login", "")
+        if login and trusted(login):
+            return True
+        untrusted.add(login or "ghost")
+        return False
+
     for thread in pr["reviewThreads"]["nodes"]:
         if thread["isResolved"] or not thread["comments"]["nodes"]:
             continue
         first = thread["comments"]["nodes"][0]
+        if not allowed(first["author"]):
+            continue
         where = f"{thread.get('path') or '?'}:{thread.get('line') or '?'}"
-        text = "\n".join(f"{(c['author'] or {}).get('login', '?')}: {c['body']}" for c in thread["comments"]["nodes"])
+        text = "\n".join(f"{(c['author'] or {}).get('login', '?')}: {c['body']}" for c in thread["comments"]["nodes"] if allowed(c["author"]))
         items.append({"id": f"thread:{thread['id']}", "kind": "thread", "bot": is_bot(first["author"]),
                       "who": (first["author"] or {}).get("login", "?"), "where": where, "text": text[:3000]})
     for comment in pr["comments"]["nodes"]:
         author = comment["author"]
         if is_bot(author) or (author or {}).get("login", "").lower() in ignore or MARKER in comment["body"] or f"comment:{comment['id']}" in seen:
+            continue
+        if not allowed(author):
             continue
         items.append({"id": f"comment:{comment['id']}", "kind": "comment", "bot": False, "who": (author or {}).get("login", "?"),
                       "where": "conversation", "text": comment["body"][:3000]})
@@ -108,7 +127,7 @@ def parse_feedback(pr: dict[str, Any], seen: set[str], ignore: tuple[str, ...] =
         if review["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             latest[(review["author"] or {}).get("login", "?")] = review
     for who, review in latest.items():
-        if review["state"] != "CHANGES_REQUESTED":
+        if review["state"] != "CHANGES_REQUESTED" or not allowed(review["author"]):
             continue
         item_id = f"review:{review['id']}"
         if item_id not in seen:
@@ -116,13 +135,14 @@ def parse_feedback(pr: dict[str, Any], seen: set[str], ignore: tuple[str, ...] =
                           "where": "review", "text": (review["body"] or "(changes requested, no text)")[:3000]})
         elif not is_bot(review["author"]):
             stuck.append(who)
-    return {"items": items, "stuck": stuck}
+    return {"items": items, "stuck": stuck, "untrusted": sorted(untrusted)}
 
 
 class GitHub:
     def __init__(self, slug: str) -> None:
         self.slug = slug
         self.owner, self.name = slug.split("/", 1)
+        self._permissions: dict[str, bool] = {}
 
     def _gh(self, *args: str, timeout: int = 120) -> str:
         result = subprocess.run(["gh", *args], capture_output=True, text=True, env=agents.child_env(), timeout=timeout)
@@ -160,8 +180,20 @@ class GitHub:
         out = self._gh("api", "graphql", "-f", f"query={THREADS_QUERY}", "-F", f"owner={self.owner}", "-F", f"name={self.name}", "-F", f"number={number}")
         return json.loads(out)["data"]["repository"]["pullRequest"]
 
+    def can_write(self, login: str) -> bool:
+        """True when `login` has write, maintain or admin permission on the repository (asked once per account)."""
+        if login not in self._permissions:
+            try:
+                out = self._gh("api", f"repos/{self.slug}/collaborators/{login}/permission", "--jq", ".permission").strip()
+            except GitHubError as error:
+                if "404" not in str(error) and "Not Found" not in str(error):
+                    raise  # a network or rate-limit problem is not an answer: the gate tries again later
+                out = "none"
+            self._permissions[login] = out in ("admin", "maintain", "write")
+        return self._permissions[login]
+
     def feedback(self, number: int, seen: set[str], ignore: tuple[str, ...] = ()) -> dict[str, Any]:
-        return parse_feedback(self.raw_feedback(number), seen, ignore)
+        return parse_feedback(self.raw_feedback(number), seen, ignore, self.can_write)
 
     def reply(self, item_id: str, number: int, body: str) -> None:
         kind, _, ref = item_id.partition(":")

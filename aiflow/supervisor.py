@@ -699,7 +699,7 @@ class Supervisor:
             self.redis.set(marker, message, 30 * DAY)
             self.jira.comment(key, f"AI Flow: {message}.")
 
-    def update_branch(self, key: str, gh: GitHub, pr: dict[str, Any], base: str) -> bool:
+    def update_branch(self, key: str, gh: GitHub, pr: dict[str, Any], base: str, qa_again: bool = True) -> bool:
         try:
             gh.update_branch(pr["number"], pr["headRefOid"])
         except GitHubError as error:
@@ -707,7 +707,7 @@ class Supervisor:
             return False
         self.redis.delete(f"qa:{key}")
         self.redis.set(f"pushed:{key}", str(int(time.time())), 30 * DAY)
-        self.jira.comment(key, f"AI Flow: {base} moved, so {pr['url']} was updated with {base} (clean merge). CI and QA run again on the new head.")
+        self.jira.comment(key, f"AI Flow: {base} moved, so {pr['url']} was updated with {base} (clean merge). CI runs again on the new head{' and QA' if qa_again else ' (the human approved it, so QA is not repeated)'}.")
         return True
 
     def rework_from_gate(self, key: str, repo: Repo, gh: GitHub, pr: dict[str, Any], info: dict[str, Any], detail: str) -> None:
@@ -850,7 +850,7 @@ class Supervisor:
         elif action == "closed":
             self.declined(key, repo, pr)
         elif action == "update":
-            return self.update_branch(key, gh, pr, base)
+            return self.update_branch(key, gh, pr, base, qa_again=False)
         elif action == "rework":
             self.rework_from_gate(key, repo, gh, pr, info, detail)
         elif action == "block":

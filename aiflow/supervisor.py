@@ -48,6 +48,8 @@ def decide(info: dict[str, Any]) -> tuple[str, str]:
     if info["ci"] == "failed":
         return "rework", "CI failed"
     if info["ci"] == "pending":
+        if info["ci_waited_minutes"] >= info["ci_wait_minutes"]:
+            return "block", f"CI is still running after {int(info['ci_wait_minutes'])} minutes"
         return "wait", "CI is running"
     if info["ci"] == "none" and info["ci_required"]:
         return ("block", "no CI result appeared in time") if info["ci_waited_minutes"] >= info["ci_wait_minutes"] else ("wait", "waiting for CI to start")

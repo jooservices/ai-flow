@@ -96,8 +96,17 @@ class Jira:
         return data
 
     def comments(self, key: str, last: int = 6) -> list[dict[str, Any]]:
-        data = json.loads(self._run("comments", "--last", str(last), key))
-        return data.get("comments", data) if isinstance(data, dict) else data
+        """The last comments, oldest first, as {author, created, body}; bodies are markdown with headings and lists kept
+        (`scripts/jira comments` flattens them, which hides the template sections)."""
+        status, body = self._library().call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={last}")
+        if status != 200:
+            raise JiraError(f"comments HTTP {status}")
+        found = []
+        for item in reversed(body.get("comments", [])):
+            document = item.get("body")
+            text = adf_to_markdown(document) if isinstance(document, dict) else str(document or "")
+            found.append({"author": (item.get("author") or {}).get("displayName", "?"), "created": item.get("created", ""), "body": text})
+        return found
 
     def blockers(self, key: str) -> list[dict[str, str]]:
         """Issues that block `key` (link type Blocks, `key` on the "is blocked by" side)."""

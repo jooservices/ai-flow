@@ -7,6 +7,6 @@
    - correct scope (nothing extra), tests added and passing, security, repository conventions, Conventional Commits, no secrets, the Deployment section of the developer's comment is true.
    End with `Required fixes:` listing, for every `- [ ]` item, the file and the reason.
 
-Finish your last message with exactly one line:
+Your last message is posted on the pull request as it is: make it that same checklist (every `- [x]` / `- [ ]` item with its evidence and the `Required fixes:` list), in English, and end it with exactly one line:
 - `VERDICT: PASS` when the change is acceptable as is.
 - `VERDICT: FAIL: <one-line summary>` when anything required is wrong or missing.

@@ -6,9 +6,9 @@ from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aiflow import agents, github
+from aiflow import agents, github, runner
 from aiflow.config import load
-from aiflow.jira import JiraError, adf_to_markdown
+from aiflow.jira import Jira, JiraError, adf_to_markdown
 from aiflow.gitops import GitError
 from aiflow import health
 from aiflow.supervisor import branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field, ticket_of_branch
@@ -565,6 +565,52 @@ class HotfixAndReleaseTests(unittest.TestCase):
         with mock.patch.object(github.GitHub, "release", side_effect=github.GitHubError("422 tag exists")):
             sup.after_merge("K-1", sup.repo, "master")
         self.assertIn("follow-up", sup.jira.comments[0][1])
+
+
+class FakeAdf:
+    doc = {"type": "doc", "content": [
+        {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "What's changed"}]},
+        {"type": "paragraph", "content": [{"type": "text", "text": "a file"}]},
+        {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Deployment"}]},
+        {"type": "paragraph", "content": [{"type": "text", "text": "None"}]}]}
+
+
+class DrillD1FindingsTests(unittest.TestCase):
+    COMMENT = "## What's changed\n- `docs/DRILLS.md`: new file\n\n## Why changed\nRecords the drill.\n\n## Deployment\nRun migration 7.\n\n## Study cases\nNone"
+
+    def test_comments_keep_their_headings_and_come_oldest_first(self):
+        jira = Jira(Path(tempfile.gettempdir()))
+        jira._api = type("L", (), {"call": lambda self, method, path: (200, {"comments": [
+            {"author": {"displayName": "B"}, "created": "2", "body": {"type": "doc", "content": []}},
+            {"author": {"displayName": "A"}, "created": "1", "body": FakeAdf.doc}]})})()
+        found = jira.comments("K-1", 2)
+        self.assertEqual([c["created"] for c in found], ["1", "2"])
+        self.assertIn("## What's changed", found[0]["body"])
+        self.assertIn("## Deployment\n\nNone", found[0]["body"])
+
+    def test_pr_body_and_deployment_rule_read_the_template_comment(self):
+        sup = make()
+        sup.jira.comments = lambda key, last=6: [{"author": "AI", "created": "", "body": self.COMMENT}]
+        sup.redis.data["dev:K-1"] = "Codex"
+        repo = type("R", (), {"pr_template": lambda self, base: "## Summary\n\n## Test plan\n"})()
+        body = sup.pr_body("K-1", {"summary": "ticket title"}, repo, "develop", "Claude")
+        self.assertIn("`docs/DRILLS.md`: new file", body)
+        self.assertIn("Why: Records the drill.", body)
+        self.assertIn("## Deployment\nRun migration 7.", body)
+        self.assertNotIn("ticket title", body)
+        sup.jira.set_field = lambda key, field, value: setattr(sup, "set", (key, value))
+        sup.require_human_for_deployment("K-1")
+        self.assertEqual(sup.set, ("K-1", {"value": "Yes"}))
+
+    def test_head_without_git_is_empty_not_an_error(self):
+        with mock.patch.object(runner.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertEqual(runner.head(Path(tempfile.gettempdir())), "")
+
+    def test_prompts_ask_for_english_and_the_checklist_as_final_message(self):
+        prompts = Path(__file__).resolve().parents[1] / "prompts"
+        self.assertIn("English only", (prompts / "common.md").read_text())
+        for name in ("reviewer", "qa"):
+            self.assertIn("posted on the pull request as it is", (prompts / f"{name}.md").read_text())
 
 
 class OperationsTests(unittest.TestCase):

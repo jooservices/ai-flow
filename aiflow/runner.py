@@ -10,7 +10,11 @@ from pathlib import Path
 
 
 def head(workdir: Path) -> str:
-    result = subprocess.run(["git", "-C", str(workdir), "rev-parse", "HEAD"], capture_output=True, text=True)
+    """Current commit of the worktree; '' when git is not installed (the shared runtimes have none) or this is no repository."""
+    try:
+        result = subprocess.run(["git", "-C", str(workdir), "rev-parse", "HEAD"], capture_output=True, text=True)
+    except OSError:
+        return ""
     return result.stdout.strip()
 
 

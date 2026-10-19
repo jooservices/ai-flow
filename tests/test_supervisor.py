@@ -474,6 +474,14 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves, [("K-1", s) for s in ("In Review", "Review passed", "In QA", "Done")])
         self.assertIn("K-2", sup.jira.comments[0][1])
 
+    def test_a_blocked_container_is_unblocked_and_closed(self):
+        tickets = [{"key": "K-1", "status": "Blocked", "labels": [], "parent": None, "summary": "story"},
+                   {"key": "K-2", "status": "Done", "labels": [], "parent": "K-1", "summary": "a"}]
+        sup = self.sup(tickets)
+        sup.sweep_containers()
+        self.assertEqual(sup.jira.moves, [("K-1", s) for s in ("To Do", "In Progress", "In Review", "Review passed", "In QA", "Done")])
+        self.assertEqual(sup.jira.fields, {("K-1", sup.cfg.blocked_reason_field): None})
+
     def test_container_with_an_open_child_stays(self):
         tickets = [{"key": "K-1", "status": "To Do", "labels": [], "parent": None},
                    {"key": "K-2", "status": "Done", "labels": [], "parent": "K-1"}, {"key": "K-3", "status": "To Do", "labels": [], "parent": "K-1"}]

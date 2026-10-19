@@ -649,6 +649,9 @@ class Supervisor:
         if self.attempts(key, "reviewer") >= self.cfg.max_attempts:
             self.block(key, "Too many failed reviewer attempts.", kind="Attempts")
             return True
+        if self.attempts(key, "pr") >= self.cfg.max_attempts:  # only reached when the workflow has no Review passed status
+            self.block(key, "The pull request could not be opened after several tries.", kind="Attempts")
+            return True
         try:
             workdir, branch = repo.ensure_worktree(key, view.get("summary", key), base)
             repo.sync_worktree(workdir, branch)
@@ -679,7 +682,7 @@ class Supervisor:
         self.redis.set(f"reviewtext:{key}", text[-800:], 30 * DAY)
         self.jira.comment(key, f"AI Flow: reviewer {agent} PASSED.\n\n{text[-1500:]}")
         if not self.jira.transition(key, "Review passed"):  # a project whose workflow has no such status opens the pull request at once
-            self.open_pull_request(key, view, repo, base, branch, agent, text)
+            self.open_pull_request(key, view, repo, base, branch, agent, text, role="pr")
         return True
 
     def pr_step(self, key: str, view: dict[str, Any], repo: Repo, base: str) -> bool:
@@ -687,7 +690,11 @@ class Supervisor:
         if self.attempts(key, "pr") >= self.cfg.max_attempts:
             self.block(key, "The pull request could not be opened after several tries.", kind="Attempts")
             return True
-        branch = repo.remote_branch(key)
+        try:
+            branch = repo.remote_branch_strict(key)
+        except GitError as error:
+            log(f"{key}: cannot list the remote branches ({error}); trying again")
+            return False  # a network problem is not a missing branch
         if not branch:
             self.block(key, "The ticket branch is not on origin; the developer output was never pushed.", kind="Config")
             return True

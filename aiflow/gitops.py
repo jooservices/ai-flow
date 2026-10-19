@@ -89,6 +89,12 @@ class Repo:
         names = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
         return names[0] if names else None
 
+    def remote_branch_strict(self, key: str) -> str | None:
+        """Like remote_branch, but a failing `git ls-remote` raises GitError instead of looking like 'no such branch'."""
+        out = git(self.path, "ls-remote", "--heads", "origin", f"{key}-*")
+        names = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
+        return names[0] if names else None
+
     def ensure_worktree(self, key: str, summary: str, base: str) -> tuple[Path, str]:
         found = self.find_worktree(key)
         if found:

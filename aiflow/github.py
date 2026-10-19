@@ -92,7 +92,7 @@ def fill_template(template: str, values: dict[str, str]) -> str:
     text = "\n".join(part.rstrip("\n") + "\n" for part in out if part.strip()).rstrip("\n") + "\n"
     if "ticket" not in kinds:
         text += f"\nTicket: {values.get('ticket', '')}\n"
-    for kind, title in (("deployment", "Deployment"), ("tests", "Test plan")):
+    for kind, title in (("summary", "Summary"), ("deployment", "Deployment"), ("tests", "Test plan")):
         if kind not in kinds and said(kind):
             text += f"\n## {title}\n{values[kind].strip()}\n"
     return text + (f"\n{values['footer']}\n" if values.get("footer") else "")

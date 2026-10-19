@@ -436,6 +436,11 @@ class PullRequestBodyTests(unittest.TestCase):
         self.assertIn("- [ ] Docs updated", body)  # template checkboxes survive in the test section
         self.assertIn("Reviewed by Grok", body)
 
+    def test_summary_is_added_when_the_template_has_no_summary_section(self):
+        body = github.fill_template("## Why\n\n## Test plan\n", self.values)
+        self.assertIn("## Summary\nAdds the thing.", body)
+        self.assertIn("## Why\nBecause it is needed.", body)
+
     def test_no_template_uses_the_default(self):
         body = github.fill_template("", self.values)
         for heading in ("## Summary", "## Why", "## Test plan", "## Deployment"):
@@ -455,9 +460,18 @@ class ReviewPassedTests(unittest.TestCase):
 
     def test_pr_step_blocks_without_a_pushed_branch(self):
         sup = self.sup()
-        repo = type("R", (), {"remote_branch": lambda self, key: None, "name": "x"})()
+        repo = type("R", (), {"remote_branch_strict": lambda self, key: None, "name": "x"})()
         self.assertTrue(sup.pr_step("K-1", {"summary": "s"}, repo, "develop"))
         self.assertEqual(sup.jira.moves, [("K-1", "Blocked")])
+
+    def test_a_failing_remote_listing_is_retried_not_blocked(self):
+        sup = self.sup()
+
+        def broken(key):
+            raise GitError("network down")
+        repo = type("R", (), {"remote_branch_strict": staticmethod(broken), "name": "x"})()
+        self.assertFalse(sup.pr_step("K-1", {"summary": "s"}, repo, "develop"))
+        self.assertEqual(sup.jira.moves, [])
 
     def test_open_pull_request_failures_count_as_pr_attempts_not_reviewer_attempts(self):
         sup = self.sup()

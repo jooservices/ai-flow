@@ -29,7 +29,8 @@ The ticket states why in the comments and in the field Blocked reason (`Kind: re
 - Pause / resume: `bin/aiflow-work pause` (workers finish the current step and take nothing new), `bin/aiflow-work resume`.
 - Pick up new code or configuration: `git pull`, `bin/aiflow-work check`, `bin/aiflow-work restart` (workers leave after their step and systemd starts them again).
 - Logs: `journalctl --user -u 'aiflow-work@*' -f`, AI logs in `Workspaces/.tmp/aiflow/logs/`.
-- Configuration: `Workspaces/JOOservices/config/aiflow.toml` and `config/aiflow/*.toml` (examples in `config.example/`); secrets only in `Workspaces/.env`.
+- Configuration: `Workspaces/JOOservices/config/aiflow.toml` and `config/aiflow/*.toml` (examples in `config.example/`); secrets only in `Workspaces/.env`. Set optional `[machines.<name>.ai_limits]` entries for `codex`, `claude`, `opencode` or `grok` to cap sessions shared by that machine's workers. Missing entries are unlimited; zero disables an AI. Check the parsed values with `bin/aiflow-work check`.
+- If a machine's AI limit is full, workers leave the ticket eligible and wait or take another eligible step; the health ticket's daily usage summary reports peak concurrent sessions per AI and machine. A dead worker's slot expires after its session lease.
 - An AI that lost its login is probed out of the pool (health reports `ai-<machine>-<AI>`): sign it in again (`grok login --device-code`, `codex login`, `claude`), the next probe puts it back within three hours.
 - Tool versions of the machines are compared daily; a drift is reported by the health check.
 - A configured post-merge command runs in the project's main clone after a base-branch merge. Its output is in `.tmp/aiflow/logs/`; failures and timeouts are commented on the ticket and reported by health until a later run succeeds.

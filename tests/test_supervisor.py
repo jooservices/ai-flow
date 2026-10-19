@@ -2,7 +2,10 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
+from dataclasses import replace
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +26,9 @@ from aiflow.supervisor import (
 class FakeRedis:
     def __init__(self):
         self.data = {}
+        self.sessions = {}
+        self.session_now = time.time()
+        self.session_lock = threading.Lock()
 
     def get(self, name):
         return self.data.get(name)
@@ -38,6 +44,43 @@ class FakeRedis:
             return False
         self.data[name] = owner
         return True
+
+    def acquire_session(self, machine, agent, owner, ttl, limit=None):
+        key = (machine, agent.casefold())
+        with self.session_lock:
+            active = self.sessions.setdefault(key, {})
+            for stale in [name for name, expires in active.items() if expires <= self.session_now]:
+                del active[stale]
+            if owner not in active and limit is not None and len(active) >= limit:
+                return False
+            active[owner] = self.session_now + ttl
+            day = datetime.fromtimestamp(self.session_now, timezone.utc).strftime("%Y-%m-%d")
+            peak_key = f"sessionpeak:{day}:{machine}:{agent.casefold()}"
+            self.data[peak_key] = str(max(len(active), int(self.data.get(peak_key, 0))))
+            return True
+
+    def renew_session(self, machine, agent, owner, ttl):
+        key = (machine, agent.casefold())
+        with self.session_lock:
+            active = self.sessions.setdefault(key, {})
+            for stale in [name for name, expires in active.items() if expires <= self.session_now]:
+                del active[stale]
+            if owner not in active:
+                return False
+            active[owner] = self.session_now + ttl
+            day = datetime.fromtimestamp(self.session_now, timezone.utc).strftime("%Y-%m-%d")
+            peak_key = f"sessionpeak:{day}:{machine}:{agent.casefold()}"
+            self.data[peak_key] = str(max(len(active), int(self.data.get(peak_key, 0))))
+            return True
+
+    def release_session(self, machine, agent, owner):
+        key = (machine, agent.casefold())
+        with self.session_lock:
+            active = self.sessions.get(key, {})
+            removed = active.pop(owner, None) is not None
+            if not active:
+                self.sessions.pop(key, None)
+            return removed
 
     def release(self, name, owner):
         return self.data.pop(name, None) is not None
@@ -735,9 +778,11 @@ class OperationsTests(unittest.TestCase):
         sup.log_usage("K-1", "developer", "Codex", 12.4, "ok", 0)
         sup.log_usage("K-2", "reviewer", "Grok", 3.0, "exit", 1)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        sup.redis.data[f"sessionpeak:{day}:test:codex"] = "3"
         summary = health.usage_summary(sup.redis, day)
         self.assertIn("Codex developer: 1 run(s), 12 min, 0 not clean", summary)
         self.assertIn("Grok reviewer: 1 run(s), 3 min, 1 not clean", summary)
+        self.assertIn("Codex on test: peak 3 concurrent session(s)", summary)
         self.assertIsNone(health.usage_summary(sup.redis, "2000-01-01"))
 
     def test_versions_are_published_once_and_drift_is_reported(self):
@@ -1324,6 +1369,118 @@ class LeaseRaceTests(unittest.TestCase):
         redis = FakeRedis()
         self.assertTrue(redis.acquire("lease:JAIF-9", "wsl:1", 60))
         self.assertFalse(redis.acquire("lease:JAIF-9", "mac:1", 60))
+
+
+class AiSessionLimitTests(unittest.TestCase):
+    def test_limit_reached_rejects_another_worker(self):
+        redis = FakeRedis()
+        self.assertTrue(redis.acquire_session("wsl", "Codex", "worker-1", 60, limit=1))
+        self.assertFalse(redis.acquire_session("wsl", "Codex", "worker-2", 60, limit=1))
+
+    def test_crashed_session_releases_its_slot_after_the_lease(self):
+        redis = FakeRedis()
+        self.assertTrue(redis.acquire_session("wsl", "Codex", "dead-worker", 60, limit=1))
+        redis.session_now += 59
+        self.assertFalse(redis.acquire_session("wsl", "Codex", "next-worker", 60, limit=1))
+        redis.session_now += 1
+        self.assertTrue(redis.acquire_session("wsl", "Codex", "next-worker", 60, limit=1))
+
+    def test_ended_session_releases_its_slot_immediately(self):
+        redis = FakeRedis()
+        self.assertTrue(redis.acquire_session("wsl", "Codex", "finished-worker", 60, limit=1))
+        self.assertTrue(redis.release_session("wsl", "Codex", "finished-worker"))
+        self.assertTrue(redis.acquire_session("wsl", "Codex", "next-worker", 60, limit=1))
+
+    def test_two_workers_racing_for_the_last_slot_have_one_winner(self):
+        redis = FakeRedis()
+        barrier = threading.Barrier(3)
+        results = []
+
+        def claim(owner):
+            barrier.wait()
+            results.append(redis.acquire_session("wsl", "Claude", owner, 60, limit=1))
+
+        workers = [threading.Thread(target=claim, args=(f"worker-{number}",)) for number in range(2)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(sorted(results), [False, True])
+
+    def test_missing_limit_is_unlimited(self):
+        redis = FakeRedis()
+        self.assertTrue(redis.acquire_session("wsl", "Grok", "worker-1", 60))
+        self.assertTrue(redis.acquire_session("wsl", "Grok", "worker-2", 60))
+
+    def test_zero_limit_disables_the_ai(self):
+        self.assertFalse(FakeRedis().acquire_session("wsl", "Grok", "worker-1", 60, limit=0))
+
+    def test_full_preferred_ai_falls_through_to_another_eligible_ai(self):
+        sup = make(AIFLOW_AGENT_ORDER="Codex,Claude")
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": {"codex": 1}}))
+        sup.redis.acquire_session("test", "Codex", "other-worker", 60, limit=1)
+        with mock.patch.object(sup, "usable_ais", return_value=["Codex", "Claude"]):
+            agent, owner = sup.reserve_agent("developer", "JAIF-9", None)
+        self.assertEqual(agent, "Claude")
+        self.assertIsNotNone(owner)
+        self.assertTrue(sup.redis.release_session("test", "Claude", owner))
+
+    def test_saturated_ai_leaves_ticket_waiting_without_blocking(self):
+        sup = make(AIFLOW_AGENT_ORDER="Codex")
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": {"codex": 1}}))
+        issue = {"key": "JAIF-9", "status": "To Do", "updated": stamp(0), "labels": []}
+        sup.candidates = lambda: [issue]
+        sup.eligible = lambda _: True
+        sup.ticket_spec = lambda _: ("", "")
+        sup.redis.acquire_session("test", "Codex", "other-worker", sup.cfg.lease_seconds, limit=1)
+        with mock.patch.object(sup, "usable_ais", return_value=["Codex"]), \
+             mock.patch.object(sup, "process") as process:
+            self.assertFalse(sup.tick())
+        process.assert_not_called()
+        self.assertEqual(sup.jira.moves, [])
+        self.assertNotIn("blocked:JAIF-9", sup.redis.data)
+        self.assertNotIn("lease:JAIF-9", sup.redis.data)
+
+    def test_developer_session_reservation_is_passed_to_processing_and_released(self):
+        sup = make(AIFLOW_AGENT_ORDER="Codex")
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": {"codex": 1}}))
+        issue = {"key": "JAIF-9", "status": "To Do", "updated": stamp(0), "labels": []}
+        sup.candidates = lambda: [issue]
+        sup.eligible = lambda _: True
+        sup.ticket_spec = lambda _: ("", "")
+        with mock.patch.object(sup, "usable_ais", return_value=["Codex"]), \
+             mock.patch.object(sup, "process", return_value=True) as process:
+            self.assertTrue(sup.tick())
+        self.assertEqual(process.call_args.args[2:4], ("developer", "Codex"))
+        self.assertTrue(process.call_args.args[4])
+        self.assertNotIn(("test", "codex"), sup.redis.sessions)
+        self.assertNotIn("lease:JAIF-9", sup.redis.data)
+
+    def test_qa_at_its_limit_waits_without_blocking(self):
+        sup = make(AIFLOW_AGENT_ORDER="Codex")
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": {"codex": 1}}))
+        sup.redis.data["dev:JAIF-9"] = "Claude"
+        sup.redis.acquire_session("test", "Codex", "other-worker", 60, limit=1)
+        repo = mock.Mock()
+        repo.name = "ai-flow"
+        with mock.patch.object(sup, "usable_ais", return_value=["Codex"]), \
+             mock.patch.object(sup, "release_slot") as release_slot, \
+             mock.patch.object(sup, "execute") as execute:
+            self.assertFalse(sup.run_qa("JAIF-9", {"agent": "Claude"}, repo, "develop", "branch", {}))
+        release_slot.assert_called_once_with("JAIF-9", "ai-flow")
+        execute.assert_not_called()
+        self.assertEqual(sup.jira.moves, [])
+        self.assertNotIn("blocked:JAIF-9", sup.redis.data)
+
+    def test_check_prints_limits_for_the_machine(self):
+        from aiflow.supervisor import main
+
+        cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test"})
+        cfg = replace(cfg, registry=replace(cfg.registry, ai_limits={"test": {"codex": 4, "claude": 2}}))
+        with mock.patch("aiflow.config.load", return_value=cfg), mock.patch("builtins.print") as output:
+            self.assertEqual(main(["check"]), 0)
+        self.assertIn("  AI session limits: claude=2, codex=4; omitted AIs are unlimited", [call.args[0] for call in output.call_args_list])
 
 
 if __name__ == "__main__":

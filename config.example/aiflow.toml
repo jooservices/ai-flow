@@ -24,5 +24,11 @@ deploy_on = "base"         # "all" also runs after hotfix and release merges
 [machines.wsl]
 workers = 2
 
+[machines.wsl.ai_limits]
+codex = 4
+claude = 2
+opencode = 4
+# An omitted AI, such as grok here, has no session limit.
+
 [machines.mac]
 workers = 1

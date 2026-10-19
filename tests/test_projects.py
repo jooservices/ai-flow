@@ -51,6 +51,18 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual((cfg.workers, cfg.expected_slots), (2, ("wsl:1", "wsl:2")))
         self.assertEqual(load(env={"AIFLOW_MACHINE": "mac", "AIFLOW_EXPECTED_SLOTS": "mac:1"}, config_dir=self.dir).expected_slots, ("mac:1",))
 
+    def test_machine_ai_limits_are_independent_of_worker_count(self):
+        write(self.dir / "aiflow.toml", '[machines.wsl]\nworkers = 10\n[machines.wsl.ai_limits]\ncodex = 4\nclaude = 2\nopencode = 4\n')
+        cfg = self.load()
+        self.assertEqual(cfg.workers, 10)
+        self.assertEqual(cfg.expected_slots, tuple(f"wsl:{number}" for number in range(1, 11)))
+        self.assertEqual(cfg.ai_limits, {"codex": 4, "claude": 2, "opencode": 4})
+        self.assertNotIn("grok", cfg.ai_limits)
+        self.assertEqual(load(env={"AIFLOW_MACHINE": "wsl"}, worker_id="10", config_dir=self.dir).slot, 10)
+
+    def test_ai_limits_can_be_omitted(self):
+        self.assertEqual(self.load().ai_limits, {})
+
     def test_worker_number_is_checked(self):
         self.assertEqual(load(env={"AIFLOW_MACHINE": "wsl"}, worker_id="2", config_dir=self.dir).slot, 2)
         with self.assertRaises(ConfigError):
@@ -86,6 +98,19 @@ class RegistryTest(unittest.TestCase):
     def test_bad_general_file(self):
         for text, expected in (("[machines.wsl]\nworkers = 0\n", "workers"), ("[extra]\n", "unknown section"), ("[defaults]\nbase = 3\n", "must be str")):
             with self.subTest(text):
+                write(self.dir / "aiflow.toml", text)
+                with self.assertRaises(ConfigError) as caught:
+                    self.load()
+                self.assertIn(expected, str(caught.exception))
+
+    def test_bad_machine_ai_limits(self):
+        cases = (
+            ("[machines.wsl]\nworkers = 2\n[machines.wsl.ai_limits]\ngemini = 1\n", "unknown setting"),
+            ("[machines.wsl]\nworkers = 2\n[machines.wsl.ai_limits]\ncodex = true\n", "must be int"),
+            ("[machines.wsl]\nworkers = 2\n[machines.wsl.ai_limits]\ncodex = -1\n", "zero or greater"),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
                 write(self.dir / "aiflow.toml", text)
                 with self.assertRaises(ConfigError) as caught:
                     self.load()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 import time
+from datetime import datetime, timezone
 
 RENEW = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end"
 RELEASE = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end"
@@ -46,6 +47,60 @@ end
 redis.call('del', KEYS[1])
 return ''
 """
+SESSION_ACQUIRE = """
+local now = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local owner = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+local existing = redis.call('ZSCORE', KEYS[1], owner)
+if existing then
+    redis.call('ZADD', KEYS[1], now + ttl, owner)
+    redis.call('EXPIRE', KEYS[1], ttl)
+    local count = redis.call('ZCARD', KEYS[1])
+    local peak = tonumber(redis.call('GET', KEYS[2]) or '0')
+    if count > peak then
+        redis.call('SET', KEYS[2], count, 'EX', ARGV[5])
+    end
+    return count
+end
+local active = redis.call('ZCARD', KEYS[1])
+if limit >= 0 and active >= limit then
+    return 0
+end
+redis.call('ZADD', KEYS[1], now + ttl, owner)
+redis.call('EXPIRE', KEYS[1], ttl)
+local count = redis.call('ZCARD', KEYS[1])
+local peak = tonumber(redis.call('GET', KEYS[2]) or '0')
+if count > peak then
+    redis.call('SET', KEYS[2], count, 'EX', ARGV[5])
+end
+return count
+"""
+SESSION_RENEW = """
+local now = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+if redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+    redis.call('ZADD', KEYS[1], now + ttl, ARGV[3])
+    redis.call('EXPIRE', KEYS[1], ttl)
+    local count = redis.call('ZCARD', KEYS[1])
+    local peak = tonumber(redis.call('GET', KEYS[2]) or '0')
+    if count > peak then
+        redis.call('SET', KEYS[2], count, 'EX', ARGV[4])
+    end
+    return 1
+end
+return 0
+"""
+SESSION_RELEASE = """
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZCARD', KEYS[1]) == 0 then
+    redis.call('DEL', KEYS[1])
+end
+return removed
+"""
+SESSION_PEAK_TTL = 10 * 24 * 60 * 60
 
 
 class RedisError(RuntimeError):
@@ -162,6 +217,44 @@ class Redis:
 
     def release(self, name: str, owner: str) -> bool:
         return self.command("EVAL", RELEASE, 1, self.key(name), owner) == 1
+
+    def session_key(self, machine: str, agent: str) -> str:
+        return f"sessions:{machine}:{agent.casefold()}"
+
+    def session_peak_key(self, day: str, machine: str, agent: str) -> str:
+        return f"sessionpeak:{day}:{machine}:{agent.casefold()}"
+
+    def acquire_session(self, machine: str, agent: str, owner: str, ttl: int, limit: int | None = None) -> bool:
+        """Atomically reserve a machine-wide AI slot and record the day's concurrent peak.
+
+        Each member expires at its last heartbeat plus `ttl`; the sorted-set key itself has the same lease TTL.
+        A missing limit is unlimited, while zero explicitly prevents new sessions.
+        """
+        now = int(time.time())
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = self.command(
+            "EVAL", SESSION_ACQUIRE, 2,
+            self.key(self.session_key(machine, agent)),
+            self.key(self.session_peak_key(day, machine, agent)),
+            now, ttl, -1 if limit is None else limit, owner, SESSION_PEAK_TTL,
+        )
+        return int(result) > 0
+
+    def renew_session(self, machine: str, agent: str, owner: str, ttl: int) -> bool:
+        """Renew an AI session lease; false means the reservation expired or was lost."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self.command(
+            "EVAL", SESSION_RENEW, 2,
+            self.key(self.session_key(machine, agent)),
+            self.key(self.session_peak_key(day, machine, agent)),
+            int(time.time()), ttl, owner, SESSION_PEAK_TTL,
+        ) == 1
+
+    def release_session(self, machine: str, agent: str, owner: str) -> bool:
+        """Release an AI session slot immediately when its process ends."""
+        return self.command(
+            "EVAL", SESSION_RELEASE, 1, self.key(self.session_key(machine, agent)), owner,
+        ) == 1
 
     def get(self, name: str) -> str | None:
         return self.command("GET", self.key(name)) or None

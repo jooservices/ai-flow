@@ -1473,6 +1473,23 @@ class AiSessionLimitTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves, [])
         self.assertNotIn("blocked:JAIF-9", sup.redis.data)
 
+    def test_qa_preparation_failure_releases_reserved_session(self):
+        sup = make(AIFLOW_AGENT_ORDER="Codex,Claude")
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": {"codex": 1}}))
+        sup.redis.data["dev:JAIF-9"] = "Claude"
+        repo = mock.Mock()
+        repo.name = "ai-flow"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo.ensure_worktree.return_value = (Path(tmp), "branch")
+            with mock.patch.object(sup, "usable_ais", return_value=["Codex"]), \
+                 mock.patch.object(sup, "prepare_ticket_database", return_value=False), \
+                 mock.patch.object(sup, "release_slot") as release_slot, \
+                 mock.patch.object(sup, "execute") as execute:
+                self.assertTrue(sup.run_qa("JAIF-9", {"agent": "Claude"}, repo, "develop", "branch", {}))
+        release_slot.assert_called_once_with("JAIF-9", "ai-flow")
+        execute.assert_not_called()
+        self.assertNotIn(("test", "codex"), sup.redis.sessions)
+
     def test_check_prints_limits_for_the_machine(self):
         from aiflow.supervisor import main
 

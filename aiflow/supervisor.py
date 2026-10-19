@@ -1409,18 +1409,16 @@ class Supervisor:
             self.release_slot(key, repo.name)
             return False
         try:
-            workdir, _ = repo.ensure_worktree(key, view.get("summary", key), base)
-            repo.sync_worktree(workdir, branch)
-        except GitError as error:
-            if session_owner:
-                self.release_agent_session(key, "qa", agent, session_owner)
-            self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
-            return True
-        if not self.prepare_ticket_database(key, workdir):
-            self.release_slot(key, repo.name)
-            return True
-        self.label_workspace(key)
-        try:
+            try:
+                workdir, _ = repo.ensure_worktree(key, view.get("summary", key), base)
+                repo.sync_worktree(workdir, branch)
+            except GitError as error:
+                self.block(key, f"Cannot get the pull request head on {self.cfg.machine}: {error}", kind="Config")
+                return True
+            if not self.prepare_ticket_database(key, workdir):
+                self.release_slot(key, repo.name)
+                return True
+            self.label_workspace(key)
             self.jira.comment(key, f"AI Flow: QA {agent} on {self.cfg.machine} started on {pr['url']} at {pr['headRefOid'][:10]} "
                                    f"(developer was {self.redis.get(f'dev:{key}') or '?'}).")
             why, text, found, quota = self.execute("qa", agent, key, view, workdir, branch, base, repo,

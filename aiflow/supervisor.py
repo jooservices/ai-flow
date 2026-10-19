@@ -205,7 +205,7 @@ class Supervisor:
                 if role == "developer":
                     spec_agent, spec_model = self.ticket_spec(issue["key"])
                     if spec_agent:
-                        view = {**view, "agent": spec_agent, "spec_model": spec_model}
+                        view = {**view, "agent": spec_agent, "spec_model": spec_model, "agent_field": view.get("agent")}
                 if role in ("developer", "reviewer"):
                     agent = self.pick_agent(role, issue["key"], view.get("agent"))
                     if agent is None:
@@ -415,7 +415,7 @@ class Supervisor:
         if issue["status"] == "To Do" and not self.jira.transition(key, "In Progress"):
             log(f"{key}: could not start (someone else did?)")
             return False
-        if view.get("agent") != agent:
+        if view.get("agent_field", view.get("agent")) != agent:  # keep Agent (AI) equal to the AI that really works (AI Model may differ)
             self.jira.set_agent(key, agent)
         if view.get("spec_model") and view.get("agent") == agent:
             self.redis.set(f"devmodel:{key}", f"{agent}:{view['spec_model']}", 30 * DAY)

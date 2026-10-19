@@ -78,9 +78,12 @@ class Settings:
 
 
 def load(env: dict[str, str] | None = None) -> Settings:
-    merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
-    merged.update(read_env_file(PROJECT_DIR / ".env"))
-    merged.update(os.environ if env is None else env)
+    if env is None:  # an explicit environment (tests) must not pick up the machine's .env files
+        merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
+        merged.update(read_env_file(PROJECT_DIR / ".env"))
+        merged.update(os.environ)
+    else:
+        merged = dict(env)
     machine = merged.get("AIFLOW_MACHINE", socket.gethostname().lower())
     return Settings(
         root=WORKSPACES_ROOT,

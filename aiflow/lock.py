@@ -12,20 +12,34 @@ import time
 RENEW = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end"
 RELEASE = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end"
 QUEUE_DEPLOY = """
+if redis.call('exists', KEYS[4]) == 1 then
+  if redis.call('get', KEYS[1]) == ARGV[1] then return 1 end
+  return 2
+end
+redis.call('set', KEYS[4], ARGV[2], 'EX', ARGV[5])
 if redis.call('exists', KEYS[1]) == 1 then
   local pending = redis.call('get', KEYS[2])
-  if pending and pending ~= '' then pending = pending .. '\\n' .. ARGV[3] else pending = ARGV[3] end
-  redis.call('set', KEYS[2], pending, 'EX', ARGV[2])
+  if pending and pending ~= '' then pending = pending .. string.char(10) .. ARGV[3] else pending = ARGV[3] end
+  redis.call('set', KEYS[2], pending, 'EX', ARGV[4])
   return 0
 end
-redis.call('set', KEYS[1], ARGV[1], 'EX', ARGV[2])
+redis.call('set', KEYS[1], ARGV[1], 'EX', ARGV[4])
+redis.call('set', KEYS[3], ARGV[3], 'EX', ARGV[4])
 return 1
 """
 FINISH_DEPLOY = """
-if redis.call('get', KEYS[1]) ~= ARGV[1] then return -1 end
+local owner = redis.call('get', KEYS[1])
+if owner ~= ARGV[1] then
+  if not owner and redis.call('exists', KEYS[2]) == 0 and redis.call('exists', KEYS[3]) == 0 then return '' end
+  return -1
+end
+local active = redis.call('get', KEYS[3])
+if active and active ~= ARGV[3] then return active end
+if active then redis.call('del', KEYS[3]) end
 local pending = redis.call('get', KEYS[2])
 if pending and pending ~= '' then
   redis.call('del', KEYS[2])
+  redis.call('set', KEYS[3], pending, 'EX', ARGV[2])
   redis.call('expire', KEYS[1], ARGV[2])
   return pending
 end
@@ -131,13 +145,17 @@ class Redis:
             return True
         return self.command("GET", self.key(name)) == owner  # a lost reply to an earlier retry must not strand our own lease
 
-    def enqueue_deploy(self, lock_name: str, pending_name: str, owner: str, ticket: str, ttl: int) -> bool:
-        """Acquire a project deployment lock or atomically append a merge ticket to its pending run."""
-        return self.command("EVAL", QUEUE_DEPLOY, 2, self.key(lock_name), self.key(pending_name), owner, ttl, ticket) == 1
+    def enqueue_deploy(self, lock_name: str, pending_name: str, active_name: str, seen_name: str, owner: str,
+                       ticket: str, payload: str, ttl: int, seen_ttl: int) -> int:
+        """Acquire the project lock or queue a merge once; return 1 acquired, 0 queued, 2 already seen."""
+        return int(self.command("EVAL", QUEUE_DEPLOY, 4, self.key(lock_name), self.key(pending_name), self.key(active_name),
+                                self.key(seen_name), owner, ticket, payload, ttl, seen_ttl))
 
-    def finish_deploy(self, lock_name: str, pending_name: str, owner: str, ttl: int) -> str | int:
-        """Release the lock or retain it and return queued tickets for one coalesced follow-up run."""
-        return self.command("EVAL", FINISH_DEPLOY, 2, self.key(lock_name), self.key(pending_name), owner, ttl)
+    def finish_deploy(self, lock_name: str, pending_name: str, active_name: str, owner: str, ttl: int,
+                      active_batch: str) -> str | int:
+        """Complete an active batch and atomically claim the pending batch, safely on retried replies."""
+        return self.command("EVAL", FINISH_DEPLOY, 3, self.key(lock_name), self.key(pending_name), self.key(active_name),
+                            owner, ttl, active_batch)
 
     def renew(self, name: str, owner: str, ttl: int) -> bool:
         return self.command("EVAL", RENEW, 1, self.key(name), owner, ttl) == 1

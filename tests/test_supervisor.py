@@ -391,6 +391,20 @@ class WriteAccessFeedbackTests(unittest.TestCase):
             gh.can_write("flaky")
 
 
+class ClearBlockTests(unittest.TestCase):
+    def test_unblocked_ticket_forgets_its_block(self):
+        sup = make()
+        sup.redis.data["blocked:K-1"] = json.dumps({"status": "In Progress", "kind": "Unclear"})
+        sup.clear_block("K-1")
+        self.assertIsNone(sup.redis.get("blocked:K-1"))
+        self.assertEqual(sup.jira.fields, {("K-1", sup.cfg.blocked_reason_field): None})
+
+    def test_a_ticket_never_blocked_is_untouched(self):
+        sup = make()
+        sup.clear_block("K-1")
+        self.assertFalse(hasattr(sup.jira, "fields"))
+
+
 class RoleDefaultTests(unittest.TestCase):
     def test_spec_parts(self):
         self.assertEqual(agents.parse_spec("Claude:sonnet:high"), ("Claude", "sonnet", "high"))

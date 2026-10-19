@@ -409,6 +409,16 @@ class Supervisor:
                 for name in (f"blocked:{key}", f"waiting:{key}:{role}", f"waitnote:{key}:{role}"):
                     self.redis.delete(name)
 
+    def clear_block(self, key: str) -> None:
+        """The owner moved a blocked ticket back to To Do himself: forget why it was blocked (the answer is in the comments)."""
+        if self.redis.get(f"blocked:{key}") is None:
+            return
+        self.redis.delete(f"blocked:{key}")
+        try:
+            self.jira.set_field(key, self.cfg.blocked_reason_field, None)
+        except JiraError as error:
+            log(f"{key}: cannot clear Blocked reason: {error}")
+
     def label_workspace(self, key: str) -> None:
         try:
             self.jira.set_workspace(key, self.cfg.workspace_field, self.cfg.workspace_name)
@@ -509,6 +519,8 @@ class Supervisor:
         if issue["status"] == "To Do" and not self.jira.transition(key, "In Progress"):
             log(f"{key}: could not start (someone else did?)")
             return False
+        if issue["status"] == "To Do":
+            self.clear_block(key)
         if view.get("agent_field", view.get("agent")) != agent:  # keep Agent (AI) equal to the AI that really works (AI Model may differ)
             self.jira.set_agent(key, agent)
         if view.get("spec_model") and view.get("agent") == agent:

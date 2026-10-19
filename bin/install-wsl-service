@@ -10,12 +10,7 @@ cp "$DIR"/deploy/systemd/aiflow-* "$UNITS/"
 systemctl --user daemon-reload
 if [ "${1:-}" = "--profiles" ]; then
   "$DIR/bin/aiflow-work" check
-  PROFILE_DIR="${AIFLOW_PROFILE_DIR:-$DIR/../../config/aiflow}"
-  for file in "$PROFILE_DIR"/*.env; do
-    profile="$(basename "$file" .env)"
-    count="$(sed -n 's/^AIFLOW_WORKERS=//p' "$file" | tail -1)"
-    for n in $(seq 1 "${count:-1}"); do systemctl --user enable --now "aiflow-work@$profile-$n.service"; done
-  done
+  for worker in $("$DIR/bin/aiflow-work" list); do systemctl --user enable --now "aiflow-work@$worker.service"; done
 else
   for slot in ${*:-1 2}; do systemctl --user enable --now "aiflow-supervisor@$slot.service"; done
 fi

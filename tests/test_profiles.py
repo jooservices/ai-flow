@@ -48,6 +48,19 @@ class ProfileTest(unittest.TestCase):
             load(env={}, worker_id="A-1", profile_dir=self.dir)
         self.assertIn("JAIF", str(error.exception))
 
+    def test_invalid_worker_count_is_refused(self):
+        for bad in ("0", "x", "-1"):
+            with self.assertRaises(ConfigError):
+                check_profiles({"X": {"AIFLOW_PROJECTS": "A", "AIFLOW_WORKERS": bad}})
+
+    def test_shell_cannot_override_profile_projects(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"AIFLOW_PROJECTS": "JOOS"}):
+            cfg = load(worker_id="A-1", profile_dir=self.dir)
+        self.assertEqual(cfg.projects, ("JAVM",))
+
     def test_profile_without_projects_is_refused(self):
         with self.assertRaises(ConfigError):
             check_profiles({"X": {}})

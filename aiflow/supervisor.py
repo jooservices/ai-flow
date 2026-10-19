@@ -253,7 +253,7 @@ class Supervisor:
         """Graceful exit between two tickets: after `aiflow-work restart` or after the maximum run time. systemd
         starts the worker again, so it runs the newest code and configuration."""
         asked = self.redis.get("restart")
-        if asked is not None and int(asked) > started:
+        if asked is not None and int(asked) >= started:
             log("restart requested; leaving after the current ticket step")
             return True
         limit = self.cfg.worker_max_minutes
@@ -912,9 +912,16 @@ def option(args: list[str], name: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .config import ConfigError, all_profiles, check_profiles, load
+    from .config import ConfigError, all_profiles, check_profiles, load, profile_workers
     args = list(argv if argv is not None else sys.argv[1:])
     try:
+        if "list" in args:  # worker ids for the installer: <profile>-<n>
+            profiles = all_profiles()
+            check_profiles(profiles)
+            for name, values in profiles.items():
+                for n in range(1, profile_workers(values) + 1):
+                    print(f"{name}-{n}")
+            return 0
         if "check" in args:  # validate every profile file without starting anything
             profiles = all_profiles()
             check_profiles(profiles)
@@ -928,7 +935,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     if "restart" in args:  # every worker leaves after its current step and systemd starts it again
-        redis.set("restart", str(int(time.time())), 3600)
+        redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it
         print("restart requested for all workers")
         return 0
     supervisor = Supervisor(cfg, Jira(cfg.root), redis)

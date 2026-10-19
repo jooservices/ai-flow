@@ -118,7 +118,10 @@ def profile_projects(values: dict[str, str]) -> tuple[str, ...]:
 
 
 def profile_workers(values: dict[str, str]) -> int:
-    return max(1, int(values.get("AIFLOW_WORKERS", 1)))
+    raw = values.get("AIFLOW_WORKERS", "1").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        raise ConfigError(f"AIFLOW_WORKERS must be a whole number of at least 1, got `{raw}`.")
+    return int(raw)
 
 
 def all_profiles(directory: Path | None = None) -> dict[str, dict[str, str]]:
@@ -138,6 +141,7 @@ def check_profiles(profiles: dict[str, dict[str, str]]) -> None:
         projects = profile_projects(values)
         if not projects:
             raise ConfigError(f"Profile {name} has no AIFLOW_PROJECTS.")
+        profile_workers(values)
         for project in projects:
             if project in owners and owners[project] != name:
                 raise ConfigError(f"Project {project} is watched by profile {owners[project]} and profile {name}. A project belongs to one profile.")
@@ -184,6 +188,9 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         if slot_from_id is not None and slot_from_id > profile_workers(values):
             raise ConfigError(f"Profile {profile} runs {profile_workers(values)} worker(s); {worker_id} is outside that number.")
     merged.update(shell)
+    if profile:  # the profile owns its projects and worker count; the shell cannot move a worker to another project
+        merged["AIFLOW_PROJECTS"] = ",".join(profile_projects(values))
+        merged["AIFLOW_WORKERS"] = str(profile_workers(values))
     if slot_from_id is not None:
         merged["AIFLOW_SLOT"] = str(slot_from_id)
     machine = merged.get("AIFLOW_MACHINE", socket.gethostname().lower())

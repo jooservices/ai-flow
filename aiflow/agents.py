@@ -46,7 +46,10 @@ def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
     # No AI may write to GitHub: every AI acts as the owner's account, so its comments would be read back as the owner's own
     # feedback. An empty gh configuration and no token make every gh call fail to authenticate; the supervisor keeps its login.
     empty = root / ".tmp" / "aiflow" / "gh-empty"
-    empty.mkdir(parents=True, exist_ok=True)
+    try:
+        empty.mkdir(parents=True, exist_ok=True)
+    except OSError:  # an unwritable root: gh then finds no configuration at that path either
+        pass
     env["GH_CONFIG_DIR"] = str(empty)
     env["GH_PROMPT_DISABLED"] = "1"
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):

@@ -185,6 +185,13 @@ class GateDecisionTests(unittest.TestCase):
         self.assertEqual(decide(facts(ci="none", ci_required=True))[0], "wait")
         self.assertEqual(decide(facts(ci="none", ci_required=True, ci_waited_minutes=31))[0], "block")
 
+    def test_pending_ci_waits_below_timeout(self):
+        self.assertEqual(decide(facts(ci="pending", ci_waited_minutes=29)), ("wait", "CI is running"))
+
+    def test_pending_ci_blocks_at_timeout(self):
+        self.assertEqual(decide(facts(ci="pending", ci_waited_minutes=30)),
+                         ("block", "CI is still running after 30 minutes"))
+
     def test_feedback_blocks_qa_and_merge(self):
         self.assertEqual(decide(facts(feedback=[{"id": "x"}], qa_ok=False))[0], "rework")
         self.assertEqual(decide(facts(settled=False, feedback=[{"id": "x"}]))[0], "wait")

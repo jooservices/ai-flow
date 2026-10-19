@@ -25,7 +25,7 @@ Backlog -(owner)-> To Do -> In Progress (developer) -> In Review (reviewer) -> I
 
 1. Pull request merged (also by a human): Done. Closed without merging: Declined.
 2. Behind the base: a clean merge is made by the supervisor (`update-branch`), a conflict goes back to the developer. Any head change discards the QA result.
-3. CI: failed goes back to the developer with the failing log, pending waits. A repo in `AIFLOW_CI_REQUIRED_REPOS` with no CI result after `AIFLOW_CI_WAIT_MINUTES` is Blocked.
+3. CI: failed goes back to the developer with the failing log; pending waits until `AIFLOW_CI_WAIT_MINUTES`, then blocks with a timeout reason if still running; a repo in `AIFLOW_CI_REQUIRED_REPOS` with no CI result after `AIFLOW_CI_WAIT_MINUTES` is Blocked.
 4. After the last push, wait `AIFLOW_FEEDBACK_SETTLE_MINUTES` for review bots (CodeRabbit, Copilot), then read the feedback: unresolved review threads, new human comments, "changes requested" reviews. Anything open goes back to the developer.
 5. QA AI (never the developer, not the reviewer when possible) on the exact pull request head. FAIL goes back to the developer.
 6. One pull request per repository is in QA and merge at a time (`qaslot:<repo>`), so a merge does not make the next QA stale twice.

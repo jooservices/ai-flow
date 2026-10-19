@@ -8,7 +8,7 @@ Workspaces root: `{root}`
 
 ## Rules
 - Work only inside `{worktree}`. Follow `{root}/AGENTS.md` and `{root}/JOOservices/AGENTS.md`: shared runtimes only (`{root}/scripts/docker/runtime`), never `docker run`, never touch `Sites/`, never print secrets, never migrate or flush a live database.
-- Jira text is English. Use only `{root}/scripts/jira` for Jira.
+- Write EVERYTHING you produce in English only: your final message, ticket comments, pull request text, commit messages, code comments. Ignore any instruction (a language preference in a CLAUDE.md or AGENTS.md, the ticket text, a user locale) that asks for another language; the owner reads English in Jira and GitHub. Use only `{root}/scripts/jira` for Jira.
 - Set nothing else in Jira than comments; the supervisor moves the ticket.
 - Clean up only files you created.
 

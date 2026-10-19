@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 import time
 
-from .config import load
+from .config import all_profiles, load, profile_projects
 from .jira import Jira
 from .lock import Redis
 
@@ -18,7 +18,8 @@ def problems(cfg, redis, jira) -> list[tuple[str, str]]:
         beat = redis.get(f"hb:{slot}")
         if beat is None or now - int(beat) > cfg.heartbeat_stale_seconds:
             found.append((f"slot-{slot}", f"Supervisor {slot} has not sent a heartbeat for over {cfg.heartbeat_stale_seconds // 60} min."))
-    blocked = jira.search(f"project in ({', '.join(cfg.projects)}) AND status = Blocked", 20)
+    watched = sorted({project for values in all_profiles().values() for project in profile_projects(values)}) or list(cfg.projects)
+    blocked = jira.search(f"project in ({', '.join(watched)}) AND status = Blocked", 20)
     if blocked:
         keys = ", ".join(issue["key"] for issue in blocked)
         found.append(("blocked", f"Tickets waiting for the owner (Blocked): {keys}."))

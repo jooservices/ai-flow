@@ -32,3 +32,14 @@ The ticket states why in the comments and in the field Blocked reason (`Kind: re
 - Configuration: `Workspaces/JOOservices/config/aiflow.toml` and `config/aiflow/*.toml` (examples in `config.example/`); secrets only in `Workspaces/.env`.
 - An AI that lost its login is probed out of the pool (health reports `ai-<machine>-<AI>`): sign it in again (`grok login --device-code`, `codex login`, `claude`), the next probe puts it back within three hours.
 - Tool versions of the machines are compared daily; a drift is reported by the health check.
+
+## Onboard a project (one Jira project, one repository)
+Do this once per project, on the machines that run workers. The first week is deliberately careful.
+1. **Repository**: it must be on GitHub under `jooservices`, cloned at `Workspaces/<company>/projects/<repo>` on WSL, with a `develop` branch (and `master` for hotfixes and releases), CI that runs on pull requests, Conventional Commits enforced (commitlint and a PR-title check), and branch protection on `develop` and `master`: pull request required, the CI checks required, up to date, conversations resolved, no approvals needed (all AIs share one GitHub account).
+2. **Jira**: switch the project to the AI Flow workflow scheme (`POST /rest/api/3/workflowscheme/project/switch` with the project id and the target scheme 10196, asynchronous), add the issue type Release (10100) to its issue type scheme, put the fields Type (10218), Version (10219), Require human (10216), AI Model (10217), Agent (AI) (10213), Workspace (10214) and Blocked reason (10215) on its create and edit screens, give it a Kanban board with one column per status (JAIF Kanban, board 191, is the model).
+3. **Configuration**: add `JOOservices/config/aiflow/<name>.toml` on every machine (the directory is git-ignored) with `[project] jira_key`, `repo`, `company`, and for the first week `auto_merge = false`, `ci_required = true`, `require_human = true`; set `release_check` to the command that runs the full test suite (and e2e). Run `bin/aiflow-work check`, then `bin/aiflow-work restart`.
+4. **Try**: create one small ticket with the template, label `aiflow-hold`, move it to To Do after removing the label, and follow it until Done. With `auto_merge = false` the ticket waits after QA for the owner to merge.
+5. **Open up**: after a week of clean tickets set `auto_merge = true` (keep `require_human = true` for risky tickets, set per ticket with the field Require human).
+
+## Jira hierarchy
+Jira allows Epic -> Story, Task or Bug -> Sub-task. A Story cannot contain Tasks; to split a Story use Sub-tasks, to group Stories and Tasks use an Epic. Only leaves are worked: a ticket with children is a container that closes itself when all its children are Done (drill D8).

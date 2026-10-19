@@ -87,7 +87,7 @@ One page for the owner: [docs/RUNBOOK.md](docs/RUNBOOK.md). Every `AIFLOW_PROBE_
 
 ### What is worked, and in which order
 
-Only leaf tickets are worked: a ticket that has child issues (a Story with Tasks, a Task with Sub-tasks) is a container and the AI never develops it; Epics are never worked. When all children of a container are Done (Declined ones do not count) the supervisor moves the container to Done through the workflow and comments the list of children. The queue is ordered `rework` first, then Priority (Highest to Lowest), then creation time.
+Jira's hierarchy is Epic, then Story or Task or Bug, then Sub-task (a Story cannot contain Tasks). Only leaf tickets are worked: a ticket that has child issues (a Story with Tasks, a Task with Sub-tasks) is a container and the AI never develops it; Epics are never worked. When all children of a container are Done (Declined ones do not count) the supervisor moves the container to Done through the workflow and comments the list of children. The queue is ordered `rework` first, then Priority (Highest to Lowest), then creation time.
 
 ### Review, Review passed and the pull request
 

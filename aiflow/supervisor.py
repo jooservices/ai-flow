@@ -231,16 +231,53 @@ class Supervisor:
         return [other] if other else []
 
     def pick_agent(self, role: str, key: str, field_agent: str | None) -> str | None:
-        found = self.eligible_agents(role, key, field_agent, agents.available(self.cfg.agent_order))
+        found = self.eligible_agents(role, key, field_agent, self.usable_ais())
         return found[0] if found else None
+
+    def usable_ais(self) -> list[str]:
+        """The installed AIs of this machine, without those the last probe found signed out or out of balance."""
+        installed = agents.available(self.cfg.agent_order)
+        states = self.redis.get_many([f"probe:{self.cfg.machine}:{a}" for a in installed])
+        return [a for a, state in zip(installed, states) if not (state or "").startswith("down")]
+
+    def probe_ais(self) -> None:
+        """Ask each installed AI for one word every few hours, so one that lost its login leaves the pool before a ticket meets it."""
+        if not self.redis.acquire("probing:" + self.cfg.machine, self.cfg.owner, 600):
+            return
+        for agent in agents.available(self.cfg.agent_order):
+            name = f"probe:{self.cfg.machine}:{agent}"
+            if self.redis.get(name) is not None:
+                continue
+            self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)  # a probe can take a minute
+            state = agents.probe(agent, self.cfg.root)
+            self.redis.set(name, state, 1800 if state.startswith("down") else self.cfg.probe_hours * 3600)
+            if state != "ok":
+                log(f"probe {agent} on {self.cfg.machine}: {state}")
+
+    def publish_versions(self) -> None:
+        """Once a day each machine publishes the versions of its tools, so the health check can see a drift between machines."""
+        name = f"versions:{self.cfg.machine}"
+        if self.redis.get(name) is None:
+            self.redis.set(name, json.dumps(agents.tool_versions()), 2 * DAY)
+
+    def paused(self) -> bool:
+        return self.redis.get("paused") is not None
+
+    def log_usage(self, key: str, role: str, agent: str, minutes: float, why: str, code: int | None) -> None:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            self.redis.set(f"usage:{day}:{key}:{role}:{agent}:{int(time.time())}",
+                           json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code}), 10 * DAY)
+        except RedisError as error:
+            log(f"could not record the usage of {key}: {error}")
 
     def publish_ais(self) -> None:
         """Tell the other machines which AIs this one has (the entry expires when the machine stops beating)."""
-        self.redis.set(f"ais:{self.cfg.machine}", ",".join(agents.available(self.cfg.agent_order)), 600)
+        self.redis.set(f"ais:{self.cfg.machine}", ",".join(self.usable_ais()), 600)
 
     def online_pool(self) -> list[str]:
         """AIs installed on this machine or on any machine that published recently."""
-        pool = list(agents.available(self.cfg.agent_order))
+        pool = list(self.usable_ais())
         for name in self.redis.scan("ais:*"):
             for ai in (self.redis.get(name) or "").split(","):
                 if ai and ai not in pool:
@@ -278,6 +315,8 @@ class Supervisor:
 
     # ---- main loop -------------------------------------------------------------------------------------------
     def tick(self) -> bool:
+        if self.paused():  # `aiflow-work pause`: no new work; resume with `aiflow-work resume`
+            return False
         for issue in self.candidates():
             try:
                 if not self.eligible(issue):
@@ -320,6 +359,8 @@ class Supervisor:
                 break
             try:
                 self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)
+                self.probe_ais()
+                self.publish_versions()
                 self.publish_ais()
                 self.recheck_blocked()
                 self.sweep_worktrees()
@@ -576,10 +617,12 @@ class Supervisor:
             last_ok[0] = time.monotonic()
             return alive
 
+        began = time.monotonic()
         code, why = runner.run(
             argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
+        self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
         quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
@@ -1180,6 +1223,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     cfg = config
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
+    if "pause" in args or "resume" in args:  # workers finish their current step and then take no new work / take work again
+        if "pause" in args:
+            redis.set("paused", str(int(time.time())), 365 * DAY)
+            print("paused: workers finish the current step and take no new ticket (aiflow-work resume to continue)")
+        else:
+            redis.delete("paused")
+            print("resumed")
+        return 0
     if "restart" in args:  # every worker leaves after its current step and systemd starts it again
         redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it
         print("restart requested for all workers")

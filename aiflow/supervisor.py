@@ -383,7 +383,7 @@ class Supervisor:
             return alive
 
         code, why = runner.run(
-            argv, stdin_text, workdir, log_file, agents.child_env(),
+            argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
         text = agents.final_text(agent, log_file, result_file)

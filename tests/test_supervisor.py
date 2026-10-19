@@ -538,6 +538,20 @@ class ModelFieldTests(unittest.TestCase):
         self.assertEqual(sup.model_for("reviewer", "Grok", "K-1"), ("grok-4.7", ""))
 
 
+class RunEnvTests(unittest.TestCase):
+    def test_pwd_is_the_worktree_for_every_ai(self):
+        for agent in ("Claude", "Codex", "Grok", "OpenCode"):
+            self.assertEqual(agents.run_env(agent, Path("/w/JAIF-1-x"), Path("/r"))["PWD"], "/w/JAIF-1-x")
+
+    def test_opencode_may_use_the_adapter_and_comment_files_outside_the_worktree(self):
+        config = json.loads(agents.run_env("OpenCode", Path("/w/JAIF-1-x"), Path("/r"))["OPENCODE_CONFIG_CONTENT"])
+        allowed = config["permission"]["external_directory"]
+        self.assertEqual(allowed["/r/scripts/*"], "allow")
+        self.assertEqual(allowed["/r/.tmp/*"], "allow")
+        self.assertNotIn("/r/*", allowed)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", agents.run_env("Codex", Path("/w"), Path("/r")))
+
+
 class AgentCommandTests(unittest.TestCase):
     def test_grok_uses_a_prompt_file_and_the_plain_format(self):
         with tempfile.TemporaryDirectory() as tmp:

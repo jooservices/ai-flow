@@ -157,6 +157,7 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
     directory = config_dir or (CONFIG_DIR if env is None else None)  # an explicit environment (tests) reads no machine files
     registry = (registry_module.load(directory, fallback) if directory else None) or registry_module.legacy(
         tuple(p.strip() for p in merged.get("AIFLOW_PROJECTS", "JAIF").split(",") if p.strip()), fallback)
+    merged.update(registry.runtime)  # [runtime] of aiflow.toml beats the legacy .env value
     slot = _int(merged, "AIFLOW_SLOT", 1)
     workers = registry.workers.get(machine, 0)
     if worker_id is not None and workers and slot > workers:
@@ -200,13 +201,13 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         merge_method=merged.get("AIFLOW_MERGE_METHOD", "merge"),
         ignored_authors=tuple(a.lower() for a in _list(merged, "AIFLOW_IGNORED_AUTHORS",
                               "codecov-commenter,github-actions,sonarqubecloud,sonarcloud,dependabot,codeql,github-advanced-security")),
-        workspace_field=merged.get("AIFLOW_WORKSPACE_FIELD", "customfield_10214"),
-        blocked_reason_field=merged.get("AIFLOW_BLOCKED_REASON_FIELD", "customfield_10215"),
-        require_human_field=merged.get("AIFLOW_REQUIRE_HUMAN_FIELD", "customfield_10216"),
-        model_field=merged.get("AIFLOW_MODEL_FIELD", "customfield_10217"),
-        type_field=merged.get("AIFLOW_TYPE_FIELD", "customfield_10218"),
+        workspace_field=merged.get("AIFLOW_WORKSPACE_FIELD", "Workspace"),
+        blocked_reason_field=merged.get("AIFLOW_BLOCKED_REASON_FIELD", "Blocked reason"),
+        require_human_field=merged.get("AIFLOW_REQUIRE_HUMAN_FIELD", "Require human"),
+        model_field=merged.get("AIFLOW_MODEL_FIELD", "AI Model"),
+        type_field=merged.get("AIFLOW_TYPE_FIELD", "Type"),
         probe_hours=_int(merged, "AIFLOW_PROBE_HOURS", 3),
-        version_field=merged.get("AIFLOW_VERSION_FIELD", "customfield_10219"),
+        version_field=merged.get("AIFLOW_VERSION_FIELD", "Version"),
         opencode_model=merged.get("AIFLOW_OPENCODE_MODEL", "opencode/deepseek-v4.1-flash-free"),
         explicit_only=_list(merged, "AIFLOW_EXPLICIT_ONLY_AIS", "OpenCode"),
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),

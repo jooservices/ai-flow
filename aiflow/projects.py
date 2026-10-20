@@ -1,10 +1,11 @@
 """Project registry: one TOML file for the general settings and one per Jira project.
 
-    JOOservices/config/aiflow.toml          [defaults] shared by every project, [machines.<name>] workers
+    JOOservices/config/aiflow.toml          [defaults] shared by every project, [machines.<name>] workers, [runtime] supervisor tuning
     JOOservices/config/aiflow/<name>.toml   [project] jira_key, repo and the project's own settings
 
 Every file of the directory is loaded. A project value beats `[defaults]`, which beats the legacy `.env` value
-(so a machine without TOML files keeps working). Secrets stay in `.env`.
+(so a machine without TOML files keeps working). `[runtime]` beats the legacy `.env` value of the same setting.
+Secrets and the identity of the machine (AIFLOW_MACHINE, Redis connection) stay in `.env`.
 """
 from __future__ import annotations
 
@@ -22,6 +23,25 @@ SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, 
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
+# [runtime] of aiflow.toml: setting -> (type, the AIFLOW_* name it replaces). A list is written as a TOML array.
+RUNTIME = {
+    "poll_seconds": (int, "AIFLOW_POLL_SECONDS"), "heartbeat_seconds": (int, "AIFLOW_HEARTBEAT_SECONDS"),
+    "lease_seconds": (int, "AIFLOW_LEASE_SECONDS"), "orphan_grace_seconds": (int, "AIFLOW_ORPHAN_GRACE_SECONDS"),
+    "idle_minutes": (int, "AIFLOW_IDLE_MINUTES"), "max_minutes": (int, "AIFLOW_MAX_MINUTES"),
+    "worker_max_minutes": (int, "AIFLOW_WORKER_MAX_MINUTES"), "max_attempts": (int, "AIFLOW_MAX_ATTEMPTS"),
+    "quota_cooldown_minutes": (int, "AIFLOW_QUOTA_COOLDOWN_MINUTES"), "quota_block_minutes": (int, "AIFLOW_QUOTA_BLOCK_MINUTES"),
+    "recheck_seconds": (int, "AIFLOW_RECHECK_SECONDS"), "probe_hours": (int, "AIFLOW_PROBE_HOURS"),
+    "wait_note_minutes": (int, "AIFLOW_WAIT_NOTE_MINUTES"), "heartbeat_stale_seconds": (int, "AIFLOW_HEARTBEAT_STALE_SECONDS"),
+    "ci_wait_minutes": (int, "AIFLOW_CI_WAIT_MINUTES"), "feedback_settle_minutes": (int, "AIFLOW_FEEDBACK_SETTLE_MINUTES"),
+    "gate_poll_seconds": (int, "AIFLOW_GATE_POLL_SECONDS"), "max_cycles": (int, "AIFLOW_MAX_CYCLES"),
+    "agent_order": (list, "AIFLOW_AGENT_ORDER"), "explicit_only_ais": (list, "AIFLOW_EXPLICIT_ONLY_AIS"),
+    "ignored_authors": (list, "AIFLOW_IGNORED_AUTHORS"), "opencode_model": (str, "AIFLOW_OPENCODE_MODEL"),
+    "health_ticket": (str, "AIFLOW_HEALTH_TICKET"), "workspace_name": (str, "AIFLOW_WORKSPACE_NAME"),
+    "workspace_field": (str, "AIFLOW_WORKSPACE_FIELD"), "blocked_reason_field": (str, "AIFLOW_BLOCKED_REASON_FIELD"),
+    "require_human_field": (str, "AIFLOW_REQUIRE_HUMAN_FIELD"), "model_field": (str, "AIFLOW_MODEL_FIELD"),
+    "type_field": (str, "AIFLOW_TYPE_FIELD"), "version_field": (str, "AIFLOW_VERSION_FIELD"),
+    "redis_prefix": (str, "AIFLOW_REDIS_PREFIX"),
+}
 AI_LIMIT_NAMES = ("claude", "codex", "grok", "opencode")
 
 
@@ -60,6 +80,7 @@ class Registry:
     workers: dict[str, int]  # machine -> number of workers; empty when the machine is not listed
     from_files: bool
     ai_limits: dict[str, dict[str, int]] = field(default_factory=dict)  # machine -> AI name -> concurrent session limit
+    runtime: dict[str, str] = field(default_factory=dict)  # AIFLOW_* name -> value, from [runtime] of aiflow.toml
 
     def get(self, key: str) -> Project | None:
         return self.projects.get(key)
@@ -90,6 +111,24 @@ def _read(path: Path) -> dict:
         raise ConfigError(f"{path}: {error}") from error
 
 
+def _runtime(table: dict, where: str) -> dict[str, str]:
+    """The `[runtime]` table as AIFLOW_* values; a list becomes a comma separated string."""
+    unknown = sorted(set(table) - set(RUNTIME))
+    if unknown:
+        raise ConfigError(f"{where}: unknown setting {', '.join(unknown)} (known: {', '.join(sorted(RUNTIME))}).")
+    values: dict[str, str] = {}
+    for key, value in table.items():
+        kind, name = RUNTIME[key]
+        if kind is int and (not isinstance(value, int) or isinstance(value, bool)):
+            raise ConfigError(f"{where}: `{key}` must be a whole number.")
+        if kind is str and not isinstance(value, str):
+            raise ConfigError(f"{where}: `{key}` must be text.")
+        if kind is list and (not isinstance(value, list) or not all(isinstance(item, str) for item in value)):
+            raise ConfigError(f"{where}: `{key}` must be a list of text values.")
+        values[name] = ",".join(value) if kind is list else str(value)
+    return values
+
+
 def legacy(keys: tuple[str, ...], base: Project) -> Registry:
     """The registry of a machine without TOML files: every watched Jira project uses the `.env` values."""
     return Registry({key: replace(base, jira_key=key) for key in keys}, {}, from_files=False)
@@ -103,8 +142,8 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
         return None
     general = _read(general_file)
     for section in general:
-        if section not in ("defaults", "machines"):
-            raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines).")
+        if section not in ("defaults", "machines", "runtime"):
+            raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines, runtime).")
     defaults = replace(fallback, **_typed(general.get("defaults", {}), SETTINGS, f"{general_file} [defaults]"))
     workers: dict[str, int] = {}
     ai_limits: dict[str, dict[str, int]] = {}
@@ -147,5 +186,6 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
         projects[project.jira_key], owners[project.jira_key] = project, path
     if not projects:
         raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
-    return Registry(projects, workers, from_files=True, ai_limits=ai_limits)
+    runtime = _runtime(general.get("runtime", {}), f"{general_file} [runtime]")
+    return Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime)
 

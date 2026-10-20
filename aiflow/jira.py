@@ -65,6 +65,25 @@ class Jira:
         self.root = root
         self.cli = str(root / "scripts" / "jira")
         self._api: Any = None
+        self._field_ids: dict[str, list[str]] | None = None
+
+    def field_id(self, field: str) -> str:
+        """The id of a Jira field given by id (`customfield_10214`) or by its name (`Blocked reason`, looked up once)."""
+        if field.startswith("customfield_"):
+            return field
+        if self._field_ids is None:
+            status, body = self._library().call("GET", "/rest/api/3/field")
+            if status != 200:
+                raise JiraError(f"field list HTTP {status}")
+            self._field_ids = {}
+            for item in body:
+                if item.get("custom"):
+                    self._field_ids.setdefault(item["name"], []).append(item["id"])
+        found = self._field_ids.get(field, [])
+        if len(found) != 1:
+            problem = "is not defined in Jira (run bin/aiflow-setup)" if not found else f"matches {len(found)} custom fields"
+            raise JiraError(f"Jira field `{field}` {problem}.")
+        return found[0]
 
     def _run(self, *args: str) -> str:
         result = subprocess.run([self.cli, *args], capture_output=True, text=True, cwd=self.root, timeout=120)
@@ -169,6 +188,7 @@ class Jira:
 
     def set_field(self, key: str, field: str, value: Any) -> None:
         """Set a custom field (text value, {"value": "Yes"} for a select) or clear it with None."""
+        field = self.field_id(field)
         status, body = self._library().call("PUT", f"/rest/api/3/issue/{key}", {"fields": {field: value}})
         if status not in (200, 204):
             raise JiraError(f"set {field} HTTP {status}: {str(body)[:200]}")
@@ -177,6 +197,7 @@ class Jira:
         self.set_field(key, field, value)
 
     def read_field(self, key: str, field: str) -> Any:
+        field = self.field_id(field)
         status, body = self._library().call("GET", f"/rest/api/3/issue/{key}?fields={field}")
         if status != 200:
             raise JiraError(f"read {field} HTTP {status}")

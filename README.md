@@ -120,11 +120,23 @@ The developer's last comment follows a fixed template: What's changed, Why chang
 
 The repositories are public, so only accounts with write, maintain or admin permission on the repository count as human feedback (comments, change requests, review threads); bots (CodeRabbit, Copilot...) count as before. What anyone else writes never reaches a developer AI: it is left out of the prompt and logged once as `ignored feedback from accounts without write access`. The permission is asked of GitHub once per account and worker.
 
+### Preparing a Jira project
+
+`bin/aiflow-setup <KEY>` prints what a Jira project still needs for AI Flow (fields, issue type Release, workflow and scheme) and `--apply` creates it. The definition is `aiflow/jira_spec.json` and uses names only, so the same command prepares any Jira site; the supervisor finds the field ids by name at runtime.
+
 ### Configuration and workers (like `queue:work`)
 
-Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):
+Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples with a comment on every key: `config.example/`). Three files, one owner each:
 
-- `aiflow.toml`: `[defaults]` for every project and `[machines.<name>] workers = N`, the number of workers of each machine. Optional `[machines.<name>.ai_limits]` sets machine-wide concurrent session caps with `codex`, `claude`, `opencode` and `grok`; missing AIs are unlimited and `0` disables that AI on the machine.
+| File | Owns |
+|---|---|
+| `Workspaces/.env` | secrets only (Jira, GitHub, Redis password) |
+| `ai-flow/.env` | the identity and Redis connection of this machine: `AIFLOW_MACHINE`, `AIFLOW_REDIS_*` |
+| `config/aiflow.toml` and `config/aiflow/*.toml` | everything the supervisor does |
+
+Precedence: project file > `[defaults]` > legacy `.env` value; `[runtime]` > legacy `.env` value. The other `AIFLOW_*` names of `.env.example` older than JAIF-79 are legacy fallbacks for a machine without TOML files. Settings are read once when a worker starts: change a file, then `bin/aiflow-work restart`.
+
+- `aiflow.toml`: `[defaults]` for every project, `[runtime]` for the supervisor tuning (timing, `agent_order`, gate waits, `health_ticket`, Jira field names (or `customfield_NNNNN` ids); an unknown key or a wrong type stops the worker with exit 2) and `[machines.<name>] workers = N`, the number of workers of each machine. Optional `[machines.<name>.ai_limits]` sets machine-wide concurrent session caps with `codex`, `claude`, `opencode` and `grok`; missing AIs are unlimited and `0` disables that AI on the machine.
 - `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, optional `database`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `human_on_deployment`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`, `deploy_command`, `deploy_timeout_minutes`, `deploy_on`). `human_on_deployment` defaults to `true`; set it to `false` to skip only the automatic review caused by a Deployment section. The check command prints its value.
 
 Set `database = "<shared-project-name>"` only for projects that need isolated databases. The target repository must ignore `.env`. Before each developer, reviewer, or QA session uses a ticket worktree, the supervisor confirms `.env` is ignored, provisions PostgreSQL, MongoDB, and Redis resources for the lower-case ticket id, writes that worktree's `.env`, and verifies its worktree mode. It also blocks a developer handoff if `.env` appears in a ticket commit. Rework reuses the same ticket database. The supervisor tears it down when the ticket is Done or its worktree is removed; the health check reports teardown failures. Leaving `database` unset preserves the existing flow.
@@ -143,7 +155,7 @@ bin/install-wsl-service --workers
 
 A mistake (unknown setting, the same Jira key in two files, a worker number above the machine's `workers`) stops the worker with exit 2, which systemd does not retry. Heartbeats are `hb:<machine>:<n>` and the health check expects every worker of its machine. The old `aiflow-supervisor@<slot>` keeps working with `.env` only.
 
-State lives in one Redis shared by every machine (plain TCP client in `aiflow/lock.py`: reconnects, retries, and the AI is stopped when Redis stays unreachable for three quarters of the lease time). DB 5 is production, DB 6 is for tests; keys are under `aiworkflow:`. Session leases and daily peaks use the same prefix; leases expire after the configured session lease. Machines that cannot route to the Redis host use `bin/aiflow-redis-tunnel` (launchd template in `deploy/launchd/`). Logs: `Workspaces/.tmp/aiflow/logs/`. See `.env.example` for every setting.
+State lives in one Redis shared by every machine (plain TCP client in `aiflow/lock.py`: reconnects, retries, and the AI is stopped when Redis stays unreachable for three quarters of the lease time). DB 5 is production, DB 6 is for tests; keys are under `aiworkflow:`. Session leases and daily peaks use the same prefix; leases expire after the configured session lease. Machines that cannot route to the Redis host use `bin/aiflow-redis-tunnel` (launchd template in `deploy/launchd/`). Logs: `Workspaces/.tmp/aiflow/logs/`. `.env.example` lists the machine settings that stay in `.env` (identity and Redis); every supervisor setting is in `config.example/aiflow.toml`.
 
 ## Troubleshooting
 

@@ -22,6 +22,7 @@ PATH = re.compile(r"(?:/[\w.\-@]+){2,}")
 SLUG = re.compile(r"<KEY>(?:-[A-Za-z0-9]+)+")
 NUMBER = re.compile(r"\b\d+\b")
 LIMIT_ROWS = 5000
+MAX_ROWS = 200_000
 
 
 def normalize(reason: str) -> str:
@@ -40,13 +41,18 @@ def signature(kind: str, reason: str) -> str:
 def query(url: str, org: str, stream: str, user: str, password: str, sql: str, hours: int,
           opener: Callable[..., Any] = urllib.request.urlopen) -> list[dict[str, Any]]:
     end = int(time.time() * 1_000_000)
-    body = json.dumps({"query": {"sql": sql.replace("{stream}", stream), "start_time": end - hours * 3600 * 1_000_000, "end_time": end,
-                                 "from": 0, "size": LIMIT_ROWS}}).encode()
     auth = base64.b64encode(f"{user}:{password}".encode()).decode()
-    request = urllib.request.Request(f"{url.rstrip('/')}/api/{org}/_search", data=body, method="POST",
-                                     headers={"Content-Type": "application/json", "Authorization": "Basic " + auth})
-    with opener(request, timeout=30) as response:
-        return json.load(response).get("hits", [])
+    rows: list[dict[str, Any]] = []
+    while True:  # page through the raw rows of one fixed window; aggregate queries fit in the first page
+        body = json.dumps({"query": {"sql": sql.replace("{stream}", stream), "start_time": end - hours * 3600 * 1_000_000, "end_time": end,
+                                     "from": len(rows), "size": LIMIT_ROWS}}).encode()
+        request = urllib.request.Request(f"{url.rstrip('/')}/api/{org}/_search", data=body, method="POST",
+                                         headers={"Content-Type": "application/json", "Authorization": "Basic " + auth})
+        with opener(request, timeout=30) as response:
+            page = json.load(response).get("hits", [])
+        rows += page
+        if len(page) < LIMIT_ROWS or len(rows) >= MAX_ROWS:
+            return rows
 
 
 def by_signature(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -54,7 +60,7 @@ def by_signature(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         sig = signature(row.get("kind", ""), row.get("reason", ""))
         group = groups.setdefault(sig, {"signature": sig, "count": 0, "tickets": set(), "projects": set(), "machines": set()})
-        group["count"] += 1
+        group["count"] += 1 if not row.get("ticket") or row["ticket"] not in group["tickets"] else 0
         for name, field in (("tickets", "ticket"), ("projects", "project"), ("machines", "machine")):
             if row.get(field):
                 group[name].add(row[field])
@@ -75,7 +81,7 @@ def over_limits(rows: list[dict[str, Any]], warn: float, limit: float) -> list[d
             longest[ticket] = max(longest[ticket], minutes)
             runs[ticket] += 1
     found = [{"ticket": t, "ai_minutes": round(m, 1), "longest_run": round(longest[t], 1), "runs": runs[t],
-              "level": "over-limit" if m > limit else "warn"} for t, m in total.items() if m > warn]
+              "level": "over-limit" if m > limit else "warn"} for t, m in total.items() if m > min(warn, limit)]
     return sorted(found, key=lambda item: -item["ai_minutes"])
 
 

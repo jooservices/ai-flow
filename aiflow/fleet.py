@@ -26,7 +26,7 @@ echo "units_failed=$(systemctl --user list-units 'aiflow-*' --no-legend --all 2>
 echo "control=$(systemctl --user is-active aiflow-control 2>/dev/null || true)"
 echo "ai_processes=$(ps -eo args | grep -E '^(claude|codex|grok|opencode)( |$)' | wc -l)"
 echo "errors_1h=$(journalctl --user -u 'aiflow-*' --since '-1h' --no-pager -q 2>/dev/null | grep -ciE 'traceback|worker.error|tick failed|ConfigError')"
-echo "commit=$(git -C "$HOME/Workspaces/JOOservices/projects/ai-flow" log -1 --format=%h 2>/dev/null)"
+echo "commit=$(git -C "${AIFLOW_WORKSPACES:-$HOME/Workspaces}/JOOservices/projects/ai-flow" log -1 --format=%h 2>/dev/null)"
 '''
 
 
@@ -51,6 +51,8 @@ def flags(snapshot: dict[str, str], newest_commit: str = "") -> list[str]:
         found.append(f"{snapshot['errors_1h']} error lines in the last hour")
     if int(snapshot.get("disk_used_pct", "0") or 0) >= 85:
         found.append("disk almost full")
+    if not snapshot.get("commit"):
+        found.append("checkout not found")
     if newest_commit and snapshot.get("commit") and snapshot["commit"] != newest_commit:
         found.append(f"code differs ({snapshot['commit']} vs {newest_commit})")
     return found
@@ -64,8 +66,11 @@ def collect(spec: str, runner=subprocess.run) -> dict[str, str]:
         command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", *shlex.split(how[4:]), "bash", "-s"]
     else:
         raise ValueError(f"host `{spec}` must be name=local or name=ssh:<arguments>")
-    result = runner(command, input=SNAPSHOT, capture_output=True, text=True, timeout=90)
-    values = parse(result.stdout) if result.returncode == 0 else {}
+    try:
+        result = runner(command, input=SNAPSHOT, capture_output=True, text=True, timeout=90)
+        values = parse(result.stdout) if result.returncode == 0 else {}
+    except (subprocess.SubprocessError, OSError):
+        values = {}
     values["name"] = name
     return values
 

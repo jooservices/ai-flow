@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,9 @@ SESSIONS = Path.home() / ".codex" / "sessions"
 
 def _find_limits(node: Any) -> dict | None:
     if isinstance(node, dict):
-        if isinstance(node.get("rate_limits"), dict) and node["rate_limits"].get("primary"):
-            return node["rate_limits"]
+        limits = node.get("rate_limits")
+        if isinstance(limits, dict) and limits.get("primary") and limits.get("limit_id") in (None, "codex"):
+            return limits
         for value in node.values():
             found = _find_limits(value)
             if found:
@@ -33,18 +35,27 @@ def _find_limits(node: Any) -> dict | None:
     return None
 
 
-def last_limits(lines: list[str]) -> dict | None:
-    """The newest `rate_limits` object in a Codex session log."""
+def _stamp(record: Any) -> float | None:
+    value = record.get("timestamp") if isinstance(record, dict) else None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def last_limits(lines: list[str], with_time: bool = False):
+    """The newest `rate_limits` object in a Codex session log (and, with `with_time`, the time of its record)."""
     for line in reversed(lines):
         if '"rate_limits"' not in line:
             continue
         try:
-            found = _find_limits(json.loads(line))
+            record = json.loads(line)
+            found = _find_limits(record)
         except ValueError:
             continue
         if found:
-            return found
-    return None
+            return (found, _stamp(record)) if with_time else found
+    return (None, None) if with_time else None
 
 
 def windows(limits: dict, now: float) -> list[dict[str, Any]]:
@@ -64,15 +75,19 @@ def windows(limits: dict, now: float) -> list[dict[str, Any]]:
 def codex_level(sessions: Path = SESSIONS, now: float | None = None, files: int = 8) -> dict[str, Any]:
     now = time.time() if now is None else now
     logs = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)[:files] if sessions.is_dir() else []
+    best: tuple[float, dict] | None = None
     for log in logs:
         try:
             lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
+            modified = log.stat().st_mtime
         except OSError:
             continue
-        limits = last_limits(lines)
-        if limits:
-            return {"known": True, "source": "codex session log", "observed_age_minutes": round((now - log.stat().st_mtime) / 60),
-                    "windows": windows(limits, now)}
+        limits, stamp = last_limits(lines, with_time=True)
+        if limits and (best is None or (stamp or modified) > best[0]):
+            best = (stamp or modified, limits)
+    if best:
+        return {"known": True, "source": "codex session log", "observed_age_minutes": round((now - best[0]) / 60),
+                "windows": windows(best[1], now)}
     return {"known": False, "source": "no Codex rate_limits found"}
 
 

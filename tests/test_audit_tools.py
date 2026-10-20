@@ -1,7 +1,10 @@
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiflow import fleet, preflight, quota, reconcile, report
 
@@ -81,7 +84,8 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(preflight.read_lock(path), {"git": "2.53", "node": "24.22"})
 
     def test_missing_configuration_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("AIFLOW_", "WORKSPACES_"))}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, clean, clear=True):
             results = preflight.run(Path(tmp), skip_ai=True, check_reach=lambda host, port: False)
             failed = {r["check"] for r in results if not r["ok"]}
             self.assertIn("config: aiflow.toml", failed)
@@ -121,3 +125,61 @@ class FleetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_version_boundaries(self):
+        self.assertTrue(preflight.version_matches("2.5", "git version 2.5.1"))
+        self.assertFalse(preflight.version_matches("2.5", "git version 2.53.0"))
+        self.assertFalse(preflight.version_matches("24.2", "v24.22.0"))
+        self.assertTrue(preflight.version_matches("24.22", "v24.22.0"))
+
+    def test_https_port_and_missing_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            seen = []
+            with mock.patch.object(preflight.common, "runtime", return_value={"obs_url": "https://obs.example", "memory_url": ""}), \
+                 mock.patch.object(preflight.common, "projects", return_value=[{"jira_key": "AAA"}]), \
+                 mock.patch.dict(os.environ, {}, clear=False):
+                results = preflight.run(Path(tmp), skip_ai=True, check_reach=lambda host, port: seen.append(port) or True)
+            self.assertIn(443, seen)
+            self.assertIn("project file has no `repo` key", [r["detail"] for r in results])
+
+    def test_blocked_count_is_distinct_tickets(self):
+        rows = [{"ticket": "A-1", "kind": "Config", "reason": "x"}, {"ticket": "A-1", "kind": "Config", "reason": "x"}]
+        self.assertEqual(report.by_signature(rows)[0]["count"], 1)
+
+    def test_warn_above_limit_still_reports_over_limit(self):
+        found = report.over_limits([{"ticket": "A-1", "minutes": 130}], warn=200, limit=120)
+        self.assertEqual(found[0]["level"], "over-limit")
+
+    def test_query_pages_through_all_rows(self):
+        pages = [[{"n": i} for i in range(report.LIMIT_ROWS)], [{"n": 1}]]
+        class Reply:
+            def __init__(self, hits): self.hits = hits
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, *a): return json.dumps({"hits": self.hits}).encode()
+        replies = iter(pages)
+        rows = report.query("http://x", "o", "s", "u", "p", "select 1", 1, opener=lambda req, timeout: Reply(next(replies)))
+        self.assertEqual(len(rows), report.LIMIT_ROWS + 1)
+
+    def test_other_codex_bucket_is_ignored(self):
+        other = json.dumps({"payload": {"rate_limits": {"limit_id": "other", "primary": {"used_percent": 1}}}})
+        mine = json.dumps({"payload": {"rate_limits": {"limit_id": "codex", "primary": {"used_percent": 50}}}})
+        self.assertEqual(quota.last_limits([mine, other])["primary"]["used_percent"], 50)
+
+    def test_newest_snapshot_wins_over_newest_file(self):
+        def line(stamp, used):
+            return json.dumps({"timestamp": stamp, "payload": {"rate_limits": {"primary": {"used_percent": used, "window_minutes": 300}}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            old_file = Path(tmp) / "rollout-1.jsonl"; new_file = Path(tmp) / "rollout-2.jsonl"
+            old_file.write_text(line("2026-10-20T10:00:00Z", 10) + "\n")
+            new_file.write_text(line("2026-10-20T08:00:00Z", 90) + "\n")  # newer file, older snapshot
+            os.utime(old_file, (1, 1)); os.utime(new_file, (2, 2))
+            level = quota.codex_level(Path(tmp), now=1_792_500_000)
+            self.assertEqual(level["windows"][0]["used_percent"], 10.0)
+
+    def test_fleet_timeout_and_missing_checkout(self):
+        def hang(*a, **k): raise subprocess.TimeoutExpired("ssh", 90)
+        self.assertEqual(fleet.collect("vm=ssh:host", runner=hang), {"name": "vm"})
+        self.assertIn("checkout not found", fleet.flags({"control": "active", "units_failed": "0"}))

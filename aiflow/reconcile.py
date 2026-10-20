@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     if not keys:
         parser.error("--keys needs at least one project key")
     merged = merged_keys(git_subjects(repo, args.base))
-    issues = Jira(root).search(f"project in ({', '.join(keys)}) AND statusCategory != Done", 200)
+    issues = Jira(root).search(f"project in ({', '.join(keys)}) AND status not in (Done, Declined)", 200)
     rows = mismatches(merged, issues)
     for row in rows:
         print(f"{row['key']:<10} {row['status']:<14} merged in {args.base}: {row['summary'][:80]}")

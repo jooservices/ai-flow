@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -34,6 +35,11 @@ def version(tool: str) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return out[0] if out else ""
+
+
+def version_matches(wanted: str, text: str) -> bool:
+    """The locked version as a whole number group: `2.5` matches `2.5.1` but not `2.53.0`."""
+    return re.search(rf"(?<![\d.]){re.escape(wanted)}(?!\d)", text) is not None
 
 
 def read_lock(path: Path) -> dict[str, str]:
@@ -69,6 +75,9 @@ def run(root: Path, skip_ai: bool = False, lock: Path | None = None, check_reach
     for company in sorted({p.get("company", "JOOservices") for p in projects}):
         add(f"worktree directory: {company}", (root / company / "worktree").is_dir(), str(root / company / "worktree"))
     for project in projects:
+        if not project.get("repo"):
+            add(f"clone of {project['jira_key']}", False, "project file has no `repo` key")
+            continue
         clone = root / project.get("company", "JOOservices") / "projects" / project["repo"]
         add(f"clone of {project['jira_key']} ({project['repo']})", (clone / ".git").exists(), str(clone))
     redis_host, redis_port = env.get("AIFLOW_REDIS_HOST", "127.0.0.1"), int(env.get("AIFLOW_REDIS_PORT", "16382") or 16382)
@@ -79,12 +88,13 @@ def run(root: Path, skip_ai: bool = False, lock: Path | None = None, check_reach
             add(f"{name} configured", False, f"{key} is empty")
             continue
         parsed = urlparse(url)
-        add(f"{name} reachable", check_reach(parsed.hostname or "", parsed.port or 80), f"{parsed.hostname}:{parsed.port}")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        add(f"{name} reachable", check_reach(parsed.hostname or "", port), f"{parsed.hostname}:{port}")
     wanted = read_lock(lock) if lock else {}
     for tool in TOOLS:
         found = shutil.which(tool) is not None
         text = version(tool) if found else ""
-        ok = found and (tool not in wanted or wanted[tool] in text)
+        ok = found and (tool not in wanted or version_matches(wanted[tool], text))
         add(f"tool: {tool}", ok, (text or "missing") + (f" (lock wants {wanted[tool]})" if tool in wanted and not ok and found else ""))
     if not skip_ai:
         for tool in ("claude", "codex"):

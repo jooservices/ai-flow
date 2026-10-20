@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-cd "$DIR"
-exec python3 -m aiflow.fleet "$@"
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m aiflow.fleet "$@"

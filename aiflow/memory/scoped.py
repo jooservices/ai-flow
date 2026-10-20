@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from . import guard
+from .embed import literal
 from .store import Store
 
 ENTRY_TYPES = ("fact", "decision", "lesson", "knowledge", "idea", "reference")
@@ -131,7 +132,21 @@ class Scoped:
         if not include_decayed:
             sql += " and e.status <> 'decayed'"
         sql += " order by ts_rank_cd(e.tsv, q) desc, e.seq limit %s"
-        return [entry(row) for row in self.run(sql, (*values, int(limit)))]
+        found = [entry(row) for row in self.run(sql, (*values, int(limit)))]
+        vector = self.store.query_vector(query)
+        if vector is None:
+            return found
+        embedder = self.store.embedder
+        meaning = (f"{ENTRY_SQL} where {clause} and e.embedding is not null and e.embedding_model = %s and 1 - (e.embedding <=> %s::vector) >= %s")
+        values = [*args, embedder.model, literal(vector), embedder.min_similarity]
+        if jira_issue_key:
+            meaning += " and e.jira_key = %s"
+            values.append(jira_issue_key.strip())
+        if not include_decayed:
+            meaning += " and e.status <> 'decayed'"
+        meaning += " order by e.embedding <=> %s::vector limit %s"
+        by_meaning = [entry(row) for row in self.run(meaning, (*values, literal(vector), int(limit)))]
+        return self.store.fuse(found, by_meaning, lambda item: item["id"], int(limit))
 
     def list(self, namespace: str | None = None, project: str | None = None, global_scope: bool = False, jira_issue_key: str | None = None,
              entry_type: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:

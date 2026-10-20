@@ -69,12 +69,15 @@ def available(order: tuple[str, ...]) -> list[str]:
 
 
 SAFE_BASH = ("git", "python3", "ls", "cat", "grep", "find", "sed", "head", "tail", "wc", "od", "diff", "mkdir", "touch", "cp", "mv", "rm",
-             "sleep", "echo", "printf", "test", "cd", "pwd", "date", "sort", "uniq", "tr", "cut", "basename", "dirname", "xargs", "tee", "make")
+             "sleep", "echo", "printf", "test", "cd", "pwd", "date", "sort", "uniq", "tr", "cut", "basename", "dirname", "xargs", "tee")
+# Project check commands: without them a Claude QA cannot run a ticket's tests ("This command requires approval") and fails every ticket whose
+# AC need them. The ticket worktree and DENIED_BASH still contain it.
+PROJECT_BASH = ("make", "composer", "npm", "npx", "node", "php", "bash ./docker/scripts/")
 
 
 def claude_allowed(root: Path) -> str:
     """Claude may edit files, search, and run a fixed set of commands plus the Jira adapter and the shared runtimes."""
-    bash = [f"Bash({name}:*)" for name in SAFE_BASH]
+    bash = [f"Bash({name}:*)" for name in SAFE_BASH + PROJECT_BASH]
     bash += [f"Bash({root}/JOOservices/projects/ai-flow/bin/aiflow-mem:*)", f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
     return ",".join(["Read", "Edit", "Write", "Glob", "Grep", *bash])
 

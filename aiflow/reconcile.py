@@ -31,7 +31,9 @@ def mismatches(merged: set[str], issues: list[dict]) -> list[dict]:
 
 
 def git_subjects(repo: Path, base: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(repo), "log", base, "--format=%s"], capture_output=True, text=True, timeout=60)
+    if base.startswith("-"):
+        raise ValueError("--base must be a branch or revision, not an option")
+    result = subprocess.run(["git", "-C", str(repo), "log", "--format=%s", "--end-of-options", base], capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip()[:200])
     return result.stdout.splitlines()

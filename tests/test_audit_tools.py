@@ -183,3 +183,7 @@ class ReviewFixTests(unittest.TestCase):
         def hang(*a, **k): raise subprocess.TimeoutExpired("ssh", 90)
         self.assertEqual(fleet.collect("vm=ssh:host", runner=hang), {"name": "vm"})
         self.assertIn("checkout not found", fleet.flags({"control": "active", "units_failed": "0"}))
+
+    def test_base_cannot_be_an_option(self):
+        with self.assertRaises(ValueError):
+            reconcile.git_subjects(Path("."), "--output=/tmp/x")

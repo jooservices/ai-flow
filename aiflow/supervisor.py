@@ -18,6 +18,8 @@ from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
+from .memory import cases as memory_cases
+from .memory.client import Memory
 from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
@@ -163,6 +165,8 @@ class Supervisor:
         self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
         self.retired = False
+        self.memory = Memory(cfg.memory.get("AIFLOW_MEMORY_URL", ""), cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
+                             spool=cfg.root / ".tmp" / "aiflow" / "memory-spool.jsonl", log=lambda m: log(m))
         self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
@@ -953,6 +957,61 @@ class Supervisor:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    # ---- shared memory ---------------------------------------------------------------------------------------
+    def recall(self, key: str, view: dict[str, Any], repo: Repo) -> str:
+        """Verified knowledge for this ticket as a prompt block. Advice only: a down service gives an empty block."""
+        if not self.memory.enabled:
+            return "(the shared memory is not configured)"
+        project = self.cfg.project(key)
+        description = str(view.get("description", ""))
+        parsed = sections(description)
+        wanted = " ".join([str(view.get("summary", "")), (parsed.get("ac") or parsed.get("acceptance criteria") or "")[:600], parsed.get("scopes", "")[:300]])
+        items = self.memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
+        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items))
+        if items:
+            self.redis.set(f"recalled:{key}", json.dumps([i["id"] for i in items]), 30 * DAY)
+        return memory_cases.prompt_block(items)
+
+    def remember_lessons(self, key: str, repo: Repo, agent: str, text: str) -> None:
+        """The `MEMORY:` lines of an AI's final message become fresh entries (verified later by confirmation or feedback)."""
+        if not self.memory.enabled:
+            return
+        project = self.cfg.project(key)
+        for kind, title, body in memory_cases.lessons(text):
+            entry_id = self.memory.propose(dict(kind=kind, scope="project", namespace=project.company, project=project.jira_key, repo=repo.name,
+                                                jira_key=key, title=title, body=body, tags=[project.jira_key.lower(), repo.name.lower(), agent.lower()],
+                                                source={"jira": key}, created_by=agent))
+            events.emit("memory.propose", ticket=key, kind=kind, title=title[:120], agent=agent, id=entry_id or "")
+
+    def remember_case(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
+        """A merged and Done ticket becomes a `case`, written by the supervisor from what it already has (no AI, no tokens)."""
+        if not self.memory.enabled:
+            return
+        project = self.cfg.project(key)
+        try:
+            comments = self.jira.comments(key, 30)
+            summary = str(self.jira.view(key).get("summary", key))
+        except (JiraError, ValueError, TypeError) as error:
+            log(f"{key}: no case written ({error})")
+            return
+        rounds = int(self.redis.get(f"cycles:{key}") or 0)
+        entry = memory_cases.build_case(key, summary, project.company, repo.name, self.change_type(key), self.state(key, "dev"),
+                                        str(pr.get("url", "")), comments, rounds, self.state(key, "rework"))
+        entry_id = self.memory.propose(entry) if entry else None
+        events.emit("memory.case", ticket=key, written=bool(entry_id), has_handover=bool(entry), rework_rounds=rounds)
+        if rounds == 0:  # merged without a single rework: the recalled knowledge did not mislead
+            for recalled in json.loads(self.redis.get(f"recalled:{key}") or "[]"):
+                self.memory.feedback(recalled, key, True)
+
+    def memory_env(self, key: str, repo: Repo) -> dict[str, str]:
+        """What `bin/aiflow-mem` needs inside the AI process: the address, the read/propose token, and the defaults of this ticket."""
+        token, url = self.cfg.memory.get("AIFLOW_MEMORY_AI_TOKEN", ""), self.cfg.memory.get("AIFLOW_MEMORY_URL", "")
+        if not (token and url):
+            return {}
+        project = self.cfg.project(key)
+        return {"AIFLOW_MEMORY_URL": url, "AIFLOW_MEMORY_TOKEN": token, "AIFLOW_MEMORY_NAMESPACE": project.company,
+                "AIFLOW_MEMORY_PROJECT": project.jira_key, "AIFLOW_MEMORY_REPO": repo.name, "AIFLOW_MEMORY_TICKET": key, "AIFLOW_MEMORY_ACTOR": "ai"}
+
     def execute(self, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path, branch: str, base: str,
                 repo: Repo, slot_owner: str | None = None, session_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
         """Run one AI. Returns (why, final text, verdict, quota)."""
@@ -967,7 +1026,8 @@ class Supervisor:
                       rework=self.rework_text(key), pr=self.pr_text(key), replies_file=str(self.replies_file(key)),
                       type=self.change_type(key) or str(view.get("type", "")), parent=view.get("parent") or "none",
                       version=self.state(key, "version"), last_tag=self.state(key, "lasttag") or "(none yet)",
-                      release_check=self.cfg.project(key).release_check or "(none configured)", project=key.rsplit("-", 1)[0])
+                      release_check=self.cfg.project(key).release_check or "(none configured)", project=key.rsplit("-", 1)[0],
+                      memory=self.recall(key, view, repo))
         prompt_role = "release" if role == "developer" and self.state(key, "isrelease") else role
         prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8") for name in ("common", prompt_role))
         for name, value in values.items():
@@ -1009,12 +1069,13 @@ class Supervisor:
         if session_owner and not self.redis.renew_session(self.cfg.machine, agent, session_owner, self.cfg.lease_seconds):
             return "lost-lease", "", None, False
         code, why = runner.run(
-            argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root),
+            argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root, self.memory_env(key, repo)),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
         self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
+        self.remember_lessons(key, repo, agent, text)
         quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
         log(f"{key} {role} {agent}: exit={code} why={why} verdict={found} quota={quota}")
         events.emit("ai.run", ticket=key, role=role, agent=agent, model=model, effort=effort, minutes=round((time.monotonic() - began) / 60, 2), why=why,
@@ -1626,13 +1687,14 @@ class Supervisor:
             cleanup_status = f"Cleanup failed ({error}); remove the worktree by hand."
         self.release_slot(key, repo.name)
         events.emit("ticket.done", ticket=key, repo=repo.name, base=base, pr=pr.get("number"), cleanup=cleanup_status[:120])
+        self.remember_case(key, repo, pr)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
-                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel"):
+                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel", "recalled"):
             self.redis.delete(f"{name}:{key}")
 
 
@@ -1670,6 +1732,10 @@ def main(argv: list[str] | None = None) -> int:
             on = bool(obs.get("AIFLOW_OBS_URL") and obs.get("AIFLOW_OBS_USER") and obs.get("AIFLOW_OBS_PASSWORD"))
             print(f"  events: {'ON' if on else 'off'} -> {obs.get('AIFLOW_OBS_URL') or 'no obs_url'} org {obs.get('AIFLOW_OBS_ORG', 'default')} "
                   f"stream {obs.get('AIFLOW_OBS_STREAM', 'aiflow_events')}" + ("" if on else " (needs obs_url in aiflow.toml and AIFLOW_OBS_USER/PASSWORD in Workspaces/.env)"))
+            memory = config.memory
+            print(f"  memory: {'ON' if memory.get('AIFLOW_MEMORY_URL') and memory.get('AIFLOW_MEMORY_TOKEN') else 'off'} -> {memory.get('AIFLOW_MEMORY_URL') or 'no memory_url'}"
+                  + ("" if memory.get('AIFLOW_MEMORY_TOKEN') else " (needs AIFLOW_MEMORY_TOKEN in Workspaces/.env)")
+                  + ("" if memory.get('AIFLOW_MEMORY_AI_TOKEN') else "; the AIs get no aiflow-mem access without AIFLOW_MEMORY_AI_TOKEN"))
             policy = config.operator_policy
             print(f"  operator: {'ON' if policy.enabled else 'off (config/operator.toml)'}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
                   f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; switch: `aiflow-work operator on|off`")

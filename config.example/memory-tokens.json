@@ -1,0 +1,4 @@
+[
+  {"name": "supervisor", "token": "<long random text>", "role": "admin", "namespaces": ["*"]},
+  {"name": "ai", "token": "<another long random text>", "role": "client", "namespaces": ["JOOservices"]}
+]

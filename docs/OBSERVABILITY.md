@@ -25,6 +25,7 @@ concerns a ticket `ticket` and `project`.
 | `control.start` / `control.cycle` / `control.config_changed` / `control.error` / `control.worker_started` / `worker_retiring` / `worker_disabled` / `worker_kept` | `start`, `retire`, `disable`, `worker`, `message` |
 | `operator.incident` / `operator.resolved` / `operator.run` / `operator.action` / `operator.escalate` / `operator.notify` / `operator.limit` | `incident`, `kind`, `agent`, `result`, `action`, `question` |
 | `health.check` / `health.problem` / `health.alert` | `problems`, `kinds`, `kind`, `message` |
+| `memory.recall` / `memory.propose` / `memory.case` / `memory.flush` / `memory.curate` | `found`, `ids`, `kind`, `title`, `written`, `rework_rounds`, `sent` |
 | `setup.step` | `text`, `applied` |
 
 ## Questions to ask (SQL in OpenObserve)

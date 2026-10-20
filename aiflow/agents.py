@@ -37,12 +37,13 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
+def run_env(agent: str, workdir: Path, root: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Environment of an AI process. PWD must be the worktree: some CLIs (OpenCode) take the project directory from PWD, not from
     the real working directory, and then treat the worktree as an external directory and reject every command in it."""
     env = child_env()
     env.pop("OPENCODE_CONFIG_CONTENT", None)
     env["PWD"] = str(workdir)
+    env.update(extra or {})
     # No AI may write to GitHub: every AI acts as the owner's account, so its comments would be read back as the owner's own
     # feedback. An empty gh configuration and no token make every gh call fail to authenticate; the supervisor keeps its login.
     empty = root / ".tmp" / "aiflow" / "gh-empty"
@@ -74,7 +75,7 @@ SAFE_BASH = ("git", "python3", "ls", "cat", "grep", "find", "sed", "head", "tail
 def claude_allowed(root: Path) -> str:
     """Claude may edit files, search, and run a fixed set of commands plus the Jira adapter and the shared runtimes."""
     bash = [f"Bash({name}:*)" for name in SAFE_BASH]
-    bash += [f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
+    bash += [f"Bash({root}/JOOservices/projects/ai-flow/bin/aiflow-mem:*)", f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
     return ",".join(["Read", "Edit", "Write", "Glob", "Grep", *bash])
 
 

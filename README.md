@@ -124,6 +124,10 @@ The repositories are public, so only accounts with write, maintain or admin perm
 
 `aiflow-control` (one systemd service per machine, `bin/install-wsl-service --control`) keeps the running workers equal to the configuration: every project file has `workers = N` (units `aiflow-work@<KEY>-1` ... `@<KEY>-N`), the sum with the shared workers may not pass the machine's `max_workers`. Worker 1 of a project serves only that project; the others take their own project first and then other projects turn by turn. More workers are started within 30 seconds; fewer are asked to leave after their current step (exit code 3, not restarted) and then disabled; a changed file restarts the workers after their step. It also runs the operator. The workers are separate units, so they keep working when the control stops. `bin/aiflow-control --dry-run` shows the plan.
 
+### Shared memory
+
+Facts, lessons and cases of finished tickets live in PostgreSQL behind a small service (`docs/MEMORY.md`): the supervisor puts the best verified entries in each prompt, writes a case when a ticket is Done, and the AIs search and propose with `bin/aiflow-mem`. It is advice only: nothing waits for it.
+
 ### The operator and fair turns
 
 The supervisor takes turns between projects (the first ticket of every project, then the second of every project, rework first; inside a project the Jira order is kept). It also finds incidents with plain code and starts a read-only AI for one incident at a time (`docs/OPERATOR.md`, `config.example/operator.toml`, `prompts/operator.md`); it is off until `operator.toml` enables it.

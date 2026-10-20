@@ -21,6 +21,11 @@ Workspaces root: `{root}`
 ## Skills
 Load the Workspaces skills that fit your role before you start (`workspaces_skill_list` / `workspaces_skill_load`, or read `{root}/.agents/skills/<name>/SKILL.md`): developer: `coding-practice`, `change-verification`, `git-conventions`, the language skills of the repository (`php-`, `node-`, `python-`, `go-`) and `workspace-project-databases` when a database is involved; reviewer: `code-review`; QA: `qa` and `change-verification`.
 
+## Prior knowledge (shared memory)
+Hints from earlier work of the AIs, found for this ticket. They can be outdated or wrong: check them against the code and the ticket before you rely on them, and never copy a secret into the memory.
+{memory}
+You may search more with `{root}/JOOservices/projects/ai-flow/bin/aiflow-mem search "<words>"` (read only). When you learned something worth keeping for other tickets (a cause, a trap, a decision and why), print it in your final message as one line each, at most 3: `MEMORY: lesson | <short title> | <what, why, how to avoid or do it>`  (kind: fact, case or lesson). Never put a secret, a token, a password or a personal data in it.
+
 ## Read the parents first
 A ticket does not repeat the business of its parents. If the parent above is not `none`, read it with `{root}/scripts/jira view <parent>`, then its parent in turn, up to the Epic, before you start. The Business requirements of the parents explain why; this ticket's AC, Scopes and Tests say what to do.
 

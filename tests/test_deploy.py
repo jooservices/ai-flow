@@ -496,3 +496,19 @@ class DeploySupervisorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogNameTests(unittest.TestCase):
+    def test_two_runs_in_the_same_clock_tick_write_two_logs(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from aiflow import deploy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / "logs"
+            with mock.patch("aiflow.deploy.time.time_ns", return_value=1):
+                for _ in range(2):
+                    deploy.run("true", Path(tmp), 1, logs)
+            self.assertEqual(len(list(logs.glob("deploy-*.log"))), 2)

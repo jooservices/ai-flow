@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, runner
+from . import agents, deploy, events, github, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -165,6 +165,8 @@ class Supervisor:
         self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
         self.retired = False
+        if hasattr(jira, "on_transition"):
+            jira.on_transition = lambda key, to: self.record_status(key, to, "supervisor")
         self.memory = Memory(cfg.memory.get("AIFLOW_MEMORY_URL", ""), cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
                              spool=cfg.root / ".tmp" / "aiflow" / "memory-spool.jsonl", log=lambda m: log(m))
         self._priorities: dict[str, tuple[float, str]] = {}
@@ -175,6 +177,7 @@ class Supervisor:
         statuses = ", ".join(f'"{s}"' for s in STAGES)
         jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
         found = self.jira.search(jql)
+        self.observe(found)
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
         if self.cfg.home and self.cfg.slot == 1:  # worker 1 of a project serves only its own project, so it always has a free hand for it
             found = [issue for issue in found if issue["key"].rsplit("-", 1)[0] == self.cfg.home]
@@ -198,6 +201,37 @@ class Supervisor:
             value = served.get(project)
             return project != self.cfg.home, "rework" not in issue.get("labels", []), rank[issue["key"]], float(value) if value else 0.0
         return sorted(found, key=turn)  # stable
+
+    def record_status(self, key: str, to: str, source: str) -> None:
+        """A status change as an event, with the time spent in the status it left. Remembers the status for the next change."""
+        now = time.time()
+        previous = self.redis.get(f"status:{key}") or ""
+        since = self.redis.get(f"statussince:{key}")
+        if previous == to:
+            return
+        events.emit("ticket.status", ticket=key, to_status=to, from_status=previous, source=source,
+                    minutes_in_from=round((now - float(since)) / 60, 2) if since else None)
+        self.redis.set(f"status:{key}", to, 30 * DAY)
+        self.redis.set(f"statussince:{key}", str(now), 30 * DAY)
+
+    def observe(self, issues: list[dict[str, Any]]) -> None:
+        """Status changes nobody here made (the owner moved a ticket, Jira did): noticed at the next poll, at most one poll late.
+        The Jira `updated` time is not the time of the change (a comment moves it too), so the poll time is the time of the event;
+        a stale search result (older than our own last record) is ignored."""
+        if not issues:
+            return
+        last = self.redis.get_many([f"status:{i['key']}" for i in issues])
+        for issue, previous in zip(issues, last):
+            if not issue.get("status") or previous == issue["status"]:
+                continue
+            since = self.redis.get(f"statussince:{issue['key']}")
+            try:
+                if since and parse_time(issue["updated"]).timestamp() + 2 < float(since):
+                    continue  # the JQL index is behind a move this supervisor just made
+            except (ValueError, KeyError):
+                pass
+            if self.redis.acquire(f"statuschg:{issue['key']}:{issue['status']}:{previous or 'none'}", self.cfg.owner, 3600):
+                self.record_status(issue["key"], issue["status"], "observed")
 
     def parents_of_open_work(self, found: list[dict[str, Any]]) -> set[str]:
         """Keys among `found` that have child issues: a ticket with children is a container, only its leaves are worked."""
@@ -367,11 +401,12 @@ class Supervisor:
     def paused(self) -> bool:
         return self.redis.get("paused") is not None
 
-    def log_usage(self, key: str, role: str, agent: str, minutes: float, why: str, code: int | None) -> None:
+    def log_usage(self, key: str, role: str, agent: str, minutes: float, why: str, code: int | None, used: dict[str, Any] | None = None) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             self.redis.set(f"usage:{day}:{key}:{role}:{agent}:{int(time.time())}",
-                           json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code}), 10 * DAY)
+                           json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code,
+                                    "tokens": (used or {}).get("total", 0), "cost": (used or {}).get("cost_usd_list", 0), "known": bool((used or {}).get("usage_known"))}), 10 * DAY)
         except RedisError as error:
             log(f"could not record the usage of {key}: {error}")
 
@@ -449,9 +484,14 @@ class Supervisor:
                 except (JiraError, RuntimeError) as error:
                     log(f"skip {issue.get('key')}: {error}")
                     continue
+                entered = self.redis.get(f"statussince:{issue['key']}")
                 events.emit("ticket.pickup", ticket=issue["key"], status=issue["status"], role=role, agent=agent, rework="rework" in issue.get("labels", []),
-                            lease_seconds=self.cfg.lease_seconds)
+                            lease_seconds=self.cfg.lease_seconds, waited_minutes=round((time.time() - float(entered)) / 60, 2) if entered else None)
+                began_step = time.monotonic()
                 worked = self.process(issue, view, role, agent, session_owner)
+                if worked:
+                    events.emit("step.run", ticket=issue["key"], status=issue["status"], role=role, agent=agent,
+                                seconds=round(time.monotonic() - began_step, 1))
             finally:
                 if session_owner and session_agent:
                     self.release_agent_session(issue["key"], role, session_agent, session_owner)
@@ -1072,7 +1112,9 @@ class Supervisor:
             argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root, self.memory_env(key, repo)),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
-        self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code)
+        used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why, code=code,
+                            minutes=round((time.monotonic() - began) / 60, 2))
+        self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code, used)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
         self.remember_lessons(key, repo, agent, text)
@@ -1775,7 +1817,7 @@ def main(argv: list[str] | None = None) -> int:
         redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it
         print("restart requested for all workers")
         return 0
-    events.configure(cfg.obs, cfg.machine, cfg.worker_label, home=cfg.home)
+    events.configure(cfg.obs, cfg.machine, cfg.worker_label, cfg.root / ".tmp" / "aiflow", home=cfg.home)
     supervisor = Supervisor(cfg, Jira(cfg.root), redis)
     (cfg.root / ".tmp").mkdir(exist_ok=True)
     if "--once" in args:

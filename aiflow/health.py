@@ -82,11 +82,15 @@ def usage_summary(redis, day: str) -> str | None:
         if not raw:
             continue
         run = json.loads(raw)
-        row = totals.setdefault((run["ai"], run["role"]), [0, 0.0, 0])
+        row = totals.setdefault((run["ai"], run["role"]), [0, 0.0, 0, 0, 0.0])
         row[0] += 1
         row[1] += run["minutes"]
         row[2] += 0 if run["why"] == "ok" else 1
-    lines = [f"- {ai} {role}: {int(row[0])} run(s), {row[1]:.0f} min, {int(row[2])} not clean" for (ai, role), row in sorted(totals.items())]
+        row[3] += run.get("tokens", 0)
+        row[4] += run.get("cost", 0)
+    lines = [f"- {ai} {role}: {int(row[0])} run(s), {row[1]:.0f} min, {int(row[2])} not clean"
+             + (f", {int(row[3]):,} tokens" if row[3] else "") + (f" (list price ${row[4]:.2f})" if row[4] else "")
+             for (ai, role), row in sorted(totals.items())]
     labels = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
     for name, peak in zip(peak_names, redis.get_many(peak_names)):
         if not peak:
@@ -101,7 +105,7 @@ def main() -> int:
     cfg = load()
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     jira = Jira(cfg.root)
-    events.configure(cfg.obs, cfg.machine, "health")
+    events.configure(cfg.obs, cfg.machine, "health", cfg.root / ".tmp" / "aiflow")
     found = problems(cfg, redis, jira)
     events.emit("health.check", problems=len(found), kinds=",".join(kind for kind, _ in found))
     for kind, message in found:

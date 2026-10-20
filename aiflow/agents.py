@@ -102,7 +102,7 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
                 "--add-dir", str(root / ".tmp")]
         return argv, prompt
     if agent == "Codex":
-        argv = ["codex", "exec", "-C", str(workdir), "-s", "read-only" if read_only else "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
+        argv = ["codex", "exec", "--json", "-C", str(workdir), "-s", "read-only" if read_only else "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
                 *(["-m", model] if model else []), *(["-c", f'model_reasoning_effort="{effort}"'] if effort else []), "-"]
         return argv, prompt
     if agent == "Grok":
@@ -115,7 +115,7 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
                 *(["-m", model] if model else []), *(["--reasoning-effort", effort] if effort else []),
                 "--prompt-file", str(prompt_file)], None
     if agent == "OpenCode":
-        return ["opencode", "run", *(["-m", model] if model else []), prompt], None
+        return ["opencode", "run", "--format", "json", *(["-m", model] if model else []), prompt], None
     raise ValueError(f"unknown agent {agent!r}")
 
 
@@ -124,6 +124,19 @@ def final_text(agent: str, log_file: Path, result_file: Path) -> str:
     if agent == "Codex" and result_file.is_file():
         return result_file.read_text(encoding="utf-8", errors="replace")
     text = log_file.read_text(encoding="utf-8", errors="replace") if log_file.is_file() else ""
+    if agent == "OpenCode":
+        parts = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "text" and isinstance((event.get("part") or {}).get("text"), str):
+                    parts.append(event["part"]["text"])
+        if parts:
+            return "\n".join(parts)
     if agent == "Claude":
         for line in reversed(text.splitlines()):
             try:

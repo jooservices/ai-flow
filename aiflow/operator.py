@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, notify, runner
+from . import agents, events, notify, runner, usage
 from .config import PROJECT_DIR
 from .incidents import WORKED, Incident, find_incidents
 from .jira import JiraError
@@ -176,6 +176,7 @@ class Operator:
             return self.redis.renew("operator:run", self.cfg.owner, self.policy.run_minutes * 60 + 120) and self.active()
         code, why = runner.run(argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root), idle_seconds=self.cfg.idle_minutes * 60,
                                max_seconds=self.policy.run_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds, heartbeat=beat)
+        usage.report(agent, log_file, ticket=tag.split("-", 2)[-1] if False else "", role="operator", incident=tag, why=why, code=code)
         text = agents.final_text(agent, log_file, result_file)
         quota = (code != 0 or not RESULT.search(text)) and agents.looks_like_quota(log_file, text, code)
         return why, text, quota

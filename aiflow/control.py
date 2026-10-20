@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     from dataclasses import replace
     holder = replace(cfg, label="control")
-    events.configure(cfg.obs, cfg.machine, "control")
+    events.configure(cfg.obs, cfg.machine, "control", cfg.root / ".tmp" / "aiflow")
     events.emit("control.start", version_hash=config_hash(CONFIG_DIR)[:12])
     supervisor = Supervisor(holder, Jira(cfg.root), redis)
     operator = Operator(supervisor, holder.operator_policy)

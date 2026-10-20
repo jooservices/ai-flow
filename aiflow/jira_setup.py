@@ -223,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="really create what is missing (default: only print the plan)")
     args = parser.parse_args(argv)
     cfg = load()
-    events.configure(cfg.obs, cfg.machine, "setup")
+    events.configure(cfg.obs, cfg.machine, "setup", cfg.root / ".tmp" / "aiflow")
     try:
         Setup(Jira(cfg.root)._library(), load_spec(), args.project.upper(), args.apply).run()
     except SetupError as error:

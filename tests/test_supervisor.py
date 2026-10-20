@@ -1182,7 +1182,7 @@ class AgentCommandTests(unittest.TestCase):
 
     def test_opencode_gets_the_model(self):
         argv, _ = agents.build_command("OpenCode", Path("/tmp"), Path("/tmp/r"), "p", Path("/tmp"), "openai/gpt-5.4-mini")
-        self.assertEqual(argv[:4], ["opencode", "run", "-m", "openai/gpt-5.4-mini"])
+        self.assertEqual(argv[:6], ["opencode", "run", "--format", "json", "-m", "openai/gpt-5.4-mini"])
 
     def test_opencode_model_default_comes_from_the_settings(self):
         self.assertEqual(make(AIFLOW_OPENCODE_MODEL="opencode/big-pickle").model_for("developer", "OpenCode"), ("opencode/big-pickle", ""))

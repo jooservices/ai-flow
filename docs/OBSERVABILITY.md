@@ -12,7 +12,10 @@ concerns a ticket `ticket` and `project`.
 |---|---|
 | `log` | `message`: every journal line of the supervisor |
 | `worker.start` / `worker.stop` / `worker.retired` / `worker.restart` / `worker.error` | `home`, `projects`, `error` |
-| `ticket.pickup` | `status`, `role`, `agent`, `rework` |
+| `ticket.pickup` | `status`, `role`, `agent`, `rework`, `waited_minutes` (time in the status before a worker took it) |
+| `ticket.status` | `from_status`, `to_status`, `minutes_in_from`, `source` (`supervisor`: it made the move; `observed`: someone else did, noticed at the next poll, at most one poll late) |
+| `step.run` | `status`, `role`, `agent`, `seconds`: the work one worker did on a ticket in one pass |
+| `ai.usage` | `agent`, `role`, `model`, `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `total`, `cost_usd_list`, `turns`, `usage_known`, `minutes`: tokens of one AI run, read from its log |
 | `ai.assign` / `ai.limit` / `ai.unserved` | `role`, `agent`, `limit`, `pool`, `cooling` |
 | `ai.run` | `role`, `agent`, `model`, `effort`, `minutes`, `why`, `code`, `verdict`, `quota`, `log_file` |
 | `ai.quota` / `ai.failed` / `ai.probe` | `agent`, `cooldown_minutes`, `attempt`, `state` |
@@ -33,3 +36,9 @@ concerns a ticket `ticket` and `project`.
 - Minutes of AI per agent and role: `SELECT agent, role, sum(minutes) FROM "aiflow_events" WHERE event = 'ai.run' GROUP BY agent, role`
 - Rework rounds per project: `SELECT project, count(*) FROM "aiflow_events" WHERE event = 'ticket.rework' GROUP BY project`
 - What happened to a ticket: `SELECT _timestamp, event, message FROM "aiflow_events" WHERE ticket = 'JAVM-82' ORDER BY _timestamp`
+
+## Time per step and tokens
+- **Time in each status** comes from the processes: a move made by a worker or the control is recorded when it is made (with the status it left and the minutes spent there); a move made by the owner or by Jira is noticed at the next poll of any worker (one event, whichever worker sees it first). The Jira `updated` time is not used (a comment changes it too). Time of the first sight of a ticket has no `from_status`.
+- **Tokens** are read from the log the AI run already wrote: Claude (`result` event: input, output, cache read/write, thinking, list-price cost), Codex (`--json` turn events; an old plain log gives the total only), OpenCode (`--format json` step events). Grok's output was not verified (no balance), so its runs say `usage_known=false`. `cost_usd_list` is the cost at list price, not money paid.
+- Events that cannot be sent when a process stops are written to `Workspaces/.tmp/aiflow/events-<machine>-<worker>.jsonl` and sent by the next process of the same worker.
+- SQL: average minutes per status `SELECT from_status, round(avg(minutes_in_from), 1) FROM "aiflow_events" WHERE event = 'ticket.status' GROUP BY from_status`; tokens per AI and role `SELECT agent, role, sum(total), sum(output), round(sum(cost_usd_list), 2) FROM "aiflow_events" WHERE event = 'ai.usage' AND usage_known = true GROUP BY agent, role`; queue wait `SELECT project, round(avg(waited_minutes), 1) FROM "aiflow_events" WHERE event = 'ticket.pickup' AND status = 'To Do' GROUP BY project`.

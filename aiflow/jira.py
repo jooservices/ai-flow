@@ -63,6 +63,8 @@ def adf_to_markdown(node: dict[str, Any], depth: int = 0) -> str:
 
 
 class Jira:
+    on_transition = None  # set by the supervisor: called as (key, new status) after every successful transition
+
     def __init__(self, root: Path) -> None:
         self.root = root
         self.cli = str(root / "scripts" / "jira")
@@ -145,6 +147,11 @@ class Jira:
         try:
             self._run("transition", key, status)
             events.emit("jira.transition", ticket=key, to=status, ok=True)
+            if self.on_transition:
+                try:
+                    self.on_transition(key, status)
+                except Exception:  # the metric never breaks the move
+                    pass
             return True
         except JiraError as error:
             events.emit("jira.transition", ticket=key, to=status, ok=False, error=str(error)[:300])

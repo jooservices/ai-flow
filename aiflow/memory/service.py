@@ -20,11 +20,13 @@ import json
 import os
 import re
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
 from . import guard
+from .embed import Embedder
 from .scoped import OPERATIONS, Scoped
 from .store import NotFound, Store
 
@@ -60,6 +62,7 @@ class Handler(BaseHTTPRequestHandler):
     scoped: Scoped
     tokens: Tokens
     log: Callable[[str], None] = staticmethod(print)
+    wake: Callable[[], None] = staticmethod(lambda: None)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - the base class signature
         pass
@@ -163,11 +166,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self.handle_request("POST")
+        if not self.path.split("?")[0].rstrip("/").endswith("/search"):
+            self.wake()  # a write may have added an entry without a vector
 
 
-def make_server(store: Store, tokens: Tokens, host: str = "127.0.0.1", port: int = 0, log: Callable[[str], None] = print) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"store": store, "scoped": Scoped(store), "tokens": tokens, "log": staticmethod(log)})
+def make_server(store: Store, tokens: Tokens, host: str = "127.0.0.1", port: int = 0, log: Callable[[str], None] = print,
+                wake: Callable[[], None] = lambda: None) -> ThreadingHTTPServer:
+    handler = type("BoundHandler", (Handler,), {"store": store, "scoped": Scoped(store), "tokens": tokens, "log": staticmethod(log), "wake": staticmethod(wake)})
     return ThreadingHTTPServer((host, port), handler)
+
+
+def fill_vectors(store: Store, stop: threading.Event, wake: threading.Event, log: Callable[[str], None] = print) -> None:
+    """Background loop: gives vectors to entries without one. Ollama not available = try again later (the search works by words meanwhile)."""
+    pending_before = False
+    while not stop.is_set():
+        try:
+            done = store.embed_pending()
+        except Exception as error:
+            log(f"memory vectors: {type(error).__name__}: {str(error)[:150]}")
+            done = 0
+        if done:
+            pending_before = True
+            continue  # more may wait
+        if pending_before:
+            log("memory vectors: all entries have a vector")
+            pending_before = False
+        wake.wait(60)
+        wake.clear()
 
 
 def connector(env: dict[str, str]) -> Callable[[], Any]:
@@ -186,14 +211,20 @@ def main() -> int:
     if not tokens.entries:
         print("no token configured: create JOOservices/config/memory-tokens.json (see docs/MEMORY.md)", file=sys.stderr)
         return 2
-    store = Store(connector(env))
+    embedder = Embedder.from_env(env)
+    store = Store(connector(env), embedder)
     store.migrate()
-    server = make_server(store, tokens, env.get("AIFLOW_MEMORY_HOST", "127.0.0.1"), int(env.get("AIFLOW_MEMORY_PORT", "8750")))
-    print(f"memory service on {server.server_address[0]}:{server.server_address[1]} with {len(tokens.entries)} token(s)", flush=True)
+    stop, wake = threading.Event(), threading.Event()
+    server = make_server(store, tokens, env.get("AIFLOW_MEMORY_HOST", "127.0.0.1"), int(env.get("AIFLOW_MEMORY_PORT", "8750")), wake=wake.set)
+    print(f"memory service on {server.server_address[0]}:{server.server_address[1]} with {len(tokens.entries)} token(s); "
+          f"search by meaning: {embedder.model + ' at ' + embedder.url if embedder else 'off (words only)'}", flush=True)
+    if embedder:
+        threading.Thread(target=fill_vectors, args=(store, stop, wake), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    stop.set()
     return 0
 
 

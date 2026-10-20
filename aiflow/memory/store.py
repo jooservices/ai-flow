@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import guard
+from .embed import Embedder, entry_text, literal
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 COLUMNS = ("id", "kind", "scope", "namespace", "project", "repo", "jira_key", "title", "body", "tags", "source", "status", "confidence", "supersedes",
@@ -29,8 +30,9 @@ class NotFound(LookupError):
 
 
 class Store:
-    def __init__(self, connect: Callable[[], Any]) -> None:
+    def __init__(self, connect: Callable[[], Any], embedder: Embedder | None = None) -> None:
         self.connect = connect
+        self.embedder = embedder  # None = the search works by words only
 
     # ---- plumbing ------------------------------------------------------------------------------------------------
     def run(self, sql: str, args: tuple = (), fetch: bool = True) -> list[tuple]:
@@ -137,6 +139,40 @@ class Store:
         self.run(f"update memory_entry set {column} = {column} + 1, updated_at = now() where id = %s", (entry_id,), fetch=False)
         self.event(actor, "feedback", entry_id, {"helpful": helpful, "ticket": jira_key})
 
+    # ---- vectors (search by meaning) -----------------------------------------------------------------------------
+    def embed_pending(self, batch: int = 16) -> int:
+        """Give a vector to the entries that have none (or one of another model). Returns how many were filled; 0 when Ollama is not available."""
+        if self.embedder is None:
+            return 0
+        rows = self.run("select id, title, body, tags from memory_entry where status <> 'decayed' and (embedding is null or embedding_model is distinct from %s) "
+                        "order by created_at limit %s", (self.embedder.model, batch))
+        if not rows:
+            return 0
+        vectors = self.embedder.embed([entry_text(title, body, tags) for _, title, body, tags in rows])
+        if vectors is None:
+            return 0
+        for (entry_id, *_), vector in zip(rows, vectors):
+            self.run("update memory_entry set embedding = %s::vector, embedding_model = %s, embedded_at = now() where id = %s",
+                     (literal(vector), self.embedder.model, entry_id), fetch=False)
+        return len(rows)
+
+    def query_vector(self, query: str) -> list[float] | None:
+        if self.embedder is None or not query.strip():
+            return None
+        found = self.embedder.embed([query])
+        return found[0] if found else None
+
+    @staticmethod
+    def fuse(first: list[Any], second: list[Any], key: Callable[[Any], Any], limit: int) -> list[Any]:
+        """Reciprocal rank fusion of two result lists (the words list and the meaning list): an entry both lists like comes first."""
+        score: dict[Any, float] = {}
+        items: dict[Any, Any] = {}
+        for ranking in (first, second):
+            for position, item in enumerate(ranking):
+                score[key(item)] = score.get(key(item), 0.0) + 1.0 / (60 + position)
+                items.setdefault(key(item), item)
+        return [items[k] for k in sorted(score, key=lambda k: -score[k])][:limit]
+
     # ---- read ----------------------------------------------------------------------------------------------------
     def get(self, entry_id: str, namespaces: list[str] | None = None) -> dict[str, Any]:
         rows = self.run(f"select {', '.join(COLUMNS)}, decay_reason from memory_entry where id = %s", (entry_id,))
@@ -171,6 +207,12 @@ class Store:
             rows = self.run(sql, (*scope_args, limit))
             names = COLUMNS
         items = [public(row, names) for row in rows]
+        vector = self.query_vector(query) if words else None
+        if vector is not None:
+            by_meaning = self.run(f"select {', '.join(COLUMNS)} from memory_entry where {scope_sql} and embedding is not null and embedding_model = %s "
+                                  "and 1 - (embedding <=> %s::vector) >= %s order by embedding <=> %s::vector limit %s",
+                                  (*scope_args, self.embedder.model, literal(vector), self.embedder.min_similarity, literal(vector), limit))
+            items = self.fuse(items, [public(row, COLUMNS) for row in by_meaning], lambda item: item["id"], limit)
         for item in items:
             item["body"] = item["body"][:body_chars]
         if touch and items:

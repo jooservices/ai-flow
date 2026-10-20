@@ -886,6 +886,10 @@ class Supervisor:
             return
         self.redis.delete(f"blocked:{key}")
         events.emit("ticket.unblocked", ticket=key)
+        self.clear_blocked_reason(key)
+
+    def clear_blocked_reason(self, key: str) -> None:
+        """Clear a stale Jira Blocked reason after a ticket becomes terminal or is unblocked."""
         try:
             self.jira.set_field(key, self.cfg.blocked_reason_field, None)
         except JiraError as error:
@@ -1471,6 +1475,7 @@ class Supervisor:
         try:
             current = self.jira.view(key)
             if current.get("status") == "Done":
+                self.clear_blocked_reason(key)
                 return True
             pr = gh.view(int(pr["number"]))
             if pr.get("state") == "MERGED":
@@ -1491,6 +1496,7 @@ class Supervisor:
         else:
             try:
                 if self.jira.view(key).get("status") == "Done":
+                    self.clear_blocked_reason(key)
                     return True
             except JiraError as error:
                 log(f"{key}: cannot confirm ticket state before blocking ({error})")
@@ -1502,6 +1508,7 @@ class Supervisor:
         try:
             current = self.jira.view(key)
             if current.get("status") == "Done":
+                self.clear_blocked_reason(key)
                 return True
             gh = GitHub(repo.github_slug())
             pr = self.gate_pr(key, gh)
@@ -1831,6 +1838,7 @@ class Supervisor:
         self.remember_case(key, repo, pr)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
+        self.clear_blocked_reason(key)
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")

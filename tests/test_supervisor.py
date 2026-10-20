@@ -831,6 +831,8 @@ class MergedPullRequestGateTests(unittest.TestCase):
     def test_merged_pr_with_missing_branch_finishes_without_blocking(self):
         sup = make()
         sup.jira.status = "In QA"
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
         repo = RecordingCleanupRepo()
         repo.github_slug = lambda: "o/r"
         repo.remote_branch = lambda key: None
@@ -848,13 +850,15 @@ class MergedPullRequestGateTests(unittest.TestCase):
             self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, repo, "develop"))
 
         self.assertEqual(sup.jira.moves, [("JAIF-9", "Done")])
-        self.assertNotIn(("JAIF-9", sup.cfg.blocked_reason_field), getattr(sup.jira, "fields", {}))
+        self.assertIsNone(sup.jira.fields[field])
         self.assertFalse(any("blocked" in body.lower() for body in written_comments))
         self.assertTrue(repo.cleanup_merged)
 
     def test_a_done_ticket_is_ignored_even_when_its_branch_is_gone(self):
         sup = make()
         sup.jira.status = "Done"
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
 
         class MissingBranchRepo:
             name = "ai-flow"
@@ -865,6 +869,29 @@ class MergedPullRequestGateTests(unittest.TestCase):
         self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, MissingBranchRepo(), "develop"))
         self.assertEqual(sup.jira.comments, [])
         self.assertEqual(sup.jira.moves, [])
+        self.assertIsNone(sup.jira.fields[field])
+
+    def test_gate_rechecks_done_status_before_blocking_a_missing_branch(self):
+        sup = make()
+        statuses = iter(("In QA", "Done"))
+        sup.jira.view = lambda key, full=False: {"key": key, "status": next(statuses)}
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
+
+        class MissingBranchRepo:
+            name = "ai-flow"
+
+            def github_slug(self):
+                return "o/r"
+
+            def remote_branch(self, key):
+                return None
+
+        self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, MissingBranchRepo(), "develop"))
+
+        self.assertEqual(sup.jira.comments, [])
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIsNone(sup.jira.fields[field])
 
     def test_done_ticket_sweep_uses_merged_pr_state_for_cleanup(self):
         sup = make()

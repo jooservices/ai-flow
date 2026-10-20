@@ -25,7 +25,9 @@ ACTION: restart_worker {}
 ACTION: pause {}
 ACTION: resume {}
 
-## Finish with exactly one of these lines
+For `ESCALATE`, put the `OPTIONS:` and `RECOMMEND:` lines before the final RESULT line.
+
+## Finish with exactly one final line
 RESULT: RESOLVED: <what you did and why, one or two sentences>
-RESULT: ESCALATE: <the question for the owner>   then lines `OPTIONS: <a>; <b>` and `RECOMMEND: <the option you advise>`
+RESULT: ESCALATE: <the question for the owner>
 RESULT: NO-ACTION: <why nothing is needed now>

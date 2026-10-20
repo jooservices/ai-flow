@@ -33,9 +33,12 @@ TICKET = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 
 def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dict[str, Any]]], str, str]:
-    """(last RESULT as (kind, text), ACTION lines as (name, args), OPTIONS, RECOMMEND)."""
+    """(valid final RESULT as (kind, text), ACTION lines as (name, args), OPTIONS, RECOMMEND)."""
     results = RESULT.findall(text)
-    result = (results[-1][0], results[-1][1].strip()) if results else None
+    final_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    final_result = RESULT.fullmatch(final_lines[-1]) if final_lines else None
+    result = ((final_result.group(1), final_result.group(2).strip())
+              if final_result and final_result.group(2).strip() and len(results) == 1 else None)
     actions: list[tuple[str, dict[str, Any]]] = []
     for name, raw in ACTION.findall(text):
         try:
@@ -293,22 +296,32 @@ class Operator:
         began = time.monotonic()
         why, text, quota = self.run_ai(agent, self.prompt(incident), incident.id.replace(":", "-"))
         self.sup.log_usage(incident.ticket or "operator", "operator", agent, (time.monotonic() - began) / 60, why, 0 if why == "ok" else None)
-        if quota:
-            self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
-            self.redis.delete(f"operator:cool:{incident.id}")
-            return True
         result, actions, options, recommend = parse_output(text)
         events.emit("operator.run", incident=incident.id, agent=agent, why=why, minutes=round((time.monotonic() - began) / 60, 2),
                     result=result[0] if result else "NONE", actions=len(actions))
+        if quota:
+            self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
+            self.redis.delete(f"operator:cool:{incident.id}")
+            self.audit(incident, agent, f"AI run ended without a usable RESULT ({why})", [],
+                       [f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS]])
+            return True
         done, refused = [], []
-        for name, args in actions[:MAX_ACTIONS]:
-            (done if self.perform(name, args) else refused).append(f"{name} {json.dumps(args, sort_keys=True)[:200]}")
-        if len(actions) > MAX_ACTIONS:
-            refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
         if result is None:
+            refused.extend(f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS])
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
             self.audit(incident, agent, "no usable RESULT line (" + why + ")", done, refused)
             return True
         kind, detail = result
+        if kind == "NO-ACTION":
+            refused.extend(f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS])
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
+        else:
+            for name, args in actions[:MAX_ACTIONS]:
+                (done if self.perform(name, args) else refused).append(f"{name} {json.dumps(args, sort_keys=True)[:200]}")
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
         if kind == "ESCALATE":
             self.escalate(incident, detail, options, recommend)
         self.audit(incident, agent, f"{kind}: {detail}", done, refused)

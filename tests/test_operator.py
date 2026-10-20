@@ -129,7 +129,7 @@ class IncidentTests(unittest.TestCase):
 class ParseTests(unittest.TestCase):
     def test_result_actions_options(self):
         text = ('thinking\nACTION: comment {"key": "A-1", "text": "ok"}\nACTION: pause\nACTION: bad {not json}\n'
-                'RESULT: ESCALATE: delete the database?\nOPTIONS: yes; no\nRECOMMEND: no')
+                'OPTIONS: yes; no\nRECOMMEND: no\nRESULT: ESCALATE: delete the database?')
         result, actions, options, recommend = parse_output(text)
         self.assertEqual(result, ("ESCALATE", "delete the database?"))
         self.assertEqual([a[0] for a in actions], ["comment", "pause", "bad"])
@@ -138,6 +138,11 @@ class ParseTests(unittest.TestCase):
 
     def test_no_result(self):
         self.assertIsNone(parse_output("nothing")[0])
+
+    def test_result_must_be_the_only_result_and_the_final_nonempty_line(self):
+        self.assertIsNone(parse_output("RESULT: RESOLVED: done\nextra text")[0])
+        self.assertIsNone(parse_output("RESULT: NO-ACTION: done\nRESULT: RESOLVED: done")[0])
+        self.assertIsNone(parse_output("RESULT: ESCALATE:")[0])
 
 
 class JiraWithLabels(FakeJira):
@@ -271,7 +276,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_escalate_labels_comments_the_question_first_and_notifies_once(self):
         notifier = Notifier()
-        op, sup, redis = self.build("RESULT: ESCALATE: Delete the old database?\nOPTIONS: delete; keep\nRECOMMEND: keep", notifier=notifier)
+        op, sup, redis = self.build("OPTIONS: delete; keep\nRECOMMEND: keep\nRESULT: ESCALATE: Delete the old database?", notifier=notifier)
         op.cfg.notify["JIRA_URL"] = "https://example.atlassian.net"
         op.run_incident(self.incident(), "20260101")
         self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
@@ -305,16 +310,93 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(redis.scan("operator:notify:*"), [])
 
     def test_missing_result_is_audited_not_hidden(self):
-        op, sup, _ = self.build("I looked but wrote no result")
+        op, sup, _ = self.build('ACTION: comment {"key": "JAIF-1", "text": "unsafe without a final result"}\n'
+                                'RESULT: RESOLVED: done\nAdditional commentary')
         op.run_incident(self.incident(), "20260101")
         audit = next(body for key, body in sup.jira.comments if body.startswith("AI Flow operator (Claude)"))
         self.assertIn("no usable RESULT line", audit)
+        self.assertIn("Refused:", audit)
+        self.assertFalse(any(body.startswith("AI Flow operator: unsafe") for _, body in sup.jira.comments))
+
+    def test_no_action_result_refuses_requested_actions(self):
+        op, sup, _ = self.build('ACTION: comment {"key": "JAIF-1", "text": "should not run"}\nRESULT: NO-ACTION: nothing is needed')
+        with mock.patch.object(op, "perform", wraps=op.perform) as perform:
+            op.run_incident(self.incident(), "20260101")
+        perform.assert_not_called()
+        self.assertFalse(any(body.startswith("AI Flow operator: should not run") for _, body in sup.jira.comments))
+        audit = next(body for _, body in sup.jira.comments if body.startswith("AI Flow operator (Claude)"))
+        self.assertIn("Outcome: NO-ACTION: nothing is needed", audit)
+        self.assertIn("Refused:", audit)
+
+    def test_quota_run_is_audited_and_does_not_perform_actions(self):
+        op, sup, redis = self.build('ACTION: pause {}')
+        op.run_ai = lambda agent, prompt, tag: ("quota", 'ACTION: pause {}', True)
+        with mock.patch.object(op, "perform", wraps=op.perform) as perform:
+            op.run_incident(self.incident(), "20260101")
+        perform.assert_not_called()
+        self.assertIsNotNone(redis.get("cooldown:Claude"))
+        self.assertIsNone(redis.get("operator:cool:blocked:JAIF-1"))
+        self.assertIsNone(redis.get("paused"))
+        self.assertEqual(len(sup.jira.comments), 1)
+        audit = sup.jira.comments[0][1]
+        self.assertIn("Outcome: AI run ended without a usable RESULT (quota)", audit)
+        self.assertIn("Did: nothing", audit)
+        self.assertIn("Refused: pause {}", audit)
+
+    def test_prompt_requires_a_final_result_line_and_contains_incident_policy_and_actions(self):
+        op, _, _ = self.build()
+        prompt = op.prompt(self.incident())
+        self.assertIn("blocked:JAIF-1: JAIF-1 is Blocked", prompt)
+        self.assertIn("## Policy", prompt)
+        self.assertIn('ACTION: retry_ci {"key": "JAIF-1"}', prompt)
+        self.assertIn("Finish with exactly one final line", prompt)
+        self.assertIn("OPTIONS:", prompt)
+        self.assertIn("RECOMMEND:", prompt)
+        self.assertLess(prompt.index("OPTIONS:"), prompt.index("RESULT: ESCALATE:"))
+
+    def test_default_claude_falls_back_to_another_usable_ai(self):
+        op, sup, _ = self.build()
+        self.assertEqual(op.choose_agent(), "Claude")
+        with mock.patch.object(sup, "cooling", side_effect=lambda name: name == "Claude"):
+            self.assertEqual(op.choose_agent(), "Codex")
+
+    def test_ai_process_has_no_github_login(self):
+        from aiflow import agents
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_with_github_login = {
+                "PATH": "/bin",
+                "GH_TOKEN": "test-token",
+                "GITHUB_TOKEN": "test-token",
+                "GH_ENTERPRISE_TOKEN": "test-token",
+                "GITHUB_ENTERPRISE_TOKEN": "test-token",
+            }
+            with mock.patch("aiflow.agents.child_env", return_value=env_with_github_login):
+                child = agents.run_env("Claude", root, root)
+
+        self.assertTrue(all(name not in child for name in env_with_github_login if name.endswith("TOKEN")))
+        self.assertTrue(child["GH_CONFIG_DIR"].endswith("/.tmp/aiflow/gh-empty"))
 
     def test_machine_incident_is_audited_on_the_health_ticket(self):
-        op, sup, _ = self.build("RESULT: NO-ACTION: seems fine")
+        output = "RESULT: NO-ACTION: seems fine"
+        result, actions, _, _ = parse_output(output)
+        self.assertEqual(result, ("NO-ACTION", "seems fine"))
+        self.assertEqual(actions, [])
+
+        op, sup, _ = self.build(output)
         op.cfg = sup.cfg = sup.cfg.__class__(**{**sup.cfg.__dict__, "health_ticket": "JAIF-12"})
-        op.run_incident(self.incident("worker:wsl:2", "wsl:2"), "20260101")
-        self.assertEqual(sup.jira.comments[0][0], "JAIF-12")
+        with mock.patch.object(op, "perform", wraps=op.perform) as perform:
+            op.run_incident(self.incident("worker:wsl:2", "wsl:2"), "20260101")
+
+        perform.assert_not_called()
+        self.assertEqual(len(sup.jira.comments), 1)
+        key, audit = sup.jira.comments[0]
+        self.assertEqual(key, "JAIF-12")
+        self.assertIn("Outcome: NO-ACTION: seems fine", audit)
+        self.assertIn("Did: nothing", audit)
+        self.assertEqual(sup.jira.added, [])
+        self.assertEqual(sup.jira.moves, [])
 
     def test_per_ticket_limit_escalates_without_running_the_ai(self):
         op, sup, redis = self.build(policy=Policy(enabled=True, retries_per_ticket_per_day=1))

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-KINDS = ("fact", "case", "lesson", "context")
+KINDS = ("fact", "case", "lesson", "context", "decision", "knowledge", "idea", "reference")
 SCOPES = ("global", "namespace", "project", "ticket")
 STATUSES = ("fresh", "verified", "promoted", "decayed")
 MAX_TITLE, MAX_BODY, MAX_TAGS, MAX_TAG = 200, 8000, 12, 40
@@ -36,18 +36,26 @@ def content_hash(kind: str, title: str, body: str) -> str:
     return hashlib.sha256(f"{kind}\0{normalise(title)}\0{normalise(body)}".encode()).hexdigest()
 
 
-def check_entry(entry: dict) -> dict:
-    """Validate and clean a proposed entry; raises Rejected."""
+def scan_secrets(*texts: str) -> None:
+    """Raise Rejected when a text looks like it contains a secret (the message never contains the value)."""
+    for name, pattern in SECRETS.items():
+        if any(pattern.search(text) for text in texts):
+            raise Rejected(f"looks like it contains a secret ({name}); remove it and propose again")
+
+
+def check_entry(entry: dict, relaxed: bool = False) -> dict:
+    """Validate and clean a proposed entry; raises Rejected. `relaxed` (the Workspaces notes): a body may be empty, a title one character."""
     kind, scope = entry.get("kind", ""), entry.get("scope", "")
     if kind not in KINDS:
         raise Rejected(f"kind must be one of {', '.join(KINDS)}")
     if scope not in SCOPES:
         raise Rejected(f"scope must be one of {', '.join(SCOPES)}")
     title, body = str(entry.get("title", "")).strip(), str(entry.get("body", "")).strip()
-    if not 3 <= len(title) <= MAX_TITLE:
-        raise Rejected(f"title must be 3 to {MAX_TITLE} characters")
-    if not 3 <= len(body) <= MAX_BODY:
-        raise Rejected(f"body must be 3 to {MAX_BODY} characters")
+    low_title, low_body = (1, 0) if relaxed else (3, 3)
+    if not low_title <= len(title) <= MAX_TITLE:
+        raise Rejected(f"title must be {low_title} to {MAX_TITLE} characters")
+    if not low_body <= len(body) <= MAX_BODY:
+        raise Rejected(f"body must be {low_body} to {MAX_BODY} characters")
     tags = entry.get("tags") or []
     if not isinstance(tags, list) or len(tags) > MAX_TAGS or not all(isinstance(t, str) and 0 < len(t) <= MAX_TAG for t in tags):
         raise Rejected(f"tags must be a list of at most {MAX_TAGS} short texts")
@@ -58,9 +66,7 @@ def check_entry(entry: dict) -> dict:
         project = ""
     if (scope in ("namespace", "project", "ticket") and not namespace) or (scope in ("project", "ticket") and not project):
         raise Rejected(f"scope {scope} needs a namespace" + (" and a project" if scope in ("project", "ticket") else ""))
-    for name, pattern in SECRETS.items():
-        if pattern.search(title) or pattern.search(body):
-            raise Rejected(f"looks like it contains a secret ({name}); remove it and propose again")
+    scan_secrets(title, body)
     return dict(kind=kind, scope=scope, namespace=namespace, project=project, repo=str(entry.get("repo", "")), jira_key=str(entry.get("jira_key", "")),
                 title=title, body=body, tags=[t.strip().lower() for t in tags], source=entry.get("source") if isinstance(entry.get("source"), dict) else {},
                 created_by=str(entry.get("created_by", ""))[:80], supersedes=entry.get("supersedes") or None,

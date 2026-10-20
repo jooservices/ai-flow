@@ -6,6 +6,8 @@
     POST /v1/entries/<id>/feedback   client   {jira_key, helpful}
     POST /v1/entries/<id>/verify | promote | decay    admin
     POST /v1/curate             admin
+    POST /v1/scoped/<operation> admin   the Workspaces notes (add, get, search, list, update, status, stale, consolidate, stats, projects, project_update,
+                                        device_add, device_list, device_update, import_*): JSON body = the arguments of the operation; answer {"result": ...}
     GET  /v1/stats              client
     GET  /health                nobody (no data)
 
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import guard
+from .scoped import OPERATIONS, Scoped
 from .store import NotFound, Store
 
 ID = r"[0-9a-fA-F-]{36}"
@@ -54,6 +57,7 @@ def allowed(who: dict[str, Any], namespace: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     server_version = "aiflow-memory"
     store: Store
+    scoped: Scoped
     tokens: Tokens
     log: Callable[[str], None] = staticmethod(print)
 
@@ -125,6 +129,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     getattr(self.store, action)(entry_id, actor)
                 return self.reply(200, {"id": item["id"], "ok": True})
+            match = re.fullmatch(r"/v1/scoped/(\w+)", path)
+            if method == "POST" and match:
+                operation = match.group(1)
+                if not admin:
+                    return self.reply(403, {"error": "the scoped notes need an admin token"})
+                if operation not in OPERATIONS:
+                    return self.reply(404, {"error": "no such operation"})
+                data = self.payload()
+                if not allowed(who, str(data.get("namespace") or "")):
+                    return self.reply(403, {"error": "namespace not allowed for this token"})
+                try:
+                    return self.reply(200, {"result": getattr(self.scoped, operation)(**data)})
+                except TypeError as error:
+                    return self.reply(400, {"error": f"bad arguments: {str(error)[:200]}"})
             if method == "POST" and path == "/v1/curate":
                 return self.reply(200, self.store.curate(actor)) if admin else self.reply(403, {"error": "curate needs an admin token"})
             return self.reply(404, {"error": "no such route"})
@@ -132,7 +150,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(422, {"error": str(error)})
         except NotFound as error:
             return self.reply(404, {"error": str(error)})
-        except (ValueError, TypeError) as error:
+        except ValueError as error:
+            return self.reply(400, {"error": str(error)[:300] or "bad request"})
+        except TypeError as error:
             return self.reply(400, {"error": f"bad request: {type(error).__name__}"})
         except Exception as error:
             self.log(f"memory service: {type(error).__name__}: {str(error)[:200]}")
@@ -146,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(store: Store, tokens: Tokens, host: str = "127.0.0.1", port: int = 0, log: Callable[[str], None] = print) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"store": store, "tokens": tokens, "log": staticmethod(log)})
+    handler = type("BoundHandler", (Handler,), {"store": store, "scoped": Scoped(store), "tokens": tokens, "log": staticmethod(log)})
     return ThreadingHTTPServer((host, port), handler)
 
 

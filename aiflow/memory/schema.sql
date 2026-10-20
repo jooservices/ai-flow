@@ -8,16 +8,19 @@ create or replace function mem_unaccent(text) returns text
 create or replace function mem_tags(text[]) returns text
     language sql immutable parallel safe as $$ select array_to_string($1, ' ') $$;
 
+create sequence if not exists memory_entry_seq;
+
 create table if not exists memory_entry (
     id            uuid primary key default gen_random_uuid(),
-    kind          text not null check (kind in ('fact', 'case', 'lesson', 'context')),
+    seq           bigint not null default nextval('memory_entry_seq'),
+    kind          text not null check (kind in ('fact', 'case', 'lesson', 'context', 'decision', 'knowledge', 'idea', 'reference')),
     scope         text not null check (scope in ('global', 'namespace', 'project', 'ticket')),
     namespace     text not null default '',
     project       text not null default '',
     repo          text not null default '',
     jira_key      text not null default '',
-    title         text not null check (char_length(title) between 3 and 200),
-    body          text not null check (char_length(body) between 3 and 8000),
+    title         text not null check (char_length(title) between 1 and 200),
+    body          text not null check (char_length(body) between 0 and 8000),
     tags          text[] not null default '{}',
     source        jsonb not null default '{}',
     status        text not null default 'fresh' check (status in ('fresh', 'verified', 'promoted', 'decayed')),
@@ -27,6 +30,9 @@ create table if not exists memory_entry (
     content_hash  text not null,
     created_by    text not null default '',
     confirmations int not null default 1,
+    updated_by    text not null default '',
+    origin        text,
+    tags_raw      text,
     created_at    timestamptz not null default now(),
     updated_at    timestamptz not null default now(),
     verified_at   timestamptz,
@@ -71,3 +77,52 @@ create table if not exists memory_feedback (
     actor    text not null default ''
 );
 create index if not exists memory_feedback_entry on memory_feedback (entry_id);
+
+-- Upgrade of a database created by an earlier version (idempotent): the Workspaces notes need an integer id, the extra kinds and shorter texts.
+alter table memory_entry add column if not exists seq bigint not null default nextval('memory_entry_seq');
+alter table memory_entry add column if not exists updated_by text not null default '';
+alter table memory_entry add column if not exists origin text;
+alter table memory_entry add column if not exists tags_raw text;
+alter table memory_entry drop constraint if exists memory_entry_kind_check;
+alter table memory_entry add constraint memory_entry_kind_check check (kind in ('fact', 'case', 'lesson', 'context', 'decision', 'knowledge', 'idea', 'reference'));
+alter table memory_entry drop constraint if exists memory_entry_title_check;
+alter table memory_entry add constraint memory_entry_title_check check (char_length(title) between 1 and 200);
+alter table memory_entry drop constraint if exists memory_entry_body_check;
+alter table memory_entry add constraint memory_entry_body_check check (char_length(body) between 0 and 8000);
+create unique index if not exists memory_entry_seq_unique on memory_entry (seq);
+create unique index if not exists memory_entry_origin_unique on memory_entry (origin) where origin is not null;
+
+create table if not exists memory_project (
+    id               bigserial primary key,
+    namespace        text not null check (char_length(btrim(namespace)) > 0),
+    name             text not null check (char_length(btrim(name)) > 0),
+    description      text not null default '',
+    tags             text not null default '',
+    github_url       text not null default '',
+    jira_key         text,
+    jira_project_url text,
+    published_as     text,
+    version          text,
+    stable           boolean not null default false,
+    unique (namespace, name)
+);
+
+create table if not exists memory_device (
+    id         bigserial primary key,
+    uuid       uuid not null default gen_random_uuid(),
+    namespace  text not null check (char_length(btrim(namespace)) > 0),
+    name       text not null check (char_length(btrim(name)) > 0),
+    role       text not null default '',
+    host       text not null default '',
+    ip         text not null default '',
+    model      text not null default '',
+    firmware   text not null default '',
+    location   text not null default '',
+    status     text not null default 'active' check (status in ('active', 'inactive', 'maintenance')),
+    notes      text not null default '',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (namespace, uuid),
+    unique (namespace, name, location)
+);
+create index if not exists memory_device_namespace on memory_device (namespace, status);

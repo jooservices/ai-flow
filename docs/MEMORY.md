@@ -37,5 +37,8 @@ Scope: `global` (every company), `namespace` (one company), `project`, `ticket`.
 - Tests: `python3 -m unittest discover -s tests`; against a real database: `uv run --with pg8000 python -m unittest tests.test_memory_pg` (database `ai_memory_test`).
 - Events in OpenObserve: `memory.recall`, `memory.propose`, `memory.case`, `memory.flush`, `memory.curate`.
 
+## The notes of a workspace (scoped notes)
+The same service stores a second kind of memory: notes in a scope (global, namespace, namespace/project), projects and devices, with integer ids, the types `fact, decision, lesson, knowledge, idea, reference` and the lifecycle `fresh -> verified -> promoted -> decayed`. It is what a workspace's own command line uses when its storage is set to this service; the rules (search sees global + the namespace (+ the project), a change needs the exact scope, verify/promote/decay/consolidate/stale) are the same as a machine-local file would have. Admin token only: `POST /v1/scoped/<operation>` with operations `add, get, search, list, update, status, stale, consolidate, stats, projects, project_update, device_add, device_list, device_update` and the one-time `import_entry, import_project, import_device` (idempotent through `origin`). The code is `aiflow/memory/scoped.py`; the client is the workspace's concern, not ai-flow's.
+
 ## Not yet
 Semantic (vector) search needs the `pgvector` extension, which the shared PostgreSQL image does not have; search is full-text plus trigram. Importing the older notes (`scripts/mem` SQLite, Claude and Codex memory files) needs a separate plan approved by the owner.

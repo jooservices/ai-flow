@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import events
 from .config import load
 from .jira import Jira
 from .lock import Redis
@@ -100,18 +101,23 @@ def main() -> int:
     cfg = load()
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     jira = Jira(cfg.root)
+    events.configure(cfg.obs, cfg.machine, "health")
     found = problems(cfg, redis, jira)
+    events.emit("health.check", problems=len(found), kinds=",".join(kind for kind, _ in found))
     for kind, message in found:
         print(f"PROBLEM {kind}: {message}")
+        events.emit("health.problem", kind=kind, message=message[:500])
         if cfg.health_ticket and redis.get(f"alert:{kind}") is None:
             redis.set(f"alert:{kind}", "1", HOUR)  # at most one alert per kind and hour
             jira.comment(cfg.health_ticket, f"AI Flow health alert from {cfg.machine}: {message}")
+            events.emit("health.alert", kind=kind, ticket=cfg.health_ticket)
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     summary = usage_summary(redis, yesterday)
     if summary and cfg.health_ticket and redis.acquire(f"usage-report:{yesterday}", "health", 3 * 86400):
         jira.comment(cfg.health_ticket, summary)
     if not found:
         print("OK all expected supervisors are beating and nothing is blocked")
+    events.close()
     return 1 if found else 0
 
 

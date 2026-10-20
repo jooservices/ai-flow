@@ -60,3 +60,6 @@ Policy and limits: `docs/OPERATOR.md`; thresholds: `JOOservices/config/operator.
 - **Look**: `bin/aiflow-control --dry-run` prints what it would start, retire and disable; `bin/aiflow-work check` shows the workers, the caps and warnings; `bin/aiflow-work list` prints the ids.
 - **A wrong file** changes nothing: the control keeps the current workers and the health check reports it on the health ticket. It never stops every worker.
 - **If the control stops**, the workers keep working; systemd restarts it after 15 seconds and the health check alerts when its heartbeat is missing.
+
+## Events in OpenObserve
+Every process sends its events to OpenObserve (`docs/OBSERVABILITY.md`: events, fields, SQL to ask "what happened to ticket X"). It needs `obs_url` in aiflow.toml `[runtime]` and `AIFLOW_OBS_USER` / `AIFLOW_OBS_PASSWORD` in `Workspaces/.env`; without them nothing is sent. A down OpenObserve never stops a worker.

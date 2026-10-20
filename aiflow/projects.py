@@ -41,6 +41,7 @@ RUNTIME = {
     "require_human_field": (str, "AIFLOW_REQUIRE_HUMAN_FIELD"), "model_field": (str, "AIFLOW_MODEL_FIELD"),
     "type_field": (str, "AIFLOW_TYPE_FIELD"), "version_field": (str, "AIFLOW_VERSION_FIELD"),
     "redis_prefix": (str, "AIFLOW_REDIS_PREFIX"),
+    "obs_url": (str, "AIFLOW_OBS_URL"), "obs_org": (str, "AIFLOW_OBS_ORG"), "obs_stream": (str, "AIFLOW_OBS_STREAM"),
 }
 AI_LIMIT_NAMES = ("claude", "codex", "grok", "opencode")
 

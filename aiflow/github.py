@@ -6,7 +6,7 @@ import re
 import subprocess
 from typing import Any, Callable
 
-from . import agents
+from . import agents, events
 
 MARKER = "<!-- aiflow -->"
 BAD_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
@@ -216,17 +216,21 @@ class GitHub:
         found = self.find(branch)
         if not found:
             raise GitHubError("pull request was created but cannot be read back")
+        events.emit("github.pr_open", repo=self.slug, branch=branch, base=base, number=found.get("number"), draft=draft, title=title[:200])
         return found
 
     def ready(self, number: int) -> None:
         """Take the pull request out of draft: from now on the review bots look at it."""
         self._gh("pr", "ready", str(number), "-R", self.slug)
+        events.emit("github.pr_ready", repo=self.slug, number=number)
 
     def update_branch(self, number: int, head_sha: str) -> None:
         self._gh("api", "-X", "PUT", f"repos/{self.slug}/pulls/{number}/update-branch", "-f", f"expected_head_sha={head_sha}")
+        events.emit("github.update_branch", repo=self.slug, number=number, head=head_sha[:10])
 
     def merge(self, number: int, head_sha: str, method: str = "merge") -> None:
         self._gh("pr", "merge", str(number), "-R", self.slug, f"--{method}", "--match-head-commit", head_sha)
+        events.emit("github.merge", repo=self.slug, number=number, head=head_sha[:10], method=method)
 
     def release(self, tag: str, target: str, title: str) -> str:
         """Create the tag on `target` and a GitHub release with generated notes; returns its URL."""
@@ -238,10 +242,12 @@ class GitHub:
         failed = [run["databaseId"] for run in runs if run.get("conclusion") in BAD_CONCLUSIONS]
         if failed:
             self._gh("run", "rerun", str(failed[0]), "-R", self.slug, "--failed")
+            events.emit("github.ci_rerun", repo=self.slug, branch=branch, run=failed[0])
         return bool(failed)
 
     def comment(self, number: int, body: str) -> None:
         self._gh("pr", "comment", str(number), "-R", self.slug, "--body", f"{body}\n\n{MARKER}")
+        events.emit("github.pr_comment", repo=self.slug, number=number, chars=len(body), preview=body[:300])
 
     # ---- feedback --------------------------------------------------------------------------------------------
     def raw_feedback(self, number: int) -> dict[str, Any]:

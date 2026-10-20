@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import events
 from .config import CONFIG_DIR, ConfigError
 from .projects import desired_ids
 
@@ -100,6 +101,7 @@ class Control:
 
     def fail(self, message: str) -> None:
         self.log(f"control: {message}")
+        events.emit("control.error", message=message[:400])
         self.redis.set("control:error", message[:400], 3600)  # the health check reports it
 
     def cycle(self, dry_run: bool = False) -> tuple[Plan, bool]:
@@ -115,11 +117,14 @@ class Control:
         plan = Plan()
         if cfg.registry.from_files:
             plan = self.reconcile(cfg, dry_run)
+        events.emit("control.cycle", start=",".join(plan.start), keep=",".join(plan.keep), retire=",".join(plan.retire), disable=",".join(plan.disable),
+                    dry_run=dry_run, projects=len(cfg.registry.projects))
         changed = False
         digest = config_hash(self.config_dir)
         known = self.hash or self.redis.get("control:confighash") or ""
         if known and known != digest and not dry_run:
             self.log("control: the configuration changed; every worker restarts after its step")
+            events.emit("control.config_changed", old=known[:12], new=digest[:12])
             self.redis.set("restart", str(int(time.time())), 7 * DAY)
             changed = True
         if not dry_run:
@@ -147,15 +152,18 @@ class Control:
             self.redis.delete(f"retire:{cfg.machine}:{worker}")
             self.backend.enable(worker)
             self.log(f"control: started worker {worker}")
+            events.emit("control.worker_started", worker=worker)
         for worker in plan.keep:
             self.redis.delete(f"retire:{cfg.machine}:{worker}")
             self.log(f"control: worker {worker} is wanted again")
+            events.emit("control.worker_kept", worker=worker)
         for worker in plan.retire:
             if budget <= 0:
                 break
             budget -= 1
             self.redis.set(f"retire:{cfg.machine}:{worker}", "1", DAY)
             self.log(f"control: worker {worker} will leave after its current step")
+            events.emit("control.worker_retiring", worker=worker)
         for worker in plan.disable:
             if budget <= 0:
                 break
@@ -163,6 +171,7 @@ class Control:
             self.backend.disable(worker)
             self.redis.delete(f"retire:{cfg.machine}:{worker}")
             self.log(f"control: disabled worker {worker}")
+            events.emit("control.worker_disabled", worker=worker)
         self.redis.delete("control:error")
         return plan
 
@@ -187,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     from dataclasses import replace
     holder = replace(cfg, label="control")
+    events.configure(cfg.obs, cfg.machine, "control")
+    events.emit("control.start", version_hash=config_hash(CONFIG_DIR)[:12])
     supervisor = Supervisor(holder, Jira(cfg.root), redis)
     operator = Operator(supervisor, holder.operator_policy)
     control = Control(Systemd(), redis, config.load, operator=lambda _cfg: operator.cycle(), log=log)
@@ -201,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             log(f"control: pass failed: {type(error).__name__}: {error}")
             changed = False
         if changed:
+            events.emit("control.stop", reason="configuration changed")
+            events.close()
             return 0  # systemd starts it again with the new configuration
         time.sleep(args.interval)
 

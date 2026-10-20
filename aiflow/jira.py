@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import events
+
 
 class JiraError(RuntimeError):
     pass
@@ -142,8 +144,10 @@ class Jira:
     def transition(self, key: str, status: str) -> bool:
         try:
             self._run("transition", key, status)
+            events.emit("jira.transition", ticket=key, to=status, ok=True)
             return True
-        except JiraError:
+        except JiraError as error:
+            events.emit("jira.transition", ticket=key, to=status, ok=False, error=str(error)[:300])
             return False
 
     def comment(self, key: str, body: str) -> None:
@@ -152,6 +156,7 @@ class Jira:
             name = handle.name
         try:
             self._run("comment", "--body-file", name, key)
+            events.emit("jira.comment", ticket=key, chars=len(body), preview=body[:300])
         finally:
             Path(name).unlink(missing_ok=True)
 
@@ -165,13 +170,17 @@ class Jira:
                             *(["--labels", labels] if labels else []), "--format", "markdown")
         finally:
             Path(name).unlink(missing_ok=True)
-        return str(json.loads(out)["key"])
+        created = str(json.loads(out)["key"])
+        events.emit("jira.create", ticket=created, issue_type=issue_type, summary=summary[:200], labels=labels)
+        return created
 
     def link(self, source: str, target: str, link_type: str = "Relates") -> None:
         self._run("link", "--type", link_type, source, target)
+        events.emit("jira.link", ticket=source, target=target, link_type=link_type)
 
     def set_agent(self, key: str, agent: str) -> None:
         self._run("edit", key, "--agent", agent)
+        events.emit("jira.agent", ticket=key, agent=agent)
 
     def labels(self, key: str) -> list[str]:
         return list(self.view(key).get("labels", []))
@@ -180,11 +189,13 @@ class Jira:
         current = self.labels(key)
         if label not in current:
             self._run("edit", key, "--labels", ",".join(current + [label]))
+            events.emit("jira.label_added", ticket=key, label=label)
 
     def remove_label(self, key: str, label: str) -> None:
         current = self.labels(key)
         if label in current:
             self._run("edit", key, "--labels", ",".join(x for x in current if x != label))
+            events.emit("jira.label_removed", ticket=key, label=label)
 
     def set_field(self, key: str, field: str, value: Any) -> None:
         """Set a custom field (text value, {"value": "Yes"} for a select) or clear it with None."""
@@ -192,6 +203,7 @@ class Jira:
         status, body = self._library().call("PUT", f"/rest/api/3/issue/{key}", {"fields": {field: value}})
         if status not in (200, 204):
             raise JiraError(f"set {field} HTTP {status}: {str(body)[:200]}")
+        events.emit("jira.field", ticket=key, field=field, value=json.dumps(value)[:200])
 
     def set_workspace(self, key: str, field: str, value: str) -> None:
         self.set_field(key, field, value)

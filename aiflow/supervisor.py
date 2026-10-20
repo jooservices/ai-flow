@@ -17,6 +17,7 @@ from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
+from .operator import Operator
 from .lock import Redis, RedisError
 from .project_database import ProjectDatabase, ticket_database_id
 
@@ -161,6 +162,7 @@ class Supervisor:
         self.deploy_process_factory = process_factory or subprocess.Popen
         self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
+        self.operator = Operator(self, cfg.operator_policy)
         self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
@@ -170,7 +172,24 @@ class Supervisor:
         jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
         found = self.jira.search(jql)
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
-        return sorted(found, key=lambda issue: "rework" not in issue.get("labels", []))  # stable: rework first, then Highest priority, then oldest
+        return self.fair_order(found)
+
+    def fair_order(self, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Rework first; then the projects take turns: the first ticket of every project, then the second of every project, and so on.
+        Inside a project the order of Jira (priority, then oldest) is kept; in one round the project served longest ago goes first."""
+        rank: dict[str, int] = {}
+        counts: dict[tuple[bool, str], int] = {}
+        for issue in found:
+            bucket = ("rework" in issue.get("labels", []), issue["key"].rsplit("-", 1)[0])
+            rank[issue["key"]] = counts.get(bucket, 0)
+            counts[bucket] = rank[issue["key"]] + 1
+        projects = sorted({project for _, project in counts})
+        served = dict(zip(projects, self.redis.get_many([f"served:{project}" for project in projects]))) if projects else {}
+
+        def turn(issue: dict[str, Any]) -> tuple[bool, int, float]:
+            value = served.get(issue["key"].rsplit("-", 1)[0])
+            return "rework" not in issue.get("labels", []), rank[issue["key"]], float(value) if value else 0.0
+        return sorted(found, key=turn)  # stable
 
     def parents_of_open_work(self, found: list[dict[str, Any]]) -> set[str]:
         """Keys among `found` that have child issues: a ticket with children is a container, only its leaves are worked."""
@@ -427,6 +446,7 @@ class Supervisor:
                     except RedisError as error:
                         log(f"{issue['key']}: could not release the lease ({error}); it expires by itself")
             if worked:
+                self.redis.set(f"served:{issue['key'].rsplit('-', 1)[0]}", str(time.time()), 7 * DAY)
                 return True
         return False
 
@@ -446,6 +466,7 @@ class Supervisor:
                 self.recheck_blocked()
                 self.sweep_worktrees()
                 self.sweep_containers()
+                self.operator.cycle()
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
@@ -1602,6 +1623,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
             limits = ", ".join(f"{name}={value}" for name, value in sorted(config.ai_limits.items())) or "none (all unlimited)"
             print(f"  AI session limits: {limits}; omitted AIs are unlimited")
+            policy = config.operator_policy
+            print(f"  operator: {'ON' if policy.enabled else 'off (config/operator.toml)'}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
+                  f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; switch: `aiflow-work operator on|off`")
             for project in config.registry.projects.values():
                 deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
                                   if project.deploy_command.strip() else "disabled")
@@ -1622,6 +1646,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             redis.delete("paused")
             print("resumed")
+        return 0
+    if "operator" in args:  # a separate switch of the operator (the policy file still has to enable it)
+        if "off" in args:
+            redis.set("operator:off", str(int(time.time())), 365 * DAY)
+            print("operator switched off: no incident is handled (aiflow-work operator on to switch it on)")
+        elif "on" in args:
+            redis.delete("operator:off")
+            print("operator switch on" + ("" if cfg.operator_policy.enabled else " (but config/operator.toml still has enabled = false)"))
+        else:
+            state = "off" if redis.get("operator:off") is not None else ("paused with the flow" if redis.get("paused") is not None else "on")
+            print(f"operator: policy {'enabled' if cfg.operator_policy.enabled else 'disabled'}, switch {state}")
         return 0
     if "restart" in args:  # every worker leaves after its current step and systemd starts it again
         redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it

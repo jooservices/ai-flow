@@ -120,6 +120,10 @@ The developer's last comment follows a fixed template: What's changed, Why chang
 
 The repositories are public, so only accounts with write, maintain or admin permission on the repository count as human feedback (comments, change requests, review threads); bots (CodeRabbit, Copilot...) count as before. What anyone else writes never reaches a developer AI: it is left out of the prompt and logged once as `ignored feedback from accounts without write access`. The permission is asked of GitHub once per account and worker.
 
+### The operator and fair turns
+
+The supervisor takes turns between projects (the first ticket of every project, then the second of every project, rework first; inside a project the Jira order is kept). It also finds incidents with plain code and starts a read-only AI for one incident at a time (`docs/OPERATOR.md`, `config.example/operator.toml`, `prompts/operator.md`); it is off until `operator.toml` enables it.
+
 ### Preparing a Jira project
 
 `bin/aiflow-setup <KEY>` prints what a Jira project still needs for AI Flow (fields, issue type Release, workflow and scheme) and `--apply` creates it. The definition is `aiflow/jira_spec.json` and uses names only, so the same command prepares any Jira site; the supervisor finds the field ids by name at runtime.

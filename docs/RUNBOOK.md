@@ -45,3 +45,9 @@ Do this once per project, on the machines that run workers. The first week is de
 
 ## Jira hierarchy
 Jira allows Epic -> Story, Task or Bug -> Sub-task. A Story cannot contain Tasks; to split a Story use Sub-tasks, to group Stories and Tasks use an Epic. Only leaves are worked: a ticket with children is a container that closes itself when all its children are Done (drill D8).
+
+## Operator (incidents handled by the supervisor)
+Policy and limits: `docs/OPERATOR.md`; thresholds: `JOOservices/config/operator.toml` (off without the file or with `enabled = false`).
+- **Read what it did**: every run is an audit comment on the ticket (on the health ticket for a worker or AI-pool incident): `AI Flow operator (<AI>) ... Saw / Outcome / Did / Refused`. The AI logs are `Workspaces/.tmp/aiflow/logs/operator-*.log`.
+- **Questions for you**: tickets with the label `needs-owner` stay Blocked; the comment starts with the question, the options and the recommendation. Answer in a comment and move the ticket to To Do.
+- **Switch it off**: `bin/aiflow-work operator off` (on: `operator on`), or `bin/aiflow-work pause` for the whole flow, or `enabled = false` in the policy file followed by `restart`.

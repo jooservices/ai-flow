@@ -108,5 +108,6 @@ Ticket names an AI: that one. Priority Highest: the strongest AI. Otherwise the 
 
 - `README.md`: how everything works, settings and commands.
 - `docs/RUNBOOK.md`: day-to-day operation, blocked reasons, onboarding a project.
+- `docs/OPERATOR.md`: what the flow does alone when it hits a problem and what always goes to the owner.
 - The workspace skill `workspace-ai-flow`: the short version for AIs working in the workspace.
 - The presentation of the design (20 slides): shared with the owner.

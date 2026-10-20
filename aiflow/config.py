@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .projects import Registry
@@ -97,6 +97,8 @@ class Settings:
     quota_block_minutes: int
     recheck_seconds: int
     workspace_name: str
+    notify: dict = field(default_factory=dict)  # AIFLOW_NOTIFY_* and JIRA_URL, for the operator's messages to the owner
+    operator_policy: Any = None  # aiflow.operator_policy.Policy
 
     @property
     def worker_label(self) -> str:
@@ -133,7 +135,7 @@ def expected_workers(merged: dict[str, str], machine: str, registry: Registry) -
 def load(env: dict[str, str] | None = None, worker_id: str | None = None, config_dir: Path | None = None) -> Settings:
     """Settings of one worker. `worker_id` is the worker number on this machine (`2`); without it AIFLOW_SLOT applies.
     Project settings come from the TOML files of `config_dir` (see projects.py); a machine without them uses `.env`."""
-    from . import projects as registry_module
+    from . import operator_policy, projects as registry_module
     if env is None:  # an explicit environment (tests) must not pick up the machine's .env files
         merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
         merged.update(read_env_file(WORKSPACES_ROOT / "JOOservices" / ".env"))
@@ -213,4 +215,6 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),
         recheck_seconds=_int(merged, "AIFLOW_RECHECK_SECONDS", 120),
         workspace_name=merged.get("AIFLOW_WORKSPACE_NAME", {"wsl": "WSL", "mac": "Mac"}.get(machine, machine)),
+        notify={k: v for k, v in merged.items() if k.startswith("AIFLOW_NOTIFY_") or k == "JIRA_URL"},
+        operator_policy=operator_policy.load(directory),
     )

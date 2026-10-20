@@ -232,6 +232,14 @@ class GitHub:
         """Create the tag on `target` and a GitHub release with generated notes; returns its URL."""
         return self._gh("release", "create", tag, "-R", self.slug, "--target", target, "--title", title, "--generate-notes").strip()
 
+    def rerun_failed(self, branch: str) -> bool:
+        """Run the failed jobs of the latest failed workflow run of a branch again (the operator's `retry_ci`)."""
+        runs = json.loads(self._gh("run", "list", "-R", self.slug, "--branch", branch, "--limit", "5", "--json", "databaseId,conclusion") or "[]")
+        failed = [run["databaseId"] for run in runs if run.get("conclusion") in BAD_CONCLUSIONS]
+        if failed:
+            self._gh("run", "rerun", str(failed[0]), "-R", self.slug, "--failed")
+        return bool(failed)
+
     def comment(self, number: int, body: str) -> None:
         self._gh("pr", "comment", str(number), "-R", self.slug, "--body", f"{body}\n\n{MARKER}")
 

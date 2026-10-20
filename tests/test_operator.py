@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -204,6 +205,33 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(found["pull_request"]["url"], pr["url"])
         self.assertEqual(found["ci_state"], "pending")
         self.assertEqual(snapshot["thresholds"]["ci_wait_minutes"], op.policy.ci_wait_minutes)
+
+    def test_github_timeout_does_not_stop_the_operator_cycle(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "In QA",
+                           "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3 * 3600)),
+                           "labels": [], "summary": "A ticket"}]
+        sup.online_pool = lambda: ["Claude"]
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        for key, value in (("statussince:JAIF-1", now - 3 * 3600), ("pr:JAIF-1", 17),
+                           ("gateentry:JAIF-1", now - 3 * 3600), ("pushed:JAIF-1", now - 3 * 3600)):
+            redis.set(key, str(value), 60)
+        for slot in op.cfg.expected_slots:
+            redis.set(f"hb:{slot}", str(int(now)), 60)
+
+        with mock.patch("aiflow.operator.Repo.github_slug", return_value="jooservices/repo"), \
+                mock.patch("aiflow.operator.GitHub.view", side_effect=subprocess.TimeoutExpired("gh pr view", 120)), \
+                mock.patch.object(op, "sync_queue", wraps=op.sync_queue) as sync_queue, \
+                mock.patch.object(op, "flush_notifications") as flush_notifications, \
+                mock.patch.object(op, "run_next", return_value=True) as run_next:
+            self.assertTrue(op.cycle())
+
+        self.assertEqual([item.id for item in sync_queue.call_args.args[0]], ["stuck:JAIF-1"])
+        self.assertEqual(sync_queue.call_args.args[0][0].facts["ci_state"], "unknown")
+        self.assertTrue(redis.list_values("operator:queue"))
+        flush_notifications.assert_called_once_with()
+        run_next.assert_called_once_with()
 
     def test_resolved_runs_the_whitelisted_actions_and_audits(self):
         out = ('ACTION: comment {"key": "JAIF-1", "text": "answer"}\nACTION: transition {"key": "JAIF-1", "status": "To Do"}\n'

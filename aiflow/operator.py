@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -137,7 +138,7 @@ class Operator:
                     ci_state, failing = github.checks_state(pr.get("statusCheckRollup"))
                     pull_request = {"number": int(number), "url": pr.get("url", ""), "state": pr.get("state", ""),
                                     "head": pr.get("headRefName", ""), "ci_state": ci_state, "failing_checks": failing}
-                except (GitError, GitHubError, ValueError, OSError):
+                except (GitError, GitHubError, subprocess.TimeoutExpired, ValueError, OSError):
                     # Missing repository or GitHub data is not evidence that CI is still waiting.
                     pass
             tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,

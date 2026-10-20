@@ -107,7 +107,9 @@ class Setup:
         missing = [value for value in wanted if value not in current]
         if not missing:
             return
-        if self.step(f"add {len(missing)} option(s) to {name}: {', '.join(missing[:4])}{' ...' if len(missing) > 4 else ''}") and context:
+        if self.step(f"add {len(missing)} option(s) to {name}: {', '.join(missing[:4])}{' ...' if len(missing) > 4 else ''}") and field_id:
+            if not context:
+                raise SetupError(f"Field `{name}` has no context; create one in Jira, then run again.")
             self.call("POST", f"/rest/api/3/field/{field_id}/context/{context}/option", {"options": [{"value": v} for v in missing]})
 
     def screens(self, field_ids: dict[str, str]) -> None:

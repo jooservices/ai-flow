@@ -212,14 +212,16 @@
     "from": [
      "Human review"
     ],
-    "to": "Done"
+    "to": "Done",
+    "resolution": "Done"
    },
    {
     "name": "Merge",
     "from": [
      "Ready to merge"
     ],
-    "to": "Done"
+    "to": "Done",
+    "resolution": "Done"
    },
    {
     "name": "Rework after approval",

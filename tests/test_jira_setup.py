@@ -137,3 +137,24 @@ class FieldNameTest(unittest.TestCase):
             jira.field_id("Type")
         with self.assertRaises(JiraError):
             jira.field_id("Nope")
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_every_transition_into_done_sets_the_resolution(self):
+        spec = load_spec()
+        missing = [t["name"] for t in spec["workflow"]["transitions"] if t["to"] == "Done" and t.get("resolution") != "Done"]
+        self.assertEqual(missing, [])
+
+    def test_a_select_field_without_a_context_is_an_error_when_applying_and_a_plan_otherwise(self):
+        class NoContext(FakeJira):
+            def call(self, method, path, body=None):
+                if "/context?" in path and "/option" not in path:
+                    return 200, {"values": [], "isLast": True}
+                return super().call(method, path, body)
+        spec = load_spec()
+        fields = [{"id": f"customfield_{n}", "name": f["name"], "custom": True} for n, f in enumerate(spec["fields"], 10)]
+        lines = []
+        Setup(NoContext(fields=fields, workflow=True), spec, "ABC", False, out=lines.append).run()
+        self.assertTrue(any("option(s) to AI Model" in line for line in lines))  # a dry run still plans it
+        with self.assertRaises(SetupError):
+            Setup(NoContext(fields=fields, workflow=True), spec, "ABC", True, out=lambda _l: None).run()

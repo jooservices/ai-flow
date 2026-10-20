@@ -30,7 +30,8 @@ tag_prefix = "v"                 # release tags are <tag_prefix><Version>
 # deploy_on = "base"             # base: only merges into `base`; all: every merge
 
 # ---------------------------------------------------------------------------------------------------------------------------
-# [runtime]: tuning of the supervisor. Every key is optional; the value shown is the one the code uses when the key is missing.
+# [runtime]: tuning of the supervisor. Every key is optional. The values shown are the settings in use on the JOOservices workstation; where one differs
+# from the built-in default (used when the key is missing) the comment says so.
 # ---------------------------------------------------------------------------------------------------------------------------
 [runtime]
 # --- worker loop ---
@@ -44,9 +45,9 @@ worker_max_minutes = 0           # a worker leaves (systemd restarts it) after t
 idle_minutes = 30                # an AI that prints nothing for this long is stopped
 max_minutes = 180                # hard time limit of one AI step
 max_attempts = 3                 # failed AI attempts on a step before the ticket is Blocked (Attempts)
-wait_note_minutes = 20           # write a "waiting for an AI" note on a ticket after this long
+wait_note_minutes = 20           # write a "waiting for an AI" note on a ticket after this long (built-in default: 10)
 # --- choosing and protecting AIs ---
-agent_order = ["Codex", "Claude", "Grok", "OpenCode"]  # preference when several AIs could take a step (first wins)
+agent_order = ["Codex", "Claude", "Grok", "OpenCode"]  # preference when several AIs could take a step, first wins (built-in default: Claude, Codex, OpenCode)
 explicit_only_ais = ["OpenCode"]  # AIs used only when the ticket names them (never picked automatically)
 opencode_model = "opencode/deepseek-v4.1-flash-free"  # model used when OpenCode is the developer
 quota_cooldown_minutes = 30      # an AI out of usage or balance is skipped by every machine for this long
@@ -60,7 +61,7 @@ gate_poll_seconds = 60           # how often the gate looks at a pull request
 max_cycles = 6                   # rework rounds on one ticket before it is Blocked
 ignored_authors = ["codecov-commenter", "github-actions", "sonarqubecloud", "sonarcloud", "dependabot", "codeql", "github-advanced-security"]  # automation: their comments are not feedback
 # --- health and visibility ---
-health_ticket = "JAIF-12"        # ticket that receives health alerts and the daily AI usage summary
+health_ticket = "JAIF-12"        # ticket that receives health alerts and the daily AI usage summary (built-in default: none, no alert is written)
 # workspace_name = "WSL"         # name written in the Jira field Workspace; default: WSL / Mac by machine, else the machine name
 # --- Redis namespace (host, port and password are per machine: see .env.example) ---
 redis_prefix = "aiworkflow:"     # prefix of every key; shared by all machines, so keep it equal everywhere

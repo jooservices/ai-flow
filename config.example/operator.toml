@@ -1,0 +1,29 @@
+# JOOservices/config/operator.toml: the policy of the AI Flow operator (git-ignored: copy it by hand to every machine).
+# The operator is an AI that the supervisor starts for one incident at a time (a Blocked ticket, a stuck pull request, a dead worker,
+# an empty AI pool, a rework loop). Without this file the operator is OFF. Read at start; `bin/aiflow-work check` validates it.
+# What it may decide alone and what always goes to the owner: docs/OPERATOR.md.
+[operator]
+enabled = false                  # true: the supervisor looks for incidents and starts the operator
+agent = "Claude"                 # AI that handles an incident (Claude, Codex or Grok); another usable AI replaces it when it is down
+blocked_minutes = 30             # a Blocked ticket this old is an incident (Quota and Offline return by themselves, they are not)
+stuck_minutes = 120              # a ticket in a worked status with no lease and no change for this long is an incident
+ci_wait_minutes = 120            # a pull request in QA with no change for this long is an incident (a runner shortage: waits first)
+rework_limit = 3                 # rework rounds on one ticket before it is an incident
+retries_per_ticket_per_day = 2   # operator runs on one ticket per day; above that the incident is escalated instead
+max_runs_per_hour = 6            # operator runs per hour in total
+max_runs_per_day = 30            # operator runs per day in total
+run_minutes = 20                 # time limit of one operator run
+notify_interval_minutes = 60     # at most one grouped message to the owner per this many minutes (needs a channel in .env)
+
+# What always goes to the owner. The operator may only add to this list, never remove from it.
+[escalation]
+always = [
+  "spending money",
+  "credentials, tokens or secrets",
+  "deleting data, databases, repositories or branches",
+  "force-push",
+  "changing the product direction or the requirements",
+  "a release",
+  "merging by hand",
+  "anything the policy does not cover",
+]

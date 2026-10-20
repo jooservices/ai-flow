@@ -84,18 +84,24 @@ def parse_spec(spec: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+READ_ONLY_TOOLS = "Read,Glob,Grep"
+
+
 def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, root: Path,
-                  model: str = "", effort: str = "") -> tuple[list[str], str | None]:
-    """Return (argv, stdin_text). The AI works only inside `workdir`; scripts/jira lives under `root`."""
+                  model: str = "", effort: str = "", read_only: bool = False) -> tuple[list[str], str | None]:
+    """Return (argv, stdin_text). The AI works only inside `workdir`; scripts/jira lives under `root`.
+    `read_only` (the operator): the AI can read files and nothing else; OpenCode cannot be restricted, so it is refused."""
+    if read_only and agent == "OpenCode":
+        raise ValueError("OpenCode cannot run read-only")
     if agent == "Claude":
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose",
                 *(["--model", model] if model else []), *(["--effort", effort] if effort else []),
-                "--allowedTools", claude_allowed(root),
+                "--allowedTools", READ_ONLY_TOOLS if read_only else claude_allowed(root),
                 "--disallowedTools", ",".join(DENIED_BASH),
                 "--add-dir", str(root / ".tmp")]
         return argv, prompt
     if agent == "Codex":
-        argv = ["codex", "exec", "-C", str(workdir), "-s", "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
+        argv = ["codex", "exec", "-C", str(workdir), "-s", "read-only" if read_only else "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
                 *(["-m", model] if model else []), *(["-c", f'model_reasoning_effort="{effort}"'] if effort else []), "-"]
         return argv, prompt
     if agent == "Grok":
@@ -104,7 +110,7 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
         prompt_file.write_text(prompt, encoding="utf-8")
         # plain output keeps the final message readable; the allowlist is the same as Claude's (Grok accepts --allowedTools rules)
         return ["grok", "--cwd", str(workdir), "--permission-mode", "dontAsk", "--output-format", "plain",
-                "--allowedTools", claude_allowed(root), "--disallowedTools", ",".join(DENIED_BASH),
+                "--allowedTools", READ_ONLY_TOOLS if read_only else claude_allowed(root), "--disallowedTools", ",".join(DENIED_BASH),
                 *(["-m", model] if model else []), *(["--reasoning-effort", effort] if effort else []),
                 "--prompt-file", str(prompt_file)], None
     if agent == "OpenCode":

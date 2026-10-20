@@ -1578,3 +1578,39 @@ class AdfTests(unittest.TestCase):
         out = adf_to_markdown(doc)
         self.assertEqual(out, "## AC\n\n- one\n- two\n  - deep\n\nplain text\n\n```\nmake test\n```")
         self.assertEqual(missing_sections(out), ["Scopes", "Tests"])
+
+
+class FairOrderTests(unittest.TestCase):
+    def issues(self, *keys, rework=()):
+        return [{"key": key, "labels": ["rework"] if key in rework else []} for key in keys]
+
+    def keys(self, sup, found):
+        return [issue["key"] for issue in sup.fair_order(found)]
+
+    def test_projects_alternate_and_each_keeps_its_own_order(self):
+        sup = make()
+        found = self.issues("JAVM-1", "JAVM-2", "JAVM-3", "JOOWT-9", "JOOWT-8", "JAIF-5")
+        self.assertEqual(self.keys(sup, found), ["JAVM-1", "JOOWT-9", "JAIF-5", "JAVM-2", "JOOWT-8", "JAVM-3"])
+
+    def test_rework_goes_first_then_the_rounds(self):
+        sup = make()
+        found = self.issues("JAVM-1", "JAVM-2", "JOOWT-9", "JOOWT-8", rework=("JOOWT-8",))
+        self.assertEqual(self.keys(sup, found), ["JOOWT-8", "JAVM-1", "JOOWT-9", "JAVM-2"])
+
+    def test_the_project_served_longest_ago_goes_first_in_a_round(self):
+        redis = FakeRedis()
+        redis.set("served:JAVM", str(time.time()), 10)
+        sup = make(redis=redis)
+        self.assertEqual(self.keys(sup, self.issues("JAVM-1", "JOOWT-9")), ["JOOWT-9", "JAVM-1"])
+
+    def test_one_worker_serves_both_projects_alternately(self):
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        found = self.issues("JAVM-1", "JAVM-2", "JOOWT-9", "JOOWT-8")
+        served = []
+        for _ in range(4):
+            first = self.keys(sup, found)[0]
+            served.append(first)
+            found = [issue for issue in found if issue["key"] != first]
+            redis.set(f"served:{first.rsplit('-', 1)[0]}", str(time.time() + len(served)), 10)
+        self.assertEqual([key.split("-")[0] for key in served], ["JAVM", "JOOWT", "JAVM", "JOOWT"])

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .projects import Registry
@@ -97,10 +98,14 @@ class Settings:
     quota_block_minutes: int
     recheck_seconds: int
     workspace_name: str
+    home: str = ""   # Jira key of the project this worker belongs to (worker id `JAVM-2`); empty for the shared workers (`1`, `2`)
+    label: str = ""  # worker id as written in the unit name, `2` or `JAVM-2`; empty = the slot number
+    notify: dict = field(default_factory=dict)  # AIFLOW_NOTIFY_* and JIRA_URL, for the operator's messages to the owner
+    operator_policy: Any = None  # aiflow.operator_policy.Policy
 
     @property
     def worker_label(self) -> str:
-        return str(self.slot)
+        return self.label or str(self.slot)
 
     @property
     def owner(self) -> str:
@@ -122,18 +127,32 @@ def parse_worker_id(worker_id: str) -> int:
     return int(worker_id)
 
 
+WORKER_ID = re.compile(r"^(?:(?P<shared>\d+)|(?P<home>[A-Z][A-Z0-9]+)-(?P<number>\d+))$")
+
+
+def parse_worker(worker_id: str) -> tuple[str, int]:
+    """`2` -> ('', 2) a shared worker; `JAVM-2` -> ('JAVM', 2) the second worker of project JAVM."""
+    match = WORKER_ID.match(worker_id)
+    number = int(match.group("shared") or match.group("number")) if match else 0
+    if not match or number < 1:
+        raise ConfigError(f"Worker id `{worker_id}` must be a whole number of at least 1 or <JIRA-KEY>-<number>.")
+    return match.group("home") or "", number
+
+
 def expected_workers(merged: dict[str, str], machine: str, registry: Registry) -> tuple[str, ...]:
     """Heartbeats the health check expects on this machine: one per worker of the registry, otherwise the legacy
     AIFLOW_EXPECTED_SLOTS list."""
-    if machine in registry.workers:
-        return tuple(f"{machine}:{n}" for n in range(1, registry.workers[machine] + 1))
+    from .projects import desired_ids
+    ids = desired_ids(registry, machine) if registry.from_files else []
+    if ids:
+        return tuple(f"{machine}:{id}" for id in ids)
     return tuple(r.strip() for r in merged.get("AIFLOW_EXPECTED_SLOTS", "wsl:1,wsl:2").split(",") if r.strip())
 
 
 def load(env: dict[str, str] | None = None, worker_id: str | None = None, config_dir: Path | None = None) -> Settings:
     """Settings of one worker. `worker_id` is the worker number on this machine (`2`); without it AIFLOW_SLOT applies.
     Project settings come from the TOML files of `config_dir` (see projects.py); a machine without them uses `.env`."""
-    from . import projects as registry_module
+    from . import operator_policy, projects as registry_module
     if env is None:  # an explicit environment (tests) must not pick up the machine's .env files
         merged = dict(read_env_file(WORKSPACES_ROOT / ".env"))
         merged.update(read_env_file(WORKSPACES_ROOT / "JOOservices" / ".env"))
@@ -143,8 +162,10 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         merged = dict(env)
         shell = {}
     merged.update(shell)
+    home = ""
     if worker_id is not None:
-        merged["AIFLOW_SLOT"] = str(parse_worker_id(worker_id))
+        home, number = parse_worker(worker_id)
+        merged["AIFLOW_SLOT"] = str(number)
     machine = merged.get("AIFLOW_MACHINE", socket.gethostname().lower())
     role_defaults = {role: merged.get(f"AIFLOW_{role.upper()}_DEFAULT", "") for role in ("developer", "reviewer", "qa")}
     default_repo = merged.get("AIFLOW_DEFAULT_REPO", "ai-flow")
@@ -160,13 +181,21 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
     merged.update(registry.runtime)  # [runtime] of aiflow.toml beats the legacy .env value
     slot = _int(merged, "AIFLOW_SLOT", 1)
     workers = registry.workers.get(machine, 0)
-    if worker_id is not None and workers and slot > workers:
-        raise ConfigError(f"Machine {machine} runs {workers} worker(s) in aiflow.toml; worker {slot} is outside that number.")
+    if worker_id is not None and home:
+        project = registry.get(home)
+        if project is None or not registry.from_files:
+            raise ConfigError(f"Worker `{worker_id}`: no project {home} in the configuration.")
+        if slot > project.workers:
+            raise ConfigError(f"Project {home} runs {project.workers} worker(s) in its TOML file; worker {worker_id} is outside that number.")
+    elif worker_id is not None and workers and slot > workers:
+        raise ConfigError(f"Machine {machine} runs {workers} shared worker(s) in aiflow.toml; worker {slot} is outside that number.")
     return Settings(
         root=WORKSPACES_ROOT,
         projects=tuple(registry.projects),
         machine=machine,
         slot=slot,
+        home=home,
+        label=worker_id if (worker_id and home) else "",
         workers=workers or 1,
         registry=registry,
         worker_max_minutes=_int(merged, "AIFLOW_WORKER_MAX_MINUTES", 0),
@@ -213,4 +242,6 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),
         recheck_seconds=_int(merged, "AIFLOW_RECHECK_SECONDS", 120),
         workspace_name=merged.get("AIFLOW_WORKSPACE_NAME", {"wsl": "WSL", "mac": "Mac"}.get(machine, machine)),
+        notify={k: v for k, v in merged.items() if k.startswith("AIFLOW_NOTIFY_") or k == "JIRA_URL"},
+        operator_policy=operator_policy.load(directory),
     )

@@ -100,7 +100,7 @@ Ticket names an AI: that one. Priority Highest: the strongest AI. Otherwise the 
 ## 12. Where things stand
 
 - Proven on real tickets: the whole path with no human step, human approval before merge, two tickets editing the same file, a ticket without the template, Highest priority routing, an unclear ticket then an answer, a container closing itself, a hotfix with the automatic merge-back.
-- Running continuously on one worker machine with health checks, a pause switch, AI sign-in probes and a daily usage summary.
+- Running continuously on one worker machine (a control service keeps the workers of each project equal to the configuration) with health checks, a pause switch, AI sign-in probes and a daily usage summary.
 - Not built: preview environments for approvers (a staging deployment is planned), a second worker machine, wiki publishing. Projects may opt into isolated per-ticket databases with their `database` TOML setting; the shared state store moves to the production one only when the owner announces the release of ai-flow.
 - Next: the first real project (javmeta) will be used to test the flow, in another working session, starting with approval on and auto-merge off for the first week.
 
@@ -108,5 +108,6 @@ Ticket names an AI: that one. Priority Highest: the strongest AI. Otherwise the 
 
 - `README.md`: how everything works, settings and commands.
 - `docs/RUNBOOK.md`: day-to-day operation, blocked reasons, onboarding a project.
+- `docs/OPERATOR.md`: what the flow does alone when it hits a problem and what always goes to the owner.
 - The workspace skill `workspace-ai-flow`: the short version for AIs working in the workspace.
 - The presentation of the design (20 slides): shared with the owner.

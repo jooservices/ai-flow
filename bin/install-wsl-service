@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install AI Flow as systemd user services (WSL).
-#   bin/install-wsl-service --workers       one aiflow-work@<n> per worker of this machine (JOOservices/config/aiflow.toml)
+#   bin/install-wsl-service --control       the control (aiflow-control.service): it starts and retires the workers by itself from the TOML files
+#   bin/install-wsl-service --workers       one aiflow-work@<id> per worker of this machine (JOOservices/config/aiflow.toml), without the control
 #   bin/install-wsl-service 1 2              legacy supervisor slots 1 and 2
 set -Eeuo pipefail
 DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -8,7 +9,10 @@ UNITS="$HOME/.config/systemd/user"
 mkdir -p "$UNITS"
 cp "$DIR"/deploy/systemd/aiflow-* "$UNITS/"
 systemctl --user daemon-reload
-if [ "${1:-}" = "--workers" ]; then
+if [ "${1:-}" = "--control" ]; then
+  "$DIR/bin/aiflow-work" check
+  systemctl --user enable --now aiflow-control.service
+elif [ "${1:-}" = "--workers" ]; then
   "$DIR/bin/aiflow-work" check
   for worker in $("$DIR/bin/aiflow-work" list); do systemctl --user enable --now "aiflow-work@$worker.service"; done
 else

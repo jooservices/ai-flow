@@ -45,3 +45,18 @@ Do this once per project, on the machines that run workers. The first week is de
 
 ## Jira hierarchy
 Jira allows Epic -> Story, Task or Bug -> Sub-task. A Story cannot contain Tasks; to split a Story use Sub-tasks, to group Stories and Tasks use an Epic. Only leaves are worked: a ticket with children is a container that closes itself when all its children are Done (drill D8).
+
+## Operator (incidents handled by the supervisor)
+Policy and limits: `docs/OPERATOR.md`; thresholds: `JOOservices/config/operator.toml` (off without the file or with `enabled = false`).
+- **Read what it did**: every run is an audit comment on the ticket (on the health ticket for a worker or AI-pool incident): `AI Flow operator (<AI>) ... Saw / Outcome / Did / Refused`. The AI logs are `Workspaces/.tmp/aiflow/logs/operator-*.log`.
+- **Questions for you**: tickets with the label `needs-owner` stay Blocked; the comment starts with the question, the options and the recommendation. Answer in a comment and move the ticket to To Do.
+- **Switch it off**: `bin/aiflow-work operator off` (on: `operator on`), or `bin/aiflow-work pause` for the whole flow, or `enabled = false` in the policy file followed by `restart`.
+
+## The control and the workers of each project
+`aiflow-control.service` (one per machine) keeps the running workers equal to the TOML files and runs the operator. Install: `bin/install-wsl-service --control`.
+- **Workers of a project**: `workers = N` in `config/aiflow/<KEY>.toml`; worker `<KEY>-1` serves only that project, `<KEY>-2` ... take their project first and then other projects (turn by turn). `[machines.<name>] workers` are shared workers; `max_workers` is the machine's cap (a total above it is refused).
+- **Add or change**: edit the TOML; within 30 seconds the control starts the missing workers, or asks the surplus ones to leave after their current step (they exit with code 3 and the control disables the unit). Nothing running is killed.
+- **A changed file** (any of `aiflow.toml`, `aiflow/*.toml`, `operator.toml`) makes every worker restart after its step and the control restart itself.
+- **Look**: `bin/aiflow-control --dry-run` prints what it would start, retire and disable; `bin/aiflow-work check` shows the workers, the caps and warnings; `bin/aiflow-work list` prints the ids.
+- **A wrong file** changes nothing: the control keeps the current workers and the health check reports it on the health ticket. It never stops every worker.
+- **If the control stops**, the workers keep working; systemd restarts it after 15 seconds and the health check alerts when its heartbeat is missing.

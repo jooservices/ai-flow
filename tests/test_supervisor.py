@@ -1176,6 +1176,10 @@ class RunEnvTests(unittest.TestCase):
 
 
 class AgentCommandTests(unittest.TestCase):
+    def test_claude_may_run_project_make_targets(self):
+        allowed = agents.claude_allowed(Path("/root")).split(",")
+        self.assertIn("Bash(make:*)", allowed)
+
     def test_grok_uses_a_prompt_file_and_the_plain_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             argv, stdin = agents.build_command("Grok", Path(tmp), Path(tmp) / "r.result", "the prompt", Path(tmp))

@@ -157,6 +157,7 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
     directory = config_dir or (CONFIG_DIR if env is None else None)  # an explicit environment (tests) reads no machine files
     registry = (registry_module.load(directory, fallback) if directory else None) or registry_module.legacy(
         tuple(p.strip() for p in merged.get("AIFLOW_PROJECTS", "JAIF").split(",") if p.strip()), fallback)
+    merged.update(registry.runtime)  # [runtime] of aiflow.toml beats the legacy .env value
     slot = _int(merged, "AIFLOW_SLOT", 1)
     workers = registry.workers.get(machine, 0)
     if worker_id is not None and workers and slot > workers:

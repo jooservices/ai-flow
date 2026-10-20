@@ -122,9 +122,17 @@ The repositories are public, so only accounts with write, maintain or admin perm
 
 ### Configuration and workers (like `queue:work`)
 
-Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples: `config.example/`):
+Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples with a comment on every key: `config.example/`). Three files, one owner each:
 
-- `aiflow.toml`: `[defaults]` for every project and `[machines.<name>] workers = N`, the number of workers of each machine. Optional `[machines.<name>.ai_limits]` sets machine-wide concurrent session caps with `codex`, `claude`, `opencode` and `grok`; missing AIs are unlimited and `0` disables that AI on the machine.
+| File | Owns |
+|---|---|
+| `Workspaces/.env` | secrets only (Jira, GitHub, Redis password) |
+| `ai-flow/.env` | the identity and Redis connection of this machine: `AIFLOW_MACHINE`, `AIFLOW_REDIS_*` |
+| `config/aiflow.toml` and `config/aiflow/*.toml` | everything the supervisor does |
+
+Precedence: project file > `[defaults]` > legacy `.env` value; `[runtime]` > legacy `.env` value. The other `AIFLOW_*` names of `.env.example` older than JAIF-79 are legacy fallbacks for a machine without TOML files. Settings are read once when a worker starts: change a file, then `bin/aiflow-work restart`.
+
+- `aiflow.toml`: `[defaults]` for every project, `[runtime]` for the supervisor tuning (timing, `agent_order`, gate waits, `health_ticket`, Jira field ids; an unknown key or a wrong type stops the worker with exit 2) and `[machines.<name>] workers = N`, the number of workers of each machine. Optional `[machines.<name>.ai_limits]` sets machine-wide concurrent session caps with `codex`, `claude`, `opencode` and `grok`; missing AIs are unlimited and `0` disables that AI on the machine.
 - `aiflow/*.toml`: every file is loaded, one `[project]` per Jira project (`jira_key`, `repo`, `company`, optional `database`, `base`, `hotfix_base`, `developer`, `reviewer`, `qa`, `require_human`, `human_on_deployment`, `auto_merge`, `ci_required`, `merge_method`, `max_parallel`, `deploy_command`, `deploy_timeout_minutes`, `deploy_on`). `human_on_deployment` defaults to `true`; set it to `false` to skip only the automatic review caused by a Deployment section. The check command prints its value.
 
 Set `database = "<shared-project-name>"` only for projects that need isolated databases. The target repository must ignore `.env`. Before each developer, reviewer, or QA session uses a ticket worktree, the supervisor confirms `.env` is ignored, provisions PostgreSQL, MongoDB, and Redis resources for the lower-case ticket id, writes that worktree's `.env`, and verifies its worktree mode. It also blocks a developer handoff if `.env` appears in a ticket commit. Rework reuses the same ticket database. The supervisor tears it down when the ticket is Done or its worktree is removed; the health check reports teardown failures. Leaving `database` unset preserves the existing flow.

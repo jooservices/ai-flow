@@ -129,3 +129,35 @@ class RegistryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeSectionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        write(self.dir / "aiflow" / "ai.toml", '[project]\njira_key = "JAIF"\nrepo = "ai-flow"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, general: str, **env):
+        write(self.dir / "aiflow.toml", general + '\n[machines.wsl]\nworkers = 2\n')
+        return load(env={"AIFLOW_MACHINE": "wsl", **env}, config_dir=self.dir)
+
+    def test_runtime_beats_env(self):
+        cfg = self.load('[runtime]\npoll_seconds = 10\nagent_order = ["Codex", "Claude"]\nhealth_ticket = "JAIF-12"',
+                        AIFLOW_POLL_SECONDS="99", AIFLOW_AGENT_ORDER="Grok", AIFLOW_HEALTH_TICKET="X-1")
+        self.assertEqual((cfg.poll_seconds, cfg.agent_order, cfg.health_ticket), (10, ("Codex", "Claude"), "JAIF-12"))
+
+    def test_without_the_section_env_applies(self):
+        cfg = self.load("", AIFLOW_POLL_SECONDS="99", AIFLOW_AGENT_ORDER="Grok,Codex")
+        self.assertEqual((cfg.poll_seconds, cfg.agent_order), (99, ("Grok", "Codex")))
+
+    def test_unknown_setting_is_rejected(self):
+        with self.assertRaises(ConfigError):
+            self.load("[runtime]\npol_seconds = 10")
+
+    def test_wrong_types_are_rejected(self):
+        for body in ('poll_seconds = "10"', 'poll_seconds = true', 'agent_order = "Codex"', 'agent_order = [1]', 'health_ticket = 5'):
+            with self.subTest(body=body), self.assertRaises(ConfigError):
+                self.load(f"[runtime]\n{body}")

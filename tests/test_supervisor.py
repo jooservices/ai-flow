@@ -1649,6 +1649,18 @@ class DeveloperPoolTests(unittest.TestCase):
         self.assertEqual(sup.eligible_agents("developer", "K-1", None, ["Codex", "Claude"]), [])
         self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Claude", ["Codex", "Claude"]), ["Codex"])  # review may still use it
 
+    def test_two_developers_cannot_take_the_reserved_slot(self):
+        sup = self.sup({"codex": 2})
+        agents_available = agents.available
+        agents.available = lambda order: ["Codex"]
+        try:
+            self.assertEqual(sup.reserve_agent("developer", "K-1", None)[0], "Codex")  # 0 running: takes the first slot
+            self.assertEqual(sup.reserve_agent("developer", "K-2", None)[0], None)  # the last slot belongs to review and QA
+            sup.redis.data["dev:K-1"] = "Claude"
+            self.assertEqual(sup.reserve_agent("reviewer", "K-1", "Claude")[0], "Codex")
+        finally:
+            agents.available = agents_available
+
     def test_a_cooling_or_explicit_only_ai_is_skipped(self):
         sup = self.sup()
         sup.redis.data["cooldown:Codex"] = "1"

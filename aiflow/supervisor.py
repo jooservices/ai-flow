@@ -372,9 +372,10 @@ class Supervisor:
                 return None, None
             for agent in found:
                 owner = f"{self.cfg.owner}:{key}:{role}:{uuid.uuid4().hex}"
-                if self.redis.acquire_session(
-                    self.cfg.machine, agent, owner, self.cfg.lease_seconds, self.cfg.ai_limits.get(agent.casefold())
-                ):
+                limit = self.cfg.ai_limits.get(agent.casefold())
+                if role == "developer" and not field_agent and self.role_spec(role, key)[0] == ANY_AI and limit is not None and limit >= 2:
+                    limit -= 1  # `Any` keeps the last slot for review and QA, also when two developers choose at the same moment
+                if self.redis.acquire_session(self.cfg.machine, agent, owner, self.cfg.lease_seconds, limit):
                     events.emit("ai.assign", ticket=key, role=role, agent=agent, limit=self.cfg.ai_limits.get(agent.casefold()),
                                 from_field=bool(field_agent))
                     return agent, owner

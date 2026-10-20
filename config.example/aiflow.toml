@@ -13,7 +13,7 @@
 [defaults]
 base = "develop"                 # branch every ticket starts from and its pull request targets
 hotfix_base = "master"           # branch of tickets with Type Hotfix (also the merge-back source)
-developer = "Codex:gpt-6-luna:xhigh"  # developer AI, as Agent[:model[:effort]]; the ticket fields Agent (AI) / AI Model win
+developer = "Codex:gpt-6-luna:xhigh"  # developer AI, as Agent[:model[:effort]]; "Any" = the least busy AI of the machine (see agent_models); the ticket fields Agent (AI) / AI Model win
 reviewer = "Grok"                # reviewer AI (never the developer when another AI is available); falls back to another AI if down
 qa = "Claude:sonnet"             # QA AI, same rule as the reviewer
 require_human = false            # true: every ticket stops in Human review before the merge (ticket field Require human overrides)
@@ -50,6 +50,7 @@ wait_note_minutes = 20           # write a "waiting for an AI" note on a ticket 
 agent_order = ["Codex", "Claude", "Grok", "OpenCode"]  # preference when several AIs could take a step, first wins (built-in default: Claude, Codex, OpenCode)
 explicit_only_ais = ["OpenCode"]  # AIs used only when the ticket names them (never picked automatically)
 opencode_model = "opencode/deepseek-v4.1-flash-free"  # model used when OpenCode is the developer
+agent_models = ["Codex:gpt-6-luna:xhigh", "Claude:sonnet"]  # model[:effort] of an AI when the role does not name it (developer = "Any", or a fallback AI); no entry = the AI's own default
 quota_cooldown_minutes = 30      # an AI out of usage or balance is skipped by every machine for this long
 quota_block_minutes = 30         # no AI available on any machine for this long: the ticket is Blocked (Quota/Offline)
 recheck_seconds = 120            # how often a ticket waiting for an AI is looked at again

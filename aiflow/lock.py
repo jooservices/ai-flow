@@ -240,6 +240,10 @@ class Redis:
         )
         return int(result) > 0
 
+    def session_count(self, machine: str, agent: str) -> int:
+        """AI sessions running now (members whose lease has not expired); read only."""
+        return int(self.command("ZCOUNT", self.key(self.session_key(machine, agent)), int(time.time()), "+inf") or 0)
+
     def renew_session(self, machine: str, agent: str, owner: str, ttl: int) -> bool:
         """Renew an AI session lease; false means the reservation expired or was lost."""
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")

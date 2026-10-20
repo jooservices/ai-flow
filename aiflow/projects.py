@@ -34,7 +34,7 @@ RUNTIME = {
     "wait_note_minutes": (int, "AIFLOW_WAIT_NOTE_MINUTES"), "heartbeat_stale_seconds": (int, "AIFLOW_HEARTBEAT_STALE_SECONDS"),
     "ci_wait_minutes": (int, "AIFLOW_CI_WAIT_MINUTES"), "feedback_settle_minutes": (int, "AIFLOW_FEEDBACK_SETTLE_MINUTES"),
     "gate_poll_seconds": (int, "AIFLOW_GATE_POLL_SECONDS"), "max_cycles": (int, "AIFLOW_MAX_CYCLES"),
-    "agent_order": (list, "AIFLOW_AGENT_ORDER"), "explicit_only_ais": (list, "AIFLOW_EXPLICIT_ONLY_AIS"),
+    "agent_order": (list, "AIFLOW_AGENT_ORDER"), "agent_models": (list, "AIFLOW_AGENT_MODELS"), "explicit_only_ais": (list, "AIFLOW_EXPLICIT_ONLY_AIS"),
     "ignored_authors": (list, "AIFLOW_IGNORED_AUTHORS"), "opencode_model": (str, "AIFLOW_OPENCODE_MODEL"),
     "health_ticket": (str, "AIFLOW_HEALTH_TICKET"), "workspace_name": (str, "AIFLOW_WORKSPACE_NAME"),
     "workspace_field": (str, "AIFLOW_WORKSPACE_FIELD"), "blocked_reason_field": (str, "AIFLOW_BLOCKED_REASON_FIELD"),

@@ -59,6 +59,10 @@ class FakeRedis:
             self.data[peak_key] = str(max(len(active), int(self.data.get(peak_key, 0))))
             return True
 
+    def session_count(self, machine, agent):
+        with self.session_lock:
+            return len([n for n, expires in self.sessions.get((machine, agent.casefold()), {}).items() if expires > self.session_now])
+
     def renew_session(self, machine, agent, owner, ttl):
         key = (machine, agent.casefold())
         with self.session_lock:
@@ -1614,3 +1618,54 @@ class FairOrderTests(unittest.TestCase):
             found = [issue for issue in found if issue["key"] != first]
             redis.set(f"served:{first.rsplit('-', 1)[0]}", str(time.time() + len(served)), 10)
         self.assertEqual([key.split("-")[0] for key in served], ["JAVM", "JOOWT", "JAVM", "JOOWT"])
+
+
+class DeveloperPoolTests(unittest.TestCase):
+    """developer = Any: the least busy AI takes the developer step."""
+    POOL = ["Codex", "Claude", "Grok"]
+
+    def sup(self, limits=None, **env):
+        sup = make(AIFLOW_AGENT_ORDER="Codex,Claude,Grok,OpenCode", AIFLOW_DEVELOPER_DEFAULT="Any", **env)
+        sup.cfg = replace(sup.cfg, registry=replace(sup.cfg.registry, ai_limits={"test": limits or {"codex": 4, "claude": 4, "grok": 2}}))
+        return sup
+
+    def busy(self, sup, agent, count):
+        for n in range(count):
+            sup.redis.acquire_session("test", agent, f"o{agent}{n}", 600)
+
+    def test_least_busy_first_and_ties_follow_agent_order(self):
+        sup = self.sup()
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, self.POOL), ["Codex", "Claude", "Grok"])
+        self.busy(sup, "Codex", 2)
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, self.POOL)[:2], ["Claude", "Grok"])
+        self.busy(sup, "Claude", 1)
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, self.POOL)[0], "Grok")  # 0/2 beats 1/4 and 2/4
+
+    def test_the_last_slot_stays_free_for_review_and_qa(self):
+        sup = self.sup({"codex": 2, "claude": 1})
+        self.busy(sup, "Codex", 1)  # 1 of 2 running: the last slot is kept
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, ["Codex", "Claude"]), ["Claude"])  # a limit of 1 has no spare slot to keep
+        self.busy(sup, "Claude", 1)
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, ["Codex", "Claude"]), [])
+        self.assertEqual(sup.eligible_agents("reviewer", "K-1", "Claude", ["Codex", "Claude"]), ["Codex"])  # review may still use it
+
+    def test_a_cooling_or_explicit_only_ai_is_skipped(self):
+        sup = self.sup()
+        sup.redis.data["cooldown:Codex"] = "1"
+        self.assertEqual(sup.eligible_agents("developer", "K-1", None, ["Codex", "Claude", "OpenCode"]), ["Claude"])
+
+    def test_a_named_ai_and_a_fixed_developer_behave_as_before(self):
+        sup = self.sup()
+        self.assertEqual(sup.eligible_agents("developer", "K-1", "Claude", self.POOL), ["Claude"])
+        fixed = make(AIFLOW_AGENT_ORDER="Codex,Claude", AIFLOW_DEVELOPER_DEFAULT="Codex:gpt-6-luna:xhigh")
+        self.assertEqual(fixed.eligible_agents("developer", "K-1", None, ["Claude", "Codex"]), ["Codex", "Claude"])
+
+    def test_the_model_of_the_chosen_ai_comes_from_agent_models(self):
+        sup = self.sup(AIFLOW_AGENT_MODELS="Codex:gpt-6-luna:xhigh,Claude:sonnet")
+        self.assertEqual(sup.model_for("developer", "Claude", "K-1"), ("sonnet", ""))
+        self.assertEqual(sup.model_for("developer", "Codex", "K-1"), ("gpt-6-luna", "xhigh"))
+        self.assertEqual(sup.model_for("developer", "Grok", "K-1"), ("", ""))  # no entry: its own default as before
+
+    def test_the_runtime_key_is_known(self):
+        from aiflow.projects import RUNTIME
+        self.assertIn("agent_models", RUNTIME)

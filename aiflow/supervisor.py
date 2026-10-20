@@ -25,6 +25,7 @@ from .project_database import ProjectDatabase, ticket_database_id
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
 PR_STAGES = ("In QA", "Human review", "Ready to merge")  # checked on GitHub by the supervisor, no AI to pick
+ANY_AI = "Any"  # developer = "Any": the least busy AI takes the step
 DAY = 86400
 SLOT_SECONDS = 600
 
@@ -320,6 +321,8 @@ class Supervisor:
                 return chosen_model, effort if name == agent else ""
         if name == agent:
             return model, effort
+        if agent in self.cfg.agent_models:
+            return self.cfg.agent_models[agent]  # [runtime] agent_models: the model this AI uses when the role names another AI or Any
         return (self.cfg.opencode_model, "") if agent == "OpenCode" else ("", "")
 
     def eligible_agents(self, role: str, key: str, field_agent: str | None, pool: list[str]) -> list[str]:
@@ -333,6 +336,8 @@ class Supervisor:
                 return [field_agent]  # type: ignore[list-item]
             if field_agent and field_agent not in pool:
                 return []  # the field names an AI nobody in this pool has
+            if preferred == ANY_AI:
+                return self.least_loaded(present)
             return sorted(present, key=lambda a: a != preferred)  # empty field, or its AI is cooling: any other AI
         dev = self.redis.get(f"dev:{key}") or field_agent or ""
         reviewer = self.redis.get(f"reviewer:{key}")
@@ -341,6 +346,18 @@ class Supervisor:
             return [preferred]
         other = agents.choose_other(dev, present, avoid=avoid)
         return [other] if other else []
+
+    def least_loaded(self, present: list[str]) -> list[str]:
+        """`developer = Any`: the AIs of `present` with a free session on this machine, the least busy (running / limit) first; ties follow
+        agent_order. An AI with a limit of 2 or more keeps its last slot for review and QA; an AI without a limit counts as running / 8."""
+        ranked = []
+        for position, agent in enumerate(present):
+            limit = self.cfg.ai_limits.get(agent.casefold())
+            running = self.redis.session_count(self.cfg.machine, agent)
+            if limit is not None and running >= (limit - 1 if limit >= 2 else limit):
+                continue
+            ranked.append((running / (limit or 8), position, agent))
+        return [agent for _, _, agent in sorted(ranked)]
 
     def pick_agent(self, role: str, key: str, field_agent: str | None) -> str | None:
         found = self.eligible_agents(role, key, field_agent, self.usable_ais())

@@ -1,8 +1,10 @@
 import json
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiflow.config import ConfigError
 from aiflow.incidents import find_incidents
@@ -14,11 +16,21 @@ NOW = 1_000_000.0
 
 
 def ticket(key, status, minutes, **extra):
-    return dict(key=key, status=status, updated=NOW - minutes * 60, labels=[], leased=False, blocked_kind="", reason="", cycles=0, **extra)
+    found = dict(key=key, status=status, status_since=NOW - minutes * 60, updated=NOW - minutes * 60, labels=[], leased=False,
+                 blocked_kind="", reason="", cycles=0, last_comments=[], pull_request=None, ci_state="unknown", ci_since=None,
+                 minutes_waiting_for_ci=0)
+    found.update(extra)
+    return found
 
 
-def state(tickets=(), heartbeats=None, pool=("Claude",)):
-    return dict(now=NOW, tickets=list(tickets), heartbeats=heartbeats or {}, stale_seconds=300, pool=list(pool))
+def state(tickets=(), heartbeats=None, pool=("Claude",), **extra):
+    thresholds = dict(blocked_minutes=30, stuck_minutes=120, ci_wait_minutes=120, rework_limit=3)
+    thresholds.update(extra.pop("thresholds", {}))
+    roles = ("developer", "reviewer", "qa")
+    role_pools = {role: list(pool) for role in roles}
+    role_pools.update(extra.pop("role_pools", {}))
+    return dict(now=NOW, tickets=list(tickets), heartbeats=heartbeats or {}, stale_seconds=300,
+                thresholds=thresholds, role_pools=role_pools, **extra)
 
 
 class PolicyTests(unittest.TestCase):
@@ -48,12 +60,15 @@ class IncidentTests(unittest.TestCase):
     policy = Policy(enabled=True)
 
     def kinds(self, st):
-        return sorted(i.id for i in find_incidents(st, self.policy))
+        return sorted(i.id for i in find_incidents(st))
 
     def test_each_kind_is_found_once_with_a_stable_id(self):
-        st = state([ticket("A-1", "Blocked", 45, ), ticket("A-2", "In Progress", 200), ticket("A-3", "In QA", 130), dict(ticket("A-4", "In Review", 5), cycles=4)],
-                   heartbeats={"wsl:1": NOW - 10, "wsl:2": None}, pool=())
-        self.assertEqual(self.kinds(st), ["ai_pool:all", "blocked:A-1", "ci:A-3", "rework:A-4", "stuck:A-2", "worker:wsl:2"])
+        st = state([ticket("A-1", "Blocked", 45), ticket("A-2", "In Progress", 200),
+                    ticket("A-3", "In QA", 130, pull_request={"number": 7}, ci_state="pending", ci_since=NOW - 130 * 60,
+                           minutes_waiting_for_ci=130), dict(ticket("A-4", "In Review", 5), cycles=4)],
+                   heartbeats={"wsl:1": NOW - 10, "wsl:2": None, "wsl:3": NOW - 301}, pool=())
+        self.assertEqual(self.kinds(st), ["ai_pool:developer", "ai_pool:qa", "ai_pool:reviewer", "blocked:A-1", "ci:A-3",
+                                         "rework:A-4", "stuck:A-2", "worker:wsl:2", "worker:wsl:3"])
         self.assertEqual(self.kinds(st), self.kinds(st))
 
     def test_nothing_is_an_incident_when_all_is_well(self):
@@ -63,8 +78,52 @@ class IncidentTests(unittest.TestCase):
 
     def test_quota_offline_hold_and_escalated_are_left_alone(self):
         blocked = [dict(ticket("A-1", "Blocked", 99), blocked_kind="Quota"), dict(ticket("A-2", "Blocked", 99), blocked_kind="Offline"),
-                   dict(ticket("A-3", "Blocked", 99), labels=["aiflow-hold"]), dict(ticket("A-4", "Blocked", 99), labels=["needs-owner"])]
+                   dict(ticket("A-3", "Blocked", 99), labels=["aiflow-hold"]), dict(ticket("A-4", "Blocked", 99), labels=["needs-owner"]),
+                   dict(ticket("A-5", "In Progress", 500), labels=["needs-owner"]),
+                   dict(ticket("A-6", "In QA", 500, pull_request={"number": 2}, ci_state="pending", minutes_waiting_for_ci=500),
+                        labels=["needs-owner"])]
         self.assertEqual(self.kinds(state(blocked)), [])
+
+    def test_blocked_and_stuck_thresholds_use_status_entry_time(self):
+        st = state([ticket("A-1", "Blocked", 30), ticket("A-2", "Blocked", 40, status_since=NOW - 5 * 60),
+                    ticket("A-3", "In Review", 120)])
+        self.assertEqual(self.kinds(st), ["blocked:A-1", "stuck:A-3"])
+
+    def test_ci_incident_requires_a_pull_request_still_waiting_for_ci(self):
+        waiting = ticket("A-1", "In QA", 180, pull_request={"number": 9, "url": "https://example/pr/9"},
+                         ci_state="pending", ci_since=NOW - 120 * 60, minutes_waiting_for_ci=120)
+        no_pr = ticket("A-2", "In QA", 180, ci_state="pending", ci_since=NOW - 180 * 60, minutes_waiting_for_ci=180)
+        passed = ticket("A-3", "In QA", 180, pull_request={"number": 11}, ci_state="passed",
+                        ci_since=NOW - 180 * 60, minutes_waiting_for_ci=180)
+        within_ci_limit = ticket("A-4", "In QA", 180, pull_request={"number": 12}, ci_state="pending",
+                                 ci_since=NOW - 10 * 60, minutes_waiting_for_ci=10)
+        no_checks = ticket("A-5", "In QA", 180, pull_request={"number": 13}, ci_state="none",
+                           ci_since=NOW - 180 * 60, minutes_waiting_for_ci=180)
+        closed = ticket("A-6", "In QA", 180, pull_request={"number": 14, "state": "CLOSED"}, ci_state="pending",
+                        ci_since=NOW - 180 * 60, minutes_waiting_for_ci=180)
+        self.assertEqual(self.kinds(state([waiting, no_pr, passed, within_ci_limit, no_checks, closed])),
+                         ["ci:A-1", "ci:A-5", "stuck:A-2", "stuck:A-3", "stuck:A-6"])
+
+    def test_rework_incident_survives_a_rework_block_and_is_not_a_duplicate_blocked_incident(self):
+        blocked = ticket("A-1", "Blocked", 90, blocked_kind="Rework", rework_rounds=4)
+        self.assertEqual(self.kinds(state([blocked])), ["rework:A-1"])
+
+    def test_rework_block_below_the_incident_limit_uses_the_blocked_threshold(self):
+        blocked = ticket("A-1", "Blocked", 90, blocked_kind="Rework", rework_rounds=3)
+        self.assertEqual(self.kinds(state([blocked])), ["blocked:A-1"])
+
+    def test_facts_include_ticket_times_comments_pull_request_and_ci_state(self):
+        comments = [{"author": "Owner", "created": "2026-01-01T00:00:00Z", "body": "waiting for CI"}]
+        item = ticket("A-1", "In QA", 150, pull_request={"number": 12}, ci_state="pending",
+                      ci_since=NOW - 150 * 60, minutes_waiting_for_ci=150, last_comments=comments)
+        incident = find_incidents(state([item]))[0]
+        self.assertEqual(incident.id, "ci:A-1")
+        self.assertEqual(incident.facts["ticket"], "A-1")
+        self.assertEqual(incident.facts["status"], "In QA")
+        self.assertEqual(incident.facts["times"]["status_since"], NOW - 150 * 60)
+        self.assertEqual(incident.facts["last_comments"], comments)
+        self.assertEqual(incident.facts["pull_request"], {"number": 12})
+        self.assertEqual(incident.facts["ci_state"], "pending")
 
 
 class ParseTests(unittest.TestCase):
@@ -119,6 +178,60 @@ class OperatorTests(unittest.TestCase):
     def incident(self, id="blocked:JAIF-1", ticket="JAIF-1"):
         from aiflow.incidents import Incident
         return Incident(id, id.split(":")[0], ticket, f"{ticket} is Blocked", {"ticket": ticket})
+
+    def test_state_snapshot_carries_status_comments_pull_request_and_ci_facts(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "In QA", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3 * 3600)),
+                           "labels": [], "summary": "A ticket"}]
+        sup.jira.comments = lambda key, last=6: [{"author": "Owner", "created": "2026-01-01T00:00:00Z", "body": "Waiting"}]
+        sup.online_pool = lambda: ["Claude"]
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        redis.set("statussince:JAIF-1", str(now - 3 * 3600), 60)
+        redis.set("pr:JAIF-1", "17", 60)
+        redis.set("gateentry:JAIF-1", str(now - 3 * 3600), 60)
+        redis.set("pushed:JAIF-1", str(now - 3 * 3600), 60)
+        redis.set("cycles:JAIF-1", "0", 60)
+        pr = {"number": 17, "url": "https://github.com/jooservices/repo/pull/17", "state": "OPEN",
+              "headRefName": "JAIF-1-branch", "statusCheckRollup": [{"__typename": "StatusContext", "context": "CI", "state": "PENDING"}]}
+
+        with mock.patch("aiflow.operator.Repo.github_slug", return_value="jooservices/repo"), \
+                mock.patch("aiflow.operator.GitHub.view", return_value=pr):
+            snapshot = op.state()
+
+        found = snapshot["tickets"][0]
+        self.assertEqual(found["status_since"], now - 3 * 3600)
+        self.assertEqual(found["last_comments"][0]["body"], "Waiting")
+        self.assertEqual(found["pull_request"]["url"], pr["url"])
+        self.assertEqual(found["ci_state"], "pending")
+        self.assertEqual(snapshot["thresholds"]["ci_wait_minutes"], op.policy.ci_wait_minutes)
+
+    def test_github_timeout_does_not_stop_the_operator_cycle(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "In QA",
+                           "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3 * 3600)),
+                           "labels": [], "summary": "A ticket"}]
+        sup.online_pool = lambda: ["Claude"]
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        for key, value in (("statussince:JAIF-1", now - 3 * 3600), ("pr:JAIF-1", 17),
+                           ("gateentry:JAIF-1", now - 3 * 3600), ("pushed:JAIF-1", now - 3 * 3600)):
+            redis.set(key, str(value), 60)
+        for slot in op.cfg.expected_slots:
+            redis.set(f"hb:{slot}", str(int(now)), 60)
+
+        with mock.patch("aiflow.operator.Repo.github_slug", return_value="jooservices/repo"), \
+                mock.patch("aiflow.operator.GitHub.view", side_effect=subprocess.TimeoutExpired("gh pr view", 120)), \
+                mock.patch.object(op, "sync_queue", wraps=op.sync_queue) as sync_queue, \
+                mock.patch.object(op, "flush_notifications") as flush_notifications, \
+                mock.patch.object(op, "run_next", return_value=True) as run_next:
+            self.assertTrue(op.cycle())
+
+        self.assertEqual([item.id for item in sync_queue.call_args.args[0]], ["stuck:JAIF-1"])
+        self.assertEqual(sync_queue.call_args.args[0][0].facts["ci_state"], "unknown")
+        self.assertTrue(redis.list_values("operator:queue"))
+        flush_notifications.assert_called_once_with()
+        run_next.assert_called_once_with()
 
     def test_resolved_runs_the_whitelisted_actions_and_audits(self):
         out = ('ACTION: comment {"key": "JAIF-1", "text": "answer"}\nACTION: transition {"key": "JAIF-1", "status": "To Do"}\n'
@@ -236,9 +349,26 @@ class OperatorTests(unittest.TestCase):
         first, second = self.incident("blocked:JAIF-1", "JAIF-1"), self.incident("blocked:JAIF-2", "JAIF-2")
         op.sync_queue([first, second])
         op.sync_queue([first, second])
-        self.assertEqual(len(redis.scan("operator:queue:*")), 2)
+        self.assertEqual(len(redis.list_values("operator:queue")), 2)
         op.sync_queue([second])
-        self.assertEqual(redis.scan("operator:queue:*"), ["operator:queue:blocked:JAIF-2"])
+        queued = [json.loads(value) for value in redis.list_values("operator:queue")]
+        self.assertEqual([item["id"] for item in queued], ["blocked:JAIF-2"])
+
+    def test_queue_deduplicates_by_stable_id_and_stores_facts(self):
+        op, sup, redis = self.build()
+        incident = self.incident()
+        incident.facts.update({"ticket": "JAIF-1", "status": "Blocked", "times": {"minutes_in_status": 45},
+                               "last_comments": [{"body": "Still blocked"}],
+                               "pull_request": {"number": 4, "url": "https://example/pr/4"}, "ci_state": "pending"})
+
+        op.sync_queue([incident, incident])
+
+        queued = [json.loads(value) for value in redis.list_values("operator:queue")]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["id"], "blocked:JAIF-1")
+        self.assertEqual(queued[0]["facts"]["last_comments"][0]["body"], "Still blocked")
+        self.assertEqual(queued[0]["facts"]["pull_request"]["number"], 4)
+        self.assertEqual(queued[0]["facts"]["ci_state"], "pending")
 
     def test_the_read_only_ai_command_has_no_edit_or_shell_tools(self):
         from aiflow import agents

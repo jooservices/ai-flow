@@ -16,6 +16,7 @@ from . import agents, deploy, events, github, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
+from .incidents import find_incidents as find_incidents
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 from .memory import cases as memory_cases
@@ -807,11 +808,15 @@ class Supervisor:
     def block(self, key: str, reason: str, kind: str = "Other") -> None:
         """Move the ticket to Blocked, say why on the ticket and in the field Blocked reason, and remember where it came from."""
         self.release_slot(key)
+        rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
         for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
             self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
         try:
             status = str(self.jira.view(key).get("status", ""))
-            self.redis.set(f"blocked:{key}", json.dumps({"status": status, "kind": kind}), 30 * DAY)
+            blocked = {"status": status, "kind": kind}
+            if rework_rounds:
+                blocked["rework_rounds"] = rework_rounds
+            self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
             self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
         except (JiraError, RedisError) as error:
             log(f"{key}: could not record the block reason: {error}")

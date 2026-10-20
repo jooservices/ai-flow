@@ -101,6 +101,13 @@ end
 return removed
 """
 SESSION_PEAK_TTL = 10 * 24 * 60 * 60
+REPLACE_LIST = """
+redis.call('DEL', KEYS[1])
+for _, value in ipairs(ARGV) do
+    redis.call('RPUSH', KEYS[1], value)
+end
+return #ARGV
+"""
 
 
 class RedisError(RuntimeError):
@@ -283,6 +290,19 @@ class Redis:
 
     def delete(self, name: str) -> None:
         self.command("DEL", self.key(name))
+
+    def list_values(self, name: str) -> list[str]:
+        """Read all values in a Redis list, oldest first."""
+        values = self.command("LRANGE", self.key(name), 0, -1)
+        if values is None:
+            return []
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise RedisError(f"LRANGE returned an invalid value for {name}")
+        return values
+
+    def replace_list(self, name: str, values: list[str]) -> None:
+        """Atomically replace a Redis list; safe to retry if the response to the command is lost."""
+        self.command("EVAL", REPLACE_LIST, 1, self.key(name), *values)
 
     def scan(self, pattern: str) -> list[str]:
         """Names (without the prefix) of the keys matching `pattern`."""

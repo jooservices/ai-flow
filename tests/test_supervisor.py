@@ -19,7 +19,7 @@ from aiflow.project_database import ProjectDatabase
 from aiflow import health
 from aiflow.supervisor import (
     tail, branches, parse_semver, Supervisor, decide, deployment_needed, missing_sections, sections, ticket_field,
-    ticket_of_branch, main,
+    ticket_of_branch, find_incidents, main,
 )
 
 
@@ -105,6 +105,12 @@ class FakeRedis:
     def scan(self, pattern):
         import fnmatch
         return [n for n in self.data if fnmatch.fnmatch(n, pattern)]
+
+    def list_values(self, name):
+        return self.data.setdefault(f"list:{name}", []).copy()
+
+    def replace_list(self, name, values):
+        self.data[f"list:{name}"] = list(values)
 
 
 class FakeJira:
@@ -196,6 +202,12 @@ class AgentChoiceTests(unittest.TestCase):
 
 
 class TicketTests(unittest.TestCase):
+    def test_incident_finder_is_exposed_by_the_supervisor_module(self):
+        found = find_incidents({"now": 1000, "thresholds": {"blocked_minutes": 1, "stuck_minutes": 1, "ci_wait_minutes": 1,
+                                                                  "rework_limit": 1},
+                                "tickets": [], "heartbeats": {}, "stale_seconds": 10, "role_pools": {}})
+        self.assertEqual(found, [])
+
     def test_fields_from_flattened_description(self):
         text = "Goal do a thing. Repo: ai-flow Base: develop Acceptance"
         self.assertEqual(ticket_field(text, "Repo", "x"), "ai-flow")
@@ -1105,6 +1117,7 @@ class SendBackTests(unittest.TestCase):
         for _ in range(3):
             sup.send_back("JAIF-9", FakeRepo(), "again", "x", [])
         self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+        self.assertEqual(json.loads(sup.redis.get("blocked:JAIF-9"))["rework_rounds"], 3)
 
     def test_blocking_resets_the_counters_so_an_unblock_starts_fresh(self):
         sup = make()

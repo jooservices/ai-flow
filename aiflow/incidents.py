@@ -7,8 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .operator_policy import Policy
-
 WORKED = ("In Progress", "In Review", "Review passed", "In QA", "Ready to merge")  # Human review waits for the owner by design
 RETURNS_BY_ITSELF = ("Quota", "Offline")
 
@@ -26,30 +24,66 @@ class Incident:
         return self.subject if "-" in self.subject else ""
 
 
-def find_incidents(state: dict[str, Any], policy: Policy) -> list[Incident]:
-    """`state`: now (epoch seconds); tickets [{key, status, updated (epoch), labels, leased, blocked_kind, reason, cycles}];
-    heartbeats {slot: epoch or None}; stale_seconds; pool (usable AIs, any machine)."""
+def find_incidents(state: dict[str, Any]) -> list[Incident]:
+    """Find incidents from a snapshot of facts and thresholds; this function performs no I/O.
+
+    `state` contains `now`, `thresholds`, tickets with status times, labels, lease, comments, pull-request and CI facts,
+    worker heartbeats, and each role's usable AI pool.
+    """
     now, found = state["now"], []
+    thresholds = state["thresholds"]
+    blocked_minutes = thresholds["blocked_minutes"]
+    stuck_minutes = thresholds["stuck_minutes"]
+    ci_wait_minutes = thresholds["ci_wait_minutes"]
+    rework_limit = thresholds["rework_limit"]
     for ticket in state.get("tickets", []):
         key, status, labels = ticket["key"], ticket["status"], ticket.get("labels", [])
-        if "aiflow-hold" in labels:
+        if "aiflow-hold" in labels or "needs-owner" in labels:
             continue
-        minutes = (now - ticket["updated"]) / 60
-        facts = {"ticket": key, "status": status, "minutes_in_status": int(minutes), "labels": labels}
-        escalated = "needs-owner" in labels
-        if status == "Blocked" and not escalated and ticket.get("blocked_kind") not in RETURNS_BY_ITSELF and minutes >= policy.blocked_minutes:
+        status_since = ticket.get("status_since", ticket.get("updated", now))
+        minutes = max(0, (now - status_since) / 60)
+        pull_request = ticket.get("pull_request")
+        facts = {
+            "ticket": key,
+            "status": status,
+            "times": {
+                "detected_at": now,
+                "status_since": status_since,
+                "minutes_in_status": int(minutes),
+                "ci_since": ticket.get("ci_since"),
+                "minutes_waiting_for_ci": ticket.get("minutes_waiting_for_ci"),
+            },
+            "labels": labels,
+            "last_comments": ticket.get("last_comments", []),
+            "pull_request": pull_request,
+            "ci_state": ticket.get("ci_state", "unknown"),
+        }
+        blocked_kind = ticket.get("blocked_kind", "")
+        pr_state = pull_request.get("state", "") if isinstance(pull_request, dict) else ""
+        ci_waiting = (status == "In QA" and not ticket.get("leased") and pull_request
+                      and pr_state in ("", "OPEN") and ticket.get("ci_state") in ("none", "pending"))
+        rounds = max(ticket.get("cycles", 0), ticket.get("rework_rounds", 0))
+        rework_over_limit = rounds > rework_limit
+        if (status == "Blocked" and blocked_kind not in RETURNS_BY_ITSELF
+                and not (blocked_kind == "Rework" and rework_over_limit)
+                and minutes >= blocked_minutes):
             found.append(Incident(f"blocked:{key}", "blocked", key, f"{key} is Blocked for {int(minutes)} min: {ticket.get('reason', '')}",
-                                  {**facts, "blocked_kind": ticket.get("blocked_kind", ""), "reason": ticket.get("reason", "")}))
-        elif status == "In QA" and not ticket.get("leased") and minutes >= policy.ci_wait_minutes:
-            found.append(Incident(f"ci:{key}", "ci", key, f"{key} has waited in QA for {int(minutes)} min", facts))
-        elif status in WORKED and status != "In QA" and not ticket.get("leased") and minutes >= policy.stuck_minutes:
+                                  {**facts, "blocked_kind": blocked_kind, "reason": ticket.get("reason", "")}))
+        elif (ci_waiting
+              and ticket.get("minutes_waiting_for_ci", 0) >= ci_wait_minutes):
+            found.append(Incident(f"ci:{key}", "ci", key,
+                                  f"{key} pull request is waiting for CI for {int(ticket['minutes_waiting_for_ci'])} min", facts))
+        elif (status in WORKED and not ticket.get("leased") and minutes >= stuck_minutes and not ci_waiting):
             found.append(Incident(f"stuck:{key}", "stuck", key, f"{key} has been in {status} for {int(minutes)} min with nobody working on it", facts))
-        if ticket.get("cycles", 0) > policy.rework_limit and not escalated and status != "Blocked":
-            found.append(Incident(f"rework:{key}", "rework", key, f"{key} went through {ticket['cycles']} rework rounds",
-                                  {**facts, "rework_rounds": ticket["cycles"]}))
+        if rework_over_limit:
+            found.append(Incident(f"rework:{key}", "rework", key, f"{key} went through {rounds} rework rounds",
+                                  {**facts, "rework_rounds": rounds}))
     for slot, beat in sorted(state.get("heartbeats", {}).items()):
         if beat is None or now - beat > state["stale_seconds"]:
-            found.append(Incident(f"worker:{slot}", "worker", slot, f"worker {slot} sends no heartbeat", {"slot": slot, "last_heartbeat": beat}))
-    if not state.get("pool"):
-        found.append(Incident("ai_pool:all", "ai_pool", "all", "no AI is usable on any machine", {"pool": []}))
+            found.append(Incident(f"worker:{slot}", "worker", slot, f"worker {slot} sends no heartbeat",
+                                  {"slot": slot, "last_heartbeat": beat, "detected_at": now, "stale_seconds": state["stale_seconds"]}))
+    for role, pool in sorted(state.get("role_pools", {}).items()):
+        if not pool:
+            found.append(Incident(f"ai_pool:{role}", "ai_pool", role, f"no AI is usable for the {role} role",
+                                  {"role": role, "pool": [], "detected_at": now}))
     return found

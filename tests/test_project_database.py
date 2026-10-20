@@ -4,18 +4,19 @@ import subprocess
 import tempfile
 import unittest
 
-from aiflow.project_database import ProjectDatabase, ticket_database_id
+from aiflow.project_database import ProjectDatabase, redact, ticket_database_id
 
 
 class FakeCommandRunner:
     def __init__(self, returncodes=()):
         self.returncodes = list(returncodes)
         self.calls = []
+        self.stderr = ""
 
     def __call__(self, command, **kwargs):
         self.calls.append((command, kwargs))
         code = self.returncodes.pop(0) if self.returncodes else 0
-        return SimpleNamespace(returncode=code)
+        return SimpleNamespace(returncode=code, stderr=self.stderr)
 
 
 class TicketDatabaseTests(unittest.TestCase):
@@ -48,12 +49,17 @@ class TicketDatabaseTests(unittest.TestCase):
             ],
         )
         self.assertTrue(all(call[1]["stdout"] == subprocess.DEVNULL for call in self.commands.calls))
-        self.assertTrue(all(call[1]["stderr"] == subprocess.DEVNULL for call in self.commands.calls))
+        self.assertTrue(all(call[1]["stderr"] == subprocess.PIPE for call in self.commands.calls))
 
     def test_provisioning_failure_stops_the_sequence(self):
         self.commands.returncodes = [1]
         self.assertEqual(self.database.prepare("my-project", "JAIF-7", self.worktree), "provision-project failed")
         self.assertEqual(len(self.commands.calls), 1)
+
+    def test_failure_reason_is_the_last_stderr_line(self):
+        self.commands.returncodes, self.commands.stderr = [1], "x\nBLOCKED/FAIL: mongodb command failed: refusing to adopt a non-empty unmarked database\n"
+        self.assertEqual(self.database.prepare("my-project", "JAIF-7", self.worktree),
+                         "provision-project failed: BLOCKED/FAIL: mongodb command failed: refusing to adopt a non-empty unmarked database")
 
     def test_env_generation_failure_stops_before_verification(self):
         self.commands.returncodes = [0, 1]
@@ -91,3 +97,12 @@ class TicketDatabaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactTests(unittest.TestCase):
+    def test_credentials_are_hidden(self):
+        self.assertEqual(redact("connect mongodb://root:s3cr3t@host:27017/db failed"), "connect mongodb://<hidden>@host:27017/db failed")
+        self.assertEqual(redact("bad password=hunter2 given"), "bad password=<hidden> given")
+        self.assertNotIn("A1b2C3d4E5f6G7h8I9j0K1l2M3n4", redact("token A1b2C3d4E5f6G7h8I9j0K1l2M3n4 rejected"))
+        self.assertEqual(redact("\n\n"), "")
+        self.assertLessEqual(len(redact("word " * 100)), 160)

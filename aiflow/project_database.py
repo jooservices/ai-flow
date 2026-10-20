@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -9,6 +10,21 @@ from typing import Any
 
 TICKET_KEY = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-([0-9]+)$")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
+SECRET_PAIR = re.compile(r"(?i)(pass(?:word|wd)?|secret|token|key|auth\w*)(\s*[=:]\s*)\S+")
+LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
+URL_LOGIN = re.compile(r"://[^/\s:@]+:[^@\s]+@")
+
+
+def redact(text: str) -> str:
+    """The last line of a helper error without anything that looks like a credential, short enough for a ticket field."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    line = URL_LOGIN.sub("://<hidden>@", lines[-1])
+    line = SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + "<hidden>", line)
+    return LONG_TOKEN.sub("<hidden>", line)[:160]
+
+
 DATABASE_ID = re.compile(r"^[a-z0-9]{1,12}$")
 
 
@@ -55,8 +71,9 @@ class ProjectDatabase:
         )
         steps = ("provision-project", "env-project", "check-project")
         for command, step in zip(commands, steps):
-            if not self._succeeded(command):
-                return f"{step} failed"
+            ok, detail = self._run(command)
+            if not ok:
+                return f"{step} failed" + (f": {detail}" if detail else "")
         return None
 
     def teardown(self, name: str, ticket_key: str) -> bool:
@@ -70,15 +87,13 @@ class ProjectDatabase:
         command = [self.shared_script, "teardown-project", name, "--confirm", name, "--db", database_id]
         return self._succeeded(command)
 
-    def _succeeded(self, command: list[str]) -> bool:
+    def _run(self, command: list[str]) -> tuple[bool, str]:
+        """Run a helper command: stdout is discarded (it may carry credentials), stderr is kept only as a redacted last line."""
         try:
-            result = self.command_runner(
-                command,
-                cwd=self.root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return result.returncode == 0
+            result = self.command_runner(command, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            return False, error.__class__.__name__
+        return result.returncode == 0, "" if result.returncode == 0 else redact(getattr(result, "stderr", "") or "")
+
+    def _succeeded(self, command: list[str]) -> bool:
+        return self._run(command)[0]

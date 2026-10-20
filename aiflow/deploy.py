@@ -6,6 +6,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,8 +109,15 @@ def run(command: str, cwd: Path, timeout_minutes: int, log_dir: Path,
     output = _redact(output, env)
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    log_path = log_dir / f"deploy-{stamp}-{time.time_ns()}.log"
-    log_path.write_text(output + ("\n" if output and not output.endswith("\n") else ""), encoding="utf-8")
+    text = output + ("\n" if output and not output.endswith("\n") else "")
+    while True:  # the clock of a VM can be coarse (1 ms), so uniqueness comes from a random suffix and an exclusive create
+        log_path = log_dir / f"deploy-{stamp}-{uuid.uuid4().hex[:12]}.log"
+        try:
+            with open(log_path, "x", encoding="utf-8") as handle:
+                handle.write(text)
+            break
+        except FileExistsError:
+            continue
     return DeployResult(exit_code, timed_out, _tail(output), log_path, interrupted)
 
 

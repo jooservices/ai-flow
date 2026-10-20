@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Flow control (keeps the workers equal to the configuration, runs the operator)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Workspaces/JOOservices/projects/ai-flow
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-control
+Restart=always
+RestartSec=15
+# A configuration error (exit 2) is not retried in a tight loop.
+RestartPreventExitStatus=2
+# The workers are separate units: stopping the control never stops them. Its operator AI (read-only) dies with it.
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

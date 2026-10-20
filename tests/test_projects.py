@@ -96,7 +96,7 @@ class RegistryTest(unittest.TestCase):
                 self.assertIn(expected, str(caught.exception))
 
     def test_bad_general_file(self):
-        for text, expected in (("[machines.wsl]\nworkers = 0\n", "workers"), ("[extra]\n", "unknown section"), ("[defaults]\nbase = 3\n", "must be str")):
+        for text, expected in (("[machines.wsl]\nworkers = -1\n", "workers"), ("[machines.wsl]\nmax_workers = 0\n", "max_workers"), ("[extra]\n", "unknown section"), ("[defaults]\nbase = 3\n", "must be str")):
             with self.subTest(text):
                 write(self.dir / "aiflow.toml", text)
                 with self.assertRaises(ConfigError) as caught:

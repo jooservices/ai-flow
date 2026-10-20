@@ -1,5 +1,5 @@
 [Unit]
-Description=AI Flow worker %i
+Description=AI Flow worker %i (a number: shared worker; <KEY>-<n>: worker n of that project)
 After=network-online.target docker.service
 
 [Service]
@@ -9,8 +9,8 @@ Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-work --id %i
 Restart=always
 RestartSec=15
-# A configuration error (exit 2) is not retried in a tight loop.
-RestartPreventExitStatus=2
+# A configuration error (exit 2) is not retried in a tight loop; exit 3 means the control retired this worker.
+RestartPreventExitStatus=2 3
 # On stop the AI process groups are killed with the unit; the lease then expires and another AI continues.
 KillMode=control-group
 

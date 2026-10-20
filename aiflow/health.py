@@ -20,6 +20,14 @@ def problems(cfg, redis, jira) -> list[tuple[str, str]]:
         beat = redis.get(f"hb:{slot}")
         if beat is None or now - int(beat) > cfg.heartbeat_stale_seconds:
             found.append((f"slot-{slot}", f"Supervisor {slot} has not sent a heartbeat for over {cfg.heartbeat_stale_seconds // 60} min."))
+    if redis.get(f"control:seen:{cfg.machine}") is not None:
+        beat = redis.get(f"hb:{cfg.machine}:control")
+        if beat is None or now - int(beat) > cfg.heartbeat_stale_seconds:
+            found.append(("control", f"The control of {cfg.machine} has not sent a heartbeat for over {cfg.heartbeat_stale_seconds // 60} min "
+                                      f"(workers keep running; the number of workers and the operator do not change until it is back)."))
+    failure = redis.get("control:error")
+    if failure:
+        found.append(("control-error", f"The control did not change anything: {failure}"))
     if redis.get("paused") is not None:
         found.append(("paused", "AI Flow is paused: no new ticket is taken (`bin/aiflow-work resume`)."))
     for name in redis.scan("probe:*"):

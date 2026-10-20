@@ -5,7 +5,7 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 (example: `config.example/operator.toml`; without the file the operator is OFF).
 
 ## How it works
-1. **Find** (plain code, no AI, no tokens): every minute one worker lists the incidents. An incident has a stable id (`kind:subject`), so the same problem is queued once; it leaves the queue by itself when it is gone.
+1. **Find** (plain code, no AI, no tokens): the control (`aiflow-control.service`, not a worker) lists the incidents every pass. An incident has a stable id (`kind:subject`), so the same problem is queued once; it leaves the queue by itself when it is gone.
 2. **Queue**: Redis, one entry per incident (`aiworkflow:operator:queue:<id>`).
 3. **Run**: one incident at a time, an AI (default Claude, another usable one replaces it) is started **read-only**, without a GitHub login, with a time limit. It reads the facts and asks for actions.
 4. **Act**: the supervisor performs only the actions below. Anything else is refused and shown in the audit comment.
@@ -36,4 +36,4 @@ The ticket gets the label `needs-owner` and a comment that starts with the quest
 - Per ticket: `retries_per_ticket_per_day` operator runs; above that the incident is escalated without running an AI. Overall: `max_runs_per_hour` and `max_runs_per_day`. After a run the same incident waits one hour.
 - `bin/aiflow-work pause` stops the operator too. `bin/aiflow-work operator off` / `on` is a separate switch; `bin/aiflow-work check` shows the policy and `operator` shows the switch.
 - The AI runs read-only (Claude and Grok: Read, Glob, Grep; Codex: read-only sandbox; OpenCode cannot be restricted and is never used).
-- A run takes the worker that started it for up to `run_minutes`.
+- The operator runs inside the control, so a run (up to `run_minutes`) never takes a worker away from tickets.

@@ -19,7 +19,7 @@ from .config import ConfigError
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
             "highest_developer": str, "release_check": str, "tag_prefix": str, "deploy_command": str,
-            "deploy_timeout_minutes": int, "deploy_on": str}
+            "deploy_timeout_minutes": int, "deploy_on": str, "workers": int}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
 MERGE_METHODS = ("merge", "squash", "rebase")
 DATABASE_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,23}$")
@@ -69,6 +69,7 @@ class Project:
     deploy_command: str = ""
     deploy_timeout_minutes: int = 30
     deploy_on: str = "base"  # "all" also runs after hotfix and release merges
+    workers: int = 0  # workers of this project (aiflow-work@<KEY>-<n>); worker 1 serves only this project, the others may take other projects' tickets
 
     def role(self, role: str) -> str:
         return {"developer": self.developer, "reviewer": self.reviewer, "qa": self.qa}.get(role, "")
@@ -81,6 +82,7 @@ class Registry:
     from_files: bool
     ai_limits: dict[str, dict[str, int]] = field(default_factory=dict)  # machine -> AI name -> concurrent session limit
     runtime: dict[str, str] = field(default_factory=dict)  # AIFLOW_* name -> value, from [runtime] of aiflow.toml
+    max_workers: dict[str, int] = field(default_factory=dict)  # machine -> most workers (shared + all projects) it may run
 
     def get(self, key: str) -> Project | None:
         return self.projects.get(key)
@@ -129,6 +131,14 @@ def _runtime(table: dict, where: str) -> dict[str, str]:
     return values
 
 
+def desired_ids(registry: Registry, machine: str) -> list[str]:
+    """The worker ids this machine should run: the shared numbers 1..N (any project), then <KEY>-1..<KEY>-n per project."""
+    ids = [str(n) for n in range(1, registry.workers.get(machine, 0) + 1)]
+    for key in sorted(registry.projects):
+        ids += [f"{key}-{n}" for n in range(1, registry.projects[key].workers + 1)]
+    return ids
+
+
 def legacy(keys: tuple[str, ...], base: Project) -> Registry:
     """The registry of a machine without TOML files: every watched Jira project uses the `.env` values."""
     return Registry({key: replace(base, jira_key=key) for key in keys}, {}, from_files=False)
@@ -147,13 +157,19 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
     defaults = replace(fallback, **_typed(general.get("defaults", {}), SETTINGS, f"{general_file} [defaults]"))
     workers: dict[str, int] = {}
     ai_limits: dict[str, dict[str, int]] = {}
+    max_workers: dict[str, int] = {}
     for machine, table in general.get("machines", {}).items():
-        if not isinstance(table, dict) or set(table) - {"workers", "ai_limits"}:
-            raise ConfigError(f"{general_file} [machines.{machine}]: only `workers` and `ai_limits` are allowed.")
-        count = table.get("workers")
-        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-            raise ConfigError(f"{general_file} [machines.{machine}]: needs `workers` as a whole number of at least 1.")
+        if not isinstance(table, dict) or set(table) - {"workers", "ai_limits", "max_workers"}:
+            raise ConfigError(f"{general_file} [machines.{machine}]: only `workers`, `max_workers` and `ai_limits` are allowed.")
+        count = table.get("workers", 0)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ConfigError(f"{general_file} [machines.{machine}]: `workers` (the shared workers, any project) must be a whole number of 0 or more.")
         workers[machine] = count
+        if "max_workers" in table:
+            cap = table["max_workers"]
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+                raise ConfigError(f"{general_file} [machines.{machine}]: `max_workers` must be a whole number of at least 1.")
+            max_workers[machine] = cap
         limits = table.get("ai_limits", {})
         if not isinstance(limits, dict):
             raise ConfigError(f"{general_file} [machines.{machine}.ai_limits]: must be a table.")
@@ -183,9 +199,17 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
             raise ConfigError(f"{path}: deploy_on must be 'base' or 'all'.")
         if project.jira_key in projects:
             raise ConfigError(f"Jira project {project.jira_key} is declared in {owners[project.jira_key].name} and in {path.name}.")
+        if project.workers < 0:
+            raise ConfigError(f"{path}: workers must be a whole number of 0 or more.")
         projects[project.jira_key], owners[project.jira_key] = project, path
     if not projects:
         raise ConfigError(f"No project file in {config_dir / 'aiflow'}.")
     runtime = _runtime(general.get("runtime", {}), f"{general_file} [runtime]")
-    return Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime)
+    registry = Registry(projects, workers, from_files=True, ai_limits=ai_limits, runtime=runtime, max_workers=max_workers)
+    for machine, cap in max_workers.items():
+        total = len(desired_ids(registry, machine))
+        if total > cap:
+            raise ConfigError(f"{general_file} [machines.{machine}]: the workers add up to {total} (shared {workers.get(machine, 0)} + projects "
+                              f"{total - workers.get(machine, 0)}) but max_workers is {cap}.")
+    return registry
 

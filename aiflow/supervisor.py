@@ -17,7 +17,6 @@ from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
-from .operator import Operator
 from .lock import Redis, RedisError
 from .project_database import ProjectDatabase, ticket_database_id
 
@@ -162,7 +161,7 @@ class Supervisor:
         self.deploy_process_factory = process_factory or subprocess.Popen
         self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
-        self.operator = Operator(self, cfg.operator_policy)
+        self.retired = False
         self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
@@ -172,11 +171,14 @@ class Supervisor:
         jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
         found = self.jira.search(jql)
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
+        if self.cfg.home and self.cfg.slot == 1:  # worker 1 of a project serves only its own project, so it always has a free hand for it
+            found = [issue for issue in found if issue["key"].rsplit("-", 1)[0] == self.cfg.home]
         return self.fair_order(found)
 
     def fair_order(self, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Rework first; then the projects take turns: the first ticket of every project, then the second of every project, and so on.
-        Inside a project the order of Jira (priority, then oldest) is kept; in one round the project served longest ago goes first."""
+        """The worker's own project first (a shared worker has none); then rework; then the projects take turns: the first ticket of
+        every project, then the second of every project, and so on. Inside a project the order of Jira (priority, then oldest) is
+        kept; in one round the project served longest ago goes first."""
         rank: dict[str, int] = {}
         counts: dict[tuple[bool, str], int] = {}
         for issue in found:
@@ -186,9 +188,10 @@ class Supervisor:
         projects = sorted({project for _, project in counts})
         served = dict(zip(projects, self.redis.get_many([f"served:{project}" for project in projects]))) if projects else {}
 
-        def turn(issue: dict[str, Any]) -> tuple[bool, int, float]:
-            value = served.get(issue["key"].rsplit("-", 1)[0])
-            return "rework" not in issue.get("labels", []), rank[issue["key"]], float(value) if value else 0.0
+        def turn(issue: dict[str, Any]) -> tuple[bool, bool, int, float]:
+            project = issue["key"].rsplit("-", 1)[0]
+            value = served.get(project)
+            return project != self.cfg.home, "rework" not in issue.get("labels", []), rank[issue["key"]], float(value) if value else 0.0
         return sorted(found, key=turn)  # stable
 
     def parents_of_open_work(self, found: list[dict[str, Any]]) -> set[str]:
@@ -466,7 +469,6 @@ class Supervisor:
                 self.recheck_blocked()
                 self.sweep_worktrees()
                 self.sweep_containers()
-                self.operator.cycle()
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
@@ -480,6 +482,10 @@ class Supervisor:
     def should_exit(self, started: int) -> bool:
         """Graceful exit between two tickets: after `aiflow-work restart` or after the maximum run time. systemd
         starts the worker again, so it runs the newest code and configuration."""
+        if self.redis.get(f"retire:{self.cfg.machine}:{self.cfg.worker_label}") is not None:
+            log("retired by the control (the project runs fewer workers now); leaving after the current ticket step")
+            self.retired = True
+            return True
         asked = self.redis.get("restart")
         if asked is not None and int(asked) >= started:
             log("restart requested; leaving after the current ticket step")
@@ -1617,12 +1623,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load(worker_id=option(args, "--id"))
         if "list" in args:  # worker numbers of this machine for the installer
-            print("\n".join(str(n) for n in range(1, config.workers + 1)))
+            from .projects import desired_ids
+            print("\n".join(desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]))
             return 0
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
-            print(f"machine {config.machine}: {config.workers} worker(s), config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
-            limits = ", ".join(f"{name}={value}" for name, value in sorted(config.ai_limits.items())) or "none (all unlimited)"
-            print(f"  AI session limits: {limits}; omitted AIs are unlimited")
+            from .projects import desired_ids
+            ids = desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]
+            cap = config.registry.max_workers.get(config.machine)
+            print(f"machine {config.machine}: {len(ids)} worker(s) ({', '.join(ids) or 'none'}), max_workers {cap or 'not set'}, "
+                  f"config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
+            limits = config.ai_limits
+            print(f"  AI session limits: {', '.join(f'{n}={v}' for n, v in sorted(limits.items())) or 'none (all unlimited)'}; omitted AIs are unlimited")
+            if not limits:
+                print("  WARNING: no ai_limits: every worker may start AI sessions with no machine-wide cap (usage limits and cooldowns follow)")
+            elif len(ids) > sum(limits.values()):
+                print(f"  WARNING: {len(ids)} workers but the AI limits add up to {sum(limits.values())}: some workers will wait for an AI")
             policy = config.operator_policy
             print(f"  operator: {'ON' if policy.enabled else 'off (config/operator.toml)'}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
                   f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; switch: `aiflow-work operator on|off`")
@@ -1632,7 +1647,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{project.jira_key}: repo {project.repo}, base {project.base}, hotfix {project.hotfix_base}, developer {project.developer or '-'}, "
                       f"reviewer {project.reviewer or '-'}, qa {project.qa or '-'}, human {project.require_human}, "
                       f"human on deployment {project.human_on_deployment}, auto-merge {project.auto_merge}, "
-                      f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}, deploy {deploy_setting}")
+                      f"ci {project.ci_required}, max parallel {project.max_parallel or 'unlimited'}, workers {project.workers}, deploy {deploy_setting}")
             return 0
     except ConfigError as error:
         print(f"CONFIG ERROR: {error}", file=sys.stderr)
@@ -1667,7 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
     if "--once" in args:
         return 0 if supervisor.tick() else 3
     supervisor.run_forever()
-    return 0
+    return 3 if supervisor.retired else 0  # 3: the unit does not restart it (RestartPreventExitStatus=2 3)
 
 
 if __name__ == "__main__":

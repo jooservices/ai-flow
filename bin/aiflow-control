@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# The control: makes the running workers equal to the configuration and runs the operator.
+#   bin/aiflow-control                  run (what systemd keeps alive)
+#   bin/aiflow-control --dry-run        print what it would start, retire or disable, change nothing
+#   bin/aiflow-control --once           one pass
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$DIR"
+exec python3 -m aiflow.control "$@"

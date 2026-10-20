@@ -77,10 +77,17 @@ version_field = "Version"                    # x.y.z of a Release ticket
 # ---------------------------------------------------------------------------------------------------------------------------
 # [machines.<name>]: <name> is AIFLOW_MACHINE of that machine (see .env.example).
 # ---------------------------------------------------------------------------------------------------------------------------
-# workers = N starts aiflow-work@1 ... @N. After a change: bin/install-wsl-service --workers (adds units), bin/aiflow-work restart.
-# ai_limits caps the concurrent AI sessions of the whole machine (all workers together); a missing AI is unlimited, 0 turns it off.
+# The workers of a machine are kept by the control (aiflow-control.service, started with `bin/install-wsl-service --control`):
+#   each project file says how many workers it has (`workers = N` in config/aiflow/<KEY>.toml: aiflow-work@<KEY>-1 ... @<KEY>-N);
+#   worker 1 of a project serves only that project, the others take their own project first and then tickets of other projects.
+# workers      = shared workers (aiflow-work@1 ... @N) that serve every project; 0 when every project has its own.
+# max_workers  = the most workers (shared + all projects) this machine may run; a configuration above it is refused.
+# ai_limits    = concurrent AI sessions of the whole machine (all workers together); a missing AI is unlimited, 0 turns it off.
+#                Workers beyond the limits wait for an AI, so keep the limits and max_workers in proportion (`aiflow-work check` warns).
+# A change is picked up by the control within 30 seconds (workers are started, retired softly after their step, restarted).
 [machines.wsl]
 workers = 2
+max_workers = 12
 # [machines.wsl.ai_limits]
 # codex = 4
 # claude = 2

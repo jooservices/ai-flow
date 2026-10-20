@@ -11,3 +11,4 @@ ci_required = true
 deploy_command = ""
 deploy_timeout_minutes = 30
 deploy_on = "base"         # use "all" to include hotfix and release merges
+workers = 1             # workers of this project (aiflow-work@JAIF-1); 0 = none of its own. Worker 1 serves only this project

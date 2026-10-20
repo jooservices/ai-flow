@@ -63,6 +63,31 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(got["total"], row["total"])
 
 
+class ReportWithTheRequestedModelTests(unittest.TestCase):
+    """Regression: the supervisor passes `model=` and every parser returns a `model` too; both must reach the event, never raise."""
+
+    def run_report(self, agent, text):
+        sink = Events("http://obs", "default", "s", "u", "p", {}, Sender(), thread=False)
+        events._sink = sink
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                log = Path(tmp) / "run.log"
+                log.write_text(text)
+                usage.report(agent, log, ticket="JAIF-5", role="developer", model="sonnet", effort="", why="ok", code=0, minutes=1.0)
+            sink.flush()
+        finally:
+            events._sink = None
+        return sink.sender.calls[0][1][0]
+
+    def test_claude_codex_opencode_and_unknown_logs_all_report(self):
+        for agent, text, answered in (("Claude", CLAUDE, "claude-sonnet-5-5"), ("Codex", CODEX_JSON, ""), ("OpenCode", OPENCODE, ""), ("Grok", "x", None)):
+            with self.subTest(agent):
+                row = self.run_report(agent, text)
+                self.assertEqual(row["model_requested"], "sonnet")
+                if answered is not None:
+                    self.assertEqual(row["model"], answered)
+
+
 class CommandTests(unittest.TestCase):
     def test_codex_and_opencode_ask_for_json(self):
         codex, _ = agents.build_command("Codex", Path("/tmp"), Path("/tmp/r"), "p", Path("/tmp"))

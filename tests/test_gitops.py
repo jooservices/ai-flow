@@ -51,5 +51,19 @@ class DeployBaseTests(unittest.TestCase):
         self.assertNotIn(("checkout", "develop"), calls)
 
 
+class MergedPullRequestCleanupTests(unittest.TestCase):
+    def test_confirmed_merged_pr_removes_worktree_without_ancestry_guard(self):
+        repo = Repo(Path("/workspaces"), "project")
+        worktree = Path("/worktrees/JAIF-9")
+        with patch.object(repo, "find_worktree", return_value=(worktree, "JAIF-9-fix")), \
+                patch.object(repo, "remove_worktree") as remove_worktree, \
+                patch.object(repo, "remote_branch", return_value=None), \
+                patch("aiflow.gitops.git") as run_git:
+            repo.cleanup("JAIF-9", merged_pr=True)
+
+        remove_worktree.assert_called_once_with(worktree)
+        run_git.assert_called_once_with(repo.path, "branch", "-D", "JAIF-9-fix")
+
+
 if __name__ == "__main__":
     unittest.main()

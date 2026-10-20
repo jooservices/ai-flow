@@ -311,10 +311,24 @@ class OperatorTests(unittest.TestCase):
         self.assertIn("no usable RESULT line", audit)
 
     def test_machine_incident_is_audited_on_the_health_ticket(self):
-        op, sup, _ = self.build("RESULT: NO-ACTION: seems fine")
+        output = "RESULT: NO-ACTION: seems fine"
+        result, actions, _, _ = parse_output(output)
+        self.assertEqual(result, ("NO-ACTION", "seems fine"))
+        self.assertEqual(actions, [])
+
+        op, sup, _ = self.build(output)
         op.cfg = sup.cfg = sup.cfg.__class__(**{**sup.cfg.__dict__, "health_ticket": "JAIF-12"})
-        op.run_incident(self.incident("worker:wsl:2", "wsl:2"), "20260101")
-        self.assertEqual(sup.jira.comments[0][0], "JAIF-12")
+        with mock.patch.object(op, "perform", wraps=op.perform) as perform:
+            op.run_incident(self.incident("worker:wsl:2", "wsl:2"), "20260101")
+
+        perform.assert_not_called()
+        self.assertEqual(len(sup.jira.comments), 1)
+        key, audit = sup.jira.comments[0]
+        self.assertEqual(key, "JAIF-12")
+        self.assertIn("Outcome: NO-ACTION: seems fine", audit)
+        self.assertIn("Did: nothing", audit)
+        self.assertEqual(sup.jira.added, [])
+        self.assertEqual(sup.jira.moves, [])
 
     def test_per_ticket_limit_escalates_without_running_the_ai(self):
         op, sup, redis = self.build(policy=Policy(enabled=True, retries_per_ticket_per_day=1))

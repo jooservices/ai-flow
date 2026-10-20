@@ -120,6 +120,10 @@ The developer's last comment follows a fixed template: What's changed, Why chang
 
 The repositories are public, so only accounts with write, maintain or admin permission on the repository count as human feedback (comments, change requests, review threads); bots (CodeRabbit, Copilot...) count as before. What anyone else writes never reaches a developer AI: it is left out of the prompt and logged once as `ignored feedback from accounts without write access`. The permission is asked of GitHub once per account and worker.
 
+### Preparing a Jira project
+
+`bin/aiflow-setup <KEY>` prints what a Jira project still needs for AI Flow (fields, issue type Release, workflow and scheme) and `--apply` creates it. The definition is `aiflow/jira_spec.json` and uses names only, so the same command prepares any Jira site; the supervisor finds the field ids by name at runtime.
+
 ### Configuration and workers (like `queue:work`)
 
 Secrets stay in `Workspaces/.env`. Everything else is TOML in `JOOservices/config/` (examples with a comment on every key: `config.example/`). Three files, one owner each:

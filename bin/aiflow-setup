@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Prepare a Jira project for AI Flow (fields, issue type Release, workflow, workflow scheme):
+#   bin/aiflow-setup JAIF            dry run: prints what is missing, writes nothing
+#   bin/aiflow-setup JAIF --apply    creates what is missing (never changes what exists)
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$DIR"
+exec python3 -m aiflow.jira_setup "$@"

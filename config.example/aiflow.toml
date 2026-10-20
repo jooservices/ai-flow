@@ -64,13 +64,14 @@ health_ticket = "JAIF-12"        # ticket that receives health alerts and the da
 # workspace_name = "WSL"         # name written in the Jira field Workspace; default: WSL / Mac by machine, else the machine name
 # --- Redis namespace (host, port and password are per machine: see .env.example) ---
 redis_prefix = "aiworkflow:"     # prefix of every key; shared by all machines, so keep it equal everywhere
-# --- Jira custom field ids of the AI Flow fields (change only if the fields are recreated) ---
-workspace_field = "customfield_10214"       # Workspace: machine working on the ticket
-blocked_reason_field = "customfield_10215"  # Blocked reason: `Kind: reason`
-require_human_field = "customfield_10216"   # Require human: Yes / empty
-model_field = "customfield_10217"           # AI Model: `<AI>:<Model>`
-type_field = "customfield_10218"            # Type: Feature, Bug, Hotfix, Chore, Docs, Refactor
-version_field = "customfield_10219"         # Version: x.y.z of a Release ticket
+# --- Jira fields of AI Flow, by NAME (ids are looked up in Jira at runtime; `bin/aiflow-setup <KEY>` creates them) ---
+# Keep the names unless you rename the fields in Jira; a `customfield_NNNNN` id is also accepted.
+workspace_field = "Workspace"                # machine working on the ticket
+blocked_reason_field = "Blocked reason"      # why a ticket is Blocked, as `Kind: reason`
+require_human_field = "Require human"        # Yes: the ticket stops in Human review before the merge
+model_field = "AI Model"                     # model per ticket, as `<AI>:<Model>`
+type_field = "Type"                          # Feature, Bug, Hotfix, Chore, Docs, Refactor
+version_field = "Version"                    # x.y.z of a Release ticket
 
 # ---------------------------------------------------------------------------------------------------------------------------
 # [machines.<name>]: <name> is AIFLOW_MACHINE of that machine (see .env.example).

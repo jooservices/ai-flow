@@ -204,11 +204,15 @@ class Repo:
         out = git(workdir, "log", "--format=", "--name-only", f"{base}..HEAD", "--", ".env")
         return ".env" in out.splitlines()
 
-    def cleanup(self, key: str, remote: bool = True) -> None:
-        """Remove the ticket worktree and local branch; the remote branch too unless `remote` is false."""
+    def cleanup(self, key: str, remote: bool = True, merged_pr: bool = False) -> None:
+        """Remove the ticket worktree and branch; a confirmed merged PR can replace the ancestry check."""
         found = self.find_worktree(key)
         if found:
-            self._helper("remove", "--path", str(found[0]), "--delete-branch")
+            if merged_pr:
+                self.remove_worktree(found[0])
+                git(self.path, "branch", "-D", found[1])
+            else:
+                self._helper("remove", "--path", str(found[0]), "--delete-branch")
         pushed = self.remote_branch(key) if remote else None
         if pushed:
             git(self.path, "push", "origin", "--delete", pushed, check=False)

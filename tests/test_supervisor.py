@@ -827,6 +827,100 @@ class PullRequestGateV2Tests(unittest.TestCase):
         self.assertEqual(make().cfg.ci_wait_minutes, 90)
 
 
+class MergedPullRequestGateTests(unittest.TestCase):
+    def test_merged_pr_with_missing_branch_finishes_without_blocking(self):
+        sup = make()
+        sup.jira.status = "In QA"
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
+        repo = RecordingCleanupRepo()
+        repo.github_slug = lambda: "o/r"
+        repo.remote_branch = lambda key: None
+        sup.jira.comments = lambda key, last=6: [
+            {"body": "AI Flow: pull request opened: https://github.com/o/r/pull/10"}
+        ]
+        written_comments = []
+        sup.jira.comment = lambda key, body: written_comments.append(body)
+        pr = {"number": 10, "state": "MERGED", "url": "https://github.com/o/r/pull/10", "headRefName": "JAIF-9-fix"}
+        sup.remember_case = lambda *args: None
+        sup.teardown_ticket_database = lambda *args: None
+        sup.after_merge = lambda *args: None
+
+        with mock.patch.object(github.GitHub, "view", return_value=pr):
+            self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, repo, "develop"))
+
+        self.assertEqual(sup.jira.moves, [("JAIF-9", "Done")])
+        self.assertIsNone(sup.jira.fields[field])
+        self.assertFalse(any("blocked" in body.lower() for body in written_comments))
+        self.assertTrue(repo.cleanup_merged)
+
+    def test_a_done_ticket_is_ignored_even_when_its_branch_is_gone(self):
+        sup = make()
+        sup.jira.status = "Done"
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
+
+        class MissingBranchRepo:
+            name = "ai-flow"
+
+            def remote_branch(self, key):
+                raise AssertionError("a Done ticket must be returned before checking the branch")
+
+        self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, MissingBranchRepo(), "develop"))
+        self.assertEqual(sup.jira.comments, [])
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIsNone(sup.jira.fields[field])
+
+    def test_gate_rechecks_done_status_before_blocking_a_missing_branch(self):
+        sup = make()
+        statuses = iter(("In QA", "Done"))
+        sup.jira.view = lambda key, full=False: {"key": key, "status": next(statuses)}
+        field = ("JAIF-9", sup.cfg.blocked_reason_field)
+        sup.jira.fields = {field: "Config: The ticket branch is not on origin."}
+
+        class MissingBranchRepo:
+            name = "ai-flow"
+
+            def github_slug(self):
+                return "o/r"
+
+            def remote_branch(self, key):
+                return None
+
+        self.assertTrue(sup.gate("JAIF-9", {"key": "JAIF-9", "status": "In QA"}, MissingBranchRepo(), "develop"))
+
+        self.assertEqual(sup.jira.comments, [])
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIsNone(sup.jira.fields[field])
+
+    def test_done_ticket_sweep_uses_merged_pr_state_for_cleanup(self):
+        sup = make()
+
+        class SweepRepo:
+            name = "ai-flow"
+
+            def exists(self):
+                return True
+
+            def worktrees(self):
+                return [(Path("/worktrees/JAIF-9"), "JAIF-9-fix")]
+
+            def github_slug(self):
+                return "o/r"
+
+            def cleanup(self, key, merged_pr=False):
+                self.cleaned = (key, merged_pr)
+
+        repo = SweepRepo()
+        sup.jira.search = lambda *args, **kwargs: [{"key": "JAIF-9", "status": "Done"}]
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo), mock.patch.object(
+            github.GitHub, "find", return_value={"state": "MERGED"}
+        ):
+            sup.sweep_worktrees()
+
+        self.assertEqual(repo.cleaned, ("JAIF-9", True))
+
+
 class PullRequestBodyTests(unittest.TestCase):
     values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",
               "deployment": "None", "ticket": "JAIF-9", "footer": github.MARKER}
@@ -943,14 +1037,16 @@ class RecordingCleanupRepo(FakeRepo):
         self.calls = []
         self.refresh_error = refresh_error
         self.cleanup_error = cleanup_error
+        self.cleanup_merged = False
 
     def refresh_base(self, base):
         self.calls.append(("refresh_base", base))
         if self.refresh_error:
             raise self.refresh_error
 
-    def cleanup(self, key):
+    def cleanup(self, key, merged_pr=False):
         self.calls.append(("cleanup", key))
+        self.cleanup_merged = merged_pr
         if self.cleanup_error:
             raise self.cleanup_error
 

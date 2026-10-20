@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, notify, runner
+from . import agents, events, notify, runner, usage
 from .config import PROJECT_DIR
 from .incidents import WORKED, Incident, find_incidents
 from .jira import JiraError
@@ -88,10 +88,12 @@ class Operator:
         current = {incident.id for incident in incidents}
         for name in self.redis.scan("operator:queue:*"):
             if name.split("operator:queue:", 1)[1] not in current:
+                events.emit("operator.resolved", incident=name.split("operator:queue:", 1)[1])
                 self.redis.delete(name)
         for incident in incidents:
             name = f"operator:queue:{incident.id}"
             if self.redis.get(name) is None:
+                events.emit("operator.incident", incident=incident.id, kind=incident.kind, subject=incident.subject, summary=incident.summary[:300])
                 self.redis.set(name, json.dumps(dict(kind=incident.kind, subject=incident.subject, summary=incident.summary, facts=incident.facts)), 7 * DAY)
 
     # ---- one cycle ---------------------------------------------------------------------------------------------
@@ -128,6 +130,7 @@ class Operator:
     def handle(self, incident: Incident) -> bool:
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         if incident.ticket and self.count(f"operator:ticket:{incident.ticket}:{day}") >= self.policy.retries_per_ticket_per_day:
+            events.emit("operator.limit", incident=incident.id, limit="retries_per_ticket_per_day")
             self.escalate(incident, f"The operator already tried {incident.ticket} {self.policy.retries_per_ticket_per_day} time(s) today and the problem is still there.",
                           "", "")
             self.redis.set(f"operator:cool:{incident.id}", "1", DAY)
@@ -173,6 +176,7 @@ class Operator:
             return self.redis.renew("operator:run", self.cfg.owner, self.policy.run_minutes * 60 + 120) and self.active()
         code, why = runner.run(argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root), idle_seconds=self.cfg.idle_minutes * 60,
                                max_seconds=self.policy.run_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds, heartbeat=beat)
+        usage.report(agent, log_file, ticket=tag.split("-", 2)[-1] if False else "", role="operator", incident=tag, why=why, code=code)
         text = agents.final_text(agent, log_file, result_file)
         quota = (code != 0 or not RESULT.search(text)) and agents.looks_like_quota(log_file, text, code)
         return why, text, quota
@@ -195,6 +199,8 @@ class Operator:
             self.redis.delete(f"operator:cool:{incident.id}")
             return True
         result, actions, options, recommend = parse_output(text)
+        events.emit("operator.run", incident=incident.id, agent=agent, why=why, minutes=round((time.monotonic() - began) / 60, 2),
+                    result=result[0] if result else "NONE", actions=len(actions))
         done, refused = [], []
         for name, args in actions[:MAX_ACTIONS]:
             (done if self.perform(name, args) else refused).append(f"{name} {json.dumps(args, sort_keys=True)[:200]}")
@@ -215,6 +221,7 @@ class Operator:
 
     def perform(self, name: str, args: dict[str, Any]) -> bool:
         """Perform one requested action. False when it is not allowed or failed; nothing outside this set can run."""
+        events.emit("operator.action", action=name, args=json.dumps(args, sort_keys=True)[:300])
         try:
             if name == "comment" and self.valid_key(args.get("key")) and isinstance(args.get("text"), str) and args["text"].strip():
                 self.jira.comment(args["key"], "AI Flow operator: " + args["text"].strip()[:3000])
@@ -279,6 +286,7 @@ class Operator:
             self.jira.add_label(incident.ticket, "needs-owner")
         if target:
             self.jira.comment(target, text)
+        events.emit("operator.escalate", incident=incident.id, ticket=target, question=question[:500], options=options[:300], recommend=recommend[:200])
         self.redis.set(f"operator:notify:{incident.id}", json.dumps(dict(ticket=target, question=question)), 7 * DAY)
 
     def flush_notifications(self) -> None:
@@ -299,6 +307,7 @@ class Operator:
             if item:
                 lines.append(f"- {item['question']}" + (f"\n  {base}/browse/{item['ticket']}" if base and item.get("ticket") else ""))
         if lines:
+            events.emit("operator.notify", questions=len(lines))
             try:
                 self.notifier.send("AI Flow needs the owner:\n" + "\n".join(lines))
             except Exception as error:

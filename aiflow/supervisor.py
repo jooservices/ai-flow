@@ -12,12 +12,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, github, runner
+from . import agents, deploy, events, github, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
+from .memory import cases as memory_cases
+from .memory.client import Memory
 from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
@@ -29,6 +31,7 @@ SLOT_SECONDS = 600
 
 def log(message: str) -> None:
     print(f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} {message}", flush=True)
+    events.emit("log", message=message)  # every journal line is also an event in OpenObserve
 
 
 def parse_time(value: str) -> datetime:
@@ -162,6 +165,10 @@ class Supervisor:
         self.deploy_log_dir = deploy_log_dir or cfg.root / ".tmp" / "aiflow" / "logs"
         self.stop = False
         self.retired = False
+        if hasattr(jira, "on_transition"):
+            jira.on_transition = lambda key, to: self.record_status(key, to, "supervisor")
+        self.memory = Memory(cfg.memory.get("AIFLOW_MEMORY_URL", ""), cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
+                             spool=cfg.root / ".tmp" / "aiflow" / "memory-spool.jsonl", log=lambda m: log(m))
         self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
@@ -170,6 +177,7 @@ class Supervisor:
         statuses = ", ".join(f'"{s}"' for s in STAGES)
         jql = f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY priority DESC, created ASC"
         found = self.jira.search(jql)
+        self.observe(found)
         found = [issue for issue in found if issue["key"] not in self.parents_of_open_work(found)]  # containers are never worked
         if self.cfg.home and self.cfg.slot == 1:  # worker 1 of a project serves only its own project, so it always has a free hand for it
             found = [issue for issue in found if issue["key"].rsplit("-", 1)[0] == self.cfg.home]
@@ -193,6 +201,37 @@ class Supervisor:
             value = served.get(project)
             return project != self.cfg.home, "rework" not in issue.get("labels", []), rank[issue["key"]], float(value) if value else 0.0
         return sorted(found, key=turn)  # stable
+
+    def record_status(self, key: str, to: str, source: str) -> None:
+        """A status change as an event, with the time spent in the status it left. Remembers the status for the next change."""
+        now = time.time()
+        previous = self.redis.get(f"status:{key}") or ""
+        since = self.redis.get(f"statussince:{key}")
+        if previous == to:
+            return
+        events.emit("ticket.status", ticket=key, to_status=to, from_status=previous, source=source,
+                    minutes_in_from=round((now - float(since)) / 60, 2) if since else None)
+        self.redis.set(f"status:{key}", to, 30 * DAY)
+        self.redis.set(f"statussince:{key}", str(now), 30 * DAY)
+
+    def observe(self, issues: list[dict[str, Any]]) -> None:
+        """Status changes nobody here made (the owner moved a ticket, Jira did): noticed at the next poll, at most one poll late.
+        The Jira `updated` time is not the time of the change (a comment moves it too), so the poll time is the time of the event;
+        a stale search result (older than our own last record) is ignored."""
+        if not issues:
+            return
+        last = self.redis.get_many([f"status:{i['key']}" for i in issues])
+        for issue, previous in zip(issues, last):
+            if not issue.get("status") or previous == issue["status"]:
+                continue
+            since = self.redis.get(f"statussince:{issue['key']}")
+            try:
+                if since and parse_time(issue["updated"]).timestamp() + 2 < float(since):
+                    continue  # the JQL index is behind a move this supervisor just made
+            except (ValueError, KeyError):
+                pass
+            if self.redis.acquire(f"statuschg:{issue['key']}:{issue['status']}:{previous or 'none'}", self.cfg.owner, 3600):
+                self.record_status(issue["key"], issue["status"], "observed")
 
     def parents_of_open_work(self, found: list[dict[str, Any]]) -> set[str]:
         """Keys among `found` that have child issues: a ticket with children is a container, only its leaves are worked."""
@@ -319,7 +358,10 @@ class Supervisor:
                 if self.redis.acquire_session(
                     self.cfg.machine, agent, owner, self.cfg.lease_seconds, self.cfg.ai_limits.get(agent.casefold())
                 ):
+                    events.emit("ai.assign", ticket=key, role=role, agent=agent, limit=self.cfg.ai_limits.get(agent.casefold()),
+                                from_field=bool(field_agent))
                     return agent, owner
+                events.emit("ai.limit", ticket=key, role=role, agent=agent, limit=self.cfg.ai_limits.get(agent.casefold()))
                 pool.remove(agent)
         return None, None
 
@@ -345,6 +387,7 @@ class Supervisor:
                 continue
             self.redis.set(f"hb:{self.cfg.machine}:{self.cfg.worker_label}", str(int(time.time())), 300)  # a probe can take a minute
             state = agents.probe(agent, self.cfg.root)
+            events.emit("ai.probe", agent=agent, state=state)
             self.redis.set(name, state, 1800 if state.startswith("down") else self.cfg.probe_hours * 3600)
             if state != "ok":
                 log(f"probe {agent} on {self.cfg.machine}: {state}")
@@ -358,11 +401,12 @@ class Supervisor:
     def paused(self) -> bool:
         return self.redis.get("paused") is not None
 
-    def log_usage(self, key: str, role: str, agent: str, minutes: float, why: str, code: int | None) -> None:
+    def log_usage(self, key: str, role: str, agent: str, minutes: float, why: str, code: int | None, used: dict[str, Any] | None = None) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             self.redis.set(f"usage:{day}:{key}:{role}:{agent}:{int(time.time())}",
-                           json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code}), 10 * DAY)
+                           json.dumps({"key": key, "role": role, "ai": agent, "minutes": round(minutes, 1), "why": why, "code": code,
+                                    "tokens": (used or {}).get("total", 0), "cost": (used or {}).get("cost_usd_list", 0), "known": bool((used or {}).get("usage_known"))}), 10 * DAY)
         except RedisError as error:
             log(f"could not record the usage of {key}: {error}")
 
@@ -382,6 +426,7 @@ class Supervisor:
     def unserved(self, key: str, role: str, field_agent: str | None) -> None:
         """No AI on this machine can take the step. Another online machine may; if nobody can for long, block with the reason."""
         pool = self.online_pool()
+        events.emit("ai.unserved", ticket=key, role=role, pool=",".join(pool), cooling=",".join(sorted(self.cooldowns(pool))))
         if self.eligible_agents(role, key, field_agent, pool):
             return  # a supervisor on another machine will take it
         self.note_waiting(key, role)
@@ -439,7 +484,14 @@ class Supervisor:
                 except (JiraError, RuntimeError) as error:
                     log(f"skip {issue.get('key')}: {error}")
                     continue
+                entered = self.redis.get(f"statussince:{issue['key']}")
+                events.emit("ticket.pickup", ticket=issue["key"], status=issue["status"], role=role, agent=agent, rework="rework" in issue.get("labels", []),
+                            lease_seconds=self.cfg.lease_seconds, waited_minutes=round((time.time() - float(entered)) / 60, 2) if entered else None)
+                began_step = time.monotonic()
                 worked = self.process(issue, view, role, agent, session_owner)
+                if worked:
+                    events.emit("step.run", ticket=issue["key"], status=issue["status"], role=role, agent=agent,
+                                seconds=round(time.monotonic() - began_step, 1))
             finally:
                 if session_owner and session_agent:
                     self.release_agent_session(issue["key"], role, session_agent, session_owner)
@@ -457,6 +509,7 @@ class Supervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: setattr(self, "stop", True))
         log(f"supervisor {self.cfg.owner} watching {','.join(self.cfg.projects)}")
+        events.emit("worker.start", home=self.cfg.home, projects=",".join(self.cfg.projects), poll_seconds=self.cfg.poll_seconds)
         started = int(time.time())
         while not self.stop:
             if self.should_exit(started):
@@ -472,6 +525,7 @@ class Supervisor:
                 worked = self.tick()
             except Exception as error:  # keep the supervisor alive; the lease and Jira state stay consistent
                 log(f"tick failed: {type(error).__name__}: {error}")
+                events.emit("worker.error", error=f"{type(error).__name__}: {error}")
                 worked = False
             if not worked:
                 for _ in range(self.cfg.poll_seconds):
@@ -484,11 +538,13 @@ class Supervisor:
         starts the worker again, so it runs the newest code and configuration."""
         if self.redis.get(f"retire:{self.cfg.machine}:{self.cfg.worker_label}") is not None:
             log("retired by the control (the project runs fewer workers now); leaving after the current ticket step")
+            events.emit("worker.retired", home=self.cfg.home)
             self.retired = True
             return True
         asked = self.redis.get("restart")
         if asked is not None and int(asked) >= started:
             log("restart requested; leaving after the current ticket step")
+            events.emit("worker.restart")
             return True
         limit = self.cfg.worker_max_minutes
         if limit > 0 and time.time() - started > limit * 60:
@@ -636,6 +692,7 @@ class Supervisor:
                 except JiraError:
                     pass
             return
+        events.emit("deploy.queue", ticket=key, project=project.jira_key, base=base, eligible=eligible, queued=queued)
         if queued == 2:
             log(f"{key}: duplicate post-merge event was already queued for project {project.jira_key}")
             return
@@ -643,10 +700,10 @@ class Supervisor:
             log(f"{key}: queued post-merge work for project {project.jira_key}")
             return
 
-        events = [event]
+        batch = [event]
         comments: list[tuple[str, str]] = []
-        while events:
-            parsed_events = [json.loads(item) for item in events]
+        while batch:
+            parsed_events = [json.loads(item) for item in batch]
             eligible_events = [item for item in parsed_events if item["eligible"]]
             deploy_base = eligible_events[-1]["base"] if eligible_events else ""
             for refresh_base in dict.fromkeys(item["base"] for item in parsed_events if item["base"] != deploy_base):
@@ -687,6 +744,8 @@ class Supervisor:
                         log_reference = str(result.log_path.relative_to(self.cfg.root))
                     except ValueError:
                         log_reference = str(result.log_path)
+                    events.emit("deploy.result", ticket=eligible_events[-1]["ticket"], project=project.jira_key, ok=result.succeeded,
+                                timed_out=result.timed_out, exit_code=result.exit_code, log=log_reference)
                     if result.succeeded:
                         try:
                             self.redis.delete(f"deploy-failure:{project.jira_key}")
@@ -710,14 +769,14 @@ class Supervisor:
                                 for item in eligible_events)
 
             try:
-                pending = self.redis.finish_deploy(lock_name, pending_name, active_name, owner, ttl, "\n".join(events))
+                pending = self.redis.finish_deploy(lock_name, pending_name, active_name, owner, ttl, "\n".join(batch))
             except RedisError:
                 log(f"{key}: could not finish the project deployment lock; it expires automatically")
                 pending = ""
             if pending == -1:
                 log(f"{key}: project deployment lock ownership was lost")
                 break
-            events = pending.splitlines() if isinstance(pending, str) and pending else []
+            batch = pending.splitlines() if isinstance(pending, str) and pending else []
         for ticket, summary in comments:
             try:
                 self.jira.comment(ticket, summary)
@@ -738,6 +797,7 @@ class Supervisor:
             self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
         except (JiraError, RedisError) as error:
             log(f"{key}: could not record the block reason: {error}")
+        events.emit("ticket.blocked", ticket=key, kind=kind, reason=reason[:500])
         self.jira.comment(key, f"AI Flow: blocked on {self.cfg.machine} ({kind}). {reason}")
         self.jira.transition(key, "Blocked")
 
@@ -796,6 +856,7 @@ class Supervisor:
             if not self.eligible_agents(role, key, view.get("agent"), self.online_pool()):
                 continue
             if self.jira.transition(key, info["status"]):
+                events.emit("ticket.resumed", ticket=key, to=info["status"], role=role)
                 self.jira.set_field(key, self.cfg.blocked_reason_field, None)
                 self.jira.comment(key, f"AI Flow: an AI for the {role} step is available again; the ticket returns to {info['status']}.")
                 for name in (f"blocked:{key}", f"waiting:{key}:{role}", f"waitnote:{key}:{role}"):
@@ -806,6 +867,7 @@ class Supervisor:
         if self.redis.get(f"blocked:{key}") is None:
             return
         self.redis.delete(f"blocked:{key}")
+        events.emit("ticket.unblocked", ticket=key)
         try:
             self.jira.set_field(key, self.cfg.blocked_reason_field, None)
         except JiraError as error:
@@ -935,6 +997,61 @@ class Supervisor:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    # ---- shared memory ---------------------------------------------------------------------------------------
+    def recall(self, key: str, view: dict[str, Any], repo: Repo) -> str:
+        """Verified knowledge for this ticket as a prompt block. Advice only: a down service gives an empty block."""
+        if not self.memory.enabled:
+            return "(the shared memory is not configured)"
+        project = self.cfg.project(key)
+        description = str(view.get("description", ""))
+        parsed = sections(description)
+        wanted = " ".join([str(view.get("summary", "")), (parsed.get("ac") or parsed.get("acceptance criteria") or "")[:600], parsed.get("scopes", "")[:300]])
+        items = self.memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
+        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items))
+        if items:
+            self.redis.set(f"recalled:{key}", json.dumps([i["id"] for i in items]), 30 * DAY)
+        return memory_cases.prompt_block(items)
+
+    def remember_lessons(self, key: str, repo: Repo, agent: str, text: str) -> None:
+        """The `MEMORY:` lines of an AI's final message become fresh entries (verified later by confirmation or feedback)."""
+        if not self.memory.enabled:
+            return
+        project = self.cfg.project(key)
+        for kind, title, body in memory_cases.lessons(text):
+            entry_id = self.memory.propose(dict(kind=kind, scope="project", namespace=project.company, project=project.jira_key, repo=repo.name,
+                                                jira_key=key, title=title, body=body, tags=[project.jira_key.lower(), repo.name.lower(), agent.lower()],
+                                                source={"jira": key}, created_by=agent))
+            events.emit("memory.propose", ticket=key, kind=kind, title=title[:120], agent=agent, id=entry_id or "")
+
+    def remember_case(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
+        """A merged and Done ticket becomes a `case`, written by the supervisor from what it already has (no AI, no tokens)."""
+        if not self.memory.enabled:
+            return
+        project = self.cfg.project(key)
+        try:
+            comments = self.jira.comments(key, 30)
+            summary = str(self.jira.view(key).get("summary", key))
+        except (JiraError, ValueError, TypeError) as error:
+            log(f"{key}: no case written ({error})")
+            return
+        rounds = int(self.redis.get(f"cycles:{key}") or 0)
+        entry = memory_cases.build_case(key, summary, project.company, repo.name, self.change_type(key), self.state(key, "dev"),
+                                        str(pr.get("url", "")), comments, rounds, self.state(key, "rework"))
+        entry_id = self.memory.propose(entry) if entry else None
+        events.emit("memory.case", ticket=key, written=bool(entry_id), has_handover=bool(entry), rework_rounds=rounds)
+        if rounds == 0:  # merged without a single rework: the recalled knowledge did not mislead
+            for recalled in json.loads(self.redis.get(f"recalled:{key}") or "[]"):
+                self.memory.feedback(recalled, key, True)
+
+    def memory_env(self, key: str, repo: Repo) -> dict[str, str]:
+        """What `bin/aiflow-mem` needs inside the AI process: the address, the read/propose token, and the defaults of this ticket."""
+        token, url = self.cfg.memory.get("AIFLOW_MEMORY_AI_TOKEN", ""), self.cfg.memory.get("AIFLOW_MEMORY_URL", "")
+        if not (token and url):
+            return {}
+        project = self.cfg.project(key)
+        return {"AIFLOW_MEMORY_URL": url, "AIFLOW_MEMORY_TOKEN": token, "AIFLOW_MEMORY_NAMESPACE": project.company,
+                "AIFLOW_MEMORY_PROJECT": project.jira_key, "AIFLOW_MEMORY_REPO": repo.name, "AIFLOW_MEMORY_TICKET": key, "AIFLOW_MEMORY_ACTOR": "ai"}
+
     def execute(self, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path, branch: str, base: str,
                 repo: Repo, slot_owner: str | None = None, session_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
         """Run one AI. Returns (why, final text, verdict, quota)."""
@@ -949,7 +1066,8 @@ class Supervisor:
                       rework=self.rework_text(key), pr=self.pr_text(key), replies_file=str(self.replies_file(key)),
                       type=self.change_type(key) or str(view.get("type", "")), parent=view.get("parent") or "none",
                       version=self.state(key, "version"), last_tag=self.state(key, "lasttag") or "(none yet)",
-                      release_check=self.cfg.project(key).release_check or "(none configured)", project=key.rsplit("-", 1)[0])
+                      release_check=self.cfg.project(key).release_check or "(none configured)", project=key.rsplit("-", 1)[0],
+                      memory=self.recall(key, view, repo))
         prompt_role = "release" if role == "developer" and self.state(key, "isrelease") else role
         prompt = "\n\n".join((PROJECT_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8") for name in ("common", prompt_role))
         for name, value in values.items():
@@ -991,24 +1109,31 @@ class Supervisor:
         if session_owner and not self.redis.renew_session(self.cfg.machine, agent, session_owner, self.cfg.lease_seconds):
             return "lost-lease", "", None, False
         code, why = runner.run(
-            argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root),
+            argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root, self.memory_env(key, repo)),
             idle_seconds=self.cfg.idle_minutes * 60, max_seconds=self.cfg.max_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds,
             heartbeat=beat)
-        self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code)
+        used = usage.report(agent, log_file, ticket=key, role=role, model=model, effort=effort, why=why, code=code,
+                            minutes=round((time.monotonic() - began) / 60, 2))
+        self.log_usage(key, role, agent, (time.monotonic() - began) / 60, why, code, used)
         text = agents.final_text(agent, log_file, result_file)
         found = agents.verdict(text)
+        self.remember_lessons(key, repo, agent, text)
         quota = (code != 0 or found is None) and agents.looks_like_quota(log_file, text, code)
         log(f"{key} {role} {agent}: exit={code} why={why} verdict={found} quota={quota}")
+        events.emit("ai.run", ticket=key, role=role, agent=agent, model=model, effort=effort, minutes=round((time.monotonic() - began) / 60, 2), why=why,
+                    code=code, verdict=found[0] if found else "", detail=(found[1] if found else "")[:300], quota=quota, log_file=str(log_file))
         return why, text, found, quota
 
     def quota_hit(self, key: str, agent: str, role: str) -> None:
         self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
+        events.emit("ai.quota", ticket=key, role=role, agent=agent, cooldown_minutes=self.cfg.quota_cooldown_minutes)
         self.jira.comment(key, f"AI Flow: {agent} is not usable on {self.cfg.machine} during {role} (usage limit, empty balance or sign-in problem). "
                                f"Cooling it down for {self.cfg.quota_cooldown_minutes} min; the ticket will be reassigned to another AI "
                                f"and continues from the branch and the hand-over comments.")
 
     def failed(self, key: str, role: str, agent: str, why: str, text: str) -> None:
         count = self.redis.incr(f"attempts:{key}:{role}", 7 * DAY)
+        events.emit("ai.failed", ticket=key, role=role, agent=agent, why=why, attempt=count, of=self.cfg.max_attempts)
         self.jira.comment(key, f"AI Flow: {agent} on {self.cfg.machine} ended the {role} run without a usable result ({why}); "
                                f"attempt {count}/{self.cfg.max_attempts}. Last output: {text[-600:]!r}")
         if count >= self.cfg.max_attempts:
@@ -1275,6 +1400,7 @@ class Supervisor:
         """Return the ticket to To Do with a reason the next developer run can act on."""
         self.release_slot(key, repo.name)
         cycles = self.redis.incr(f"cycles:{key}", 30 * DAY)
+        events.emit("ticket.rework", ticket=key, round=cycles, headline=headline[:300], items=len(items))
         lines = [f"Rework needed (round {cycles}): {headline}", "", details.strip()]
         if items:
             lines += ["", "Feedback items. Answer each one in the replies file (see the developer instructions):"]
@@ -1318,6 +1444,9 @@ class Supervisor:
             log(f"{key}: gate check failed: {error}")
             return False
         action, detail = decide(info)
+        events.emit("gate.decision", ticket=key, action=action, detail=detail, pr=pr.get("number"), ci=info.get("ci"), behind=info.get("behind"),
+                    conflicting=info.get("conflicting"), feedback=len(info.get("feedback", [])), stuck=len(info.get("stuck", [])),
+                    qa_ok=info.get("qa_ok"), draft=info.get("draft"), waited_minutes=round(info.get("ci_waited_minutes", 0), 1))
         if action in ("qa", "merge") and not self.take_slot(key, repo):
             self.note_gate(key, "waiting for another pull request of this repository to finish QA and merge")
             return False
@@ -1501,6 +1630,7 @@ class Supervisor:
     def to_human_review(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
         self.release_slot(key, repo.name)
         self.redis.set(f"humanreview:{key}", "1", 30 * DAY)
+        events.emit("ticket.human_review", ticket=key, pr=pr.get("number"), url=pr.get("url"))
         self.jira.comment(key, f"AI Flow: CI, feedback and QA passed on {pr['url']} (head {pr['headRefOid'][:10]}). This ticket requires a human: "
                                f"review the pull request, then move the ticket to Ready to merge (the supervisor updates the branch if it is "
                                f"outdated and merges it) or to To Do with a comment to ask for changes. No preview deployment yet (JAIF-28).")
@@ -1598,13 +1728,15 @@ class Supervisor:
             log(f"{key}: {step}: {error}")
             cleanup_status = f"Cleanup failed ({error}); remove the worktree by hand."
         self.release_slot(key, repo.name)
+        events.emit("ticket.done", ticket=key, repo=repo.name, base=base, pr=pr.get("number"), cleanup=cleanup_status[:120])
+        self.remember_case(key, repo, pr)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
         for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
-                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel"):
+                     "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel", "recalled"):
             self.redis.delete(f"{name}:{key}")
 
 
@@ -1638,6 +1770,14 @@ def main(argv: list[str] | None = None) -> int:
                 print("  WARNING: no ai_limits: every worker may start AI sessions with no machine-wide cap (usage limits and cooldowns follow)")
             elif len(ids) > sum(limits.values()):
                 print(f"  WARNING: {len(ids)} workers but the AI limits add up to {sum(limits.values())}: some workers will wait for an AI")
+            obs = config.obs
+            on = bool(obs.get("AIFLOW_OBS_URL") and obs.get("AIFLOW_OBS_USER") and obs.get("AIFLOW_OBS_PASSWORD"))
+            print(f"  events: {'ON' if on else 'off'} -> {obs.get('AIFLOW_OBS_URL') or 'no obs_url'} org {obs.get('AIFLOW_OBS_ORG', 'default')} "
+                  f"stream {obs.get('AIFLOW_OBS_STREAM', 'aiflow_events')}" + ("" if on else " (needs obs_url in aiflow.toml and AIFLOW_OBS_USER/PASSWORD in Workspaces/.env)"))
+            memory = config.memory
+            print(f"  memory: {'ON' if memory.get('AIFLOW_MEMORY_URL') and memory.get('AIFLOW_MEMORY_TOKEN') else 'off'} -> {memory.get('AIFLOW_MEMORY_URL') or 'no memory_url'}"
+                  + ("" if memory.get('AIFLOW_MEMORY_TOKEN') else " (needs AIFLOW_MEMORY_TOKEN in Workspaces/.env)")
+                  + ("" if memory.get('AIFLOW_MEMORY_AI_TOKEN') else "; the AIs get no aiflow-mem access without AIFLOW_MEMORY_AI_TOKEN"))
             policy = config.operator_policy
             print(f"  operator: {'ON' if policy.enabled else 'off (config/operator.toml)'}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
                   f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; switch: `aiflow-work operator on|off`")
@@ -1677,11 +1817,14 @@ def main(argv: list[str] | None = None) -> int:
         redis.set("restart", str(int(time.time())), 7 * 24 * 3600)  # workers started later ignore it
         print("restart requested for all workers")
         return 0
+    events.configure(cfg.obs, cfg.machine, cfg.worker_label, cfg.root / ".tmp" / "aiflow", home=cfg.home)
     supervisor = Supervisor(cfg, Jira(cfg.root), redis)
     (cfg.root / ".tmp").mkdir(exist_ok=True)
     if "--once" in args:
         return 0 if supervisor.tick() else 3
     supervisor.run_forever()
+    events.emit("worker.stop", retired=supervisor.retired)
+    events.close()
     return 3 if supervisor.retired else 0  # 3: the unit does not restart it (RestartPreventExitStatus=2 3)
 
 

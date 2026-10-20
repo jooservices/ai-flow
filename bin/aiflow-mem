@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# AI memory from a terminal: bin/aiflow-mem search "crawl retry" --project JAVM | add --kind lesson --title ... --body ... | get <id> | feedback <id> --helpful
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$DIR"
+exec python3 -m aiflow.memory.cli "$@"

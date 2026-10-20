@@ -100,6 +100,8 @@ class Settings:
     workspace_name: str
     home: str = ""   # Jira key of the project this worker belongs to (worker id `JAVM-2`); empty for the shared workers (`1`, `2`)
     label: str = ""  # worker id as written in the unit name, `2` or `JAVM-2`; empty = the slot number
+    memory: dict = field(default_factory=dict)  # AIFLOW_MEMORY_URL, AIFLOW_MEMORY_TOKEN (supervisor, admin), AIFLOW_MEMORY_AI_TOKEN (for the AIs, client)
+    obs: dict = field(default_factory=dict)  # AIFLOW_OBS_*: OpenObserve address, org, stream and the login (from the environment)
     notify: dict = field(default_factory=dict)  # AIFLOW_NOTIFY_* and JIRA_URL, for the operator's messages to the owner
     operator_policy: Any = None  # aiflow.operator_policy.Policy
 
@@ -242,6 +244,8 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         quota_block_minutes=_int(merged, "AIFLOW_QUOTA_BLOCK_MINUTES", 30),
         recheck_seconds=_int(merged, "AIFLOW_RECHECK_SECONDS", 120),
         workspace_name=merged.get("AIFLOW_WORKSPACE_NAME", {"wsl": "WSL", "mac": "Mac"}.get(machine, machine)),
+        memory={k: v for k, v in merged.items() if k.startswith("AIFLOW_MEMORY_")},
+        obs={k: v for k, v in merged.items() if k.startswith("AIFLOW_OBS_")},
         notify={k: v for k, v in merged.items() if k.startswith("AIFLOW_NOTIFY_") or k == "JIRA_URL"},
         operator_policy=operator_policy.load(directory),
     )

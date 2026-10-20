@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The memory service (the only process with the PostgreSQL credential). It needs the pg8000 driver, which uv provides without touching the system.
+# Settings in Workspaces/.env: AIFLOW_MEMORY_PG_HOST/PORT/DB/USER/PASSWORD, optional AIFLOW_MEMORY_HOST/PORT; tokens: JOOservices/config/memory-tokens.json
+set -Eeuo pipefail
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$DIR"
+exec uv run --quiet --no-project --with pg8000 python3 -m aiflow.memory.service "$@"

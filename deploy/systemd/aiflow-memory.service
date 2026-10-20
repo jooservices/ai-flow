@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Flow memory service (PostgreSQL behind a small HTTP API)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Workspaces/JOOservices/projects/ai-flow
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Workspaces/JOOservices/projects/ai-flow/bin/aiflow-memory
+Restart=always
+RestartSec=15
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target

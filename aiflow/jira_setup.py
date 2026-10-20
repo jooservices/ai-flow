@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import events
+
 FIELD_TYPES = {
     "select": ("com.atlassian.jira.plugin.system.customfieldtypes:select", "com.atlassian.jira.plugin.system.customfieldtypes:multiselectsearcher"),
     "text": ("com.atlassian.jira.plugin.system.customfieldtypes:textfield", "com.atlassian.jira.plugin.system.customfieldtypes:textsearcher"),
@@ -55,6 +57,7 @@ class Setup:
     def step(self, text: str) -> bool:
         """Report an action; True when it must really run."""
         self.changes += 1
+        events.emit("setup.step", project=self.key, text=text, applied=self.apply)
         self.out(("DO    " if self.apply else "PLAN  ") + text)
         return self.apply
 
@@ -220,11 +223,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="really create what is missing (default: only print the plan)")
     args = parser.parse_args(argv)
     cfg = load()
+    events.configure(cfg.obs, cfg.machine, "setup", cfg.root / ".tmp" / "aiflow")
     try:
         Setup(Jira(cfg.root)._library(), load_spec(), args.project.upper(), args.apply).run()
     except SetupError as error:
         print(f"ERROR {error}", file=sys.stderr)
+        events.close()
         return 1
+    events.close()
     return 0
 
 

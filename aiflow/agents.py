@@ -37,12 +37,13 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def run_env(agent: str, workdir: Path, root: Path) -> dict[str, str]:
+def run_env(agent: str, workdir: Path, root: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Environment of an AI process. PWD must be the worktree: some CLIs (OpenCode) take the project directory from PWD, not from
     the real working directory, and then treat the worktree as an external directory and reject every command in it."""
     env = child_env()
     env.pop("OPENCODE_CONFIG_CONTENT", None)
     env["PWD"] = str(workdir)
+    env.update(extra or {})
     # No AI may write to GitHub: every AI acts as the owner's account, so its comments would be read back as the owner's own
     # feedback. An empty gh configuration and no token make every gh call fail to authenticate; the supervisor keeps its login.
     empty = root / ".tmp" / "aiflow" / "gh-empty"
@@ -74,7 +75,7 @@ SAFE_BASH = ("git", "python3", "ls", "cat", "grep", "find", "sed", "head", "tail
 def claude_allowed(root: Path) -> str:
     """Claude may edit files, search, and run a fixed set of commands plus the Jira adapter and the shared runtimes."""
     bash = [f"Bash({name}:*)" for name in SAFE_BASH]
-    bash += [f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
+    bash += [f"Bash({root}/JOOservices/projects/ai-flow/bin/aiflow-mem:*)", f"Bash({root}/scripts/jira:*)", f"Bash({root}/scripts/docker/runtime:*)", f"Bash(scripts/docker/runtime:*)"]
     return ",".join(["Read", "Edit", "Write", "Glob", "Grep", *bash])
 
 
@@ -101,7 +102,7 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
                 "--add-dir", str(root / ".tmp")]
         return argv, prompt
     if agent == "Codex":
-        argv = ["codex", "exec", "-C", str(workdir), "-s", "read-only" if read_only else "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
+        argv = ["codex", "exec", "--json", "-C", str(workdir), "-s", "read-only" if read_only else "danger-full-access", "--skip-git-repo-check", "-o", str(result_file),
                 *(["-m", model] if model else []), *(["-c", f'model_reasoning_effort="{effort}"'] if effort else []), "-"]
         return argv, prompt
     if agent == "Grok":
@@ -114,7 +115,7 @@ def build_command(agent: str, workdir: Path, result_file: Path, prompt: str, roo
                 *(["-m", model] if model else []), *(["--reasoning-effort", effort] if effort else []),
                 "--prompt-file", str(prompt_file)], None
     if agent == "OpenCode":
-        return ["opencode", "run", *(["-m", model] if model else []), prompt], None
+        return ["opencode", "run", "--format", "json", *(["-m", model] if model else []), prompt], None
     raise ValueError(f"unknown agent {agent!r}")
 
 
@@ -123,6 +124,19 @@ def final_text(agent: str, log_file: Path, result_file: Path) -> str:
     if agent == "Codex" and result_file.is_file():
         return result_file.read_text(encoding="utf-8", errors="replace")
     text = log_file.read_text(encoding="utf-8", errors="replace") if log_file.is_file() else ""
+    if agent == "OpenCode":
+        parts = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "text" and isinstance((event.get("part") or {}).get("text"), str):
+                    parts.append(event["part"]["text"])
+        if parts:
+            return "\n".join(parts)
     if agent == "Claude":
         for line in reversed(text.splitlines()):
             try:

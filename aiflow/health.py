@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import events
 from .config import load
 from .jira import Jira
 from .lock import Redis
@@ -81,11 +82,15 @@ def usage_summary(redis, day: str) -> str | None:
         if not raw:
             continue
         run = json.loads(raw)
-        row = totals.setdefault((run["ai"], run["role"]), [0, 0.0, 0])
+        row = totals.setdefault((run["ai"], run["role"]), [0, 0.0, 0, 0, 0.0])
         row[0] += 1
         row[1] += run["minutes"]
         row[2] += 0 if run["why"] == "ok" else 1
-    lines = [f"- {ai} {role}: {int(row[0])} run(s), {row[1]:.0f} min, {int(row[2])} not clean" for (ai, role), row in sorted(totals.items())]
+        row[3] += run.get("tokens", 0)
+        row[4] += run.get("cost", 0)
+    lines = [f"- {ai} {role}: {int(row[0])} run(s), {row[1]:.0f} min, {int(row[2])} not clean"
+             + (f", {int(row[3]):,} tokens" if row[3] else "") + (f" (list price ${row[4]:.2f})" if row[4] else "")
+             for (ai, role), row in sorted(totals.items())]
     labels = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
     for name, peak in zip(peak_names, redis.get_many(peak_names)):
         if not peak:
@@ -100,18 +105,23 @@ def main() -> int:
     cfg = load()
     redis = Redis(cfg.redis_host, cfg.redis_port, cfg.redis_db, cfg.redis_prefix, cfg.redis_password, cfg.redis_user)
     jira = Jira(cfg.root)
+    events.configure(cfg.obs, cfg.machine, "health", cfg.root / ".tmp" / "aiflow")
     found = problems(cfg, redis, jira)
+    events.emit("health.check", problems=len(found), kinds=",".join(kind for kind, _ in found))
     for kind, message in found:
         print(f"PROBLEM {kind}: {message}")
+        events.emit("health.problem", kind=kind, message=message[:500])
         if cfg.health_ticket and redis.get(f"alert:{kind}") is None:
             redis.set(f"alert:{kind}", "1", HOUR)  # at most one alert per kind and hour
             jira.comment(cfg.health_ticket, f"AI Flow health alert from {cfg.machine}: {message}")
+            events.emit("health.alert", kind=kind, ticket=cfg.health_ticket)
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     summary = usage_summary(redis, yesterday)
     if summary and cfg.health_ticket and redis.acquire(f"usage-report:{yesterday}", "health", 3 * 86400):
         jira.comment(cfg.health_ticket, summary)
     if not found:
         print("OK all expected supervisors are beating and nothing is blocked")
+    events.close()
     return 1 if found else 0
 
 

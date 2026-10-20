@@ -106,5 +106,9 @@ def report(agent: str, log_file: Path, **fields: Any) -> dict[str, Any]:
     except OSError:
         text = ""
     found = parse(agent, text)
-    events.emit("ai.usage", agent=agent, **fields, **found)
+    asked = fields.pop("model", None)  # the model the supervisor asked for; `model` in the report is the one the log says answered
+    row = {**fields, **found}  # one dict: a key present in both can never be passed twice to emit()
+    if asked:
+        row["model_requested"] = asked
+    events.emit("ai.usage", agent=agent, **row)
     return found

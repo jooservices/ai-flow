@@ -186,6 +186,6 @@ State lives in one Redis shared by every machine (plain TCP client in `aiflow/lo
 ## Known limits
 
 - A failed cleanup after a merge is reported in the Jira comment, and the worktree must then be removed by hand.
-- Codex runs with `danger-full-access` (its workspace-write mode makes `.git` read-only, so it cannot commit); Claude runs with an allowlist.
+- Codex runs with `danger-full-access` (its workspace-write mode makes `.git` read-only, so it cannot commit); Claude runs with an allowlist (file tools, git, make, composer, npm, npx, node, php, `bash ./docker/scripts/` and the shared runtimes; force push, hard reset, `docker run` and volume removal stay denied).
 - The PR title check of a repository must accept the Conventional Commits form above. Repositories with other rules need a per-repo setting (not built yet).
 - A pull request is read through the GitHub CLI of the machine that runs the gate; `gh` must be logged in as the account that owns the pull requests.

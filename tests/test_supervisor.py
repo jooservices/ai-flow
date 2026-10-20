@@ -1180,6 +1180,17 @@ class AgentCommandTests(unittest.TestCase):
         allowed = agents.claude_allowed(Path("/root")).split(",")
         self.assertIn("Bash(make:*)", allowed)
 
+    def test_claude_may_run_project_check_commands(self):
+        allowed = agents.claude_allowed(Path("/root")).split(",")
+        for rule in ("make", "composer", "npm", "npx", "node", "php", "bash ./docker/scripts/"):
+            self.assertIn(f"Bash({rule}:*)", allowed)
+
+    def test_claude_deny_list_is_unchanged(self):
+        self.assertEqual(agents.DENIED_BASH, (
+            "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)",
+            "Bash(docker run:*)", "Bash(docker compose run:*)", "Bash(docker system prune:*)", "Bash(docker volume rm:*)"))
+        self.assertFalse(set(agents.DENIED_BASH) & set(agents.claude_allowed(Path("/root")).split(",")))
+
     def test_grok_uses_a_prompt_file_and_the_plain_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             argv, stdin = agents.build_command("Grok", Path(tmp), Path(tmp) / "r.result", "the prompt", Path(tmp))

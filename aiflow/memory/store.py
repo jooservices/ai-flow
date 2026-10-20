@@ -10,9 +10,11 @@ from . import guard
 from .embed import Embedder, entry_text, literal
 
 SCHEMA = Path(__file__).with_name("schema.sql")
+SCHEMA_VECTOR = Path(__file__).with_name("schema_vector.sql")
 COLUMNS = ("id", "kind", "scope", "namespace", "project", "repo", "jira_key", "title", "body", "tags", "source", "status", "confidence", "supersedes",
            "created_by", "confirmations", "created_at", "verified_at", "last_used_at", "use_count", "helpful", "unhelpful")
 VISIBLE = ("verified", "promoted")
+QUERY_TIMEOUT = 3.0  # a search never waits long for Ollama: it falls back to words
 
 
 def public(row: tuple, names: tuple[str, ...]) -> dict[str, Any]:
@@ -50,10 +52,17 @@ class Store:
             conn.close()
 
     def migrate(self) -> None:
+        self.apply(SCHEMA)
+        try:
+            self.apply(SCHEMA_VECTOR)
+        except Exception:
+            self.embedder = None  # no pgvector in this PostgreSQL: the search works by words only
+
+    def apply(self, script: Path) -> None:
         conn = self.connect()
         try:
             cursor = conn.cursor()
-            for statement in self.statements(SCHEMA.read_text(encoding="utf-8")):
+            for statement in self.statements(script.read_text(encoding="utf-8")):
                 cursor.execute(statement)
             conn.commit()
         except Exception:
@@ -159,7 +168,7 @@ class Store:
     def query_vector(self, query: str) -> list[float] | None:
         if self.embedder is None or not query.strip():
             return None
-        found = self.embedder.embed([query])
+        found = self.embedder.embed([query], timeout=QUERY_TIMEOUT)
         return found[0] if found else None
 
     @staticmethod

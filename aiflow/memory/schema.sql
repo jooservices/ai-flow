@@ -126,11 +126,3 @@ create table if not exists memory_device (
     unique (namespace, name, location)
 );
 create index if not exists memory_device_namespace on memory_device (namespace, status);
-
--- Search by meaning (JAIF-83): vectors made by an embedding model (Ollama), 1024 dimensions (qwen3-embedding, mxbai-embed-large). Filled in the background,
--- an entry without a vector is found by words only.
-create extension if not exists vector;
-alter table memory_entry add column if not exists embedding vector(1024);
-alter table memory_entry add column if not exists embedding_model text;
-alter table memory_entry add column if not exists embedded_at timestamptz;
-create index if not exists memory_entry_embedding on memory_entry using hnsw (embedding vector_cosine_ops);

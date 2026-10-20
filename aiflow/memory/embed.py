@@ -27,13 +27,13 @@ class Embedder:
             minimum = DEFAULT_MIN_SIMILARITY
         return cls(url, (env.get("AIFLOW_MEMORY_EMBED_MODEL") or DEFAULT_MODEL).strip(), minimum)
 
-    def embed(self, texts: list[str]) -> list[list[float]] | None:
+    def embed(self, texts: list[str], timeout: float | None = None) -> list[list[float]] | None:
         if not texts:
             return []
         body = json.dumps({"model": self.model, "input": [t[:MAX_CHARS] for t in texts]}).encode()
         request = urllib.request.Request(self.url + "/api/embed", data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 vectors = json.loads(response.read()).get("embeddings")
         except Exception:
             return None

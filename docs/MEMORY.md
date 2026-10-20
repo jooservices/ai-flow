@@ -40,7 +40,7 @@ Search finds an entry by its words and, when an embedding server is configured, 
 - The same holds for the scoped notes (`search`).
 
 ## Run it
-- Database: any PostgreSQL 14+ (the shared Docker of a machine for development: `scripts/docker/shared provision-project ai-memory --postgres`). Extensions `pg_trgm` and `unaccent`; the service creates its tables when it starts (`schema.sql`).
+- Database: any PostgreSQL 14+ (the shared Docker of a machine for development: `scripts/docker/shared provision-project ai-memory --postgres`). Extensions `pg_trgm` and `unaccent` (and `vector` of pgvector for the search by meaning; without it the memory works by words only); the service creates its tables when it starts (`schema.sql`).
 - Service: `bin/aiflow-memory` (uses `uv run --with pg8000`, nothing is installed on the system); unit `deploy/systemd/aiflow-memory.service`. Its settings are in `Workspaces/.env` (`AIFLOW_MEMORY_PG_*`) and its tokens in `JOOservices/config/memory-tokens.json` (git-ignored; example in `config.example/memory-tokens.json`).
 - Clients: `memory_url` in aiflow.toml `[runtime]` and `AIFLOW_MEMORY_TOKEN` / `AIFLOW_MEMORY_AI_TOKEN` in `Workspaces/.env`. `bin/aiflow-work check` shows whether memory is on.
 - Tests: `python3 -m unittest discover -s tests`; against a real database: `uv run --with pg8000 python -m unittest tests.test_memory_pg` (database `ai_memory_test`).
@@ -50,4 +50,4 @@ Search finds an entry by its words and, when an embedding server is configured, 
 The same service stores a second kind of memory: notes in a scope (global, namespace, namespace/project), projects and devices, with integer ids, the types `fact, decision, lesson, knowledge, idea, reference` and the lifecycle `fresh -> verified -> promoted -> decayed`. It is what a workspace's own command line uses when its storage is set to this service; the rules (search sees global + the namespace (+ the project), a change needs the exact scope, verify/promote/decay/consolidate/stale) are the same as a machine-local file would have. Admin token only: `POST /v1/scoped/<operation>` with operations `add, get, search, list, update, status, stale, consolidate, stats, projects, project_update, device_add, device_list, device_update` and the one-time `import_entry, import_project, import_device` (idempotent through `origin`). The code is `aiflow/memory/scoped.py`; the client is the workspace's concern, not ai-flow's.
 
 ## Not yet
-Semantic (vector) search needs the `pgvector` extension, which the shared PostgreSQL image does not have; search is full-text plus trigram. Importing the older notes (`scripts/mem` SQLite, Claude and Codex memory files) needs a separate plan approved by the owner.
+Importing the older notes (`scripts/mem` SQLite, Claude and Codex memory files) needs a separate plan approved by the owner.

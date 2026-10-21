@@ -324,7 +324,9 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
                                 "output": "The release worker did not report a valid checked commit SHA."}])
     repo = project.repo_name
     source, target = source_branch(project), target_branch(project)
-    current_source = ctx.github.branch_sha(repo, source)
+    if ctx.github is None:
+        raise RuntimeError("GitHub App is not connected")
+    current_source =ctx.github.branch_sha(repo, source)
     if current_source.lower() != sha.lower():
         detail = f"develop moved during the full check ({sha[:12]} checked, {current_source[:12]} now); retrying."
         _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=sha, gate_detail=detail)

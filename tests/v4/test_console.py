@@ -414,14 +414,15 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge'].map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations'].map(viewOf).join(','));")
+    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
+    assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects', 'integrations']" in page
 
 
 def test_knowledge_view_renders_resources_history_and_owner_approval_diff():

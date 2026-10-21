@@ -8,7 +8,8 @@ Read AGENTS.md and docs/SPEC.md first when they exist; they define the layout, r
 {rework}
 Rules:
 - Do not run git commit, git push or anything that changes branches or history. AI Flow commits and pushes your
-  work after you finish and opens the pull request.
+  work after you finish and opens the pull request. Ending with uncommitted changes (a resolved merge included)
+  is the expected way to finish: never report BLOCKED because you cannot commit, push or write to .git.
 - Stay inside this worktree. Do not read secrets or files outside it.
 - Write or update tests for every acceptance criterion and run them. Run the project's checks before you finish:
 {checks}

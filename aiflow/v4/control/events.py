@@ -2,7 +2,8 @@
 
 Every event shares the fields ts, type, ticket, project, step, run_id, fence, account, provider, model, node,
 duration_ms, outcome, reason (design: stream aiflow4_events). OpenObserve gets them in batches from a
-background thread; when it is down, events stay in the registry and the batch is retried.
+background thread; when it is down, events stay in the registry and the batch is retried. Node heartbeats go
+through ship() instead: OpenObserve only, so they neither flood the Command Center nor grow the events table.
 """
 from __future__ import annotations
 
@@ -46,12 +47,23 @@ class Events:
             {**row, "data": J(data)})
         out = {**{k: v for k, v in row.items() if v not in (None, "")}, **data, "id": rec["id"],
                "_timestamp": int(rec["ts"].timestamp() * 1_000_000)}
+        self._queue(out)
+        return out
+
+    def ship(self, type: str, **fields: Any) -> dict:
+        """High-volume telemetry (node heartbeats): OpenObserve only, never a registry row."""
+        out = {k: v for k, v in fields.items() if v not in (None, "")}
+        out["type"] = type
+        out["_timestamp"] = int(now().timestamp() * 1_000_000)
+        self._queue(out)
+        return out
+
+    def _queue(self, out: dict) -> None:
         if self.o2_url:
             try:
                 self.q.put_nowait(out)
             except queue.Full:
-                log.warning("event queue full; OpenObserve copy dropped (registry keeps it)")
-        return out
+                log.warning("event queue full; OpenObserve copy of %s dropped", out["type"])
 
     # --- OpenObserve shipping -------------------------------------------------------------------------------
     def start(self) -> None:

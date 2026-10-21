@@ -103,7 +103,8 @@ def snapshot(ctx) -> dict[str, Any]:
                        " WHERE closed_at IS NULL ORDER BY opened_at DESC")
     incidents_recent = db.all("SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
                               " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20")
-    events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events ORDER BY id DESC LIMIT 60")
+    events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
+                    " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60")
     projects = [{"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
                  "work_minutes": p.work_minutes(), "counts": by_status.get(p.key, {})} for p in repo.projects.values()]
     return {

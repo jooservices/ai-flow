@@ -52,3 +52,25 @@ The median uses finished runs only. The numbers are read live from the `runs` ta
 The Delivery view shows the selected project in an **Analytics** panel: a 14-day inline SVG bar chart of runs
 per day, split into done or merged, rework, failed and other, and a table with one row per day and account.
 The panel refreshes every minute.
+
+### OpenObserve dashboards
+
+`o2/dashboards/aiflow-events.json` defines the **AI Flow events and runs** dashboard with panels for runs per
+hour by outcome, AI time per account, policy denials, incidents opened and node heartbeats. The panels query
+the `aiflow4_events` log stream populated by the control plane. Each successful node heartbeat is sent to
+OpenObserve as a `node.heartbeat` event only; it is not stored in the registry `events` table, so the Command
+Center event list and the table do not fill with heartbeats.
+
+From the repository root on a host that can reach OpenObserve, set the same URL and basic-auth value used by
+event shipping, then run the provisioner:
+
+```sh
+AIFLOW4_O2_URL=http://aiflow4-openobserve:5080/o2 O2_BASIC='<base64 username:password>' \
+  uv run --frozen python deploy/v4/o2/provision.py
+```
+
+`AIFLOW4_O2_URL` is the OpenObserve base URL, including any reverse-proxy prefix such as `/o2`. `O2_BASIC` is
+the base64 encoding of `username:password` (without the `Basic ` prefix). The provisioner uses the `default`
+organization and folder, creates the dashboard when its title is absent, and updates the existing dashboard
+using its OpenObserve ID and hash on later runs. The checked-in definition is authoritative, so provisioning
+again replaces changes made directly to this dashboard in the UI.

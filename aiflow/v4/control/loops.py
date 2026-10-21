@@ -38,7 +38,9 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s, now())"
             " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
             " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, synced_at=now()",
+            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated,"
+            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done'"
+            " THEN EXCLUDED.jira_updated ELSE tickets.done_at END, synced_at=now()",
             t)
         n += 1
     return n

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
 from .dev import api_node
 from .gitops import Git
 from .notes import note, project_env
@@ -118,7 +118,14 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
                                                     f"{(res.error_message or text.strip())[-400:]}")
             return result
-        # PASS
+        # PASS from the reviewer; CI on the PR head must agree before anything is merged
+        ci = wait_for_ci(api, c, pr.get("head_sha") or head, hb)
+        failed = [x for x in ci if x["state"] == "failure"]
+        if failed:
+            findings = "\n".join(f"- CI {x['name']}: failed ({x['url']})" for x in failed[:10])
+            return _rework(c, api, jira, pr_comment, result, findings, "CI failed", checks, t0=t0)
+        if ci:
+            checks += " · CI: " + ", ".join(f"{x['name']} {x['state']}" for x in ci[:8])
         result["summary"] = f"verify passed; checks: {checks}"[:1000]
         needs_human = "require-human" in c.ticket.get("labels", []) or project.get("merge", {}).get("require_human")
         if needs_human or not project.get("merge", {}).get("auto", True):
@@ -129,7 +136,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             jira("transition", to="Human review")
             result["outcome"] = "human"
             return result
-        title = f"{key}: {c.ticket['summary']}"
+        title = pr_title(c.ticket)
         m = api.call("POST", "/v1/github/merge", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
                                                   "title": title, "method": project.get("merge", {}).get("method", "squash")})
         if not m.get("merged"):
@@ -174,3 +181,20 @@ def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, che
     result.update(outcome="rework", summary=f"{why}: {findings}"[:1500])
     result.setdefault("details", {})["findings"] = findings
     return result
+
+
+def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wait_s: int = 900) -> list[dict]:
+    """Checks on the PR head; waits while any is pending (heartbeats keep the lease). [] when the repo has no CI."""
+    t_end = time.time() + max_wait_s
+    while True:
+        try:
+            ci = api.call("GET", "/v1/github/checks", params={"run_id": c.run_id, "fence": c.fence, "sha": sha})["checks"]
+        except Conflict:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("CI status unavailable: %s", e)
+            return []
+        if not any(x["state"] == "pending" for x in ci) or time.time() > t_end or hb.lost.is_set():
+            return ci
+        hb.progress = {"phase": "waiting for CI", "pending": [x["name"] for x in ci if x["state"] == "pending"]}
+        time.sleep(30)

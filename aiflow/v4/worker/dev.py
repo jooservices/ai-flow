@@ -87,11 +87,17 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                       rework=rework)
 
 
+def pr_title(ticket: dict) -> str:
+    """Conventional-commit title with the ticket key, e.g. 'feat: Monorepo scaffold and Makefile (TESTWP-4)'."""
+    title = ticket["summary"].strip().rstrip(".")
+    title = title[0].upper() + title[1:] if title else ticket["key"]
+    kind = {"Bug": "fix", "Hotfix": "fix", "Chore": "chore", "Docs": "docs", "Tech Debt": "refactor"}.get(ticket.get("type", ""), "feat")
+    suffix = f" ({ticket['key']})"
+    return f"{kind}: {title}"[:100 - len(suffix)] + suffix
+
+
 def commit_message(c: Claimed, summary: str) -> str:
-    title = c.ticket["summary"].strip().rstrip(".")
-    title = title[0].upper() + title[1:] if title else c.ticket["key"]
-    kind = "fix" if c.ticket.get("type") == "Bug" else "feat"
-    head = f"{kind}: {title}"[:100]
+    head = pr_title(c.ticket)
     return (f"{head}\n\n{summary}\n\nRefs: {c.ticket['key']}\nAI-Run: {c.run_id} ({c.account}, {c.provider}"
             f"{'/' + c.model if c.model else ''})\n")
 
@@ -193,7 +199,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 f"- run: {c.run_id}, fence {c.fence}\n- files changed: {len(changed)}\n\n"
                 "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
         pr = api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence, "repo": repo, "head": branch,
-                                                "base": project["base"], "title": f"{key}: {c.ticket['summary']}"[:120],
+                                                "base": project["base"], "title": pr_title(c.ticket),
                                                 "body": body, "draft": True})
         jira("comment", body=note(c, "draft PR opened", what=summary[:700],
                                   result=f"{len(changed)} files committed as {sha[:10]} on {branch}; draft PR {pr['url']}. Tests: {tests or 'not reported'}",

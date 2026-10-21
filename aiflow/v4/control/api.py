@@ -527,6 +527,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                         reason=res.get("message", "")[:200])
         return res
 
+    @app.get("/v1/github/checks")
+    def github_checks(run_id: str, fence: int, sha: str, node: str = Depends(node_auth)) -> dict:
+        run = run_row(run_id)
+        if run["node"] != node or not ctx.leases.valid(run["ticket_key"], run_id, fence):
+            raise HTTPException(409, "not the owner of this run")
+        project = ctx.repo().projects[run["project"]]
+        return {"checks": ctx.github.checks(project.repo_name, sha)}
+
     @app.post("/v1/github/comment")
     def github_comment(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "comment", {"number": body.number})

@@ -112,6 +112,20 @@ class GitHubApp:
             return {"merged": True, "sha": data.get("sha", ""), "message": data.get("message", "")}
         return {"merged": False, "sha": "", "message": f"{r.status_code}: {data.get('message', r.text[:200])}"}
 
+    def checks(self, repo: str, sha: str) -> list[dict]:
+        """Check runs and commit statuses of a commit: name, state (pending|success|failure|neutral), url."""
+        out = []
+        runs = self.api("GET", f"/repos/{self.org}/{repo}/commits/{sha}/check-runs?per_page=100", repo=repo)
+        for c in runs.get("check_runs", []):
+            state = "pending" if c["status"] != "completed" else (
+                "success" if c["conclusion"] in ("success", "skipped") else "neutral" if c["conclusion"] == "neutral" else "failure")
+            out.append({"name": c["name"], "state": state, "url": c.get("html_url", "")})
+        st = self.api("GET", f"/repos/{self.org}/{repo}/commits/{sha}/status", repo=repo)
+        for c in st.get("statuses", []):
+            state = {"success": "success", "pending": "pending"}.get(c["state"], "failure")
+            out.append({"name": c["context"], "state": state, "url": c.get("target_url", "")})
+        return out
+
     def bot_identity(self) -> tuple[str, str]:
         slug = self.meta["slug"]
         user = self._req("GET", f"/users/{slug}%5Bbot%5D", self.token()[0])

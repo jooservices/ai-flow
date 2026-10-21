@@ -52,3 +52,9 @@ def test_verdict_and_findings_parsing():
     text = "looked at it\nCHECKS: phpunit ok\nVERDICT: FAIL\nFINDINGS:\n- core/a.php: missing escaping\n- tests: none for AC2\n"
     assert VERDICT.search(text).group(1) == "FAIL"
     assert findings_of(text) == "- core/a.php: missing escaping\n- tests: none for AC2"
+
+
+def test_pr_title_is_a_conventional_commit_with_the_key():
+    from aiflow.v4.worker.dev import pr_title
+    assert pr_title({"key": "TESTWP-4", "summary": "monorepo scaffold.", "type": "Story"}) == "feat: Monorepo scaffold (TESTWP-4)"
+    assert pr_title({"key": "TESTWP-9", "summary": "Broken link", "type": "Bug"}).startswith("fix: Broken link")

@@ -11,7 +11,8 @@ class CodexAdapter(Adapter):
 
     def argv(self, spec: RunSpec) -> list[str]:
         cmd = ["codex", "exec", "--json", "--cd", spec.cwd, "--sandbox", "workspace-write",
-               "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true"]
+               "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true",
+               "-c", "features.apps=false"]
         if spec.model:
             cmd += ["-m", spec.model]
         if spec.effort:

@@ -24,6 +24,19 @@ def test_claude_events_from_spike_s1():
     assert rejected.error_kind == "quota" and rejected.reset_at.year >= 2026
 
 
+def test_codex_argv_disables_chatgpt_apps_and_keeps_options(tmp_path):
+    a = CodexAdapter()
+    cmd = a.argv(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path), model="gpt-6-luna", effort="high"))
+    assert cmd[cmd.index("features.apps=false") - 1] == "-c"
+    assert 'approval_policy="never"' in cmd
+    assert "sandbox_workspace_write.network_access=true" in cmd
+    assert cmd[:5] == ["codex", "exec", "--json", "--cd", str(tmp_path)]
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert cmd[cmd.index("-m") + 1] == "gpt-6-luna"
+    assert 'model_reasoning_effort="high"' in cmd
+    assert cmd[-1] == "p"
+
+
 def test_codex_and_grok_events_from_spikes():
     res = RunResult()
     CodexAdapter().parse_event({"type": "item.completed", "item": {"type": "agent_message", "text": "SUMMARY: x\nRESULT: DONE"}}, res)

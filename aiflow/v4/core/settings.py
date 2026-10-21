@@ -54,6 +54,7 @@ class Settings:
     o2_url: str = ""
     o2_basic: str = ""
     public_url: str = "http://127.0.0.1:18480"
+    gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
     # node / worker
     control_url: str = "http://10.44.0.10"
     node_name: str = ""
@@ -76,6 +77,7 @@ class Settings:
         s.control_repo = _env("CONTROL_REPO", s.control_repo)
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)
+        s.gatus_url = _env("GATUS_URL", s.gatus_url)
         s.control_url = _env("CONTROL_URL", s.control_url)
         s.node_name = _env("NODE_NAME", s.node_name)
         s.node_token_file = _env("NODE_TOKEN_FILE", s.node_token_file)

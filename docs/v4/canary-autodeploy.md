@@ -38,7 +38,8 @@ the pending ticket payload and latest failure are stored in the registry and ret
 even after the canary state is removed.
 
 When the minimum time and run count are met, the deployer promotes the release to the control plane and changes
-`CURRENT`; other nodes then receive it on heartbeat. At the maximum time, a candidate with fewer than the
+`CURRENT`; other nodes then receive it in a rolling upgrade ([Fleet upgrade](fleet-upgrade.md)), after the
+pre-upgrade check allowed the control plane to move. At the maximum time, a candidate with fewer than the
 required runs is treated as stable, and an informational incident records the low sample count before promotion.
 The bug project defaults to `TESTFLOW`; set `AIFLOW4_CANARY_BUG_PROJECT` in the control service environment to
 use another Jira project.

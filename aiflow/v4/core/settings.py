@@ -60,6 +60,13 @@ class Settings:
     public_url: str = "http://127.0.0.1:18480"
     join_control_url: str = ""
     gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
+    # fleet upgrades (docs/v4/fleet-upgrade.md)
+    control_version: str = ""  # the control plane's release (AIFLOW4_VERSION); not vX.Y.Z disables the skew policy
+    rollout_batch_size: int = 2  # nodes per wave after the canary
+    rollout_install_timeout_s: int = 1800  # a node must report the requested release within this time
+    rollout_soak_s: int = 120  # and keep heartbeating on it this long to pass its health check
+    rollout_canary_node: str = ""  # preferred canary; empty picks a node by name
+    version_max_minor_lag: int = 1  # how many minors a node may run behind the control plane
     # node / worker
     control_url: str = "http://10.44.0.10"
     node_name: str = ""
@@ -86,6 +93,12 @@ class Settings:
         s.public_url = _env("PUBLIC_URL", s.public_url)
         s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)
         s.gatus_url = _env("GATUS_URL", s.gatus_url)
+        s.control_version = _env("VERSION", s.control_version)
+        s.rollout_batch_size = max(1, int(_env("ROLLOUT_BATCH_SIZE", str(s.rollout_batch_size))))
+        s.rollout_install_timeout_s = int(_env("ROLLOUT_INSTALL_TIMEOUT_S", str(s.rollout_install_timeout_s)))
+        s.rollout_soak_s = int(_env("ROLLOUT_SOAK_S", str(s.rollout_soak_s)))
+        s.rollout_canary_node = _env("ROLLOUT_CANARY_NODE", _env("CANARY_NODE", s.rollout_canary_node))
+        s.version_max_minor_lag = max(0, int(_env("VERSION_MAX_MINOR_LAG", str(s.version_max_minor_lag))))
         s.control_url = _env("CONTROL_URL", s.control_url)
         s.node_name = _env("NODE_NAME", s.node_name)
         s.node_token_file = _env("NODE_TOKEN_FILE", s.node_token_file)

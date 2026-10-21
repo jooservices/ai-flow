@@ -24,13 +24,16 @@ control() {
   token=$(cat "$TOKEN_FILE" 2>/dev/null) || return 1
   printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fsS -K - --max-time 120 "$@"
 }
-reject() {
-  echo "$1" >&2
+report_failure() {
   local body
   body=$(printf '{"release_version": "%s", "detail": "installer: %s"}' "$VERSION" "${1//\"/}")
   control -X POST -H 'Content-Type: application/json' --data "$body" \
     "$CONTROL_URL/v1/nodes/$NODE_NAME/release-failures" >/dev/null 2>&1 \
     || echo "could not report the rejected release to the control API" >&2
+}
+reject() {
+  echo "$1" >&2
+  report_failure "$1"
   exit 4
 }
 
@@ -96,6 +99,8 @@ if ! systemctl is-active --quiet aiflow4-node-agent || ! /srv/aiflow/current/.ve
     echo "agent unhealthy on $VERSION; rolling back to $(basename "$PREV")" >&2
     ln -sfn "$PREV" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
     systemctl restart aiflow4-node-agent
+    # a fleet rollout treats this as a failed health check and halts (docs/v4/fleet-upgrade.md)
+    report_failure "agent unhealthy on $VERSION; switched back to $(basename "$PREV")"
     exit 6
   fi
 fi

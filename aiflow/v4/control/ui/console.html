@@ -802,7 +802,8 @@ function renderDBody() {
   var runs = D().recent_runs.filter(function (r) { return byKey[r.ticket]; });
   var devDone = runs.filter(function (r) { return r.step === 'dev' && r.outcome === 'done' && r.duration_s; }).map(function (r) { return r.duration_s; }).sort(function (a, b) { return a - b; });
   var med = devDone.length ? devDone[Math.floor(devDone.length / 2)] : null;
-  var p = D().projects.filter(function (x) { return x.key === S.project; })[0] || { work_minutes: { target: 30, warn: 45, hard: 60 } };
+  var p = D().projects.filter(function (x) { return x.key === S.project; })[0] || {};
+  var wm = p.work_minutes || { target: 30, warn: 45, hard: 60 };
 
   var h = '<section class="kpis" aria-label="Project summary">';
   h += kpi('Tickets', String(work.length), all.length - work.length + ' epics', '', 'd-board');
@@ -811,7 +812,7 @@ function renderDBody() {
   h += kpi('AI working', String(cnt('In Progress')), D().active_runs.filter(function (r) { return byKey[r.ticket]; }).length + ' runs live', '', 'd-board');
   h += kpi('In verify', String(cnt('In Verify')), 'draft PR open, checks next', '', 'd-board');
   h += kpi('Waiting on people', String(people), people ? 'human review or owner answer' : 'nothing waiting', people ? 'warn' : '', 'd-att');
-  h += kpi('Median dev run', med == null ? '—' : mmss(med), 'target ' + p.work_minutes.target + ' min · hard ' + p.work_minutes.hard, med != null && med > p.work_minutes.warn * 60 ? 'warn' : '', 'd-runs');
+  h += kpi('Median dev run', med == null ? '—' : mmss(med), 'target ' + wm.target + ' min · hard ' + wm.hard, med != null && med > wm.warn * 60 ? 'warn' : '', 'd-runs');
   h += '</section>';
 
   var epics = sortEpics(all.filter(function (t) { return t.type === 'Epic'; }));
@@ -845,7 +846,7 @@ function renderDBody() {
     var lr = t.last_run;
     if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The developer AI stopped with a question; answer in the Jira ticket']);
     else if (t.status === 'Human review') att.push([t, 'info', 'Human review', 'Require human = Yes; checks passed']);
-    else if (t.run && (t.run.elapsed_s || 0) >= p.work_minutes.target * 60) att.push([t, (t.run.elapsed_s >= p.work_minutes.warn * 60 ? 'crit' : 'warn'), 'Over ' + p.work_minutes.target + ' min', t.run.account + ' · ' + mmss(t.run.elapsed_s)]);
+    else if (t.run && (t.run.elapsed_s || 0) >= wm.target * 60) att.push([t, (t.run.elapsed_s >= wm.warn * 60 ? 'crit' : 'warn'), 'Over ' + wm.target + ' min', t.run.account + ' · ' + mmss(t.run.elapsed_s)]);
     else if (!t.run && lr && t.status === 'To Do' && ['failed', 'lost', 'timeout', 'quota'].indexOf(lr.outcome) >= 0) att.push([t, 'warn', 'Retry', lr.account + ': ' + lr.outcome + (lr.error_kind ? ' (' + lr.error_kind + ')' : '')]);
   });
   if (!att.length) h += '<div class="col-empty">Nothing needs attention</div>';
@@ -911,7 +912,7 @@ function card(t, p) {
   h += '<span class="c-title">' + esc(t.summary) + '</span>';
   if (flags) h += '<span class="c-top">' + flags + '</span>';
   if (t.run) {
-    var hard = (p.work_minutes.hard || 60) * 60;
+    var hard = (wm.hard || 60) * 60;
     h += '<span class="c-run"><span class="sdot" data-tone="info"></span><span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step) + ' · fence #' + t.run.fence + '</span>';
     h += '<span class="c-clock"><span class="track"><i data-clock="' + (t.run.elapsed_s || 0) + '" data-hard="' + hard + '"></i><b style="left:50%"></b><b style="left:75%"></b></span><span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span></span>';
   } else if (t.last_run) {

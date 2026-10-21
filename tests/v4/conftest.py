@@ -148,6 +148,18 @@ class FakeJira:
 class FakeGitHub:
     def __init__(self) -> None:
         self.prs: list[dict] = []
+        self.commits: list[dict] = []
+        self.branches: list[tuple[str, str, str]] = []
+
+    def default_branch(self, repo):
+        return "develop"
+
+    def create_branch(self, repo, branch, base):
+        self.branches.append((repo, branch, base))
+
+    def commit_file(self, repo, branch, path, content, message):
+        self.commits.append({"repo": repo, "branch": branch, "path": path, "content": content, "message": message})
+        return f"commit{len(self.commits):04d}"
 
     def token(self, repo=None, permissions=None):
         from datetime import datetime, timedelta, timezone
@@ -158,6 +170,9 @@ class FakeGitHub:
         pr = {"html_url": f"https://github.com/jooservices/{repo}/pull/{len(self.prs) + 1}", "number": len(self.prs) + 1}
         self.prs.append({"repo": repo, "head": head, "base": base, "title": title, "draft": draft})
         return pr
+
+    def create_control_pr(self, repo, head, base, title, body):
+        return self.create_pr(repo, head, base, title, body, draft=True)
 
     def bot_identity(self):
         return ("jooservices-aiflow-bot[bot]", "1+jooservices-aiflow-bot[bot]@users.noreply.github.com")
@@ -179,7 +194,8 @@ class FakeGitHub:
 @pytest.fixture
 def ctx(db, leases, control_repo):
     s = Settings(join_token="join-secret", join_control_url="https://control.example.test",
-                 reviewer_token="review-secret", lease_ms=90_000, jira_projects=["TESTWP"])
+                 reviewer_token="review-secret", owner_token="owner-secret", lease_ms=90_000,
+                 jira_projects=["TESTWP"])
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     return c

@@ -12,6 +12,8 @@ x-app: &app
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
     AIFLOW4_JOIN_CONTROL_URL: ${AIFLOW4_JOIN_CONTROL_URL:-}
     AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
+    AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR: /var/cache/aiflow4-memory/fastembed
+    HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
     AIFLOW4_PUBLIC_URL: http://127.0.0.1:18480
     AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
@@ -21,6 +23,7 @@ x-app: &app
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github:ro
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
     - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
+    - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
   logging: { driver: journald, options: { tag: "{{.Name}}" } }
   networks: [control, services, edge]
 
@@ -31,7 +34,7 @@ services:
     <<: *app
     container_name: aiflow4-control-api-a
     command: ["control-api", "--port", "8080"]
-    mem_limit: 512m
+    mem_limit: 2g
     healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"], interval: 5s, timeout: 5s, retries: 5, start_period: 5s }
     labels:
       traefik.enable: "true"
@@ -50,7 +53,7 @@ services:
     <<: *app
     container_name: aiflow4-control-loops
     command: ["control-loops"]
-    mem_limit: 384m
+    mem_limit: 2g
 
 networks:
   control: { name: aiflow4-control, external: true }

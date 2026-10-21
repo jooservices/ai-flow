@@ -4,11 +4,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .. import VERSION
+
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
 
 def _age(ts: datetime | None) -> int | None:
     return None if ts is None else int((datetime.now(timezone.utc) - ts).total_seconds())
+
+
+def _iso(ts: datetime | None) -> str | None:
+    return None if ts is None else ts.isoformat()
 
 
 def snapshot(ctx) -> dict[str, Any]:
@@ -27,6 +33,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"], "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "last_heartbeat": _iso(n["last_heartbeat"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
@@ -101,7 +108,8 @@ def snapshot(ctx) -> dict[str, Any]:
                  "work_minutes": p.work_minutes(), "counts": by_status.get(p.key, {})} for p in repo.projects.values()]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
-        "control_repo": repo.ref, "versions": repo.versions,
+        "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
+        "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets, "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events,

@@ -43,7 +43,9 @@
   color-scheme:dark;
 }
 *{box-sizing:border-box}
-body{background:var(--bg); color:var(--fg); font-family:var(--f-ui); font-size:14px; line-height:1.45}
+html{overflow-x:hidden}
+body{margin:0; min-height:100vh; display:flex; flex-direction:column; overflow-x:hidden; background:var(--bg); color:var(--fg); font-family:var(--f-ui); font-size:14px; line-height:1.45}
+body > main{flex:1 0 auto; width:100%}
 body::before{content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top,0px); z-index:30; background:var(--surface)}
 button,input,select,textarea{font:inherit; color:inherit}
 a{color:var(--accent)}
@@ -51,7 +53,9 @@ a{color:var(--accent)}
 .mono{font-family:var(--f-mono); font-variant-numeric:tabular-nums}
 .muted{color:var(--muted)}
 .num{font-variant-numeric:tabular-nums}
-.wrap{max-width:1400px; margin:0 auto; padding-left:max(16px, env(safe-area-inset-left,0px)); padding-right:max(16px, env(safe-area-inset-right,0px))}
+/* full window width: 16 px gutter, 24 px on screens wider than 1400 px */
+.wrap{width:100%; max-width:none; margin:0; padding-left:max(16px, env(safe-area-inset-left,0px)); padding-right:max(16px, env(safe-area-inset-right,0px))}
+@media (min-width:1401px){ .wrap{padding-left:max(24px, env(safe-area-inset-left,0px)); padding-right:max(24px, env(safe-area-inset-right,0px))} }
 
 /* top bar */
 .topbar{position:sticky; top:env(safe-area-inset-top,0px); z-index:20; background:var(--surface); border-bottom:1px solid var(--line)}
@@ -235,6 +239,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .drawer-h .d-title{flex:1; min-width:0}
 .drawer-h h3{margin:2px 0 0; font-family:var(--f-cond); font-size:20px; font-weight:600; text-wrap:balance}
 .drawer-b{padding:16px 18px 28px; overflow:auto; display:flex; flex-direction:column; gap:18px}
+.report-md{margin:0; padding:12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.55 var(--f-mono); color:var(--text)}
 .dsec{display:flex; flex-direction:column; gap:8px}
 .dsec h4{margin:0; font-family:var(--f-cond); font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:600}
 .facts{display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:10px}
@@ -321,6 +326,9 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .epic .e-s{font-size:12px; color:var(--muted)}
 .ebar{display:flex; height:10px; border-radius:6px; overflow:hidden; background:var(--track)}
 .ebar span{height:100%}
+.an-chart{width:100%; max-width:640px; height:auto; display:block}
+.an-chart text{fill:var(--muted); font-family:var(--f-mono); font-size:10px}
+.an-ok{background:var(--good); fill:var(--good)} .an-rework{background:var(--warn); fill:var(--warn)} .an-failed{background:var(--crit); fill:var(--crit)} .an-other{background:var(--faint); fill:var(--faint)}
 .st-done{background:var(--good)} .st-verify{background:var(--accent)} .st-progress{background:#7b6cff} .st-todo{background:var(--faint)} .st-wait{background:var(--warn)}
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
 .empty{font-size:13px; color:var(--muted); padding:8px 0}
@@ -328,7 +336,14 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .runs tbody tr{cursor:pointer}
 .small{font-size:12px; color:var(--muted)}
 .linkbtn{background:none; border:0; padding:0; color:var(--accent); cursor:pointer; font:inherit}
-@media (max-width:640px){ .topbar{position:static} .epic{grid-template-columns:minmax(0,1fr)} .ver{grid-template-columns:90px minmax(0,1fr)} }
+.footer{margin-top:24px; background:var(--surface); border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; padding-bottom:env(safe-area-inset-bottom,0px)}
+.footer .wrap{display:flex; flex-wrap:wrap; align-items:center; gap:6px 18px; padding-block:12px}
+.footer .f-item{display:inline-flex; gap:6px; align-items:baseline; min-width:0; overflow-wrap:anywhere}
+.footer .f-k{color:var(--faint)}
+.footer .f-v{font-family:var(--f-mono); color:var(--fg)}
+.footer .f-links{display:inline-flex; flex-wrap:wrap; gap:4px 14px}
+.footer .f-copy{margin-left:auto}
+@media (max-width:640px){ .topbar{position:static} .epic{grid-template-columns:minmax(0,1fr)} .ver{grid-template-columns:90px minmax(0,1fr)} .footer .f-copy{margin-left:0} }
 </style>
 </head>
 <body>
@@ -357,6 +372,19 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div id="dbody" class="view"></div>
   </section>
 </main>
+<footer class="footer" id="footer">
+  <div class="wrap">
+    <span class="f-item"><span class="f-k">AI Flow</span><span class="f-v" id="f-version">—</span></span>
+    <span class="f-item"><span class="f-k">Environment</span><span class="f-v" id="f-env">—</span></span>
+    <span class="f-item"><span class="f-k">Control repo</span><span class="f-v" id="f-control">—</span></span>
+    <nav class="f-links" aria-label="Operations tools">
+      <a id="f-o2" href="/o2/" target="_blank" rel="noopener">OpenObserve</a>
+      <a id="f-mail" href="/mail/" target="_blank" rel="noopener">Mailpit</a>
+      <a id="f-gatus" href="/gatus/" target="_blank" rel="noopener">Gatus</a>
+    </nav>
+    <span class="f-copy">&copy; <span id="f-year">2026</span> JOOservices</span>
+  </div>
+</footer>
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawer-title"></aside>
 <div class="toasts" id="toasts" aria-live="polite"></div>
@@ -367,7 +395,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
 
-var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20;
+var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20, ANALYTICS_MS = 60000, ANALYTICS_DAYS = 14;
 var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 function $(s, r) { return (r || document).querySelector(s); }
 function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
@@ -375,6 +403,12 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function
 function pad(n) { return String(n).padStart(2, '0'); }
 function mmss(sec) { if (sec == null) return '—'; sec = Math.max(0, Math.floor(sec)); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s); }
 function ago(sec) { if (sec == null) return 'never'; sec = Math.max(0, Math.round(sec)); if (sec < 60) return sec + ' s ago'; if (sec < 3600) return Math.floor(sec / 60) + ' min ago'; if (sec < 86400) return Math.floor(sec / 3600) + ' h ' + Math.floor(sec % 3600 / 60) + ' min ago'; return Math.floor(sec / 86400) + ' d ago'; }
+function nodeLastSeen(n) {
+  if (!n.last_heartbeat) return 'never';
+  var age = (n.heartbeat_age_s || 0) + since();
+  var seen = when(n.last_heartbeat) + ' (' + ago(age) + ')';
+  return n.status === 'offline' ? 'last seen ' + seen : seen;
+}
 function tok(n) { n = Number(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n)); }
 function gib(b) { return b == null ? '—' : (b / 1073741824).toFixed(1) + ' GiB'; }
 function usd(v) { v = Number(v || 0); return v ? '$' + v.toFixed(v < 1 ? 3 : 2) : '—'; }
@@ -397,7 +431,7 @@ var ICON = {
 
 /* ---------- state ---------- */
 var S = {
-  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '',
+  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   view: location.pathname.indexOf('/delivery') === 0 ? 'delivery' : 'cc',
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true
@@ -450,6 +484,16 @@ function pollServices() {
     if (S.view === 'cc' && S.data) renderCC();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
+}
+function pollAnalytics() {
+  fetch('/v1/analytics/daily?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.analytics = d.rows || []; S.anError = '';
+    if (S.view === 'delivery' && S.data) renderDBody();
+  }).catch(function (e) { S.anError = String(e.message || e); })
+    .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
 function notify(prevInc, prevRuns) {
   var d = D();
@@ -698,7 +742,7 @@ function renderDHead() {
   }
   h += '<span class="spacer"></span>';
   var p = d.projects.filter(function (x) { return x.key === S.project; })[0];
-  if (p) h += '<a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
+  if (p) h += '<button class="btn sm" data-act="open-report">Report</button><a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
   $('#dhead').innerHTML = h;
 }
 function epicOf(t, byKey) {
@@ -772,7 +816,49 @@ function renderDBody() {
   });
   h += '</div></section>';
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
+  h += analyticsPanel();
   $('#dbody').innerHTML = h;
+}
+
+/* ---------- Analytics (/v1/analytics/daily, per UTC day, project and account) ---------- */
+function utcDays(n) {
+  var out = [], t = Date.now();
+  for (var i = n - 1; i >= 0; i--) out.push(new Date(t - i * 86400000).toISOString().slice(0, 10));
+  return out;
+}
+function analyticsChart(rows) {
+  var days = utcDays(ANALYTICS_DAYS), by = {};
+  days.forEach(function (d) { by[d] = { ok: 0, rework: 0, failed: 0, other: 0 }; });
+  rows.forEach(function (r) {
+    var b = by[r.day]; if (!b) return;
+    b.ok += r.done + r.merged; b.rework += r.rework; b.failed += r.failed;
+    b.other += Math.max(0, r.runs - r.done - r.merged - r.rework - r.failed);
+  });
+  var max = 1; days.forEach(function (d) { var b = by[d]; max = Math.max(max, b.ok + b.rework + b.failed + b.other); });
+  var W = 28, G = 8, H = 120, LB = 16, svg = '<svg class="an-chart" viewBox="0 0 ' + (days.length * (W + G)) + ' ' + (H + LB) + '" role="img" aria-label="Runs per day by outcome, last ' + days.length + ' days">';
+  days.forEach(function (d, i) {
+    var b = by[d], x = i * (W + G) + G / 2, y = H;
+    [['ok', 'Done or merged'], ['rework', 'Rework'], ['failed', 'Failed'], ['other', 'Other']].forEach(function (k) {
+      if (!b[k[0]]) return;
+      var hh = H * b[k[0]] / max; y -= hh;
+      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + d + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
+    });
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + d.slice(8) + '</text>';
+  });
+  return svg + '</svg>';
+}
+function analyticsPanel() {
+  var rows = S.analytics.filter(function (r) { return r.project === S.project; });
+  var h = '<section class="panel" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
+  if (S.anError) h += '<div class="empty">Analytics unavailable: ' + esc(S.anError) + '</div>';
+  h += analyticsChart(rows);
+  if (!rows.length) return h + '<div class="empty">No runs for this project in the last ' + ANALYTICS_DAYS + ' days.</div></section>';
+  h += '<div class="tablebox"><table class="an-table" style="min-width:880px"><thead><tr><th>Day</th><th>Account</th><th>Runs</th><th>Done</th><th>Merged</th><th>Rework</th><th>Failed</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th><th>Median run</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    h += '<tr><td class="mono">' + esc(r.day) + '</td><td class="mono">' + esc(r.account) + '</td><td class="mono">' + r.runs + '</td><td class="mono">' + r.done + '</td><td class="mono">' + r.merged + '</td><td class="mono">' + r.rework + '</td><td class="mono">' + r.failed + '</td>';
+    h += '<td class="mono">' + tok(r.tokens_in) + '</td><td class="mono">' + tok(r.tokens_out) + '</td><td class="mono">' + usd(r.cost_usd) + '</td><td class="mono">' + mmss(r.median_run_s) + '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>';
 }
 function card(t, p) {
   var flags = '';
@@ -852,7 +938,7 @@ function drawerNode(name) {
   var n = nodeBy(name); if (!n) return drawerShell('node', esc(name), '', '<div class="empty">This node is no longer registered.</div>');
   var d = D(), accs = d.accounts.filter(function (a) { return a.node === n.name; }), m = n.metrics || {};
   var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No purpose or notes yet: add <span class="mono">purpose</span> and <span class="mono">notes</span> to aiflow-control/nodes/' + esc(n.name) + '.yaml</div>') +
-    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Heartbeat', '<span data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span>') + fact('CPUs', String(m.cpus || '—')) + fact('Host', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
+    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
   b += '<div class="dsec"><h4>Tools on this node</h4><div class="ver">';
@@ -890,6 +976,14 @@ function drawerInc(id) {
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';
   return drawerShell('incident #' + esc(i.id), esc(i.title), pill(i.closed_at ? 'ok' : i.severity === 'critical' ? 'crit' : 'warn', i.closed_at ? 'Resolved' : i.severity), b);
 }
+function drawerReport() {
+  var r = S.drawer, label = r.epic ? esc(r.epic) : esc(r.id);
+  if (r.error) return drawerShell('project report', label, '', '<div class="empty">' + esc(r.error) + '</div>');
+  if (!r.text) return drawerShell('project report', label, '', '<div class="empty">Loading Markdown report…</div>');
+  var b = '<div style="display:flex;justify-content:flex-end"><button class="btn sm" data-act="copy-report">Copy Markdown</button></div>' +
+    '<pre class="report-md">' + esc(r.text) + '</pre>';
+  return drawerShell('project report', label, '', b);
+}
 function renderDrawer() {
   var d = $('#drawer'); if (!S.drawer) return;
   var k = S.drawer.kind, id = S.drawer.id, html = '';
@@ -897,6 +991,7 @@ function renderDrawer() {
   if (k === 'node') html = drawerNode(id);
   if (k === 'acc') html = drawerAcc(id);
   if (k === 'inc') html = drawerInc(id);
+  if (k === 'report') html = drawerReport();
   var body = $('.drawer-b', d), scroll = body ? body.scrollTop : 0;
   d.innerHTML = html;
   var nb = $('.drawer-b', d); if (nb) nb.scrollTop = scroll;
@@ -906,6 +1001,43 @@ function loadTicket(key) {
   fetch('/v1/tickets/' + encodeURIComponent(key), { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
     if (d) { S.ticket[key] = d; if (S.drawer && S.drawer.kind === 'ticket' && S.drawer.id === key) renderDrawer(); }
   }).catch(function () {});
+}
+function loadProjectReport(project, epic) {
+  var query = 'format=md' + (epic ? '&epic=' + encodeURIComponent(epic) : '');
+  fetch('/v1/projects/' + encodeURIComponent(project) + '/report?' + query, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('Report could not be loaded (' + r.status + ')');
+    return r.text();
+  }).then(function (text) {
+    if (S.drawer && S.drawer.kind === 'report' && S.drawer.id === project && S.drawer.epic === epic) {
+      S.drawer.text = text; renderDrawer();
+    }
+  }).catch(function (e) {
+    if (S.drawer && S.drawer.kind === 'report' && S.drawer.id === project && S.drawer.epic === epic) {
+      S.drawer.error = String(e.message || e); renderDrawer();
+    }
+  });
+}
+function openProjectReport(opener) {
+  lastFocus = opener || document.activeElement;
+  var epic = S.epic === 'all' ? null : S.epic;
+  S.drawer = { kind: 'report', id: S.project, epic: epic, text: '', error: '' };
+  renderDrawer();
+  $('#overlay').setAttribute('data-open', ''); $('#drawer').setAttribute('data-open', ''); $('#drawer').setAttribute('aria-hidden', 'false');
+  loadProjectReport(S.project, epic);
+  setTimeout(function () { var c = $('#drawer [data-act="close"]'); if (c) c.focus(); }, 60);
+}
+function copyReport() {
+  var text = S.drawer && S.drawer.text || '';
+  function copied(ok) { toast(ok ? 'Report copied' : 'Could not copy report', ok ? 'Markdown copied to clipboard' : 'Select and copy the report text', ok ? 'ok' : 'warn'); }
+  if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+    window.navigator.clipboard.writeText(text).then(function () { copied(true); }).catch(function () { copied(false); });
+    return;
+  }
+  var field = document.createElement('textarea'); field.value = text;
+  field.setAttribute('readonly', ''); field.style.position = 'fixed'; field.style.opacity = '0';
+  document.body.appendChild(field); field.select();
+  var ok = document.execCommand && document.execCommand('copy');
+  field.remove(); copied(Boolean(ok));
 }
 var lastFocus = null;
 function openDrawer(kind, id, opener) {
@@ -923,8 +1055,21 @@ function closeAll() {
 }
 
 /* ---------- render and live tick ---------- */
+/* ---------- footer ---------- */
+function footerVersion(d) { return ((d.versions || {}).ai_flow || {}).ref || d.version || '—'; }
+function renderFooter() {
+  var d = D(), links = d.links || {};
+  $('#f-year').textContent = String(new Date().getFullYear());
+  if (!S.data) return;
+  $('#f-version').textContent = footerVersion(d);
+  $('#f-env').textContent = d.env || '—';
+  $('#f-control').textContent = String(d.control_repo || '—').replace('ref: refs/heads/', '');
+  [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
+}
+
 function render() {
   renderLive();
+  renderFooter();
   if (S.view === 'cc') renderCC(); else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -964,6 +1109,8 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
   else if (act === 'open-inc') openDrawer('inc', el.getAttribute('data-id'), el);
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
+  else if (act === 'open-report') openProjectReport(el);
+  else if (act === 'copy-report') copyReport();
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; render(); }
@@ -993,7 +1140,7 @@ try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentE
 $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
 $('#view-cc').hidden = S.view !== 'cc'; $('#view-delivery').hidden = S.view !== 'delivery';
 render();
-poll(); pollServices();
+poll(); pollServices(); pollAnalytics();
 setInterval(tick, 1000);
 })();
 </script>

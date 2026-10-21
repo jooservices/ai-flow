@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -26,6 +26,7 @@ from .events import Events
 from .github import GitHubApp
 from .jira import Jira
 from .policy import Decision, decide
+from .report import ReportNotFound, build_report, render_markdown
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
@@ -192,8 +193,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
                 " roles=EXCLUDED.roles, updated_at=now()", (a.id, a.provider, a.node, a.tier, a.roles))
         for n in repo.nodes.values():
+            # Keep the IP a node reported at join: a restart must not replace where it was last seen with
+            # the control repo value. Only a first insert (no join yet) takes the configured address.
             ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total) VALUES (%s,%s,%s,%s)"
-                       " ON CONFLICT (name) DO UPDATE SET ip=EXCLUDED.ip, role=EXCLUDED.role, slots_total=EXCLUDED.slots_total",
+                       " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total",
                        (n.name, n.ip, n.role, n.slots))
 
     app.state.sync_accounts = sync_accounts
@@ -466,7 +469,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["ticket_key"] != key:
             raise HTTPException(403, "run is for another ticket")
         status = ctx.jira.transition_to(key, body.to)
-        ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
+        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
+                   " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
@@ -635,9 +639,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"accepted": n}
 
     # --- state for dashboards ---------------------------------------------------------------------------------
+    @app.get("/v1/projects/{key}/report")
+    def project_report(key: str, epic: str | None = None, format: str = Query(default="json")):
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        if format not in ("json", "md"):
+            raise HTTPException(400, "format must be json or md")
+        try:
+            report = build_report(ctx, key, epic)
+        except ReportNotFound as e:
+            raise HTTPException(404, str(e)) from e
+        if format == "md":
+            return PlainTextResponse(render_markdown(report), media_type="text/markdown")
+        return report
+
     @app.get("/v1/state")
     def state() -> dict:
         from .state import snapshot
         return snapshot(ctx)
+
+    @app.get("/v1/analytics/daily")
+    def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
+        from .analytics import daily
+        return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
 
     return app

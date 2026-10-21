@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -31,7 +31,7 @@ from .events import Events
 from .github import GitHubApp
 from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only
-from .report import ReportNotFound, build_report, render_markdown
+from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import notify
 
 log = logging.getLogger("aiflow4.api")
@@ -1184,14 +1184,22 @@ def create_app(ctx: Ctx) -> FastAPI:
     def project_report(key: str, epic: str | None = None, format: str = Query(default="json")):
         if key not in ctx.repo().projects:
             raise HTTPException(404, f"unknown project {key}")
-        if format not in ("json", "md"):
-            raise HTTPException(400, "format must be json or md")
+        if format not in ("json", "md", "csv", "html"):
+            raise HTTPException(400, "format must be json, md, csv or html")
         try:
             report = build_report(ctx, key, epic)
         except ReportNotFound as e:
             raise HTTPException(404, str(e)) from e
         if format == "md":
-            return PlainTextResponse(render_markdown(report), media_type="text/markdown")
+            filename = f"{epic or key}-progress.md"
+            return PlainTextResponse(render_markdown(report), media_type="text/markdown",
+                                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        if format == "csv":
+            filename = f"{epic or key}-progress.csv"
+            return PlainTextResponse(render_csv(report), media_type="text/csv; charset=utf-8",
+                                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        if format == "html":
+            return HTMLResponse(render_html(report))
         return report
 
     @app.post("/v1/projects/{key}/close")

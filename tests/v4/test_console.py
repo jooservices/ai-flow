@@ -170,6 +170,8 @@ def test_console_page_and_state_feed_the_footer(ctx):
     client = TestClient(app)
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
+    lead = client.get("/lead")
+    assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
     s = client.get("/v1/state").json()
     assert s["version"] == VERSION
     assert s["env"] and "control_repo" in s and "versions" in s
@@ -197,6 +199,60 @@ console.log(JSON.stringify({
     assert 'data-act="close-project" data-p="TESTWP"' in out["suggested"]
     assert 'data-act="close-project"' in out["open"]
     assert "Closed · study case v2" in out["closed"]
+
+
+def test_team_lead_view_selects_epics_and_offers_three_report_formats():
+    page = html()
+    assert 'data-view="lead">Team Lead</button>' in page
+    assert "function renderLead()" in page and "requirement_coverage" in page
+    assert "encodeURIComponent(S.leadEpic) + '&format=' + format" in page
+    assert "leadReportHref('csv')" in page and "leadReportHref('html')" in page
+    assert "Insufficient tasks" in page and "latest completed verify verdict" in page
+
+
+def test_team_lead_and_stakeholder_routes_both_select_their_console_views():
+    routes = run_script("console.log(['/lead', '/stakeholder'].map(viewOf).join(','));")
+    assert routes.strip() == "lead,stakeholder"
+    page = html()
+    assert 'id="view-lead"' in page and 'id="view-stakeholder"' in page
+    assert "else if (S.view === 'lead') renderLead();" in page
+    assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
+    assert "['cc', 'delivery', 'lead', 'business', 'stakeholder']" in page
+
+
+def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():
+    report = {
+        "tickets": {"done": 1, "total": 2, "in_progress": 1, "needs_owner": 0},
+        "usage": {"tokens_total": 123, "cost_usd": .045},
+        "rework_rounds": {"count": 1},
+        "lead_time": {"sample_size": 1, "median_seconds": 86400, "p90_seconds": 86400},
+        "requirement_coverage": {
+            "insufficient_tasks": True,
+            "gaps": [{"ticket": "TESTWP-702", "reason": "done_without_verified_acceptance_criteria"}],
+            "tickets": [{
+                "key": "TESTWP-701", "type": "Story", "summary": "Child story", "parent_key": "TESTWP-700",
+                "status": "Done", "acceptance_criteria": [{"id": "AC1", "text": "Show result", "status": "verified"}],
+                "verify": {"verdict": "PASS", "outcome": "merged", "ended_at": "2025-01-02T00:00:00+00:00"},
+                "rework_rounds": 0,
+            }],
+        },
+    }
+    driver = f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (s) {{ return s === '#view-lead' ? root : null; }};
+S.data = {{projects: [{{key: 'TESTWP'}}], tickets: [
+  {{key: 'TESTWP-700', project: 'TESTWP', type: 'Epic', summary: 'Epic', status: 'To Do', labels: []}}
+], recent_runs: [], active_runs: [], incidents: [], events: [], totals: {{}}, versions: {{}}}};
+S.project = 'TESTWP'; S.leadEpic = 'TESTWP-700';
+S.leadReport = {{project: 'TESTWP', epic: 'TESTWP-700', loading: false, error: '', loadedAt: Date.now(), data: {json.dumps(report)}}};
+renderLead();
+console.log(root.innerHTML);
+"""
+    rendered = run_script(driver)
+    for value in ("TESTWP-701", "TESTWP-700", "AC1:", "Show result", "Verified", "Done / total", "Needs owner",
+                  "Rework rounds", "123", "$0.045000", "format=md", "format=csv", "format=html",
+                  "Insufficient tasks"):
+        assert value in rendered
 
 
 def test_gatus_link_is_configurable(monkeypatch):

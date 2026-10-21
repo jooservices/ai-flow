@@ -239,7 +239,60 @@ def test_wheelhouse_stages_locked_python_uv_and_native_312_wheels(tmp_path, monk
     pip = next(command for command in commands if command[0] == offline.sys.executable and "download" in command)
     assert pip[pip.index("--python-version") + 1] == "312"
     assert pip[pip.index("--only-binary=:all:")] == "--only-binary=:all:"
-    assert pip[pip.index("--platform") + 1].startswith("manylinux_2_28_")
+    machine = platform.machine()
+    platforms = [pip[index + 1] for index, flag in enumerate(pip) if flag == "--platform"]
+    assert platforms == [f"manylinux_2_{minor}_{machine}" for minor in range(28, 16, -1)] + [f"manylinux2014_{machine}"]
+
+
+def _manylinux_2017_only_wheel(directory, machine):
+    """Write a minimal wheel tagged only manylinux_2_17/manylinux2014, like pydantic_core in uv.lock."""
+    tag = f"cp312-cp312-manylinux_2_17_{machine}.manylinux2014_{machine}"
+    wheel = directory / f"fixture_native-1.0-{tag}.whl"
+    files = {
+        "fixture_native/__init__.py": b"",
+        "fixture_native-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: fixture-native\nVersion: 1.0\n",
+        "fixture_native-1.0.dist-info/WHEEL": (
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: false\n"
+            f"Tag: cp312-cp312-manylinux_2_17_{machine}\nTag: cp312-cp312-manylinux2014_{machine}\n").encode(),
+    }
+    record = []
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            record.append(f"{name},sha256={digest},{len(data)}")
+        record.append("fixture_native-1.0.dist-info/RECORD,,")
+        archive.writestr("fixture_native-1.0.dist-info/RECORD", "\n".join(record) + "\n")
+    return wheel
+
+
+@pytest.mark.parametrize("machine", ["x86_64", "aarch64"])
+def test_wheelhouse_pip_command_accepts_wheels_tagged_only_manylinux_2_17(tmp_path, monkeypatch, machine):
+    candidates = [shutil.which("python3"), "/usr/bin/python3"]
+    pip_python = next((candidate for candidate in candidates if candidate and Path(candidate).is_file() and
+                       subprocess.run([candidate, "-m", "pip", "--version"], capture_output=True).returncode == 0),
+                      None)
+    if not pip_python:
+        pytest.skip("python3 -m pip is not available")
+    index = tmp_path / "index"
+    index.mkdir()
+    wheel = _manylinux_2017_only_wheel(index, machine)
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(f"fixture-native==1.0 --hash=sha256:{offline._sha256(wheel)}\n")
+    offline_flags = ["--no-index", "--find-links", str(index), "--disable-pip-version-check"]
+    node_arch = offline.ARCHES[machine][1]
+
+    wheelhouse = tmp_path / "wheelhouse"
+    command = offline.pip_download_command(pip_python, requirements, wheelhouse, node_arch)
+    result = subprocess.run([*command, *offline_flags], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (wheelhouse / wheel.name).is_file()
+
+    # The fixture really discriminates: the earlier single manylinux_2_28 tag rejects it.
+    monkeypatch.setattr(offline, "manylinux_platforms", lambda _arch: [f"manylinux_2_28_{machine}"])
+    single_tag = offline.pip_download_command(pip_python, requirements, tmp_path / "rejected", node_arch)
+    rejected = subprocess.run([*single_tag, *offline_flags], capture_output=True, text=True)
+    assert rejected.returncode != 0
 
 
 def test_agent_and_worker_debs_include_systemd_user_directories_and_supported_architecture(tmp_path):

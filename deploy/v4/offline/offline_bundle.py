@@ -28,6 +28,8 @@ PACKAGE_NAMES = {
     "grok": "@vibe-kit/grok-cli",
 }
 ARCHES = {"x86_64": ("amd64", "x64", "x86_64"), "aarch64": ("arm64", "arm64", "aarch64")}
+# Newest glibc a bundled wheel may require; Ubuntu 22.04 (2.35), 24.04 (2.39) and Debian 12 (2.36) all exceed it.
+MANYLINUX_GLIBC_FLOOR = (2, 28)
 REQUIRED_TOOLS = ("claude_code", "codex", "opencode", "node", "uv", "python3")
 AGENT_UNIT = "aiflow4-node-agent.service"
 WORKER_UNIT = "aiflow4-worker@.service"
@@ -264,14 +266,29 @@ def _build_wheelhouse(release_root: Path, versions: dict[str, str], payload: Pat
     wheelhouse.mkdir()
     _run([str(uv_target), "build", "--wheel", "--out-dir", str(wheelhouse)], cwd=release_root, env=python_env)
     _, _, node_arch = target
-    platform_tag = "manylinux_2_28_x86_64" if node_arch == "x64" else "manylinux_2_28_aarch64"
     pip_python = shutil.which("python3")
     if not pip_python:
         raise BundleError("python3 is required to download locked wheels (install python3-pip on the build host)")
-    _run([pip_python, "-m", "pip", "download", "--only-binary=:all:", "--require-hashes",
-          "--dest", str(wheelhouse), "--platform", platform_tag, "--python-version", "312",
-          "--implementation", "cp", "--abi", "cp312", "--requirement", str(requirements)], cwd=release_root)
+    _run(pip_download_command(pip_python, requirements, wheelhouse, node_arch), cwd=release_root)
     shutil.copy2(requirements, payload / "requirements.txt")
+
+
+def manylinux_platforms(node_arch: str) -> list[str]:
+    """Every manylinux tag a node at the bundle's glibc floor accepts, newest first.
+
+    pip matches ``--platform`` exactly, so each compatible tag must be listed: locked wheels such as
+    ``pydantic_core`` or ``psycopg_binary`` ship only ``manylinux_2_17``/``manylinux2014`` tags.
+    """
+    machine = "x86_64" if node_arch == "x64" else "aarch64"
+    tags = [f"manylinux_2_{minor}_{machine}" for minor in range(MANYLINUX_GLIBC_FLOOR[1], 16, -1)]
+    return [*tags, f"manylinux2014_{machine}"]
+
+
+def pip_download_command(pip_python: str, requirements: Path, wheelhouse: Path, node_arch: str) -> list[str]:
+    platforms = [flag for tag in manylinux_platforms(node_arch) for flag in ("--platform", tag)]
+    return [pip_python, "-m", "pip", "download", "--only-binary=:all:", "--require-hashes",
+            "--dest", str(wheelhouse), *platforms, "--python-version", "312",
+            "--implementation", "cp", "--abi", "cp312", "--requirement", str(requirements)]
 
 
 def _deb_control(package: str, version: str, description: str) -> str:

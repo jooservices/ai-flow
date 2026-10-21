@@ -3,8 +3,10 @@
 `aiflow4-offline-bundle` creates a checksummed, architecture-specific installation bundle from a published v4
 release, its Docker image, and the `versions.lock` in the matching `aiflow-control` checkout. Run the builder on a
 connected Linux host of the target architecture: npm and Python wheels can contain architecture-specific files.
-The builder accepts amd64 and arm64. Its Python wheel target is manylinux 2.28, which runs on Ubuntu 22.04 and
-24.04 and Debian 12. The two service packages are architecture-independent `.deb` files, so the same packages
+The builder accepts amd64 and arm64. The bundle's glibc floor is 2.28: the wheelhouse download accepts every
+manylinux tag from `manylinux_2_28` down to `manylinux_2_17` and `manylinux2014` (pip matches `--platform`
+exactly, so each tag is passed), and so needs glibc 2.28 or newer on the node. Ubuntu 22.04 (2.35), 24.04 (2.39)
+and Debian 12 (2.36) all qualify. The two service packages are architecture-independent `.deb` files, so the same packages
 work on both architectures and all three distributions.
 
 The lock must contain exact pins for Claude Code (`claude_code`, `claude-code` or `claude`), Codex, OpenCode,

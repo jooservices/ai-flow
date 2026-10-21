@@ -27,7 +27,9 @@ from .policy_relay import PolicyRelay
 log = logging.getLogger("aiflow4.node")
 TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "codex-code-mode-host": ["sh", "-c", 'h="$(dirname "$(readlink -f "$(command -v codex)")")/codex-code-mode-host";'
-                                  ' test -x "$h" && echo "present $h"'], "grok": ["grok", "--version"],
+                                  ' test -x "$h" && { if test -r "$h.version"; then'
+                                  ' printf "codex-code-mode-host %s\\n" "$(head -n1 "$h.version")";'
+                                  ' else echo "present $h"; fi; }'], "grok": ["grok", "--version"],
          "opencode": ["opencode", "--version"], "docker": ["docker", "--version"], "git": ["git", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],
@@ -371,6 +373,33 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
              (result.stderr or result.stdout).strip()[:200])
 
 
+def process_node_operation(api: ControlClient, node: str) -> None:
+    """Claim and run at most one owner-approved, server-created whitelist operation."""
+    operation = api.call("GET", f"/v1/nodes/{node}/operations/next", retries=1).get("operation")
+    if not operation:
+        return
+    from .operations import OperationError, execute
+
+    operation_id = operation["id"]
+    try:
+        result = execute(operation)
+        body = {"status": "completed", "result": result}
+    except OperationError as exc:
+        log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])
+        body = {"status": "failed", "result": {"healthy": False, "error": str(exc)[:300]}}
+    except Exception as exc:  # noqa: BLE001 - installer exceptions may include command details
+        log.error("node operation %s failed with %s", operation_id, type(exc).__name__)
+        body = {"status": "failed", "result": {"healthy": False, "error": type(exc).__name__}}
+    api.call("POST", f"/v1/nodes/{node}/operations/{operation_id}/result", body, retries=2)
+
+
+def _process_node_operation_logged(api: ControlClient, node: str) -> None:
+    try:
+        process_node_operation(api, node)
+    except Exception as operation_error:  # noqa: BLE001 - keep polling failures out of the heartbeat thread
+        log.warning("node operation poll failed: %s", type(operation_error).__name__)
+
+
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
     api = ControlClient(control_url, token, timeout=15)
@@ -380,6 +409,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
     pending_network_events: list[dict] = []
+    operation_thread: threading.Thread | None = None
     try:
         while not stop.is_set():
             try:
@@ -411,6 +441,11 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     pending_network_events = []
                 except Exception as e:  # noqa: BLE001 - retry the event delivery on the next heartbeat
                     log.warning("heartbeat error report not recorded: %s", type(e).__name__)
+            if operation_thread is None or not operation_thread.is_alive():
+                operation_thread = threading.Thread(
+                    target=_process_node_operation_logged, args=(api, name),
+                    name=f"aiflow4-node-operation-{name}")
+                operation_thread.start()
             try:
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))

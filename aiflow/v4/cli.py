@@ -7,7 +7,7 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
-  aiflow4 node join --name N --join-token-file F [--control URL]
+  aiflow4 node join --name N (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
   aiflow4 version
@@ -88,7 +88,9 @@ def main(argv: list[str] | None = None) -> int:
     pn = sub.add_parser("node")
     pn.add_argument("action", choices=["join"])
     pn.add_argument("--name", required=True)
-    pn.add_argument("--join-token-file", required=True)
+    join_token = pn.add_mutually_exclusive_group(required=True)
+    join_token.add_argument("--join-token-file")
+    join_token.add_argument("--join-token-stdin", action="store_true")
     pn.add_argument("--control", default="")
     pn.add_argument("--ip", default="")
     pa = sub.add_parser("node-agent")
@@ -188,8 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "node":
         import httpx
         control = a.control or s.control_url
-        join_token = Path(a.join_token_file).read_text().strip()
-        r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json={"name": a.name, "join_token": join_token, "ip": a.ip},
+        join_secret = sys.stdin.read().strip() if a.join_token_stdin else Path(a.join_token_file).read_text().strip()
+        r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json={"name": a.name, "join_token": join_secret, "ip": a.ip},
                        timeout=30)
         r.raise_for_status()
         tok = Path(s.node_token_file)

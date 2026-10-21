@@ -10,6 +10,7 @@ x-app: &app
     AIFLOW4_ENV: lab
     AIFLOW4_VERSION: ${AIFLOW4_VERSION:-4.0.0a1}
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
+    AIFLOW4_JOIN_CONTROL_URL: ${AIFLOW4_JOIN_CONTROL_URL:-}
     AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
     AIFLOW4_PUBLIC_URL: http://127.0.0.1:18480

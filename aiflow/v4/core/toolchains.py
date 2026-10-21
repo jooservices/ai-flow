@@ -26,6 +26,44 @@ STACK_TOOLS: dict[str, tuple[str, ...]] = {
     "python-3.12": ("python3", "uv"),
 }
 
+# `versions.lock` names used by the control repo. Keep aliases here so installation and verification use the
+# same pins as the console's version display.
+VERSION_KEYS: dict[str, tuple[str, ...]] = {
+    "claude": ("claude_code", "claude-code", "claude"),
+    "codex": ("codex",),
+    "grok": ("grok",),
+    "opencode": ("opencode",),
+    "docker": ("docker",),
+    "php": ("php",),
+    "composer": ("composer",),
+    "wp": ("wp", "wp_cli"),
+    "git": ("git",),
+    "node": ("node",),
+    "uv": ("uv",),
+    "gh": ("gh",),
+    "python3": ("python3", "python"),
+}
+
+
+def pinned_version(versions: dict[str, object] | None, tool: str, stacks: Iterable[str] = ()) -> str:
+    """Version pin for a tool, using versions.lock first and the project's explicit stack version second."""
+    if tool == "codex-code-mode-host":
+        # The host binary must come from the same Codex release to speak its protocol.
+        return pinned_version(versions, "codex")
+    locked = (versions or {}).get("tools") or {}
+    if isinstance(locked, dict):
+        for key in VERSION_KEYS.get(tool, (tool,)):
+            value = locked.get(key)
+            if isinstance(value, dict):
+                value = value.get("version")
+            if value not in (None, ""):
+                return str(value)
+    for stack in stacks:
+        prefix, sep, version = str(stack).partition("-")
+        if sep and ((tool == "php" and prefix == "php") or (tool == "python3" and prefix == "python")):
+            return version
+    return ""
+
 
 def tools_for_providers(providers: Iterable[str]) -> list[str]:
     """CLIs the AI providers of a node's accounts need (Codex also needs its code-mode host)."""

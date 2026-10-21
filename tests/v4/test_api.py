@@ -1,3 +1,5 @@
+import csv
+import io
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -488,7 +490,8 @@ def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
     assert report["period"] == {
         "start": created.isoformat(), "end": (created + timedelta(days=7)).isoformat(), "days": 7.0,
     }
-    assert report["tickets"] == {"total": 6, "done": 6, "done_by_type": {"Story": 3, "Task": 3}}
+    assert report["tickets"] == {"total": 6, "done": 6, "in_progress": 0, "needs_owner": 0,
+                                  "done_by_type": {"Story": 3, "Task": 3}}
     assert report["lead_time"] == {"sample_size": 6, "median_seconds": 388800.0, "p90_seconds": 604800.0}
     assert report["ai_time"] == {"sample_size": 2, "median_seconds": 105.0, "p90_seconds": 170.0,
                                   "total_seconds": 210.0}
@@ -511,12 +514,90 @@ def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
     assert whole_project["tickets"]["done"] == 6
     markdown = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-100", "format": "md"})
     assert markdown.status_code == 200 and markdown.headers["content-type"].startswith("text/markdown")
-    assert "# Project report: TESTWP-100" in markdown.text
+    assert "# Progress report: TESTWP-100" in markdown.text
     assert "| Story | 3 |" in markdown.text and "median 4.5d, p90 7.0d (n=6)" in markdown.text
     assert "Tokens: 280 (200 in, 80 out)" in markdown.text and "TESTWP-102 · Summary of TESTWP-102" in markdown.text
     assert client.get("/v1/projects/UNKNOWN/report").status_code == 404
     assert client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-101"}).status_code == 404
-    assert client.get("/v1/projects/TESTWP/report", params={"format": "html"}).status_code == 400
+    printable = client.get("/v1/projects/TESTWP/report", params={"format": "html"})
+    assert printable.status_code == 200 and printable.headers["content-type"].startswith("text/html")
+
+
+def test_team_lead_epic_requirement_coverage_progress_and_exports(client, ctx):
+    created = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    done = created + timedelta(days=5)
+    add_ticket(ctx.db, "TESTWP-700", status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic', jira_created=%s WHERE key='TESTWP-700'", (created,))
+    children = [
+        ("TESTWP-701", "Done", "Acceptance criteria:\n- AC1: Create row\n- AC2: Render <script>alert(1)</script>\n"
+          "Technical notes:\n- AC3: This is outside the AC section", "TESTWP-700"),
+        ("TESTWP-702", "In Progress", "Acceptance criteria:\n- AC1: Show status", "TESTWP-700"),
+        ("TESTWP-703", "Needs owner", "No acceptance criteria section", "TESTWP-700"),
+        ("TESTWP-704", "Done", "Acceptance criteria:\n- AC1: Validate input", "TESTWP-700"),
+    ]
+    for key, status, description, parent in children:
+        add_ticket(ctx.db, key, status=status, labels=())
+        ctx.db.run("UPDATE tickets SET type='Story', parent_key=%s, description=%s, jira_created=%s, jira_updated=%s,"
+                   " done_at=%s WHERE key=%s", (parent, description, created, done, done if status == "Done" else None, key))
+    ctx.db.run("UPDATE tickets SET summary=%s WHERE key='TESTWP-702'", ('=HYPERLINK("https://example.invalid")',))
+
+    def run(key, step, outcome, tokens_in, tokens_out, cost, details=None):
+        ctx.db.run(
+            "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+            "started_at,ended_at,tokens_in,tokens_out,cost_usd,details)"
+            " VALUES (%s,%s,'TESTWP',%s,'codex-01','codex','gpt-6-luna','cc',1,'finished',%s,%s,%s,%s,%s,%s,%s)",
+            (str(uuid.uuid4()), key, step, outcome, created, created + timedelta(seconds=60), tokens_in, tokens_out,
+             cost, J(details or {})))
+
+    run("TESTWP-701", "verify", "merged", 100, 20, .10, {"verdict": "PASS"})
+    run("TESTWP-702", "dev", "done", 50, 25, .05)
+    # A PASS review followed by failed CI is recorded as rework; Jira Done must not make its AC look verified.
+    run("TESTWP-704", "verify", "rework", 30, 10, .02,
+        {"verdict": "PASS", "findings": "CI failed after the verifier passed"})
+
+    response = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700"})
+    assert response.status_code == 200
+    report = response.json()
+    assert report["tickets"] == {"total": 4, "done": 2, "in_progress": 1, "needs_owner": 1,
+                                  "done_by_type": {"Story": 2}}
+    coverage = report["requirement_coverage"]
+    assert coverage["insufficient_tasks"] is True
+    by_key = {t["key"]: t for t in coverage["tickets"]}
+    assert by_key["TESTWP-701"]["parent_key"] == "TESTWP-700"
+    assert [(ac["id"], ac["status"]) for ac in by_key["TESTWP-701"]["acceptance_criteria"]] == [
+        ("AC1", "verified"), ("AC2", "verified")]
+    assert "AC3" not in {ac["id"] for ac in by_key["TESTWP-701"]["acceptance_criteria"]}
+    assert by_key["TESTWP-704"]["acceptance_criteria"][0]["status"] == "not_confirmed"
+    assert {(g["ticket"], g["reason"]) for g in coverage["gaps"]} == {
+        ("TESTWP-703", "ticket_has_no_acceptance_criteria"),
+        ("TESTWP-704", "done_without_verified_acceptance_criteria"),
+    }
+    assert report["rework_rounds"]["count"] == 1
+    assert report["lead_time"]["sample_size"] == 2
+    assert report["usage"]["tokens_total"] == 235 and report["usage"]["cost_usd"] == .17
+
+    markdown = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "md"})
+    assert markdown.status_code == 200 and "attachment" in markdown.headers["content-disposition"]
+    assert "Done: 2 of 4" in markdown.text and "AC1 [verified]: Create row" in markdown.text
+    csv_report = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "csv"})
+    assert csv_report.status_code == 200 and csv_report.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(csv_report.text)))
+    assert len(rows) == 4 and rows[0]["epic"] == "TESTWP-700"
+    assert "AC1 [verified]: Create row" in rows[0]["acceptance_criteria"]
+    assert rows[1]["summary"].startswith("'=")
+    assert rows[-1]["coverage_gap"] == "done_without_verified_acceptance_criteria"
+
+    printable = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "html"})
+    assert printable.status_code == 200 and "@media print" in printable.text
+    assert "Insufficient tasks found" in printable.text and "&lt;script&gt;alert(1)&lt;/script&gt;" in printable.text
+    assert "<script>alert(1)</script>" not in printable.text
+
+    add_ticket(ctx.db, "TESTWP-710", status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-710'")
+    empty = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-710"}).json()
+    assert empty["requirement_coverage"]["insufficient_tasks"] is True
+    assert empty["requirement_coverage"]["gaps"] == [
+        {"ticket": "TESTWP-710", "reason": "epic_has_no_child_tickets"}]
 
 
 def test_jira_sync_uses_resolution_date_for_done_ticket_insert_and_keeps_it_on_edits(ctx):

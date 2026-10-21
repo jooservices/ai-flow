@@ -9,6 +9,9 @@ cd $R
 if [ -n "$BUNDLE" ]; then
   git fetch -q "$BUNDLE" "+$REF:refs/heads/$REF"
   git push -q origin "$REF" 2>&1 | grep -v '^remote:' || true
+else
+  git fetch -q origin
+  case "$REF" in */*) ;; *) REF="origin/$REF" ;; esac   # deploy what GitHub has, not a stale local branch
 fi
 SHA=$(git rev-parse --short=10 "$REF")
 B=/srv/aiflow/build/$SHA; rm -rf "$B"; mkdir -p "$B"; git archive "$REF" | tar -x -C "$B"

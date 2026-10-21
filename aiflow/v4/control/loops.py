@@ -45,9 +45,10 @@ def close_incident(ctx: Ctx, kind: str, subject: str, note: str = "") -> None:
 
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
-    if not ctx.jira or not ctx.settings.jira_projects:
+    keys = ctx.settings.jira_projects or sorted(ctx.repo().projects)
+    if not ctx.jira or not keys:
         return 0
-    projects = ",".join(ctx.settings.jira_projects)
+    projects = ",".join(keys)
     jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
@@ -150,6 +151,20 @@ def watchdog(ctx: Ctx) -> None:
                       f"{a['provider']}: {a['last_error'][:300]}{until}. Its tickets go to the other accounts.")
     for a in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working')"):
         close_incident(ctx, "account_quota", a["id"], "account works again")
+    # every role the flow needs must have at least two ready accounts (no single AI the flow depends on)
+    ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
+    for role in ("master", "intake_refiner", "verify", "dev"):
+        holders = [a for a in repo.accounts if role in (a.roles or [])]
+        ok = [a.id for a in holders if a.id in ready]
+        if not holders:
+            continue
+        if len(ok) < 2:
+            open_incident(ctx, "role_coverage", role, "critical" if not ok else "warning",
+                          f"role {role} has {len(ok)} ready account{'s' if len(ok) != 1 else ''}",
+                          f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: {', '.join(ok) or 'none'}."
+                          " Every role needs two ready accounts of different providers so one quota or outage cannot stop the flow.")
+        else:
+            close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts ready")
     # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
     for a in ctx.db.all("SELECT id, provider, quota FROM accounts WHERE quota ? 'windows'"):
         for wname, w in (a["quota"].get("windows") or {}).items():

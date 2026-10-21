@@ -219,3 +219,15 @@ def test_failing_ticket_backs_off_and_is_reported(client, ctx):
     ctx.db.run("UPDATE runs SET ended_at = now() WHERE ticket_key='TESTWP-30'")
     watchdog(ctx)
     assert ctx.db.one("SELECT title FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL")["title"] == "TESTWP-30 failed 3 runs in a row"
+
+
+def test_role_with_one_ready_account_is_reported(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    join(client, "cc")
+    ctx.db.run("UPDATE accounts SET status='idle'")
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")["n"] == 0
+    ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
+    watchdog(ctx)
+    inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"

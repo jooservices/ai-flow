@@ -70,7 +70,7 @@ class Settings:
         s.lease_ms = int(_env("LEASE_MS", str(s.lease_ms)))
         s.database_url = _env("DATABASE_URL", s.database_url)
         s.jira_site = _env("JIRA_SITE", s.jira_site)
-        s.jira_projects = [p for p in _env("JIRA_PROJECTS", "TESTWP").split(",") if p]
+        s.jira_projects = [p for p in _env("JIRA_PROJECTS", "").split(",") if p]  # empty: every project in the control repo
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)
         s.control_repo = _env("CONTROL_REPO", s.control_repo)

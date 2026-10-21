@@ -114,6 +114,10 @@ class Git:
         self.run("worktree", "prune", "--expire=now", cwd=mirror, check=False)
         self.mkdirs(path.parent)
         self.run("worktree", "add", "-q", "--detach", str(path), ref, cwd=mirror)
+        # Codex's sandbox protects <cwd>/.codex and <cwd>/.agents and creates them when missing, which fails in a
+        # read-only checkout ("Can't mkdir .agents"): create them before the tree becomes read-only (git ignores empty dirs)
+        for name in (".codex", ".agents"):
+            (path / name).mkdir(exist_ok=True)
         for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
             for name in dirs + files:
                 item = Path(root) / name

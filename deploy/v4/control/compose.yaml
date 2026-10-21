@@ -8,7 +8,6 @@ x-app: &app
   env_file: [/etc/aiflow/secrets/control/aiflow4.env]
   environment:
     AIFLOW4_ENV: lab
-    AIFLOW4_JIRA_PROJECTS: TESTWP
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
     AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2

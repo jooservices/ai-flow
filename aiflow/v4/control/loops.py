@@ -45,9 +45,10 @@ def close_incident(ctx: Ctx, kind: str, subject: str, note: str = "") -> None:
 
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
-    if not ctx.jira or not ctx.settings.jira_projects:
+    keys = ctx.settings.jira_projects or sorted(ctx.repo().projects)
+    if not ctx.jira or not keys:
         return 0
-    projects = ",".join(ctx.settings.jira_projects)
+    projects = ",".join(keys)
     jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):

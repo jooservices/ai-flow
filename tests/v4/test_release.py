@@ -29,6 +29,8 @@ def test_tag_release_workflow_builds_signs_and_publishes_assets():
         "aiflow4-$VERSION.tar.gz.sigstore.json",
     ):
         assert required in workflow
+    # the image reference is passed to the signing step through the environment under the name that step reads
+    assert 'echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"' in workflow and 'cosign sign --yes "$IMAGE"' in workflow
 
 
 def test_conventional_release_notes_group_commits_and_mark_breaking_changes():
@@ -308,3 +310,12 @@ def test_autodeploy_rolls_back_a_versioned_release_with_aiflow4_deploy(tmp_path)
     assert calls.index("deploy v4.1.0") < calls.index("deploy v4.0.0")
     assert "alert [CRITICAL] AI Flow: auto-deploy of v4.1.0 rolled back" in calls
 
+
+
+def test_develop_channel_scripts_refuse_hosts_that_did_not_opt_in(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "AIFLOW4_NODE_ENV": str(tmp_path / "missing.env")}
+    for script, args in (("aiflow4-develop-install", ["x.tar.gz", "0123456789"]), ("aiflow4-deploy-develop", [])):
+        done = subprocess.run(["bash", f"deploy/v4/bin/{script}", *args], capture_output=True, text=True, env=env)
+        assert done.returncode == 3 and "not on the develop channel" in done.stderr
+    autodeploy = Path("deploy/v4/bin/aiflow4-autodeploy").read_text()
+    assert 'AIFLOW4_CHANNEL:-release}" = develop ] && exec /usr/local/sbin/aiflow4-autodeploy-develop' in autodeploy

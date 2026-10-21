@@ -191,6 +191,8 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert page.status_code == 200 and 'id="footer"' in page.text
     assert client.get("/sa").status_code == 200
     assert 'id="view-sa"' in page.text and 'data-view="sa"' in page.text
+    lead = client.get("/lead")
+    assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
     s = client.get("/v1/state").json()
     assert s["version"] == VERSION
     assert s["env"] and "control_repo" in s and "versions" in s
@@ -289,6 +291,60 @@ def test_delivery_report_button_loads_markdown_into_copyable_drawer():
     assert "window.navigator.clipboard.writeText(text)" in page and "document.execCommand('copy')" in page
 
 
+def test_team_lead_view_selects_epics_and_offers_three_report_formats():
+    page = html()
+    assert 'data-view="lead">Team Lead</button>' in page
+    assert "function renderLead()" in page and "requirement_coverage" in page
+    assert "encodeURIComponent(S.leadEpic) + '&format=' + format" in page
+    assert "leadReportHref('csv')" in page and "leadReportHref('html')" in page
+    assert "Insufficient tasks" in page and "latest completed verify verdict" in page
+
+
+def test_team_lead_and_stakeholder_routes_both_select_their_console_views():
+    routes = run_script("console.log(['/lead', '/stakeholder'].map(viewOf).join(','));")
+    assert routes.strip() == "lead,stakeholder"
+    page = html()
+    assert 'id="view-lead"' in page and 'id="view-stakeholder"' in page
+    assert "else if (S.view === 'lead') renderLead();" in page
+    assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'stakeholder']" in page
+
+
+def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():
+    report = {
+        "tickets": {"done": 1, "total": 2, "in_progress": 1, "needs_owner": 0},
+        "usage": {"tokens_total": 123, "cost_usd": .045},
+        "rework_rounds": {"count": 1},
+        "lead_time": {"sample_size": 1, "median_seconds": 86400, "p90_seconds": 86400},
+        "requirement_coverage": {
+            "insufficient_tasks": True,
+            "gaps": [{"ticket": "TESTWP-702", "reason": "done_without_verified_acceptance_criteria"}],
+            "tickets": [{
+                "key": "TESTWP-701", "type": "Story", "summary": "Child story", "parent_key": "TESTWP-700",
+                "status": "Done", "acceptance_criteria": [{"id": "AC1", "text": "Show result", "status": "verified"}],
+                "verify": {"verdict": "PASS", "outcome": "merged", "ended_at": "2025-01-02T00:00:00+00:00"},
+                "rework_rounds": 0,
+            }],
+        },
+    }
+    driver = f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (s) {{ return s === '#view-lead' ? root : null; }};
+S.data = {{projects: [{{key: 'TESTWP'}}], tickets: [
+  {{key: 'TESTWP-700', project: 'TESTWP', type: 'Epic', summary: 'Epic', status: 'To Do', labels: []}}
+], recent_runs: [], active_runs: [], incidents: [], events: [], totals: {{}}, versions: {{}}}};
+S.project = 'TESTWP'; S.leadEpic = 'TESTWP-700';
+S.leadReport = {{project: 'TESTWP', epic: 'TESTWP-700', loading: false, error: '', loadedAt: Date.now(), data: {json.dumps(report)}}};
+renderLead();
+console.log(root.innerHTML);
+"""
+    rendered = run_script(driver)
+    for value in ("TESTWP-701", "TESTWP-700", "AC1:", "Show result", "Verified", "Done / total", "Needs owner",
+                  "Rework rounds", "123", "$0.045000", "format=md", "format=csv", "format=html",
+                  "Insufficient tasks"):
+        assert value in rendered
+
+
 def test_gatus_link_is_configurable(monkeypatch):
     monkeypatch.setenv("AIFLOW4_GATUS_URL", "https://status.example/")
     assert Settings.from_env().gatus_url == "https://status.example/"
@@ -366,6 +422,36 @@ console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4
     assert "savePrefs(); render();" in page
     assert "savePrefs(); renderDHead(); renderDBody();" in page
     assert "S.epic = e.target.value; savePrefs();" in page
+
+
+def test_stakeholder_deployment_links_and_missing_url_fallback():
+    links = run_script("console.log(stakeholderEnvLink('develop', 'Develop (UAT)', 'https://uat.example.test')); "
+                       "console.log(stakeholderEnvLink('production', 'Production', ''));")
+    assert '<a class="btn" href="https://uat.example.test" target="_blank" rel="noopener">Develop (UAT)' in links
+    assert "Production: chưa deploy" in links
+    page = html()
+    assert 'data-view="stakeholder">Stakeholder</button>' in page
+    assert "Đúng mong đợi" in page and "Chưa đúng mong đợi" in page
+    assert "release_commit" in page and "expected" in page and "actual" in page
+    assert "result.key" in page
+
+
+def test_stakeholder_changes_render_ticket_epic_release_and_verdict_choices():
+    driver = """
+var body = {innerHTML: ''};
+document.querySelector = function (s) { return s === '#sbody' ? body : null; };
+S.project = 'TESTWP';
+S.sh.project = 'TESTWP';
+S.sh.data = {changes: [{key: 'TESTWP-20', summary: 'Stakeholder flow', type: 'Feature', status: 'Human review',
+  epic: 'TESTWP-2', changed_at: '2026-10-21T12:00:00+00:00', release_commit: 'v4.2.0',
+  change_summary: 'Review these changes'}]};
+renderStakeholderBody();
+console.log(body.innerHTML);
+"""
+    rendered = run_script(driver)
+    for value in ("TESTWP-20", "Stakeholder flow", "TESTWP-2", "v4.2.0", "Review these changes",
+                  "Đúng mong đợi", "Chưa đúng mong đợi", "Ảnh chụp"):
+        assert value in rendered
 
 
 def poll_console(prefs: dict, state: dict) -> dict:

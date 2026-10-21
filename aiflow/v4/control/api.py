@@ -235,6 +235,10 @@ class EventsBody(BaseModel):
     events: list[dict[str, Any]]
 
 
+class WorktreeSweepBody(BaseModel):
+    dirs: list[str] = []   # "<project>/<directory>" entries found under /srv/aiflow/work on the node
+
+
 class ReleaseFailureBody(BaseModel):
     release_version: str
     detail: str = ""
@@ -491,6 +495,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         opened = open_incident(ctx, "release_verification", f"{node}:{body.release_version}", "critical", title, detail)
         ctx.events.emit("node.release_rejected", node=node, release_version=body.release_version, detail=detail)
         return {"recorded": True, "opened": opened}
+
+    @app.post("/v1/nodes/{name}/worktrees/sweep")
+    def worktrees_sweep(name: str, body: WorktreeSweepBody, node: str = Depends(node_auth)) -> dict:
+        """Which of a node's worktree directories can go: every directory of a ticket that is Done, and the
+        per-run checkouts (intake, impact, triage) of a ticket that has no run in progress."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        remove: list[str] = []
+        for entry in body.dirs[:2000]:
+            project, _, directory = entry.partition("/")
+            m = re.match(r"([A-Z][A-Z0-9]*-\d+)(.*)$", directory)
+            if not m or not project or "/" in directory or ".." in entry:
+                continue
+            key, rest = m.group(1), m.group(2)
+            ticket = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))
+            running = ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND status='running' LIMIT 1", (key,))
+            per_run = bool(re.fullmatch(r"--(intake|impact|triage-.+)", rest))
+            if running:
+                continue
+            if per_run or (ticket and ticket["status"] == "Done"):
+                remove.append(entry)
+        return {"remove": remove}
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str, done: bool = False) -> dict | None:

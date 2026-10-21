@@ -129,10 +129,52 @@ def reconcile(accounts: list[str]) -> None:
 
 _update_tried: dict[str, float] = {}
 _last_clean = 0.0
+_last_sweep = 0.0
 _RELEASE_VERSION = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 _RELEASE_WORKFLOW_IDENTITY = "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{}"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_INCOMING_DIR = Path("/srv/aiflow/releases/incoming")
+
+
+def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow", min_age_s: int = 600) -> int:
+    """Remove the worktrees of finished tickets (Done) and spent per-run checkouts: the control plane decides
+    which directories can go. Runs at most every ten minutes; returns how many were removed."""
+    global _last_sweep
+    if time.time() - _last_sweep < 600:
+        return 0
+    _last_sweep = time.time()
+    work = Path(srv_root) / "work"
+    found = {}
+    for project in work.iterdir() if work.is_dir() else []:
+        if not project.is_dir():
+            continue
+        for d in project.iterdir():
+            try:
+                if d.is_dir() and not d.is_symlink() and time.time() - d.stat().st_mtime > min_age_s:
+                    found[f"{project.name}/{d.name}"] = d
+            except OSError:
+                pass
+    if not found:
+        return 0
+    remove = api.call("POST", f"/v1/nodes/{node}/worktrees/sweep", {"dirs": sorted(found)}, retries=1).get("remove", [])
+    removed = 0
+    for entry in remove:
+        path = found.get(entry)
+        if path is None:
+            continue
+        try:
+            for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
+                os.chmod(root, 0o700)  # read-only triage checkouts
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            log.warning("could not remove worktree %s: %s", entry, exc)
+    if removed:
+        for mirror in (Path(srv_root) / "mirrors").glob("*"):
+            subprocess.run(["git", "-c", "safe.directory=*", "-C", str(mirror), "worktree", "prune", "--expire=now"],
+                           capture_output=True)
+        log.info("removed %d worktrees of finished tickets", removed)
+    return removed
 
 
 def clean_scratch(max_age_s: int = 6 * 3600) -> int:
@@ -315,6 +357,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()
+                    clean_worktrees(api, name)
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

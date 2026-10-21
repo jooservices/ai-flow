@@ -344,3 +344,27 @@ def test_release_signature_verification_pins_the_tagged_workflow_identity(tmp_pa
     assert agent.verify_release_signature(tmp_path / "release.tar.gz", tmp_path / "bundle.json", "develop") == (
         False, "release version is not a vX.Y.Z tag")
     assert not commands
+
+
+def test_node_removes_the_worktrees_the_control_plane_marks_finished(tmp_path, monkeypatch):
+    import os
+    import time
+    from aiflow.v4.node import agent
+
+    work = tmp_path / "work" / "TESTWP"
+    for name in ("TESTWP-1-done", "TESTWP-2-open", "TESTWP-2--intake"):
+        (work / name / "node_modules").mkdir(parents=True)
+        os.utime(work / name, (time.time() - 3600,) * 2)
+    ro = work / "TESTWP-2--intake"
+    os.chmod(ro, 0o500)
+
+    class Api:
+        def call(self, method, path, body=None, retries=0):
+            assert path == "/v1/nodes/cc/worktrees/sweep"
+            assert sorted(body["dirs"]) == ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2-open"]
+            return {"remove": ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/not-listed"]}
+
+    monkeypatch.setattr(agent, "_last_sweep", 0.0)
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 2
+    assert [p.name for p in work.iterdir()] == ["TESTWP-2-open"]
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0  # at most every ten minutes

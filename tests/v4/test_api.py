@@ -452,3 +452,13 @@ def test_parallel_sessions_of_one_account(client, ctx, tmp_path):
         headers=n1).json()
     assert hb["desired"]["workers"] == ["codex-01"]
     assert ctx.db.one("SELECT status FROM accounts WHERE id='codex-01'")["status"] == "working"
+
+
+def test_in_progress_ticket_without_a_run_is_requeued(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    add_ticket(ctx.db, "TESTWP-40")
+    ctx.db.run("UPDATE tickets SET status='In Progress', synced_at=now() WHERE key='TESTWP-40'")
+    ctx.jira.status_of["TESTWP-40"] = "In Progress"
+    watchdog(ctx)
+    assert ctx.jira.status_of["TESTWP-40"] == "To Do"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "To Do"

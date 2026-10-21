@@ -1,0 +1,124 @@
+name: Release v4
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  v4-tests:
+    name: Test v4 before release
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+      - name: Run v4 tests
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+        run: uv run --frozen pytest tests/v4 -q
+
+  release:
+    name: Package, sign and publish v4 release
+    needs: v4-tests
+    if: github.repository == 'jooservices/ai-flow'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
+        with:
+          cosign-release: v3.0.6
+
+      - name: Validate tag and master ancestry
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch origin master --tags
+          test "$(git rev-parse "$VERSION^{commit}")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build tarball and conventional changelog
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --output="dist/aiflow4-$VERSION.tar.gz" "$VERSION" \
+            aiflow pyproject.toml uv.lock prompts deploy
+          PREVIOUS=$(git describe --tags --match 'v[0-9]*' --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)
+          python3 -m aiflow.v4.core.release_notes "$VERSION" --previous "$PREVIOUS" > dist/CHANGELOG.md
+          (cd dist && sha256sum "aiflow4-$VERSION.tar.gz" > SHA256SUMS)
+
+      - name: Build and push control-api image to GHCR
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          IMAGE="ghcr.io/jooservices/ai-flow/control-api:$VERSION"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build \
+            --build-arg "AIFLOW4_VERSION=$VERSION" \
+            --build-arg "AIFLOW4_REVISION=$GITHUB_SHA" \
+            -f deploy/v4/control/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Sign tarball and image with GitHub OIDC
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          cosign sign-blob --yes \
+            --bundle "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+            "dist/aiflow4-$VERSION.tar.gz"
+          cosign sign --yes "$IMAGE"
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --title "AI Flow $VERSION" --notes-file dist/CHANGELOG.md
+          else
+            gh release create "$VERSION" --target "$GITHUB_SHA" --title "AI Flow $VERSION" \
+              --notes-file dist/CHANGELOG.md
+          fi
+          gh release upload "$VERSION" \
+            "dist/aiflow4-$VERSION.tar.gz" \
+            "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+            dist/SHA256SUMS --clobber

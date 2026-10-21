@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from conftest import add_ticket
+from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
@@ -604,8 +605,13 @@ def test_in_progress_ticket_without_a_run_is_requeued(client, ctx):
 
 def test_nodes_follow_the_current_release(client, ctx, tmp_path, monkeypatch):
     n1 = join(client, "node1")
+    (tmp_path / "CURRENT").write_text("v4.2.1\n")
+    monkeypatch.setattr(control_api, "RELEASES", tmp_path)
     hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1).json()
-    assert "release" in hb["desired"]
+    assert hb["desired"]["release"] == ""
+    upgraded = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2, "release_protocol": 1},
+                           headers=n1).json()
+    assert upgraded["desired"]["release"] == "v4.2.1"
     assert client.get("/v1/releases/zzz.tar.gz", headers=n1).status_code in (400, 404)
     assert client.get("/v1/releases/abc1234.tar.gz", headers=n1).status_code == 404
     assert client.get("/v1/releases/abc1234.tar.gz").status_code == 401

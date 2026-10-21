@@ -36,6 +36,7 @@ log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
+RELEASES = Path("/srv/aiflow/control/releases")
 # A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
 # failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
 BACKOFF_SQL = """
@@ -92,6 +93,7 @@ class HeartbeatBody(BaseModel):
     slots_total: int = 1
     slots_used: int = 0
     release_version: str = ""
+    release_protocol: int = 0
     tools: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
@@ -208,6 +210,11 @@ class MasterActionBody(BaseModel):
 
 class EventsBody(BaseModel):
     events: list[dict[str, Any]]
+
+
+class ReleaseFailureBody(BaseModel):
+    release_version: str
+    detail: str = ""
 
 
 # --- app --------------------------------------------------------------------------------------------------
@@ -384,28 +391,83 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
+        # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
+        # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
+        release = current_release() if body.release_protocol >= 1 else ""
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
-                            "release": current_release(),
+                            "release": release,
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "tools": repo.tools_for_node(node), "versions": repo.versions}}
 
-    # --- releases: nodes follow the release the control plane runs (written by aiflow4-deploy) ---------------
-    RELEASES = Path("/srv/aiflow/control/releases")
-
+    # --- releases: nodes follow a tagged, signed release written by aiflow4-deploy ---------------------------
     def current_release() -> str:
         try:
             return (RELEASES / "CURRENT").read_text().strip()
         except OSError:
             return ""
 
+    def tagged_release(version: str) -> Path:
+        if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
+            raise HTTPException(400, "bad release version")
+        return RELEASES / version
+
+    def release_assets(version: str) -> tuple[Path, Path, Path, str]:
+        directory = tagged_release(version)
+        tar_name = f"aiflow4-{version}.tar.gz"
+        tarball = directory / tar_name
+        bundle = directory / f"{tar_name}.sigstore.json"
+        sums = directory / "SHA256SUMS"
+        if not all(path.is_file() for path in (tarball, bundle, sums)):
+            raise HTTPException(404, "no such signed release")
+        checksum = re.compile(rf"^([0-9a-f]{{64}})  {re.escape(tar_name)}$")
+        matches = [m.group(1) for line in sums.read_text().splitlines() if (m := checksum.fullmatch(line))]
+        if len(matches) != 1:
+            raise HTTPException(404, "release checksum manifest is incomplete")
+        return tarball, bundle, sums, matches[0]
+
+    @app.get("/v1/releases/{version}/manifest")
+    def release_manifest(version: str, _node: str = Depends(node_auth)) -> dict:
+        _, _, _, checksum = release_assets(version)
+        base = f"/v1/releases/{version}"
+        tar_name = f"aiflow4-{version}.tar.gz"
+        return {"version": version, "sha256": checksum, "tarball": f"{base}.tar.gz",
+                "signature": f"{base}.tar.gz.sigstore.json", "checksums": f"{base}/SHA256SUMS",
+                "filename": tar_name}
+
+    @app.get("/v1/releases/{version}/SHA256SUMS")
+    def release_checksums(version: str, _node: str = Depends(node_auth)) -> FileResponse:
+        _, _, sums, _ = release_assets(version)
+        return FileResponse(sums, media_type="text/plain", filename="SHA256SUMS")
+
+    @app.get("/v1/releases/{version}.tar.gz.sigstore.json")
+    def release_signature(version: str, _node: str = Depends(node_auth)) -> FileResponse:
+        _, bundle, _, _ = release_assets(version)
+        return FileResponse(bundle, media_type="application/json", filename=f"aiflow4-{version}.tar.gz.sigstore.json")
+
     @app.get("/v1/releases/{sha}.tar.gz")
     def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
-        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", sha):
+            f, _, _, _ = release_assets(sha)
+        elif re.fullmatch(r"[0-9a-f]{7,40}", sha):  # old, already-installed releases remain downloadable
+            f = RELEASES / f"aiflow4-{sha}.tar.gz"
+        else:
             raise HTTPException(400, "bad release id")
-        f = RELEASES / f"aiflow4-{sha}.tar.gz"
         if not f.is_file():
             raise HTTPException(404, "no such release")
         return FileResponse(f, media_type="application/gzip")
+
+    @app.post("/v1/nodes/{name}/release-failures")
+    def release_failure(name: str, body: ReleaseFailureBody, node: str = Depends(node_auth)) -> dict:
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", body.release_version):
+            raise HTTPException(400, "bad release version")
+        detail = body.detail.strip()[:1000] or "release signature or checksum verification failed"
+        title = f"node {node} rejected release {body.release_version}"
+        from .incidents import open_incident
+        opened = open_incident(ctx, "release_verification", f"{node}:{body.release_version}", "critical", title, detail)
+        ctx.events.emit("node.release_rejected", node=node, release_version=body.release_version, detail=detail)
+        return {"recorded": True, "opened": opened}
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str, done: bool = False) -> dict | None:

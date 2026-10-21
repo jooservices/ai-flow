@@ -14,4 +14,14 @@ CREATE TABLE IF NOT EXISTS node_operations (
 CREATE INDEX IF NOT EXISTS node_operations_node_created ON node_operations (node, created_at DESC);
 CREATE INDEX IF NOT EXISTS node_operations_pending ON node_operations (node, created_at) WHERE status = 'queued';
 
+-- Join capabilities are one-time and stored only as SHA-256 hashes; no SSH credential is accepted or retained.
+CREATE TABLE IF NOT EXISTS node_join_tokens (
+    token_hash      text PRIMARY KEY,
+    node            text NOT NULL,
+    expires_at      timestamptz NOT NULL,
+    consumed_at     timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS node_join_tokens_expiry ON node_join_tokens (expires_at);
+
 COMMENT ON COLUMN write_audit.target IS 'jira | github | node';

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal
 import subprocess
 import threading
@@ -86,6 +87,7 @@ class Adapter:
     def base_env(self, spec: RunSpec) -> dict[str, str]:
         env = {"HOME": spec.account_home, "USER": os.environ.get("USER", "aiflow-worker"), "LANG": "C.UTF-8",
                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "TERM": "dumb", "NO_COLOR": "1"}
+        env.update(scratch_env(spec))
         env.update(self.env(spec))
         env.update(spec.extra_env)
         return env
@@ -183,6 +185,32 @@ class Adapter:
         if m:
             res.verdict, res.verdict_reason = m.group(2).upper(), m.group(3).strip()
         return res
+
+
+def scratch_root(spec: RunSpec) -> Path:
+    """Disk space for temp files and package caches of AI runs (/tmp on the lab machines is RAM)."""
+    home = Path(spec.account_home)
+    srv = home.parent.parent if home.parent.name == "accounts" else Path("/srv/aiflow")
+    return srv / "cache" / "ai"
+
+
+def scratch_env(spec: RunSpec) -> dict[str, str]:
+    root = scratch_root(spec)
+    for sub in ("tmp", "uv", "npm", "composer", "pip"):
+        try:
+            (root / sub).mkdir(parents=True, exist_ok=True)
+            os.chmod(root / sub, 0o1777)  # shared by the AI user's runs; sticky like /tmp
+        except OSError:
+            pass
+    if os.geteuid() == 0:
+        # the worker runs as root, the AI as aiflow-worker: Codex's sandbox creates <root>/.git to protect it,
+        # which fails ("bwrap: Can't mkdir") when the AI user does not own the writable root
+        try:
+            shutil.chown(root, "aiflow-worker", "aiflow-worker")
+        except (LookupError, OSError):
+            pass
+    return {"TMPDIR": str(root / "tmp"), "UV_CACHE_DIR": str(root / "uv"), "npm_config_cache": str(root / "npm"),
+            "COMPOSER_CACHE_DIR": str(root / "composer"), "PIP_CACHE_DIR": str(root / "pip")}
 
 
 def get_adapter(provider: str) -> Adapter:

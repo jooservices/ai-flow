@@ -113,3 +113,26 @@ def test_claude_settings_respect_policy_relay_toggle(tmp_path, monkeypatch):
     a.prepare(spec)
     hook = json.loads(a.settings_path(spec).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]
     assert hook["url"] == "http://10.44.0.10/v1/policy/decide"
+
+
+def test_ai_runs_keep_temp_files_and_caches_on_disk(tmp_path):
+    from aiflow.v4.adapters.base import scratch_env
+    home = tmp_path / "srv" / "accounts" / "codex-01"
+    home.mkdir(parents=True)
+    spec = RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(home))
+    env = scratch_env(spec)
+    assert env["TMPDIR"] == str(tmp_path / "srv" / "cache" / "ai" / "tmp") and Path(env["UV_CACHE_DIR"]).is_dir()
+    argv = CodexAdapter().argv(spec)
+    assert any("writable_roots" in a and str(tmp_path / "srv" / "cache" / "ai") in a for a in argv)
+
+
+def test_scratch_root_belongs_to_the_ai_user_when_the_worker_is_root(tmp_path, monkeypatch):
+    """Codex's sandbox creates <writable root>/.git; it fails when root owns the scratch root."""
+    from aiflow.v4.adapters import base
+    home = tmp_path / "srv" / "accounts" / "codex-01"
+    home.mkdir(parents=True)
+    owned = []
+    monkeypatch.setattr(base.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(base.shutil, "chown", lambda p, u, g: owned.append((Path(p), u, g)))
+    base.scratch_env(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(home)))
+    assert (tmp_path / "srv" / "cache" / "ai", "aiflow-worker", "aiflow-worker") in owned

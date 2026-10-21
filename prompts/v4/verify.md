@@ -34,3 +34,8 @@ VERDICT: FAIL
 FINDINGS:
 - <file or area>: <what is wrong and how to fix it>
 - ...
+or, only when the review environment itself does not work (commands cannot start, the worktree is missing):
+VERDICT: BLOCKED
+FINDINGS:
+- environment: <what failed, with the error message>
+A failing check or a code defect is never BLOCKED; the ticket goes back to its developer only on FAIL.

@@ -126,6 +126,40 @@ def reconcile(accounts: list[str]) -> None:
 
 
 _update_tried: dict[str, float] = {}
+_last_clean = 0.0
+
+
+def clean_scratch(max_age_s: int = 6 * 3600) -> int:
+    """Remove the AI user's temp files older than six hours from /tmp (RAM on the lab machines) and from the
+    scratch tmp on disk. Runs at most once an hour; returns how many entries were removed."""
+    global _last_clean
+    if time.time() - _last_clean < 3600:
+        return 0
+    _last_clean = time.time()
+    removed = 0
+    try:
+        import pwd
+        uid = pwd.getpwnam("aiflow-worker").pw_uid
+    except (KeyError, ImportError):
+        return 0
+    for base in (Path("/tmp"), Path("/srv/aiflow/cache/ai/tmp")):
+        if not base.is_dir():
+            continue
+        for entry in base.iterdir():
+            try:
+                st = entry.lstat()
+                if st.st_uid != uid or time.time() - st.st_mtime < max_age_s:
+                    continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                continue
+    if removed:
+        log.info("cleaned %s old AI temp entries", removed)
+    return removed
 
 
 def installed_release() -> str:
@@ -182,6 +216,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "workers": ws}, retries=2)["desired"]
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
+                    clean_scratch()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""))
             except Exception as e:  # noqa: BLE001

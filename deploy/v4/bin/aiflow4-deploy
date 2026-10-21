@@ -61,6 +61,24 @@ if [ "$STAGE_ONLY" = yes ]; then
   exit 0
 fi
 
+# Pre-upgrade check (docs/v4/fleet-upgrade.md), run from the new image before any control container or CURRENT
+# changes: migrations only add NNN_*.sql files, and no online node falls outside the version skew policy.
+# A blocked check exits 9, keeps the running release and records the reasons (write_audit, incident).
+CUR=$(cat "$RELEASES/CURRENT" 2>/dev/null || true)
+if [ "${AIFLOW4_SKIP_UPGRADE_CHECK:-}" != 1 ]; then
+  CHECK=(docker run --rm --network aiflow4-control --env-file /etc/aiflow/secrets/control/aiflow4.env
+         -e "AIFLOW4_VERSION=$VERSION")
+  BASELINE="/srv/aiflow/build/$CUR/aiflow/v4/control/migrations"
+  CHECK_ARGS=(upgrade-check --target "$VERSION" --current "${CUR:-none}")
+  if [ -n "$CUR" ] && [ -d "$BASELINE" ]; then
+    CHECK+=(-v "$BASELINE:/srv/aiflow/upgrade-baseline:ro"); CHECK_ARGS+=(--baseline /srv/aiflow/upgrade-baseline)
+  fi
+  if ! "${CHECK[@]}" "$IMAGE:$VERSION" "${CHECK_ARGS[@]}"; then
+    echo "pre-upgrade check blocked $VERSION; the control plane keeps ${CUR:-its release}" >&2
+    exit 9
+  fi
+fi
+
 CF="$B/deploy/v4/control/compose.yaml"
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
 for svc in control-api-a control-api-b; do

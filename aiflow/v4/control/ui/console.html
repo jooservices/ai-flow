@@ -555,6 +555,10 @@ function consoleOwner() { return S.consoleUser && S.consoleUser.role === 'owner'
 function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'lead'); }
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
+function relLabel(n) {
+  var p = n.version_policy || {};
+  return esc(n.release || '—') + (p.compatible === false ? ' <span title="' + esc(p.reason || '') + '">· incompatible, no new work</span>' : '');
+}
 function nodeLabel(n) { return { online: 'Online', offline: 'Offline', draining: 'Draining', joined: 'Joining' }[n.status] || n.status; }
 function accTone(a) { return { working: 'info', probing: 'info', idle: 'ok', cooldown: 'warn', signed_out: 'crit', error: 'crit', stopped: 'muted', unknown: 'muted', node_offline: 'crit' }[a.status] || 'muted'; }
 function accLabel(a) { return { working: 'Working', probing: 'Checking', idle: 'Ready', cooldown: 'No quota', signed_out: 'Signed out', error: 'Failing', stopped: 'Stopped', unknown: 'No worker', node_offline: 'Node offline' }[a.status] || a.status; }
@@ -810,7 +814,7 @@ function renderCC() {
     var mm = n.metrics || {};
     h += '<span class="small mono">' + esc(mm.hostname || '—') + (n.purpose ? ' · ' + esc(n.purpose) : '') + '</span>';
     h += nodeMetrics(n);
-    h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + esc(n.release || '—') + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
+    h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + relLabel(n) + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
     h += '<span class="node-accs">';
     if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned (aiflow-control/accounts.yaml)</span></span>';
     accs.forEach(function (a) { h += '<span class="node-acc"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></span>'; });
@@ -1802,7 +1806,7 @@ function drawerNode(name) {
   var n = nodeBy(name); if (!n) return drawerShell('node', esc(name), '', '<div class="empty">This node is no longer registered.</div>');
   var d = D(), accs = d.accounts.filter(function (a) { return a.node === n.name; }), m = n.metrics || {};
   var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No purpose or notes yet: add <span class="mono">purpose</span> and <span class="mono">notes</span> to aiflow-control/nodes/' + esc(n.name) + '.yaml</div>') +
-    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
+    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + relLabel(n) + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
   var missingTools = n.missing_tools || Object.keys(n.tools || {}).filter(function (k) { return n.tools[k] === 'missing'; });

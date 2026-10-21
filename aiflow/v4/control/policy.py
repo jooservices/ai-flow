@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import glob
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -79,6 +80,57 @@ class Decision:
     def hook_output(self) -> dict:
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": self.decision,
                                        "permissionDecisionReason": self.reason}}
+
+
+MASTER_ACTIONS = {"jira_comment", "jira_update", "dev_reply", "requeue", "incident_open", "incident_close",
+                  "notify_owner", "escalate_to_owner"}
+ESCALATE_TO_OWNER_DEFAULTS = {
+    "infrastructure": [
+        r"\b(?:change|modify|upgrade|downgrade|configure|provision|decommission|restart|migrate|thay đổi|đổi|"
+        r"nâng cấp|hạ cấp|cấu hình|cấp phát|khởi động lại|di chuyển)\b.{0,100}\b"
+        r"(?:infrastructure|infra|hạ tầng|server|máy chủ|cluster|network|mạng|database|redis|postgres|node)\b",
+        r"\b(?:infrastructure|infra|hạ tầng|server|máy chủ|cluster|network|mạng|database|redis|postgres|node)\b"
+        r".{0,100}\b(?:change|modify|upgrade|downgrade|configure|provision|decommission|restart|migrate|thay đổi|"
+        r"đổi|nâng cấp|hạ cấp|cấu hình|cấp phát|khởi động lại|di chuyển)\b",
+    ],
+    "secret": [
+        r"\b(?:rotate|change|create|delete|revoke|expose|read|update|replace|thay đổi|thay|đổi|xoay vòng|tạo|xóa|thu hồi|"
+        r"tiết lộ|đọc|cập nhật|thay thế)\b.{0,100}\b"
+        r"(?:secret|bí mật|credential|thông tin xác thực|password|mật khẩu|private key|api key|access token|token)\b",
+        r"\b(?:secret|bí mật|credential|thông tin xác thực|password|mật khẩu|private key|api key|access token|token)\b"
+        r".{0,100}\b(?:rotate|change|create|delete|revoke|expose|read|update|replace|thay đổi|thay|đổi|xoay vòng|tạo|xóa|thu hồi|"
+        r"tiết lộ|đọc|cập nhật|thay thế)\b",
+    ],
+    "production_release": [
+        r"\b(?:release|deploy|publish|roll out|ship|phát hành|triển khai|đưa lên)\b.{0,100}\b"
+        r"(?:production|prod|sản xuất)\b",
+        r"\b(?:production|prod|sản xuất)\b.{0,100}\b"
+        r"(?:release|deploy|publish|roll out|ship|phát hành|triển khai|đưa lên)\b",
+    ],
+}
+
+
+def decide_master_action(policy: dict, action: str, intent: str) -> Decision:
+    """Allow only the master control API actions; always escalate protected operational work."""
+    if action == "escalate_to_owner":
+        return Decision("escalate", "escalate_to_owner was explicitly requested")
+    rules = {key: list(patterns) for key, patterns in ESCALATE_TO_OWNER_DEFAULTS.items()}
+    for category, patterns in ((policy or {}).get("escalate_to_owner") or {}).items():
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        rules.setdefault(category, []).extend(patterns)
+    text = re.sub(r"[_-]+", " ", f"{action}\n{intent or ''}")[:5000]
+    for category, patterns in rules.items():
+        for pattern in patterns:
+            try:
+                if re.search(str(pattern), text, flags=re.IGNORECASE):
+                    return Decision("escalate", f"escalate_to_owner: {category}")
+            except re.error:
+                # Invalid control-repo policy must not weaken mandatory protected-action rules.
+                continue
+    if action not in MASTER_ACTIONS:
+        return Decision("deny", f"master action '{action}' is not allowed")
+    return Decision("allow", "allowed master control API action")
 
 
 def _intake_segments(command: str) -> list[str]:

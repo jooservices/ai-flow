@@ -28,12 +28,14 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp
 from .jira import Jira
-from .policy import Decision, decide, decide_read_only
+from .policy import Decision, decide, decide_master_action, decide_read_only
 from .report import ReportNotFound, build_report, render_markdown
 from . import notify
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
+MASTER_SCOPE = "master:global"
+MASTER_CYCLE_S = 60
 # A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
 # failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
 BACKOFF_SQL = """
@@ -182,6 +184,28 @@ class TriageAlertBody(BaseModel):
     detail: str
 
 
+class MasterActionBody(BaseModel):
+    run_id: str
+    fence: int
+    action: str
+    ticket: str = ""
+    intent: str = ""
+    headline: str = "follow up"
+    what: str = ""
+    why: str = ""
+    result: str = ""
+    next: str = ""
+    fields: dict[str, Any] = Field(default_factory=dict)
+    add_labels: list[str] = Field(default_factory=list)
+    remove_labels: list[str] = Field(default_factory=list)
+    kind: str = "master_follow_up"
+    subject: str = ""
+    severity: str = "warning"
+    title: str = ""
+    detail: str = ""
+    target_status: str = ""
+
+
 class EventsBody(BaseModel):
     events: list[dict[str, Any]]
 
@@ -255,7 +279,56 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.events.emit("write.refused", ticket=run["ticket_key"], run_id=run_id, fence=fence,
                             account=run["account_id"], node=run["node"], reason=f"{target}.{action}: stale fence")
             raise HTTPException(409, "fencing token is no longer valid")
+        if run["step"] == "master" and target != "master":
+            audit(target, action, run["ticket_key"], run_id, fence, run["account_id"], False,
+                  "master writes must use the restricted master action API", payload)
+            ctx.events.emit("write.refused", ticket=run["ticket_key"], run_id=run_id, fence=fence,
+                            account=run["account_id"], node=run["node"],
+                            reason=f"{target}.{action}: master writes require the restricted action API")
+            raise HTTPException(403, "master writes must use the restricted master action API")
         return run
+
+    def master_run(run_id: str, fence: int, node: str, action: str, payload: dict | None = None) -> dict:
+        run = fenced(run_id, fence, "master", action, payload)
+        if run["step"] != "master":
+            raise HTTPException(403, "only a master run can use this endpoint")
+        if run["node"] != node:
+            raise HTTPException(403, "master run belongs to another node")
+        return run
+
+    def master_snapshot() -> dict:
+        now = utcnow()
+        repo = ctx.repo()
+        incidents = ctx.db.all("SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
+                               " WHERE closed_at IS NULL ORDER BY opened_at")
+        needs_owner = ctx.db.all("SELECT key, project, summary, description, priority, labels, jira_updated"
+                                 " FROM tickets WHERE status='Needs owner' AND NOT ('owner-escalated'=ANY(labels))"
+                                 " ORDER BY priority, jira_created NULLS LAST, key")
+        running = ctx.db.all("SELECT id, ticket_key, project, step, account_id, provider, model, node, fence, started_at"
+                             " FROM runs WHERE status='running' AND step<>'master' ORDER BY started_at")
+        clocks = []
+        for run in running:
+            project = repo.projects.get(run["project"])
+            limits = project.work_minutes() if project else {"target": 30, "warn": 45, "hard": 60}
+            elapsed = max(0, (now - run["started_at"]).total_seconds() / 60)
+            clocks.append({"run_id": str(run["id"]), "ticket": run["ticket_key"], "project": run["project"],
+                           "step": run["step"], "account": run["account_id"], "provider": run["provider"],
+                           "model": run["model"], "node": run["node"], "fence": run["fence"],
+                           "started_at": run["started_at"].isoformat(), "elapsed_minutes": round(elapsed, 1),
+                           "work_minutes": limits,
+                           "passed": [name for name in ("target", "warn", "hard") if elapsed >= limits[name]]})
+        offline_nodes = ctx.db.all("SELECT name, last_heartbeat FROM nodes WHERE status='offline' ORDER BY name")
+        quota_incidents = [i for i in incidents if i["kind"] in ("account_quota", "quota_high")]
+        high_subjects = {i["subject"].split(":", 1)[0] for i in quota_incidents if i["kind"] == "quota_high"}
+        quota_accounts = []
+        for account in ctx.db.all("SELECT id, provider, node, status, cooldown_until, last_error, quota FROM accounts"):
+            cooling = ctx.leases.cooling(account["id"])
+            if account["status"] in ("cooldown", "signed_out", "error") or cooling or account["id"] in high_subjects:
+                quota_accounts.append({**account, "cooldown": {"reason": cooling[0], "seconds": cooling[1]}
+                                      if cooling else None})
+        return {"scope": "global", "captured_at": now.isoformat(), "open_incidents": incidents,
+                "needs_owner": needs_owner, "running_clocks": clocks, "offline_nodes": offline_nodes,
+                "quota_accounts": quota_accounts, "quota_incidents": quota_incidents}
 
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/healthz")
@@ -350,11 +423,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if ctx.leases.cooling(account_id):
             return []
         projects = [p for p in (repo.nodes[node].projects if node in repo.nodes else []) if p in repo.projects]
-        if not projects:
-            return []
         roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
+        if not projects:
+            return []
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
             verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
@@ -415,10 +488,49 @@ def create_app(ctx: Ctx) -> FastAPI:
             out += dev_rows
         return out
 
+    def master_candidate(account_id: str, node: str) -> dict | None:
+        repo = ctx.repo()
+        account = repo.account(account_id)
+        if not account or account.node != node:
+            raise HTTPException(403, f"account {account_id} does not run on {node}")
+        if "master" not in (account.roles or []) or ctx.leases.cooling(account_id):
+            return None
+        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a JOIN nodes n ON n.name=a.node"
+                           " WHERE a.id=%s AND a.node=%s", (account_id, node))
+        if not ready or ready["status"] not in ("idle", "working", "probing") or ready["node_status"] != "online":
+            return None
+        held = set(ctx.leases.held_keys())
+        if MASTER_SCOPE in held:
+            return None
+        recent = ctx.db.one("SELECT id, fence, ticket_key, provider, status, outcome, ended_at FROM runs"
+                            " WHERE step='master' ORDER BY started_at DESC LIMIT 1")
+        provider_failover = False
+        if recent:
+            lease_lost = (recent["status"] == "running" and
+                          ctx.leases.master_holder() != f"{recent['id']}:{recent['fence']}")
+            failed_over = recent["outcome"] in ("quota", "lost") or lease_lost
+            if failed_over and recent["provider"] == account.provider:
+                return None
+            provider_failover = failed_over and recent["provider"] != account.provider
+        backoff = ctx.db.all(BACKOFF_SQL, {"step": "master"})
+        if not provider_failover and any(row["ticket_key"] == MASTER_SCOPE for row in backoff):
+            return None
+        if recent and recent["ended_at"] and recent["ended_at"] > utcnow() - timedelta(seconds=MASTER_CYCLE_S):
+            if recent["outcome"] == "done":
+                return None
+        return {"key": MASTER_SCOPE, "project": "", "status": "Master", "type": "Master", "priority": "Highest",
+                "labels": [], "summary": "Master monitoring cycle",
+                "description": "Review incidents and follow up on blocked or slow work.",
+                "jira_created": None, "step": "master"}
+
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
         return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
                              "step": t["step"]} for t in eligible(account, node)[:20]]}
+
+    @app.get("/v1/master/candidate")
+    def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        return {"candidate": master_candidate(account, node)}
 
     def related_hits(t: dict) -> list[dict]:
         """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
@@ -430,7 +542,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
-        tickets = {(t["key"], t["step"]): t for t in eligible(body.account, node)}
+        candidates = [master_candidate(body.account, node)] if body.step == "master" else eligible(body.account, node)
+        tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))
         if not t:
             return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
@@ -456,9 +569,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE accounts SET status='working', updated_at=now() WHERE id=%s", (acc.id,))
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
-        p = repo.projects[t["project"]]
+        p = repo.projects.get(t["project"])
         extra: dict[str, Any] = {}
-        dev = last_dev(t["key"], done=True) or last_dev(t["key"])
+        dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
         if body.step == "verify" and dev:
             extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                            "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
@@ -487,16 +600,26 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["recent_comments"] = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
             except Exception as e:  # noqa: BLE001
                 log.warning("comments of %s for intake failed: %s", t["key"], e)
-        extra["related"] = related_hits(t)
+        if body.step == "master":
+            extra["master_scope"] = "global"
+        else:
+            extra["related"] = related_hits(t)
+        project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
+                         "node": node,
+                         "work_minutes": {"target": 30, "warn": 45, "hard": 60},
+                         "merge": {"method": "squash", "auto": False, "require_human": True}}
+                        if body.step == "master" else
+                        {"key": p.key, "repo": p.repo, "base": p.base, "hotfix_base": p.hotfix_base,
+                         "checks": p.checks, "stack": p.stack, "work_minutes": p.work_minutes(),
+                         "merge": {"method": (p.merge or {}).get("method", "squash"),
+                                   "auto": bool((p.merge or {}).get("auto", True)),
+                                   "require_human": bool((p.merge or {}).get("require_human", False))}}
+                        if p else {})
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
                 "ticket": {k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
-                "project": {"key": p.key, "repo": p.repo, "base": p.base, "hotfix_base": p.hotfix_base,
-                            "checks": p.checks, "stack": p.stack, "work_minutes": p.work_minutes(),
-                            "merge": {"method": (p.merge or {}).get("method", "squash"),
-                                      "auto": bool((p.merge or {}).get("auto", True)),
-                                      "require_human": bool((p.merge or {}).get("require_human", False))}}}
+                "project": project_data}
 
     # --- runs -----------------------------------------------------------------------------------------------
     @app.post("/v1/runs/{run_id}/heartbeat")
@@ -562,6 +685,142 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("run.released", ticket=run["ticket_key"], run_id=run_id, fence=body.fence,
                         account=run["account_id"], node=node, outcome="released" if released else "not_owner")
         return {"released": released}
+
+    @app.get("/v1/master/context")
+    def master_context(run_id: str, fence: int, node: str = Depends(node_auth)) -> dict:
+        master_run(run_id, fence, node, "context")
+        return master_snapshot()
+
+    @app.post("/v1/master/actions")
+    def master_action(body: MasterActionBody, node: str = Depends(node_auth)) -> dict:
+        run = master_run(body.run_id, body.fence, node, body.action,
+                         {"ticket": body.ticket, "intent_chars": len(body.intent), "action": body.action})
+        ticket = body.ticket.strip()
+        ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,)) if ticket else None
+        policy_project = ticket_row["project"] if ticket_row else None
+        policy = ctx.repo().policy_for(policy_project)
+        if not body.intent.strip():
+            reason = "master action must include the request or observation intent"
+            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+            ctx.events.emit("master.action", ticket=ticket or run["ticket_key"], run_id=body.run_id,
+                            fence=body.fence, account=run["account_id"], node=node, outcome="denied", reason=reason,
+                            action=body.action)
+            raise HTTPException(400, reason)
+        action_context = "\n".join((body.action, body.intent, body.what, body.why, body.result, body.next,
+                                    str(body.fields), body.title, body.detail))
+        decision = decide_master_action(policy, body.action, action_context)
+        ctx.events.emit("policy.decision", ticket=ticket or run["ticket_key"], step="master", run_id=body.run_id,
+                        fence=body.fence, account=run["account_id"], node=node, outcome=decision.decision,
+                        reason=decision.reason[:200], action=body.action)
+
+        def master_event(outcome: str, reason: str) -> None:
+            ctx.events.emit("master.action", ticket=ticket or run["ticket_key"], project=policy_project or "",
+                            step="master", run_id=body.run_id, fence=body.fence, account=run["account_id"],
+                            provider=run["provider"], model=run["model"], node=node, outcome=outcome,
+                            reason=reason[:300], action=body.action)
+
+        def formatted_comment(headline: str, result: str, next_step: str) -> str:
+            from ..worker.notes import note
+            comment_context = type("MasterCommentContext", (), {
+                "step": "master", "account": run["account_id"], "provider": run["provider"], "model": run["model"],
+                "run_id": body.run_id, "fence": body.fence,
+            })()
+            return note(comment_context, headline, what=body.what or body.intent or "Review the monitoring snapshot",
+                        why=body.why or "The master follow-up requires an action", result=result,
+                        next_=next_step or body.next or "Continue monitoring in the next master cycle", node=node)
+
+        if decision.decision == "escalate":
+            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,
+                  decision.reason, {"intent_chars": len(body.intent)})
+            link = (ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}") if ticket and ctx.settings.jira_site else ""
+            comment_id = ""
+            if ticket and ctx.jira and ctx.db.one("SELECT key FROM tickets WHERE key=%s", (ticket,)):
+                comment_id = ctx.jira.comment(ticket, formatted_comment(
+                    "owner decision required", "Escalated to the owner; no protected action was performed.",
+                    "The owner decides whether and how this change may proceed."))
+                audit("jira", "comment", ticket, body.run_id, body.fence, run["account_id"], True, comment_id,
+                      {"master_action": body.action, "escalate_to_owner": decision.reason})
+            sent = notify.send("warning", f"{ticket or 'AI Flow'} requires owner decision",
+                               f"{decision.reason}. {body.intent[:2500]}", link)
+            audit("notify", "master-escalation", ticket, body.run_id, body.fence, run["account_id"], True,
+                  ",".join(sent) or "no channel configured", {"reason": decision.reason})
+            master_event("escalated", decision.reason)
+            return {"ok": True, "escalated": True, "reason": decision.reason, "commented": bool(comment_id),
+                    "sent": sent}
+
+        if decision.decision != "allow":
+            audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,
+                  decision.reason, {"intent_chars": len(body.intent)})
+            master_event("denied", decision.reason)
+            raise HTTPException(403, decision.reason)
+
+        allowed_ticket_actions = {"jira_comment", "jira_update", "dev_reply", "requeue"}
+        ticket_row = None
+        if body.action in allowed_ticket_actions:
+            ticket_row = ctx.db.one("SELECT key, project FROM tickets WHERE key=%s", (ticket,)) if ticket else None
+            if not ticket_row:
+                reason = "a valid Jira ticket is required for this master action"
+                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+                master_event("denied", reason)
+                raise HTTPException(400, reason)
+            if not ctx.jira:
+                raise HTTPException(503, "Jira is unavailable")
+
+        result = "ok"
+        if body.action in ("jira_comment", "dev_reply"):
+            result = ctx.jira.comment(ticket, formatted_comment(
+                body.headline, body.result or body.what or "Follow-up recorded", body.next))
+        elif body.action == "jira_update":
+            if body.fields:
+                ctx.jira.set_fields(ticket, body.fields)
+            for label in body.add_labels:
+                ctx.jira.add_label(ticket, label)
+                ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s=ANY(labels) THEN labels ELSE array_append(labels,%s) END"
+                           " WHERE key=%s", (label, label, ticket))
+            for label in body.remove_labels:
+                ctx.jira.remove_label(ticket, label)
+                ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (label, ticket))
+            result = "updated"
+        elif body.action == "requeue":
+            target = body.target_status or "To Do"
+            if target != "To Do":
+                reason = "master may only requeue tickets to To Do"
+                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+                master_event("denied", reason)
+                raise HTTPException(403, reason)
+            ctx.jira.transition_to(ticket, "To Do")
+            ctx.db.run("UPDATE tickets SET status='To Do', synced_at=now() WHERE key=%s", (ticket,))
+            ctx.jira.comment(ticket, formatted_comment(body.headline or "ticket requeued",
+                                                       body.result or "The ticket is back in To Do.", body.next))
+            result = "To Do"
+        elif body.action == "incident_open":
+            from .incidents import open_incident
+            if not body.kind or not body.subject or body.severity not in ("info", "warning", "critical"):
+                reason = "incident_open requires kind, subject, and a valid severity"
+                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+                master_event("denied", reason)
+                raise HTTPException(400, reason)
+            result = "opened" if open_incident(ctx, body.kind, body.subject, body.severity,
+                                                body.title or body.headline, body.detail or body.result) else "already open"
+        elif body.action == "incident_close":
+            from .incidents import close_incident
+            if not body.kind or not body.subject:
+                reason = "incident_close requires kind and subject"
+                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+                master_event("denied", reason)
+                raise HTTPException(400, reason)
+            close_incident(ctx, body.kind, body.subject, body.result or body.why)
+            result = "closed"
+        elif body.action == "notify_owner":
+            sent = notify.send(body.severity if body.severity in ("info", "warning", "critical") else "warning",
+                               body.title or body.headline, body.detail or body.result,
+                               ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}" if ticket and ctx.settings.jira_site else "")
+            result = ",".join(sent) or "no channel configured"
+        audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], True, str(result)[:500],
+              {"intent_chars": len(body.intent), "fields": list(body.fields), "labels_added": body.add_labels,
+               "labels_removed": body.remove_labels})
+        master_event("completed", str(result))
+        return {"ok": True, "result": result, "escalated": False}
 
     # --- Jira writes (fenced) ---------------------------------------------------------------------------------
     @app.post("/v1/jira/{key}/transition")
@@ -717,7 +976,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not run:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
-        if run["step"] == "triage":
+        if run["step"] == "master":
+            d = Decision("deny", "master runs return an action plan; all effects go through the fenced master API")
+        elif run["step"] == "triage":
             d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                                  str(payload.get("cwd") or ""),
                                  "a triage run reads the base branch and cannot edit files")

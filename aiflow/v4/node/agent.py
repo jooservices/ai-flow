@@ -393,6 +393,13 @@ def process_node_operation(api: ControlClient, node: str) -> None:
     api.call("POST", f"/v1/nodes/{node}/operations/{operation_id}/result", body, retries=2)
 
 
+def _process_node_operation_logged(api: ControlClient, node: str) -> None:
+    try:
+        process_node_operation(api, node)
+    except Exception as operation_error:  # noqa: BLE001 - keep polling failures out of the heartbeat thread
+        log.warning("node operation poll failed: %s", type(operation_error).__name__)
+
+
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
     api = ControlClient(control_url, token, timeout=15)
@@ -402,6 +409,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
     pending_network_events: list[dict] = []
+    operation_thread: threading.Thread | None = None
     try:
         while not stop.is_set():
             try:
@@ -433,11 +441,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     pending_network_events = []
                 except Exception as e:  # noqa: BLE001 - retry the event delivery on the next heartbeat
                     log.warning("heartbeat error report not recorded: %s", type(e).__name__)
+            if operation_thread is None or not operation_thread.is_alive():
+                operation_thread = threading.Thread(
+                    target=_process_node_operation_logged, args=(api, name),
+                    name=f"aiflow4-node-operation-{name}")
+                operation_thread.start()
             try:
-                try:
-                    process_node_operation(api, name)
-                except Exception as operation_error:  # noqa: BLE001 - keep heartbeat and worker supervision alive
-                    log.warning("node operation poll failed: %s", type(operation_error).__name__)
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()

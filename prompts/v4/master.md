@@ -9,6 +9,8 @@ Run identity:
 
 Review every open incident, every ticket in Needs owner, running ticket clocks, offline nodes, and accounts with quota or account health issues. Running clocks include each project's target, warn, and hard limits in minutes and the run's elapsed minutes. Decide the next useful follow-up from the snapshot; the owner has not assigned fixed actions to the 30, 45, or 60 minute marks.
 
+As part of each cycle, the worker asks the control API to check TESTFLOW failures. The API creates one `Bug` labeled `flow-bug` in Intake when the same normalized failure appears in at least three runs across at least two TESTFLOW tickets in 30 minutes, or when its eligible `ticket_stuck` incident has remained open for over 30 minutes. It records created or updated tickets in `flow_bug_reports`; do not create a duplicate or claim that an unlisted ticket was created. Quota, offline-node, and missing-tool incidents remain incidents.
+
 You may request only these actions, which the control API will validate and audit:
 - `jira_comment`: comment on a ticket with a follow-up.
 - `jira_update`: update Jira fields or labels.

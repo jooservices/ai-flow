@@ -44,9 +44,10 @@ its health check. A successful operation reports installed tool versions and gre
 ## Execution and safety
 
 The supported agent operations are `install` and `repair`. Tool names, version pins, package names and service
-units come from the control repo; request bodies cannot supply a command. AI CLIs use fixed npm package names
-with versions from `versions.lock`. The agent also installs `uv`, Python, Node.js, GitHub CLI, Composer,
-WP-CLI and `codex-code-mode-host` from their official versioned releases. GitHub release asset digests, Node.js
+units come from the control repo; request bodies cannot supply a command. AI CLI plans include Node.js before
+the fixed npm package install; the agent installs the pinned Node.js distribution if Node or npm is missing.
+AI CLIs use fixed npm package names with versions from `versions.lock`. The agent also installs `uv`, Python,
+GitHub CLI, Composer, WP-CLI and `codex-code-mode-host` from their official versioned releases. GitHub release asset digests, Node.js
 checksums and Composer checksums are verified before an artifact is installed. Python is installed through the
 node's pinned uv release; the Codex host is selected from the same release as the pinned Codex CLI, and its
 installed version is recorded for later reconciliation.
@@ -62,18 +63,16 @@ shell, with an argv built from a fixed map; any other component name is rejected
 | `docker` | `server-installer apply --modules docker` |
 | `php` | `SI_PHP_VERSION=<MAJOR.MINOR from versions.lock> server-installer apply --modules php` |
 
-Inherited `SI_*` variables are removed before the call. The generated package module checks and verifies the
-full declared list through the server-installer's distro-aware package manager, including on Debian/Ubuntu and
-RHEL-family hosts. Install the installer on each node (as root) before using these components:
+Inherited `SI_*` variables are removed before the call. Before the first OS component operation, the agent
+downloads the pinned `v1.1.0` source archive from the official GitHub repository, safely extracts it, and installs
+the CLI at the fixed path. No per-node manual clone is required. The generated package module checks and verifies
+the full declared list through the server-installer's distro-aware package manager, including on Debian/Ubuntu and
+RHEL-family hosts.
 
-```bash
-git clone --depth 1 --branch v1.1.0 https://github.com/jooservices/server-installer /opt/server-installer/v1.1.0
-```
-
-A missing installer fails the operation with that path in the message. Artifact downloads use fixed vendor URLs,
-locked versions (or the vendor's latest stable release when no supporting-tool pin is present), and a checksum
-before writing to `/usr/local/bin`. Arbitrary commands and arbitrary artifact URLs are never accepted from the
-API or control repo.
+An unavailable or invalid pinned installer archive fails the operation. Other artifact downloads use fixed vendor
+URLs, locked versions (or the vendor's latest stable release when no supporting-tool pin is present), and a
+checksum before writing to `/usr/local/bin`. Arbitrary commands and arbitrary artifact URLs are never accepted
+from the API or control repo.
 
 `GET /v1/nodes/{name}/operations/next` is node-token protected. The agent claims one queued operation and posts
 its verified result to `/result`. The Command Center log is `GET /v1/nodes/{name}/operations`, available only

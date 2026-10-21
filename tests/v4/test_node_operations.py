@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import shlex
 import subprocess
+import tarfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,10 +40,11 @@ def test_owner_can_queue_missing_tool_install_for_online_agent_and_agent_complet
 
     queued = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert queued.status_code == 202
-    assert queued.json()["status"] == "queued" and queued.json()["components"] == ["codex"]
+    assert queued.json()["status"] == "queued" and queued.json()["components"] == ["codex", "node"]
     op = client.get("/v1/nodes/node1/operations/next", headers=headers).json()["operation"]
     assert op["id"] == queued.json()["id"] and op["payload"] == {
-        "action": "install", "tools": [{"name": "codex", "version": "0.4.1", "packages": []}], "services": []}
+        "action": "install", "tools": [{"name": "codex", "version": "0.4.1", "packages": []},
+                                           {"name": "node", "version": "", "packages": []}], "services": []}
     result = client.post(f"/v1/nodes/node1/operations/{op['id']}/result",
                          json={"status": "completed", "result": {"healthy": True, "tools": {"codex": "codex 0.4.1"}}},
                          headers=headers)
@@ -195,13 +199,16 @@ def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(
     assert plan["codex"] == "0.4.1" and plan["php"] == "8.3.7" and plan["composer"] == "2.8.1"
     package_plan = next(tool for tool in op["payload"]["tools"] if tool["name"] == "packages")
     assert package_plan["packages"] == ["curl", "ca-certificates"]
+    assert next(tool for tool in op["payload"]["tools"] if tool["name"] == "node")
     assert op["payload"]["services"] == repo.nodes["node1"].services
 
 
 def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(monkeypatch):
     calls = []
-    versions = iter([{"codex": "missing"}, {"codex": "codex 0.4.1"}])
+    versions = iter([{"node": "node v22.4.0", "codex": "missing"},
+                     {"node": "node v22.4.0", "codex": "codex 0.4.1"}])
     monkeypatch.setattr(agent, "tool_versions", lambda _names: next(versions))
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
 
     def fake_run(command, **kwargs):
         calls.append(command)
@@ -210,7 +217,7 @@ def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(m
     monkeypatch.setattr(operations.subprocess, "run", fake_run)
     monkeypatch.setattr(operations.httpx, "get", lambda *args, **kwargs: SimpleNamespace(status_code=200))
     result = operations.execute({"payload": {"action": "repair", "tools": [
-        {"name": "codex", "version": "0.4.1"}], "services": [
+        {"name": "codex", "version": "0.4.1"}, {"name": "node", "version": ""}], "services": [
         {"name": "worker-api", "unit": "worker-api.service", "healthcheck": "http://127.0.0.1/health"}]}})
     assert result["healthy"] is True
     assert result["services"] == [{"name": "worker-api", "unit": "worker-api.service", "healthy": True,
@@ -219,6 +226,41 @@ def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(m
                         "https://registry.npmjs.org", "@openai/codex@0.4.1"]
     assert calls[1:3] == [["systemctl", "enable", "--now", "worker-api.service"],
                           ["systemctl", "is-active", "--quiet", "worker-api.service"]]
+
+
+def test_repair_installs_codex_when_reported_version_has_a_matching_prefix(monkeypatch):
+    snapshots = iter([{"node": "node v22.4.0", "codex": "codex 0.4.10"},
+                      {"node": "node v22.4.0", "codex": "codex 0.4.1"}])
+    installs = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: next(snapshots))
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
+    monkeypatch.setattr(operations, "_install_component",
+                        lambda name, version, packages: installs.append((name, version)))
+
+    result = operations.execute({"payload": {"action": "repair", "tools": [
+        {"name": "codex", "version": "0.4.1"}, {"name": "node", "version": ""}], "services": []}})
+
+    assert result["healthy"] is True
+    assert installs == [("codex", "0.4.1")]
+    assert not operations._tool_version_ok("codex", "codex 0.4.10", "0.4.1")
+    assert not operations._tool_version_ok("codex", "codex 0.4.10", "0.4")
+    assert operations._tool_version_ok("python3", "Python 3.12.3", "3.12")
+
+
+def test_ai_cli_repair_installs_node_when_npm_is_missing_even_if_node_is_present(monkeypatch):
+    snapshots = iter([{"node": "node v22.4.0", "codex": "missing"},
+                      {"node": "node v22.4.0", "codex": "codex 0.4.1"}])
+    installs = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: next(snapshots))
+    monkeypatch.setattr(operations.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(operations, "_install_component",
+                        lambda name, version, packages: installs.append((name, version)))
+
+    result = operations.execute({"payload": {"action": "install", "tools": [
+        {"name": "codex", "version": "0.4.1"}, {"name": "node", "version": ""}], "services": []}})
+
+    assert result["healthy"] is True
+    assert installs == [("node", ""), ("codex", "0.4.1")]
 
 
 def test_repair_installs_missing_required_toolchains_and_codex_host(monkeypatch):
@@ -352,6 +394,65 @@ def test_node_agent_claims_whitelisted_operation_and_posts_its_result(monkeypatc
                         {"status": "completed", "result": {"healthy": True}}, {"retries": 2})
 
 
+def test_node_agent_keeps_heartbeating_while_an_operation_runs(monkeypatch):
+    operation = {"id": "op-slow", "payload": {"action": "repair"}}
+    heartbeat_count = 0
+    heartbeats = threading.Event()
+    execute_started = threading.Event()
+    finish_execute = threading.Event()
+    result_posted = threading.Event()
+    operation_claimed = False
+
+    class FakeApi:
+        def call(self, method, path, body=None, **kwargs):
+            nonlocal heartbeat_count, operation_claimed
+            if path.endswith("/heartbeat"):
+                heartbeat_count += 1
+                if heartbeat_count >= 2:
+                    heartbeats.set()
+                return {"desired": {"workers": [], "accounts": [], "release": ""}}
+            if path.endswith("/operations/next"):
+                if operation_claimed:
+                    return {"operation": None}
+                operation_claimed = True
+                return {"operation": operation}
+            if path.endswith("/result"):
+                result_posted.set()
+                return {"status": body["status"]}
+            return {}
+
+    api = FakeApi()
+    monkeypatch.setattr(agent, "ControlClient", lambda *args, **kwargs: api)
+    monkeypatch.setattr(agent, "metrics", lambda previous: ({}, previous))
+    monkeypatch.setattr(agent, "tool_versions", lambda: {})
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+
+    def slow_execute(_operation):
+        execute_started.set()
+        finish_execute.wait(2)
+        return {"healthy": True}
+
+    monkeypatch.setattr(operations, "execute", slow_execute)
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+    stop = threading.Event()
+    runner = threading.Thread(target=agent.run_agent,
+                              args=("http://control", "node1", "token"),
+                              kwargs={"every_s": 0.005, "manage_workers": False, "stop": stop})
+    runner.start()
+    try:
+        assert execute_started.wait(1)
+        assert heartbeats.wait(1)
+        assert heartbeat_count >= 2
+    finally:
+        stop.set()
+        finish_execute.set()
+        runner.join(2)
+    assert not runner.is_alive()
+    assert result_posted.wait(1)
+
+
 def test_server_installer_argv_comes_from_the_module_whitelist():
     binary = "/opt/server-installer/v1.1.0/bin/server-installer"
     assert str(operations.SERVER_INSTALLER) == binary
@@ -399,11 +500,39 @@ def test_packages_docker_and_php_run_the_pinned_server_installer_without_a_shell
     assert package_modules[0].count('"zip"') == 1 and package_modules[0].count('"unzip"') == 1
 
 
-def test_missing_server_installer_or_unsafe_extra_packages_fail_the_operation(monkeypatch, tmp_path):
-    monkeypatch.setattr(operations, "SERVER_INSTALLER", tmp_path / "absent")
-    with pytest.raises(operations.OperationError, match="server-installer v1.1.0 is not installed"):
-        operations._install_component("docker", "", [])
-    binary = tmp_path / "server-installer"
+def test_missing_server_installer_is_provisioned_from_its_pinned_archive(monkeypatch, tmp_path):
+    install_dir = tmp_path / "opt" / "server-installer" / "v1.1.0"
+    binary = install_dir / "bin" / "server-installer"
+    monkeypatch.setattr(operations, "SERVER_INSTALLER", binary)
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        cli = b"#!/bin/bash\n"
+        member = tarfile.TarInfo("server-installer-v1.1.0/bin/server-installer")
+        member.mode = 0o755
+        member.size = len(cli)
+        archive.addfile(member, io.BytesIO(cli))
+    downloads = []
+
+    def fake_response(url, **kwargs):
+        downloads.append((url, kwargs))
+        return SimpleNamespace(content=payload.getvalue())
+
+    calls = []
+    monkeypatch.setattr(operations, "_response", fake_response)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kwargs: (
+        calls.append((command, kwargs)) or SimpleNamespace(returncode=0, stdout="", stderr="")))
+
+    operations._install_component("docker", "27.5", [])
+
+    assert downloads == [("https://api.github.com/repos/jooservices/server-installer/tarball/v1.1.0",
+                         {"timeout": 900})]
+    assert binary.is_file() and binary.stat().st_mode & 0o111
+    assert calls[0][0] == [str(binary), "apply", "--modules", "docker"]
+
+
+def test_unsafe_extra_packages_fail_before_running_server_installer(monkeypatch, tmp_path):
+    binary = tmp_path / "server-installer" / "v1.1.0" / "bin" / "server-installer"
+    binary.parent.mkdir(parents=True)
     binary.write_text("#!/bin/bash\n")
     monkeypatch.setattr(operations, "SERVER_INSTALLER", binary)
     calls = []
@@ -418,10 +547,9 @@ def test_missing_server_installer_or_unsafe_extra_packages_fail_the_operation(mo
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(operations.subprocess, "run", fake_run)
-    operations._install_component("packages", "", ["curl"])
-    assert len(calls) == 1 and calls[0][-3:] == ["apply", "--modules", "packages"]
     with pytest.raises(operations.OperationError, match="safe package names"):
         operations._install_component("packages", "", ["curl;id"])
+    assert calls == []
 
 
 def test_operation_whitelist_rejects_arbitrary_commands():

@@ -49,6 +49,31 @@ def action(client, headers, run, **payload):
                        headers=headers)
 
 
+def failed_flow_run(ctx, ticket, summary, *, step="dev", error_kind="infra", outcome="failed", minutes_ago=0,
+                    node="node1"):
+    run_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,summary)"
+               " VALUES (%s,%s,'TESTFLOW',%s,'codex-01','codex',%s,1,'finished',%s,%s,%s)",
+               (run_id, ticket, step, node, outcome, error_kind, summary))
+    if minutes_ago:
+        ctx.db.run("UPDATE runs SET started_at=now()-(%s * interval '1 minute'),"
+                   " ended_at=now()-(%s * interval '1 minute') WHERE id=%s",
+                   (minutes_ago, minutes_ago, run_id))
+    return run_id
+
+
+def master_context(client, headers, run):
+    response = client.get("/v1/master/context", params={"run_id": run["run_id"], "fence": run["fence"]},
+                          headers=headers)
+    if response.status_code != 200:
+        return response
+    scan = client.post("/v1/master/flow-bugs", json={"run_id": run["run_id"], "fence": run["fence"]},
+                       headers=headers)
+    payload = response.json()
+    payload["flow_bug_reports"] = scan.json().get("reports", [])
+    return SimpleNamespace(status_code=response.status_code, json=lambda: payload)
+
+
 def test_master_cycle_is_single_fenced_and_next_cycle_can_use_another_ready_provider(client, ctx):
     cc = ready(client, "cc", "claude-01")
     node1 = ready(client, "node1", "codex-01")
@@ -363,9 +388,11 @@ def test_codex_master_runs_use_read_only_sandbox_without_network(tmp_path, monke
 
     class FakeApi:
         def call(self, method, path, json=None, params=None):
-            assert (method, path) == ("GET", "/v1/master/context")
-            return {"open_incidents": [], "needs_owner": [], "running_clocks": [], "offline_nodes": [],
-                    "quota_accounts": [], "quota_incidents": []}
+            if (method, path) == ("GET", "/v1/master/context"):
+                return {"open_incidents": [], "needs_owner": [], "running_clocks": [], "offline_nodes": [],
+                        "quota_accounts": [], "quota_incidents": []}
+            assert (method, path) == ("POST", "/v1/master/flow-bugs")
+            return {"reports": []}
 
     class FakeAdapter:
         def argv(self, _spec):
@@ -436,3 +463,200 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     attempted = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action='jira_comment'",
                            (master["run_id"],))
     assert not attempted["accepted"] and category in attempted["result"]
+
+
+def test_repeated_testflow_failures_create_a_fenced_flow_bug_in_intake(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    ready(client, "node1", "codex-01")
+    master = claim_master(client, cc, "claude-01").json()
+    ctx.db.run("UPDATE nodes SET release_version='v4.2.1' WHERE name='node1'")
+    failures = [
+        failed_flow_run(ctx, "TESTFLOW-101", "Git refused checkout of branch TESTFLOW-101: pathspec did not match",
+                        step="triage"),
+        failed_flow_run(ctx, "TESTFLOW-101", "Git refused checkout of branch TESTFLOW-101: pathspec did not match",
+                        step="verify"),
+        failed_flow_run(ctx, "TESTFLOW-101", "Git refused checkout of branch TESTFLOW-101: pathspec did not match",
+                        step="triage"),
+    ]
+    assert master_context(client, cc, master).json()["flow_bug_reports"] == []
+    assert not getattr(ctx.jira, "created", [])  # three repeats on one ticket do not meet the two-ticket threshold
+
+    failures.append(failed_flow_run(
+        ctx, "TESTFLOW-102", "Git refused checkout of branch TESTFLOW-102: pathspec did not match", step="verify"))
+    snapshot = client.get("/v1/master/context", params={"run_id": master["run_id"], "fence": master["fence"]},
+                          headers=cc)
+    assert snapshot.status_code == 200 and not getattr(ctx.jira, "created", [])
+    scan = client.post("/v1/master/flow-bugs", json={"run_id": master["run_id"], "fence": master["fence"]},
+                       headers=cc)
+    assert scan.status_code == 200 and scan.json()["reports"][0]["action"] == "created"
+    created = ctx.jira.created[-1]
+    assert created["project"] == "TESTFLOW" and created["issuetype"] == "Bug"
+    assert created["labels"] == ["flow-bug"]
+    assert ctx.jira.status_of[created["key"]] == "Intake"
+    for run_id in failures:
+        assert run_id in created["description"]
+    for required in ("Pattern:", "Nodes:", "node1", "AI Flow releases:", "v4.2.1", "Suggested fix:",
+                     "aiflow/v4/worker/gitops.py", "aiflow/v4/worker/triage.py", "aiflow/v4/worker/verify.py"):
+        assert required in created["description"]
+    audit = ctx.db.one("SELECT actor, run_id, fence, accepted FROM write_audit WHERE action='flow_bug_create'")
+    assert audit["actor"] == "claude-01" and audit["run_id"] == master["run_id"]
+    assert audit["fence"] == master["fence"] and audit["accepted"]
+
+    finish(client, cc, master)
+    assert master_context(client, cc, master).status_code == 409
+    assert len(ctx.jira.created) == 1
+
+
+def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    for key in ("TESTFLOW-110", "TESTFLOW-111", "TESTFLOW-110"):
+        failed_flow_run(ctx, key, f"Git checkout refused for branch {key}: reference is unavailable", step="triage")
+    master_context(client, cc, master)
+    flow_bug = ctx.jira.created[0]["key"]
+
+    failed_flow_run(ctx, "TESTFLOW-112", "Git checkout refused for branch TESTFLOW-112: reference is unavailable",
+                    step="verify")
+    failed_flow_run(ctx, "TESTFLOW-113", "Git checkout refused for branch TESTFLOW-113: reference is unavailable",
+                    step="triage")
+    response = master_context(client, cc, master)
+    reports = response.json()["flow_bug_reports"]
+    assert len(reports) == 1
+    assert reports[0]["action"] == "repeated" and reports[0]["ticket"] == flow_bug
+    assert reports[0]["repeat_count"] == 2 and len(reports[0]["new_run_ids"]) == 2
+    assert len(ctx.jira.created) == 1
+    assert len(ctx.jira.comments) == 1 and ctx.jira.comments[0][0] == flow_bug
+    assert "Repeat count: 2" in ctx.jira.comments[0][1]
+    assert all(run_id in ctx.jira.comments[0][1] for run_id in response.json()["flow_bug_reports"][0]["new_run_ids"])
+
+    master_context(client, cc, master)
+    assert len(ctx.jira.created) == 1 and len(ctx.jira.comments) == 1
+
+
+def test_open_flow_bug_comments_on_one_recurrence_after_original_runs_age_out(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    original_ids = [
+        failed_flow_run(ctx, "TESTFLOW-117", f"Git checkout refused for branch TESTFLOW-117: ref unavailable"),
+        failed_flow_run(ctx, "TESTFLOW-118", f"Git checkout refused for branch TESTFLOW-118: ref unavailable"),
+        failed_flow_run(ctx, "TESTFLOW-117", f"Git checkout refused for branch TESTFLOW-117: ref unavailable"),
+    ]
+    created = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert created[0]["action"] == "created"
+    flow_bug = created[0]["ticket"]
+
+    ctx.db.run("UPDATE runs SET started_at=now()-interval '31 minutes', ended_at=now()-interval '31 minutes'"
+               " WHERE id=ANY(%s::uuid[])", (original_ids,))
+    recurring_id = failed_flow_run(
+        ctx, "TESTFLOW-119", "Git checkout refused for branch TESTFLOW-119: ref unavailable")
+    repeated = master_context(client, cc, master).json()["flow_bug_reports"]
+
+    assert repeated == [{"action": "repeated", "ticket": flow_bug, "repeat_count": 1,
+                         "new_run_ids": [recurring_id]}]
+    assert len(ctx.jira.created) == 1
+    assert len(ctx.jira.comments) == 1 and ctx.jira.comments[0][0] == flow_bug
+    assert "Repeat count: 1" in ctx.jira.comments[0][1] and recurring_id in ctx.jira.comments[0][1]
+
+
+def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_second_issue(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    for key in ("TESTFLOW-115", "TESTFLOW-116", "TESTFLOW-115"):
+        failed_flow_run(ctx, key, f"Git checkout refused for branch {key}: reference is unavailable", step="triage")
+    real_transition = ctx.jira.transition_to
+    calls = []
+
+    def flaky_transition(key, target):
+        calls.append((key, target))
+        if len(calls) == 1:
+            raise RuntimeError("Jira unavailable")
+        return real_transition(key, target)
+
+    ctx.jira.transition_to = flaky_transition
+    first = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert first[0]["action"] == "created" and not first[0]["in_intake"]
+    flow_bug = first[0]["ticket"]
+    assert len(ctx.jira.created) == 1 and ctx.jira.status_of[flow_bug] == "Backlog"
+    tracked = ctx.db.one("SELECT ticket_key, in_intake FROM flow_bug_tracker")
+    assert tracked["ticket_key"] == flow_bug and not tracked["in_intake"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (flow_bug,))["status"] != "Intake"
+
+    second = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert second == [{"action": "moved_to_intake", "ticket": flow_bug, "signature": first[0]["signature"]}]
+    assert len(ctx.jira.created) == 1 and ctx.jira.status_of[flow_bug] == "Intake"
+    assert ctx.db.one("SELECT in_intake FROM flow_bug_tracker")["in_intake"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (flow_bug,))["status"] == "Intake"
+
+    # Once in Intake the flow may move the Bug on; the master never pulls it back to Intake.
+    ctx.jira.status_of[flow_bug] = "In Progress"
+    master_context(client, cc, master)
+    assert len(ctx.jira.created) == 1 and len(calls) == 2
+
+
+def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    run_id = failed_flow_run(ctx, "TESTFLOW-120", "verify worker error: git checkout failed while preparing review",
+                             step="verify", minutes_ago=45)
+    from aiflow.v4.control.incidents import open_incident
+    open_incident(ctx, "ticket_stuck", "TESTFLOW-120", "warning", "TESTFLOW-120 failed repeatedly",
+                  "verify checkout is stuck")
+    ctx.db.run("UPDATE incidents SET opened_at=now()-interval '31 minutes'"
+               " WHERE kind='ticket_stuck' AND subject='TESTFLOW-120' AND closed_at IS NULL")
+
+    response = master_context(client, cc, master)
+    assert response.status_code == 200
+    assert response.json()["flow_bug_reports"][0]["action"] == "created"
+    issue = ctx.jira.created[0]
+    assert issue["labels"] == ["flow-bug"] and ctx.jira.status_of[issue["key"]] == "Intake"
+    assert run_id in issue["description"]
+    assert "incident" in issue["description"] and "open over 30 minutes" in issue["description"]
+
+
+def test_old_ticket_stuck_incident_does_not_claim_a_failure_started_after_it_opened(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    from aiflow.v4.control.incidents import open_incident
+    open_incident(ctx, "ticket_stuck", "TESTFLOW-121", "warning", "TESTFLOW-121 failed repeatedly",
+                  "checkout is stuck")
+    ctx.db.run("UPDATE incidents SET opened_at=now()-interval '31 minutes'"
+               " WHERE kind='ticket_stuck' AND subject='TESTFLOW-121' AND closed_at IS NULL")
+    failed_flow_run(ctx, "TESTFLOW-121", "Git checkout refused for branch TESTFLOW-121: ref unavailable",
+                    minutes_ago=10)
+
+    response = master_context(client, cc, master)
+
+    assert response.status_code == 200 and response.json()["flow_bug_reports"] == []
+    assert not getattr(ctx.jira, "created", [])
+
+
+@pytest.mark.parametrize("kind,subject,outcome,error_kind,summary", [
+    ("account_quota", "claude-01", "quota", "quota", "account quota exhausted"),
+    ("node_down", "node1", "failed", "infra", "node node1 went offline during checkout"),
+    ("node_tools", "node1:TESTFLOW", "failed", "infra", "required tool composer is missing on node1"),
+])
+def test_quota_offline_and_missing_tool_incidents_never_create_flow_bugs(
+        client, ctx, kind, subject, outcome, error_kind, summary):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    from aiflow.v4.control.incidents import open_incident
+    open_incident(ctx, kind, subject, "warning", f"{kind} incident", summary)
+    for key in ("TESTFLOW-130", "TESTFLOW-131", "TESTFLOW-130"):
+        failed_flow_run(ctx, key, summary, error_kind=error_kind, outcome=outcome)
+
+    response = master_context(client, cc, master)
+    assert response.status_code == 200 and response.json()["flow_bug_reports"] == []
+    assert not getattr(ctx.jira, "created", [])
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind=%s AND subject=%s AND closed_at IS NULL",
+                      (kind, subject))["n"] == 1
+
+
+def test_flow_bug_candidate_precedes_regular_ticket_when_both_are_eligible(client, ctx):
+    node1 = ready(client, "node1", "codex-01")
+    add_ticket(ctx.db, "TESTWP-130", status="To Do")
+    add_ticket(ctx.db, "TESTWP-131", status="To Do", labels=("aiflow-ready", "flow-bug"))
+    ctx.db.run("UPDATE tickets SET type='Bug' WHERE key='TESTWP-131'")
+
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=node1).json()["tickets"]
+    assert candidates[0]["key"] == "TESTWP-131"
+    assert candidates[0]["step"] == "dev"

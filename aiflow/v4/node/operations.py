@@ -39,6 +39,8 @@ _SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}\Z")
 _SAFE_PACKAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+:_-]{0,127}\Z")
 _SAFE_UNIT = re.compile(r"[A-Za-z0-9_.@-]{1,180}\.service\Z")
 _SEMVER = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][A-Za-z0-9.-]+)?\Z")
+_REPORTED_VERSION = re.compile(
+    r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){1,2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?)(?![A-Za-z0-9])")
 _PYTHON_VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\Z")
 _INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp",
                   "gh", "claude", "codex", "codex-code-mode-host", "grok", "opencode")
@@ -111,11 +113,61 @@ module_verify() {{
 '''
 
 
+def _ensure_server_installer() -> None:
+    """Provision the pinned TESTFLOW-68 installer on first use, without requiring git on a new node."""
+    if SERVER_INSTALLER.is_file():
+        return
+
+    install_dir = SERVER_INSTALLER.parent.parent
+    root = install_dir.parent
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f".{install_dir.name}-", dir=root) as tmp:
+            staging = Path(tmp)
+            extract_dir = staging / "extract"
+            extract_dir.mkdir()
+            payload = _response(
+                f"https://api.github.com/repos/jooservices/server-installer/tarball/{SERVER_INSTALLER_VERSION}",
+                timeout=900).content
+            try:
+                with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+                    archive.extractall(path=extract_dir, filter="data")
+            except (tarfile.TarError, OSError) as exc:
+                raise OperationError("pinned server-installer archive is invalid") from exc
+            candidates = [path for path in extract_dir.rglob("bin/server-installer")
+                          if path.is_file() and not path.is_symlink()]
+            if len(candidates) != 1:
+                raise OperationError("pinned server-installer archive is missing its CLI")
+            source_dir = candidates[0].parent.parent
+            staged_dir = staging / "install"
+            os.replace(source_dir, staged_dir)
+            binary = staged_dir / "bin" / "server-installer"
+            os.chmod(binary, binary.stat().st_mode | 0o111)
+
+            backup_dir = staging / "previous"
+            if install_dir.exists():
+                if install_dir.is_symlink() or not install_dir.is_dir():
+                    raise OperationError("server-installer install path is not a regular directory")
+                os.replace(install_dir, backup_dir)
+            try:
+                os.replace(staged_dir, install_dir)
+            except OSError:
+                if backup_dir.exists():
+                    os.replace(backup_dir, install_dir)
+                raise
+    except OperationError:
+        raise
+    except (httpx.HTTPError, OSError, tarfile.TarError) as exc:
+        raise OperationError(f"could not provision jooservices/server-installer {SERVER_INSTALLER_VERSION} "
+                             f"({type(exc).__name__})") from exc
+    if not SERVER_INSTALLER.is_file():
+        raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} was not installed")
+
+
 def _run_server_installer(name: str, version: str, packages: list[str] | None = None) -> None:
     command, settings = server_installer_command(name, version)
     if not SERVER_INSTALLER.is_file():
-        raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} is not installed at "
-                             f"{SERVER_INSTALLER}")
+        _ensure_server_installer()
     # Drop inherited SI_* values so only the pinned settings above reach the installer modules.
     env = {k: v for k, v in os.environ.items() if not k.startswith("SI_")} | settings
     if name in {"packages", "git"}:
@@ -420,7 +472,14 @@ def _install_component(name: str, version: str, packages: list[str]) -> None:
 def _version_ok(actual: str, expected: str) -> bool:
     if actual in ("", "missing", "timeout"):
         return False
-    return not expected or expected in actual
+    if not expected:
+        return True
+    match = _REPORTED_VERSION.search(actual)
+    if not match:
+        return False
+    reported = match.group(1).removeprefix("v")
+    pinned = expected.removeprefix("v")
+    return reported == pinned
 
 
 def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
@@ -428,6 +487,13 @@ def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
         if actual.startswith("codex-code-mode-host "):
             return _version_ok(actual, expected)
         return not expected and actual.startswith("present ") and actual != "present "
+    # PHP and Python stack pins may intentionally name only a major/minor release line.
+    if name in {"php", "python3"} and re.fullmatch(r"v?\d+\.\d+", expected):
+        match = _REPORTED_VERSION.search(actual)
+        if match:
+            reported = match.group(1).removeprefix("v")
+            pinned = expected.removeprefix("v")
+            return reported == pinned or reported.startswith(pinned + ".")
     return _version_ok(actual, expected)
 
 
@@ -483,16 +549,22 @@ def execute(operation: dict[str, Any]) -> dict[str, Any]:
     ordered = [item for _, item in sorted(indexed, key=lambda row: (
         _INSTALL_ORDER.index(str(row[1].get("name", ""))) if str(row[1].get("name", "")) in _INSTALL_ORDER
         else len(_INSTALL_ORDER), row[0]))]
+    needs_npm = any(str(item.get("name", "")) in AI_PACKAGES for item in ordered)
+    npm_missing = needs_npm and shutil.which("npm") is None
     for item in ordered:
         name = str(item.get("name", ""))
         version = _check_version(str(item.get("version", "")), required=name in AI_PACKAGES)
         packages = item.get("packages") or []
         if not isinstance(packages, list):
             raise OperationError("package plan is invalid")
-        if name != "packages" and _tool_version_ok(name, str(before.get(name, "missing")), version):
+        prerequisite_missing = name == "node" and npm_missing
+        if (name != "packages" and not prerequisite_missing
+                and _tool_version_ok(name, str(before.get(name, "missing")), version)):
             continue
         _install_component(name, version, packages)
         installed.append(name)
+        if name == "node":
+            npm_missing = False
 
     after = tool_versions(checked_tools)
     mismatches = [str(t.get("name")) for t in desired_tools if isinstance(t, dict)

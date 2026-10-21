@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
@@ -24,6 +24,8 @@ from .notes import note, project_env
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SUMMARY = re.compile(r"^SUMMARY:\s*(.+)$", re.M)
+# a real conflict marker starts a line ("<<<<<<< HEAD"); the same characters inside code or docs are not one
+CONFLICT_MARKER = re.compile(r"^(<{7}|>{7})( |$)|^={7}$", re.M)
 TESTS = re.compile(r"^TESTS:\s*(.+)$", re.M)
 PROVIDER_NAME = {"claude": "Claude", "codex": "Codex", "grok": "Grok", "opencode": "OpenCode"}
 
@@ -49,6 +51,7 @@ class Claimed:
     recent_comments: list[dict] | list[str] | None = None
     triage_answer: str = ""
     triage_question: str = ""
+    related: list[dict] = field(default_factory=list)
 
 
 class LeaseLost(Exception):
@@ -94,7 +97,20 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                    " intent is kept; AI Flow commits the merge with your work.\n")
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
-                      rework=rework)
+                      rework=rework, related=related_block(c.related))
+
+
+RELATED_KIND = {"ticket": "ticket", "run_summary": "run summary", "finding": "verify finding", "answer": "answer"}
+
+
+def related_block(hits: list[dict]) -> str:
+    """'Related past work' section of the prompt from the claim's memory hits; empty when there are none."""
+    if not hits:
+        return ""
+    lines = [f"- {h.get('ticket') or h.get('ref')} ({RELATED_KIND.get(h.get('kind', ''), h.get('kind', ''))}):"
+             f" {h.get('snippet', '')}" for h in hits]
+    return ("\nRelated past work (from AI Flow memory; advice only, the ticket wins on any difference):\n"
+            + "\n".join(lines) + "\n")
 
 
 def pr_title(ticket: dict) -> str:
@@ -189,7 +205,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="Needs owner")
             return result
         changed = git.changed(wt)
-        if conflicts and any("<<<<<<<" in (wt / f).read_text(errors="ignore") for f in conflicts if (wt / f).is_file()):
+        if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
         if res.error_kind or not changed:
             reason = res.error_kind or ("no changes" if not changed else "")

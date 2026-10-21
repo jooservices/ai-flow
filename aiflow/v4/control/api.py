@@ -23,6 +23,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
+from . import memory
 from .db import DB, J
 from .events import Events
 from .github import GitHubApp
@@ -417,6 +418,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
                              "step": t["step"]} for t in eligible(account, node)[:20]]}
 
+    def related_hits(t: dict) -> list[dict]:
+        """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
+        try:
+            return memory.related(ctx.db, t["project"], t["summary"], exclude_ticket=t["key"], limit=3)
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory lookup for %s failed: %s", t["key"], e)
+            return []
+
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
         tickets = {(t["key"], t["step"]): t for t in eligible(body.account, node)}
@@ -470,6 +479,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["triage_question"] = (q or {}).get("summary") or ""
         if body.step == "triage":
             extra.update(triage_context)
+        extra["related"] = related_hits(t)
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
@@ -784,9 +794,22 @@ def create_app(ctx: Ctx) -> FastAPI:
         from .state import snapshot
         return snapshot(ctx)
 
+    @app.get("/v1/tickets/{key}/timeline")
+    def ticket_timeline(key: str) -> dict:
+        from .timeline import timeline
+        tl = timeline(ctx.db, key)
+        if tl is None:
+            raise HTTPException(404, "unknown ticket")
+        return tl
+
     @app.get("/v1/analytics/daily")
     def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
         return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
+
+    # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
+    @app.get("/v1/memory/search")
+    def memory_search(q: str = "", project: str = "", limit: int = 10) -> dict:
+        return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
 
     return app

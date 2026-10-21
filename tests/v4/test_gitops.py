@@ -78,3 +78,9 @@ def test_pr_title_is_a_conventional_commit_with_the_key():
     from aiflow.v4.worker.dev import pr_title
     assert pr_title({"key": "TESTWP-4", "summary": "monorepo scaffold.", "type": "Story"}) == "feat: Monorepo scaffold (TESTWP-4)"
     assert pr_title({"key": "TESTWP-9", "summary": "Broken link", "type": "Bug"}).startswith("fix: Broken link")
+
+
+def test_conflict_markers_are_found_only_at_line_starts():
+    from aiflow.v4.worker.dev import CONFLICT_MARKER
+    assert CONFLICT_MARKER.search("a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> origin/develop\n")
+    assert not CONFLICT_MARKER.search('text = "conflict markers (<<<<<<<, =======, >>>>>>>)"\n')

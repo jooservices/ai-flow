@@ -161,3 +161,17 @@ def test_node_heartbeat_reports_policy_relay_health(monkeypatch):
     heartbeat = clients[0].calls[0][0][2]
     assert heartbeat["metrics"]["policy_relay"] == {"enabled": True, "healthy": True}
     assert relays[0].started and relays[0].stopped
+
+
+def test_a_slow_tool_check_is_not_reported_missing(monkeypatch):
+    import subprocess as sp
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "composer":
+            raise sp.TimeoutExpired(cmd, 30)
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} 1.0\n", stderr="")
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    from aiflow.v4.core.toolchains import missing_tools
+    versions = agent.tool_versions()
+    assert versions["composer"] == "timeout" and missing_tools(versions, ["composer"]) == []

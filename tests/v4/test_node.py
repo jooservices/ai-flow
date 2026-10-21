@@ -187,6 +187,8 @@ def test_node_agent_reports_cli_expiry_and_queued_heartbeat_retry(monkeypatch):
             if path == "/v1/events":
                 self.event_batches.append(body)
                 return {"accepted": len(body["events"])}
+            if path.endswith("/operations/next"):
+                return {"operation": None}
             raise AssertionError(path)
 
     class StopAfterRecovery:
@@ -218,7 +220,7 @@ def test_node_agent_reports_cli_expiry_and_queued_heartbeat_retry(monkeypatch):
 
     assert clients[0].heartbeat_body["credential_expiries"] == {"claude-01": expiry}
     assert [path for _, path, _ in clients[0].calls] == ["/v1/nodes/node1/heartbeat", "/v1/nodes/node1/heartbeat",
-                                                       "/v1/events"]
+                                                       "/v1/events", "/v1/nodes/node1/operations/next"]
     event = clients[0].event_batches[0]["events"][0]
     assert event["type"] == "node.heartbeat.error" and event["error_kind"] == "network"
     assert event["retry"] is True and event["attempts"] == 2

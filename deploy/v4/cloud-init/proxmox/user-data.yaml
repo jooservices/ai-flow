@@ -1,0 +1,9 @@
+#cloud-config
+# Proxmox cloud-init snippet: inject /run/secrets/aiflow4/join-token from the short-lived secret
+# channel before this guest reaches runcmd. Never place the token in a reusable template.
+hostname: aiflow-node-01
+manage_etc_hosts: true
+runcmd:
+  - [test, -r, /run/secrets/aiflow4/join-token]
+  - [curl, -fsSL, https://aiflow-control.example.net/v1/install.sh, -o, /run/aiflow4-install.sh]
+  - [sh, /run/aiflow4-install.sh, --token-file, /run/secrets/aiflow4/join-token]

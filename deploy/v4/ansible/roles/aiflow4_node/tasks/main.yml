@@ -1,0 +1,283 @@
+---
+- name: Check node enrollment and resource limits
+  ansible.builtin.assert:
+    that:
+      - aiflow4_node_server_installer_tag == 'v1.1.0'
+      - aiflow4_node_name is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+      - aiflow4_node_role is match('^[a-z][a-z0-9_-]{0,31}$')
+      - aiflow4_node_project | length > 0
+      - aiflow4_node_slots | int > 0
+      - aiflow4_node_cpu_limit | float > 0
+      - aiflow4_node_memory_limit | string is match('^[1-9][0-9]*[KMGTP]B?$')
+      - aiflow4_node_control_url is match('^https?://[^/]+$')
+      - >-
+        aiflow4_node_si_environment.keys()
+        | select('match', '^SI_[A-Z0-9_]+$')
+        | list | length == aiflow4_node_si_environment | length
+  no_log: true
+
+- name: Inspect existing AI Flow node files
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - /etc/aiflow/node.env
+    - /srv/aiflow/current/.venv/bin/aiflow4
+    - /srv/aiflow/state/node.token
+  register: aiflow4_node_files
+
+- name: Check node identity without reading its credential
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -Fqx
+      - --
+      - 'AIFLOW4_NODE_NAME="{{ aiflow4_node_name }}"'
+      - /etc/aiflow/node.env
+  register: aiflow4_node_identity
+  changed_when: false
+  failed_when: false
+  when: aiflow4_node_files.results[0].stat.exists
+
+- name: Refuse to enroll over a different configured node
+  ansible.builtin.assert:
+    that:
+      - >-
+        not aiflow4_node_files.results[0].stat.exists or
+        aiflow4_node_identity.rc == 0
+    fail_msg: /etc/aiflow/node.env belongs to another AI Flow node
+
+- name: Record whether this node already completed enrollment
+  ansible.builtin.set_fact:
+    aiflow4_node_is_joined: >-
+      {{ aiflow4_node_files.results[0].stat.exists
+         and aiflow4_node_files.results[1].stat.exists
+         and aiflow4_node_files.results[2].stat.exists
+         and aiflow4_node_identity.rc == 0 }}
+
+- name: Create server-installer directories for a new node
+  when: not aiflow4_node_is_joined | bool
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - '{{ aiflow4_node_server_installer_root }}'
+    - /run/aiflow4
+
+- name: Download pinned server-installer release
+  ansible.builtin.get_url:
+    url: >-
+      {{ 'https://github.com/jooservices/server-installer/archive/refs/tags/'
+         ~ aiflow4_node_server_installer_tag ~ '.tar.gz' }}
+    dest: '{{ aiflow4_node_server_installer_archive }}'
+    mode: '0644'
+  when: not aiflow4_node_is_joined | bool
+
+- name: Unpack pinned server-installer CLI
+  ansible.builtin.unarchive:
+    src: '{{ aiflow4_node_server_installer_archive }}'
+    dest: '{{ aiflow4_node_server_installer_root }}'
+    remote_src: true
+    creates: '{{ aiflow4_node_server_installer_bin }}'
+  when: not aiflow4_node_is_joined | bool
+
+- name: Prepare node OS through server-installer
+  ansible.builtin.command:
+    argv:
+      - '{{ aiflow4_node_server_installer_bin }}'
+      - apply
+      - --modules
+      - '{{ aiflow4_node_server_installer_modules }}'
+      - --preflight
+  environment: '{{ aiflow4_node_si_environment }}'
+  register: aiflow4_node_preflight
+  changed_when: "'changed' in aiflow4_node_preflight.stdout | lower"
+  no_log: true
+  when: not aiflow4_node_is_joined | bool
+
+- name: Run PHP module through server-installer when the project pins PHP
+  ansible.builtin.command:
+    argv:
+      - '{{ aiflow4_node_server_installer_bin }}'
+      - apply
+      - --modules
+      - php
+      - --preflight
+  environment: '{{ aiflow4_node_si_environment }}'
+  register: aiflow4_node_php_preflight
+  changed_when: "'changed' in aiflow4_node_php_preflight.stdout | lower"
+  no_log: true
+  when:
+    - not aiflow4_node_is_joined | bool
+    - aiflow4_node_si_environment.SI_PHP_VERSION is defined
+
+- name: Remove downloaded installer archive
+  ansible.builtin.file:
+    path: '{{ aiflow4_node_server_installer_archive }}'
+    state: absent
+  when: not aiflow4_node_is_joined | bool
+
+- name: Request one-use enrollment token from the control plane
+  ansible.builtin.uri:
+    url: '{{ aiflow4_node_control_url }}/v1/nodes/join-tokens'
+    method: POST
+    body_format: json
+    body:
+      provision_key: '{{ lookup("env", "AIFLOW4_PROVISION_KEY") }}'
+      name: '{{ aiflow4_node_name }}'
+      role: '{{ aiflow4_node_role }}'
+      project: '{{ aiflow4_node_project }}'
+    status_code: 200
+    return_content: true
+  delegate_to: localhost
+  register: aiflow4_node_join_grant
+  no_log: true
+  when: not aiflow4_node_is_joined | bool
+
+- name: Create private runtime directory for the one-use token
+  ansible.builtin.file:
+    path: /run/aiflow4
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: not aiflow4_node_is_joined | bool
+
+- name: Install and run AI Flow's pinned join bootstrap
+  when: not aiflow4_node_is_joined | bool
+  block:
+    - name: Write short-lived token to a root-only file
+      ansible.builtin.copy:
+        content: '{{ aiflow4_node_join_grant.json.token }}'
+        dest: '{{ aiflow4_node_join_token_path }}'
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Download AI Flow join command
+      ansible.builtin.get_url:
+        url: '{{ aiflow4_node_control_url }}/v1/install.sh'
+        dest: /run/aiflow4/install.sh
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Join and install this node from the current signed AI Flow release
+      ansible.builtin.command:
+        argv:
+          - sh
+          - /run/aiflow4/install.sh
+          - --token-file
+          - '{{ aiflow4_node_join_token_path }}'
+      environment:
+        AIFLOW4_SERVER_INSTALLER_PREPARED: '1'
+      changed_when: true
+      no_log: true
+
+  always:
+    - name: Remove short-lived token and bootstrap script
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: absent
+      loop:
+        - '{{ aiflow4_node_join_token_path }}'
+        - /run/aiflow4/install.sh
+
+- name: Set the requested AI Flow node slot count
+  ansible.builtin.lineinfile:
+    path: /etc/aiflow/node.env
+    regexp: '^AIFLOW4_SLOTS='
+    line: 'AIFLOW4_SLOTS="{{ aiflow4_node_slots | int }}"'
+    owner: root
+    group: root
+    mode: '0600'
+  register: aiflow4_node_slots_config
+
+- name: Create node-agent systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/aiflow4-node-agent.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create worker systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/aiflow4-worker@.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install node-agent CPU and memory limits
+  ansible.builtin.template:
+    src: node-agent-limits.conf.j2
+    dest: /etc/systemd/system/aiflow4-node-agent.service.d/50-aiflow4-fleet.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: aiflow4_node_agent_limits
+
+- name: Install worker CPU and memory limits
+  ansible.builtin.template:
+    src: worker-limits.conf.j2
+    dest: /etc/systemd/system/aiflow4-worker@.service.d/50-aiflow4-fleet.conf
+    owner: root
+    group: root
+    mode: '0644'
+  register: aiflow4_node_worker_limits
+
+- name: Install aggregate node CPU and memory limits
+  ansible.builtin.template:
+    src: node-limits.slice.j2
+    dest: /etc/systemd/system/aiflow4-node.slice
+    owner: root
+    group: root
+    mode: '0644'
+  register: aiflow4_node_slice_limits
+
+- name: Reload systemd after fleet resource settings change
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: >-
+    aiflow4_node_agent_limits.changed or aiflow4_node_worker_limits.changed or
+    aiflow4_node_slice_limits.changed or aiflow4_node_slots_config.changed
+
+- name: Restart node agent to apply fleet resource settings
+  ansible.builtin.systemd_service:
+    name: aiflow4-node-agent.service
+    state: restarted
+  when:
+    - >-
+      aiflow4_node_agent_limits.changed or aiflow4_node_worker_limits.changed or
+      aiflow4_node_slice_limits.changed or aiflow4_node_slots_config.changed
+    - >-
+      aiflow4_node_files.results[1].stat.exists or
+      not aiflow4_node_is_joined | bool
+
+- name: Find active AI Flow worker services
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - list-units
+      - --state=active
+      - --plain
+      - --no-legend
+      - aiflow4-worker@*.service
+  register: aiflow4_node_active_workers
+  changed_when: false
+  when: >-
+    aiflow4_node_worker_limits.changed or aiflow4_node_slice_limits.changed or
+    aiflow4_node_slots_config.changed
+
+- name: Restart active AI Flow worker services to apply fleet resource settings
+  ansible.builtin.systemd_service:
+    name: '{{ item.split()[0] }}'
+    state: restarted
+  loop: '{{ aiflow4_node_active_workers.stdout_lines | default([]) }}'
+  when: >-
+    aiflow4_node_worker_limits.changed or aiflow4_node_slice_limits.changed or
+    aiflow4_node_slots_config.changed

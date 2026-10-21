@@ -1,0 +1,12 @@
+---
+- name: Prepare AI Flow control host
+  hosts: aiflow4_control
+  become: true
+  roles:
+    - aiflow4_control
+
+- name: Prepare and join AI Flow node fleet
+  hosts: aiflow4_nodes
+  become: true
+  roles:
+    - aiflow4_node

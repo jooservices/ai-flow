@@ -6,14 +6,21 @@ CONTROL_URL=__AIFLOW4_CONTROL_URL__
 SERVER_INSTALLER_TAG=v1.1.0
 COSIGN_VERSION=v3.1.4
 TOKEN=
+TOKEN_FILE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --token) [ "$#" -ge 2 ] || { echo "--token needs a value" >&2; exit 2; }; TOKEN=$2; shift 2 ;;
-    *) echo "usage: curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T" >&2; exit 2 ;;
+    --token-file) [ "$#" -ge 2 ] || { echo "--token-file needs a path" >&2; exit 2; }; TOKEN_FILE=$2; shift 2 ;;
+    *) echo "usage: curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T (or --token-file PATH)" >&2; exit 2 ;;
   esac
 done
-[ -n "$TOKEN" ] || { echo "a short-lived --token from Command Center is required" >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 2; }
+if [ -n "$TOKEN_FILE" ]; then
+  [ -r "$TOKEN_FILE" ] || { echo "join token file is not readable" >&2; exit 2; }
+  TOKEN=$(cat "$TOKEN_FILE")
+  rm -f "$TOKEN_FILE"
+fi
+[ -n "$TOKEN" ] || { echo "a short-lived --token from Command Center is required" >&2; exit 2; }
 
 WORK=$(mktemp -d /tmp/aiflow4-node-join.XXXXXX)
 chmod 700 "$WORK"
@@ -103,12 +110,14 @@ chmod 0600 /etc/aiflow/node.env
 
 # OS setup and preflight stay in server-installer. v1.1.0 is pinned; the node profile proposal is documented
 # separately because that profile must be added to server-installer by its owner/lead.
-curl -fsSL --max-time 120 "https://github.com/jooservices/server-installer/archive/refs/tags/${SERVER_INSTALLER_TAG}.tar.gz" \
-  -o "$WORK/server-installer.tar.gz"
-tar -xzf "$WORK/server-installer.tar.gz" -C "$WORK"
-SI_BIN=$WORK/server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer
-[ -x "$SI_BIN" ] || { echo "pinned server-installer CLI is missing" >&2; exit 1; }
-"$SI_BIN" apply --modules packages,timesync,docker,docker_group --preflight
+if [ "${AIFLOW4_SERVER_INSTALLER_PREPARED:-0}" != "1" ]; then
+  curl -fsSL --max-time 120 "https://github.com/jooservices/server-installer/archive/refs/tags/${SERVER_INSTALLER_TAG}.tar.gz" \
+    -o "$WORK/server-installer.tar.gz"
+  tar -xzf "$WORK/server-installer.tar.gz" -C "$WORK"
+  SI_BIN=$WORK/server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer
+  [ -x "$SI_BIN" ] || { echo "pinned server-installer CLI is missing" >&2; exit 1; }
+  "$SI_BIN" apply --modules packages,timesync,docker,docker_group --preflight
+fi
 
 # AI Flow owns the userland runtimes, agent, worker, project tools and provider CLIs.
 # Keep this list in sync with tests/v4/test_api.py's bootstrap command-source check.
@@ -138,7 +147,9 @@ print(m.group(1) if m else "")
 PY
 )
 if [ -n "$PHP_VERSION" ]; then
-  SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight
+  if [ "${AIFLOW4_SERVER_INSTALLER_PREPARED:-0}" != "1" ]; then
+    SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight
+  fi
   curl -fsSL --max-time 60 https://getcomposer.org/installer -o "$WORK/composer-setup.php"
   php "$WORK/composer-setup.php" --install-dir=/usr/local/bin --filename=composer >/dev/null
   curl -fsSL --max-time 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp

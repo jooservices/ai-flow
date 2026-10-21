@@ -1,0 +1,9 @@
+#cloud-config
+# Generic cloud image user-data: deliver the one-use token through the provider's protected secret channel
+# as /run/secrets/aiflow4/join-token. Keep the user-data object free of credentials.
+hostname: aiflow-node-01
+manage_etc_hosts: true
+runcmd:
+  - [test, -r, /run/secrets/aiflow4/join-token]
+  - [curl, -fsSL, https://aiflow-control.example.net/v1/install.sh, -o, /run/aiflow4-install.sh]
+  - [sh, /run/aiflow4-install.sh, --token-file, /run/secrets/aiflow4/join-token]

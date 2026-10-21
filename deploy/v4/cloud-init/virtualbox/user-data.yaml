@@ -1,0 +1,9 @@
+#cloud-config
+# VirtualBox NoCloud seed user-data: inject /run/secrets/aiflow4/join-token at first boot using a
+# protected seed artifact, and discard that artifact after the VM has joined.
+hostname: aiflow-node-01
+manage_etc_hosts: true
+runcmd:
+  - [test, -r, /run/secrets/aiflow4/join-token]
+  - [curl, -fsSL, https://aiflow-control.example.net/v1/install.sh, -o, /run/aiflow4-install.sh]
+  - [sh, /run/aiflow4-install.sh, --token-file, /run/secrets/aiflow4/join-token]

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
 
+import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -29,7 +30,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from ..core.toolchains import pinned_version, toolchain_gaps
+from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, knowledge, memory, rollout
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
 from . import projects as project_lifecycle
@@ -228,6 +229,25 @@ class ClaimBody(BaseModel):
     ticket: str
     account: str
     step: str = "dev"
+
+
+class ProjectPreflightBody(BaseModel):
+    site: str = Field(min_length=1, max_length=300)
+    project: str = Field(min_length=1, max_length=500)
+    repo: str = Field(min_length=1, max_length=200)
+    base: str = Field(default="develop", min_length=1, max_length=120)
+    stack: str = Field(default="", max_length=80)
+
+
+class ProjectCreateBody(ProjectPreflightBody):
+    checks: list[str] = Field(default_factory=list, max_length=50)
+    priority: int = Field(default=5, ge=0, le=100)
+    parallel_limit: int = Field(default=2, ge=1, le=100)
+    merge_method: Literal["merge", "squash", "rebase"] = "squash"
+
+
+class ProjectPauseBody(BaseModel):
+    paused: bool = True
 
 
 class FenceBody(BaseModel):
@@ -779,6 +799,228 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.leases.r.ping()
         return {"ok": True, "version": VERSION}
 
+    # --- Projects screen: owner-managed project definitions in aiflow-control -------------------------------
+    required_project_statuses = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Needs owner", "Done"]
+
+    def jira_site() -> str:
+        return str(getattr(ctx.jira, "site", "") or ctx.settings.jira_site).rstrip("/")
+
+    def project_key_from_input(value: str, site: str) -> str:
+        """Accept a Jira project key or a URL for the selected connected site."""
+        raw = value.strip()
+        if raw.startswith(("http://", "https://")):
+            parsed = urlsplit(raw)
+            selected = urlsplit(site)
+            if not parsed.hostname or parsed.hostname.lower() != (selected.hostname or "").lower():
+                raise HTTPException(422, "Jira project URL must belong to the selected connected site")
+            parts = [part for part in parsed.path.split("/") if part]
+            candidate = ""
+            for index, part in enumerate(parts[:-1]):
+                if part in {"projects", "browse"}:
+                    candidate = parts[index + 1]
+                    break
+            if not candidate:
+                raise HTTPException(422, "Jira project URL does not contain a project key")
+            raw = candidate.split("-", 1)[0]
+        key = raw.upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key):
+            raise HTTPException(422, "Jira project must be a project key or project URL")
+        return key
+
+    def project_preflight(body: ProjectPreflightBody) -> dict[str, Any]:
+        if not ctx.jira:
+            raise HTTPException(503, "Jira is not connected")
+        if not ctx.github:
+            raise HTTPException(503, "GitHub App is not connected")
+        site = jira_site()
+        if body.site.rstrip("/") != site:
+            raise HTTPException(422, "selected Jira site is not connected")
+        key = project_key_from_input(body.project, site)
+        if body.stack and body.stack not in STACK_TOOLS:
+            raise HTTPException(422, "unsupported project stack")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", body.base) or ".." in body.base:
+            raise HTTPException(422, "invalid base branch")
+        org, slash, repo_name = body.repo.partition("/")
+        if not slash or org.lower() != ctx.settings.github_org.lower() or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+", repo_name):
+            raise HTTPException(422, "select a repository accessible to the GitHub App")
+
+        try:
+            jira_statuses = ctx.jira.project_statuses(key)
+            repositories = ctx.github.installation_repositories()
+            available = {str(item.get("full_name", "")).lower() for item in repositories}
+            if body.repo.lower() not in available:
+                raise HTTPException(422, "repository is not accessible to the GitHub App")
+            branch_exists = bool(ctx.github.branch_exists(repo_name, body.base))
+        except HTTPException:
+            raise
+        except Exception as exc:  # provider details can contain request metadata; keep them out of the UI
+            log.warning("project preflight failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "could not complete Jira and GitHub project checks") from exc
+
+        missing_statuses = [status for status in required_project_statuses if status not in jira_statuses]
+        repo = ctx.repo()
+        node_rows = {row["name"]: row for row in ctx.db.all("SELECT name,status,tools FROM nodes")}
+        node_names = sorted(set(repo.nodes) | set(node_rows))
+        required_tools = tools_for_stack(body.stack)
+        node_results = []
+        for name in node_names:
+            row = node_rows.get(name) or {}
+            tools = row.get("tools") or {}
+            gaps = toolchain_gaps(tools, required_tools, repo.versions, [body.stack] if body.stack else (),
+                                  require_pins=bool(body.stack))
+            absent = missing_tools(tools, required_tools)
+            gaps = list(dict.fromkeys(absent + gaps))
+            node_results.append({"name": name, "status": row.get("status", "unknown"),
+                                 "ready": not gaps, "missing_tools": gaps})
+        return {"project": key, "site": site, "missing_statuses": missing_statuses,
+                "branch_exists": branch_exists, "nodes": node_results, "required_tools": required_tools,
+                "ok": not missing_statuses and branch_exists}
+
+    def refresh_projects() -> None:
+        if ctx.refresh_repo:
+            try:
+                ctx.refresh_repo()
+            except Exception as exc:  # commit already exists remotely; RepoCache will retry its pull later
+                log.warning("project control repo refresh failed (%s)", type(exc).__name__)
+
+    def project_audit(action: str, key: str, actor: str, accepted: bool, result: str,
+                      payload: dict[str, Any] | None = None) -> None:
+        audit("aiflow-control", action, key, "", None, actor, accepted, result,
+              payload or {"project": key})
+
+    @app.get("/v1/projects")
+    def managed_projects() -> dict:
+        repo = ctx.repo()
+        counts = {row["project"]: int(row["count"]) for row in
+                  ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
+        return {"projects": [{"key": project.key, "repo": project.repo, "status": "paused" if project.paused else "active",
+                              "priority": project.priority, "ticket_count": counts.get(project.key, 0),
+                              "base": project.base, "stack": project.stack}
+                             for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
+
+    @app.get("/v1/projects/catalog")
+    def project_catalog(request: Request) -> dict:
+        console_user(request, {"owner"}, target="aiflow-control", action="project_catalog")
+        if not ctx.jira or not ctx.github:
+            raise HTTPException(503, "Jira and GitHub App must be connected before adding a project")
+        try:
+            jira_projects = ctx.jira.projects()
+            github_repos = ctx.github.installation_repositories()
+        except Exception as exc:
+            log.warning("project catalog could not be loaded (%s)", type(exc).__name__)
+            raise HTTPException(502, "could not load connected Jira projects and GitHub repositories") from exc
+        return {"jira_sites": [jira_site()], "jira_projects": jira_projects,
+                "github_repos": [item for item in github_repos
+                                 if str(item.get("full_name", "")).split("/", 1)[0].lower()
+                                 == ctx.settings.github_org.lower()],
+                "stacks": sorted(STACK_TOOLS), "required_statuses": required_project_statuses}
+
+    @app.post("/v1/projects/preflight")
+    def project_preflight_endpoint(body: ProjectPreflightBody, request: Request) -> dict:
+        console_user(request, {"owner"}, target="aiflow-control", action="project_preflight")
+        return project_preflight(body)
+
+    @app.post("/v1/projects")
+    def add_project(body: ProjectCreateBody, request: Request) -> dict:
+        user = console_user(request, {"owner"}, target="aiflow-control", action="add_project",
+                            node=body.project[:32])
+        try:
+            result = project_preflight(body)
+        except HTTPException as exc:
+            project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
+                          {"project_input": body.project, "repo": body.repo})
+            raise
+        key = result["project"]
+        if key in ctx.repo().projects:
+            project_audit("add_project", key, user.subject, False, "project is already configured",
+                          {"repo": body.repo})
+            raise HTTPException(409, "project is already configured")
+        if not result["ok"]:
+            reasons = []
+            if result["missing_statuses"]:
+                reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
+            if not result["branch_exists"]:
+                reasons.append(f"base branch {body.base} is missing from {body.repo}")
+            detail = {"message": "; ".join(reasons) or "project checks failed",
+                      "missing_statuses": result["missing_statuses"],
+                      "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
+            project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
+            raise HTTPException(422, detail)
+
+        worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
+        worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
+        checks = [check.strip() for check in body.checks if check.strip()]
+        config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
+                  "checks": checks, "merge": {"method": body.merge_method},
+                  "limits": {"parallel": body.parallel_limit,
+                             "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
+                  "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
+        content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+        control_name = Path(ctx.settings.control_repo).name
+        try:
+            branch = ctx.github.default_branch(control_name)
+            commit = ctx.github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                            f"projects: add {key} via AI Flow console")
+        except Exception as exc:
+            log.warning("project add commit failed (%s)", type(exc).__name__)
+            project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
+            raise HTTPException(502, "could not save the project to aiflow-control") from exc
+        refresh_projects()
+        project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
+        ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
+                        reason=f"control repo commit {commit or 'created'}")
+        return {"saved": True, "project": key, "commit": commit, "preflight": result}
+
+    @app.post("/v1/projects/{key}/pause")
+    def pause_project(key: str, body: ProjectPauseBody, request: Request) -> dict:
+        user = console_user(request, {"owner"}, target="aiflow-control", action="pause_project", node=key)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
+            project_audit("pause_project", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        project_file = ctx.repo().root / "projects" / f"{key}.yaml"
+        try:
+            config = yaml.safe_load(project_file.read_text(encoding="utf-8")) or {}
+            config["paused"] = body.paused
+            content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+            control_name = Path(ctx.settings.control_repo).name
+            branch = ctx.github.default_branch(control_name)
+            commit = ctx.github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                            f"projects: {'pause' if body.paused else 'resume'} {key}")
+        except Exception as exc:
+            log.warning("project pause update failed (%s)", type(exc).__name__)
+            project_audit("pause_project", key, user.subject, False, "control repo commit failed",
+                          {"paused": body.paused})
+            raise HTTPException(502, "could not update the project in aiflow-control") from exc
+        refresh_projects()
+        action = "paused" if body.paused else "resumed"
+        project_audit("pause_project", key, user.subject, True, commit or f"{action} by bot commit",
+                      {"project": key, "paused": body.paused})
+        ctx.events.emit(f"project.{action}", project=key, account=user.subject, outcome=action,
+                        reason=f"control repo commit {commit or 'created'}")
+        return {"project": key, "status": "paused" if body.paused else "active", "commit": commit}
+
+    @app.delete("/v1/projects/{key}")
+    def remove_project(key: str, request: Request) -> dict:
+        user = console_user(request, {"owner"}, target="aiflow-control", action="remove_project", node=key)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
+            project_audit("remove_project", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        control_name = Path(ctx.settings.control_repo).name
+        try:
+            branch = ctx.github.default_branch(control_name)
+            commit = ctx.github.delete_file(control_name, branch, f"projects/{key}.yaml",
+                                            f"projects: remove {key} via AI Flow console")
+        except Exception as exc:
+            log.warning("project remove commit failed (%s)", type(exc).__name__)
+            project_audit("remove_project", key, user.subject, False, "control repo commit failed")
+            raise HTTPException(502, "could not remove the project from aiflow-control") from exc
+        refresh_projects()
+        project_audit("remove_project", key, user.subject, True, commit or "bot commit created", {"project": key})
+        ctx.events.emit("project.removed", project=key, account=user.subject, outcome="removed",
+                        reason=f"control repo commit {commit or 'created'}")
+        return {"removed": True, "project": key, "commit": commit}
+
     # --- nodes ----------------------------------------------------------------------------------------------
     @app.get("/v1/install.sh", response_class=PlainTextResponse)
     def node_install_script(request: Request) -> PlainTextResponse:
@@ -1232,6 +1474,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         node_row = ctx.db.one("SELECT projects,dynamic,tools FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
+        projects = [key for key in projects if not repo.projects[key].paused]
+        running_by_project = {row["project"]: int(row["count"]) for row in
+                              ctx.db.all("SELECT project,count(*) AS count FROM runs"
+                                         " WHERE status='running' GROUP BY project")}
+        projects = [key for key in projects if not repo.projects[key].parallel_limit or
+                    running_by_project.get(key, 0) < repo.projects[key].parallel_limit]
         # A project with a declared stack is offered only after this node reports every pinned tool healthy.
         # Filtering here keeps another project on the same node available while a stack install is pending.
         projects = [p for p in projects if not repo.projects[p].stacks or not toolchain_gaps(

@@ -1,11 +1,12 @@
-"""Snapshot of the whole system for Command Center and Delivery view (one query round, no caching)."""
+"""Snapshot of the registry for Command Center, Delivery and SA dashboards (one query round, no caching)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import VERSION
 from ..core.toolchains import missing_tools
+from .sa import dashboard_data, thresholds
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -21,6 +22,7 @@ def _iso(ts: datetime | None) -> str | None:
 def snapshot(ctx) -> dict[str, Any]:
     db = ctx.db
     repo = ctx.repo()
+    sa_thresholds = thresholds(repo)
     nodes = []
     assigned: dict[str, int] = {}
     for a in repo.accounts:
@@ -37,6 +39,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "missing_tools": missing_tools(n["tools"], required), "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
                       "last_heartbeat": _iso(n["last_heartbeat"]),
+                      "idle_since": _iso(n["idle_since"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
@@ -54,13 +57,23 @@ def snapshot(ctx) -> dict[str, Any]:
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
         acc = repo.account(a["id"])
+        expiry = a["credential_expires_at"]
+        expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
+            days=sa_thresholds["credential_expiry_days"]))
+        status = "signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
+            "node_offline" if node_status.get(a["node"], "offline") != "online"
+            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"])))
+        probe = (a["worker_state"] or {}).get("probe") or {}
         accounts.append({
             "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": a["roles"],
             "explicit_only": bool(acc and acc.explicit_only),
-            "status": "cooldown" if cool else ("working" if r else (
-                "node_offline" if node_status.get(a["node"], "offline") != "online" else a["status"])),
+            "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
+                                                    else "cooldown" if cool else a["status"]),
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
-            "cooldown_until": a["cooldown_until"], "quota": a["quota"], "last_error": a["last_error"],
+            "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
+            "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
+            "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
+            "quota": a["quota"], "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
             "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
@@ -122,13 +135,14 @@ def snapshot(ctx) -> dict[str, Any]:
                          "closed_at": _iso(current.get("closed_at")), "closed_by": current.get("closed_by", ""),
                          "report_version": int(current.get("version", 0)),
                          "close_suggested": bool(total and counts.get("Done", 0) == total and not closed)})
+    sa = dashboard_data(ctx, nodes, accounts)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets, "incidents": incidents, "incidents_recent": incidents_recent,
-        "events": events,
+        "events": events, "sa": sa,
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),
                    "tokens_out_24h": int(today["tout"]), "done_24h": today["done"], "failed_24h": today["failed"]},
     }

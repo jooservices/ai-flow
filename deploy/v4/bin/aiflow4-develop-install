@@ -1,0 +1,42 @@
+#!/bin/bash
+# DEVELOP CHANNEL (lab only, docs/v4/develop-channel.md): install an unsigned develop build on this node: /srv/aiflow/releases/<sha> with its own venv, then switch
+# /srv/aiflow/current and restart the node agent. Workers restart themselves between runs when they see the
+# new release (a running AI step is never cut by a deploy).
+#   aiflow4-develop-install <develop.tar.gz> <sha>
+# Refuses to run unless this node is explicitly on the develop channel (AIFLOW4_CHANNEL=develop in node.env).
+set -euo pipefail
+NODE_ENV=${AIFLOW4_NODE_ENV:-/etc/aiflow/node.env}
+if [ -r "$NODE_ENV" ]; then set -a; . "$NODE_ENV"; set +a; fi
+[ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this node is not on the develop channel (set AIFLOW4_CHANNEL=develop in $NODE_ENV)" >&2; exit 3; }
+[ $# -eq 2 ] || { echo "usage: aiflow4-develop-install <develop.tar.gz> <sha>" >&2; exit 2; }
+TAR=$1; SHA=$2
+[[ $SHA =~ ^[0-9a-f]{7,40}$ ]] || { echo "develop builds are named by commit id" >&2; exit 2; }
+REL=/srv/aiflow/releases/$SHA
+if [ ! -x "$REL/.venv/bin/aiflow4" ]; then
+  rm -rf "$REL"; mkdir -p "$REL"
+  tar -xzf "$TAR" -C "$REL"
+  if ! (cd "$REL" && UV_LINK_MODE=copy UV_PYTHON=python3.12 uv sync --frozen --no-dev -q); then
+    rm -rf "$REL"; echo "uv sync failed" >&2; exit 1
+  fi
+fi
+echo "$SHA" > "$REL/RELEASE"
+PREV=$(readlink -f /srv/aiflow/current 2>/dev/null || true)
+ln -sfn "$REL" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
+install -m 0755 "$REL/deploy/v4/bin/aiflow4-develop-install" /usr/local/sbin/aiflow4-develop-install.new
+mv -f /usr/local/sbin/aiflow4-develop-install.new /usr/local/sbin/aiflow4-develop-install
+install -m 0644 "$REL"/deploy/v4/node/systemd/*.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable -q aiflow4-node-agent
+systemctl restart aiflow4-node-agent
+sleep 15
+if ! systemctl is-active --quiet aiflow4-node-agent || ! /srv/aiflow/current/.venv/bin/aiflow4 version >/dev/null 2>&1; then
+  if [ -n "$PREV" ] && [ "$PREV" != "$REL" ] && [ -d "$PREV" ]; then
+    echo "agent unhealthy on $SHA; rolling back to $(basename "$PREV")" >&2
+    ln -sfn "$PREV" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
+    systemctl restart aiflow4-node-agent
+    exit 6
+  fi
+fi
+# keep the last 5 releases
+ls -1dt /srv/aiflow/releases/*/ 2>/dev/null | tail -n +6 | xargs -r rm -rf
+echo "installed $SHA: $(/srv/aiflow/current/.venv/bin/aiflow4 version)"

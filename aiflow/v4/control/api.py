@@ -354,8 +354,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
                 if t["key"] in held or t["key"] in verify_cooling:
                     continue
-                dev = last_dev(t["key"])
-                if not dev or dev["outcome"] != "done" or not dev["pr_url"]:
+                dev = last_dev(t["key"], done=True)
+                if not dev or not dev["pr_url"]:
                     continue
                 if dev["account_id"] == acc.id:  # never grade your own work
                     continue

@@ -12,8 +12,15 @@ When investigating a failed release job, first check the `Install release on Ubu
 nodes` step. A control API health timeout points to artifact startup or database connectivity; a missing online
 node points to join, systemd, or heartbeat handling; an unavailable claim points to node authorization or
 project/account configuration. A failed rollback check means the node did not return to its previous release
-and healthy agent state. Re-run the tagged workflow after fixing the cause; the release is created only after
-all these checks pass.
+and healthy agent state. A timeout on the `release_verification` incident means the installer's report never
+reached control (node token, `AIFLOW4_CONTROL_URL`, `POST /v1/nodes/{name}/release-failures`). A timeout on the
+halted rollout or the fleet rollback points to `aiflow4-control-loops` or the rollout health check
+(`rollout.py`). The script prints the latest rollout from `/v1/state` when a wait times out. Re-run the tagged
+workflow after fixing the cause; the release is created only after all these checks pass.
+
+The smoke test also checks the production recovery path after a halted rollout. Fix the failed node. Point
+`CURRENT` at the previous release, wait until `/v1/state` shows that rollout `completed`, then point `CURRENT` at the
+fixed release again. A new rollout starts with the canary.
 
 The Command Center node drawer lets an authenticated owner install missing required tools or queue a repair to
 the desired state in `aiflow-control`. The API stores the operation, actor and result in `node_operations`, adds

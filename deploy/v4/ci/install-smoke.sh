@@ -64,14 +64,22 @@ wait_systemd "$CONTROL"
 wait_systemd "$NODE_A"
 wait_systemd "$NODE_B"
 
-docker exec --env VERSION="$VERSION" "$CONTROL" bash -se <<'CONTROL_SETUP'
+docker exec --env VERSION="$VERSION" --env PREVIOUS_VERSION="$PREVIOUS_VERSION" --env BASELINE="$BASELINE" \
+  "$CONTROL" bash -se <<'CONTROL_SETUP'
 set -euo pipefail
 release="/srv/aiflow/control/releases/$VERSION"
 repo=/srv/aiflow/control/repos/aiflow-control
 mkdir -p "$release" "$repo/nodes" "$repo/projects" /run/aiflow4-smoke
-install -m 0644 "/artifacts/aiflow4-$VERSION.tar.gz" "$release/"
-install -m 0644 "/artifacts/aiflow4-$VERSION.tar.gz.sigstore.json" "$release/"
-(cd "$release" && sha256sum "aiflow4-$VERSION.tar.gz" > SHA256SUMS)
+publish() {  # serve a signed release to the nodes exactly like aiflow4-deploy lays it out
+  local version=$1 directory="/srv/aiflow/control/releases/$1"
+  mkdir -p "$directory"
+  install -m 0644 "/artifacts/aiflow4-$version.tar.gz" "$directory/"
+  install -m 0644 "/artifacts/aiflow4-$version.tar.gz.sigstore.json" "$directory/"
+  (cd "$directory" && sha256sum "aiflow4-$version.tar.gz" > SHA256SUMS)
+}
+publish "$VERSION"
+# A halted rollout sends its members back to the previous signed release, so control must serve it too.
+[[ $BASELINE -eq 1 ]] || publish "$PREVIOUS_VERSION"
 printf '%s\n' "$VERSION" > /srv/aiflow/control/releases/CURRENT
 tar -xzf "/artifacts/aiflow4-$VERSION.tar.gz" -C "$release"
 (cd "$release" && uv sync --frozen --no-dev -q)
@@ -111,10 +119,16 @@ AIFLOW4_REDIS_PREFIX=ci-install-smoke:
 AIFLOW4_CONTROL_REPO=/srv/aiflow/control/repos/aiflow-control
 AIFLOW4_JOIN_TOKEN=ci-install-smoke-key
 AIFLOW4_JOIN_CONTROL_URL=http://control:8080
+AIFLOW4_ROLLOUT_SOAK_S=10
+AIFLOW4_ROLLOUT_BATCH_SIZE=1
+AIFLOW4_ROLLOUT_CANARY_NODE=smoke-node-a
 ENV
-cat > /etc/systemd/system/aiflow4-control-api.service <<UNIT
+# control-loops drives the fleet rollout (canary, waves, halt, rollback), so it runs next to the API.
+unit() {
+  local name=$1 description=$2 command=$3
+  cat > "/etc/systemd/system/aiflow4-$name.service" <<UNIT
 [Unit]
-Description=AI Flow v4 install smoke control API
+Description=AI Flow v4 install smoke $description
 After=network-online.target
 Wants=network-online.target
 
@@ -122,13 +136,16 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/run/aiflow4-smoke/control.env
 WorkingDirectory=$release
-ExecStart=$release/.venv/bin/aiflow4 control-api --host 0.0.0.0 --port 8080
+ExecStart=$release/.venv/bin/aiflow4 $command
 Restart=on-failure
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+}
+unit control-api "control API" "control-api --host 0.0.0.0 --port 8080"
+unit control-loops "control loops" "control-loops"
 systemctl daemon-reload
 systemctl enable --now aiflow4-control-api.service
 CONTROL_SETUP
@@ -139,6 +156,8 @@ for _ in $(seq 1 120); do
 done
 curl --silent --show-error --fail http://127.0.0.1:18080/healthz >/dev/null \
   || { echo "control API from the release artifact did not become healthy" >&2; exit 1; }
+# The API has applied the migrations; start the loops on the same schema.
+docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service
 
 docker exec "$CONTROL" bash -se <<'SEED_TICKET'
 set -euo pipefail
@@ -238,6 +257,34 @@ wait_for_release() {
   return 1
 }
 
+# Evaluate a Python expression against control's /v1/state: r is the latest fleet rollout, m its members by node,
+# incidents the open (kind, subject) pairs, v the candidate and p the previous release.
+STATE_CHECK='
+import json, sys
+state = json.load(sys.stdin)
+r = state.get("rollout") or {}
+m = {n["node"]: n for n in r.get("nodes") or []}
+incidents = {(i["kind"], i["subject"]) for i in state.get("incidents") or []}
+v, p = sys.argv[2], sys.argv[3]
+sys.exit(0 if eval(f"({sys.argv[1]})") else 1)
+'
+wait_for_state() {
+  local what=$1 check=$2
+  for _ in $(seq 1 150); do
+    if curl --silent --show-error --fail http://127.0.0.1:18080/v1/state \
+      | python3 -c "$STATE_CHECK" "$check" "$VERSION" "$PREVIOUS_VERSION"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "timed out waiting for control to report $what; latest rollout:" >&2
+  curl --silent http://127.0.0.1:18080/v1/state | python3 -c 'import json,sys; print(json.load(sys.stdin).get("rollout"))' >&2 || true
+  return 1
+}
+set_current() {
+  docker exec --env RELEASE="$1" "$CONTROL" bash -euc 'printf "%s\n" "$RELEASE" > /srv/aiflow/control/releases/CURRENT'
+}
+
 wait_for_release smoke-node-a "$PREVIOUS_VERSION"
 wait_for_release smoke-node-b "$PREVIOUS_VERSION"
 docker exec "$NODE_A" bash -se <<'CLAIM_SMOKE'
@@ -276,9 +323,20 @@ chmod 0755 "$release/.venv/bin/aiflow4"
 printf '%s\n' "$VERSION" > "$release/RELEASE"
 STAGE_BROKEN_CANDIDATE
 
-docker exec "$NODE_A" bash -euc \
-  'sed -i "s/^AIFLOW4_SELF_UPDATE=.*/AIFLOW4_SELF_UPDATE=1/" /etc/aiflow/node.env; systemctl restart aiflow4-node-agent'
+self_update_on() {  # also restarts the agent, which clears its in-memory "tried this release" throttle
+  docker exec "$1" bash -euc \
+    'sed -i "s/^AIFLOW4_SELF_UPDATE=.*/AIFLOW4_SELF_UPDATE=1/" /etc/aiflow/node.env; systemctl restart aiflow4-node-agent'
+}
+
+# Upgrade: node A is the rollout's canary (AIFLOW4_ROLLOUT_CANARY_NODE) and installs the candidate itself.
+self_update_on "$NODE_A"
 wait_for_release smoke-node-a "$VERSION"
+if [[ $BASELINE -eq 0 ]]; then
+  # The canary passes its soak and the next wave (node B alone, batch size 1) is assigned the candidate.
+  wait_for_state "node A healthy and node B assigned $VERSION in wave 1" \
+    'r.get("target") == v and r.get("status") == "rolling" and m.get("smoke-node-a", {}).get("status") == "healthy"
+     and m.get("smoke-node-b", {}).get("status") == "assigned"'
+fi
 
 checksum=$(sha256sum "$TARBALL" | awk '{print $1}')
 set +e
@@ -302,16 +360,50 @@ wait_for_release smoke-node-b "$PREVIOUS_VERSION"
 docker exec "$NODE_B" systemctl is-active --quiet aiflow4-node-agent \
   || { echo "node B agent did not recover after rollback" >&2; exit 1; }
 
-# Remove the intentionally broken tree and finish the install on node B from the same signed artifact.
-docker exec --env VERSION="$VERSION" "$NODE_B" rm -rf "/srv/aiflow/releases/$VERSION"
-docker exec --env VERSION="$VERSION" --env CHECKSUM="$checksum" "$NODE_B" bash -se <<'INSTALL_CANDIDATE_B'
+# The installer's failure report must reach control: POST /v1/nodes/smoke-node-b/release-failures opens a
+# critical release_verification incident for this node and release.
+wait_for_state "the release_verification incident for node B" \
+  '("release_verification", "smoke-node-b:" + v) in incidents'
+
+if [[ $BASELINE -eq 0 ]]; then
+  # The report fails node B's health check: the rollout halts, names node B and opens the fleet_rollout incident.
+  wait_for_state "the rollout of $VERSION halted by node B" \
+    'r.get("target") == v and r.get("status") == "halted" and r.get("failed_node") == "smoke-node-b"
+     and "rejected the release" in (r.get("reason") or "") and ("fleet_rollout", v) in incidents'
+  # No node keeps a halted release: the healthy canary is sent back to the previous release as well.
+  wait_for_release smoke-node-a "$PREVIOUS_VERSION"
+  wait_for_state "the fleet rollback of $VERSION to succeed" \
+    'r.get("target") == v and r.get("status") == "halted" and r.get("rollback") == "succeeded"
+     and all(m.get(n, {}).get("status") == "rolled_back" for n in ("smoke-node-a", "smoke-node-b"))
+     and ("fleet_rollback", v) in incidents'
+
+  # Resume as the runbook describes: fix node B, point CURRENT at the previous release (that rollout completes at
+  # once), then name the candidate again so a fresh rollout moves both nodes through canary and wave.
+  docker exec --env VERSION="$VERSION" "$NODE_B" bash -euc 'rm -rf "/srv/aiflow/releases/$VERSION"'
+  self_update_on "$NODE_A"
+  self_update_on "$NODE_B"
+  set_current "$PREVIOUS_VERSION"
+  wait_for_state "the rollout back to $PREVIOUS_VERSION to complete" \
+    'r.get("target") == p and r.get("status") == "completed"'
+  set_current "$VERSION"
+  wait_for_release smoke-node-a "$VERSION"
+  wait_for_release smoke-node-b "$VERSION"
+  wait_for_state "the new rollout of $VERSION to complete" 'r.get("target") == v and r.get("status") == "completed"'
+else
+  # The first tagged release follows an unversioned develop build: control has no previous fleet release, so the
+  # rollout of the candidate completed at once and there is nothing to halt. Finish node B by hand.
+  wait_for_state "the rollout of $VERSION to be complete" 'r.get("target") == v and r.get("status") == "completed"'
+  docker exec --env VERSION="$VERSION" "$NODE_B" bash -euc 'rm -rf "/srv/aiflow/releases/$VERSION"'
+  docker exec --env VERSION="$VERSION" --env CHECKSUM="$checksum" "$NODE_B" bash -se <<'INSTALL_CANDIDATE_B'
 set -euo pipefail
 AIFLOW4_NODE_ENV=/etc/aiflow/node.env \
   /tmp/aiflow4-bootstrap/deploy/v4/bin/aiflow4-node-install \
   "/artifacts/aiflow4-$VERSION.tar.gz" "$VERSION" \
   "/artifacts/aiflow4-$VERSION.tar.gz.sigstore.json" "$CHECKSUM"
 INSTALL_CANDIDATE_B
-wait_for_release smoke-node-a "$VERSION"
-wait_for_release smoke-node-b "$VERSION"
+  wait_for_release smoke-node-a "$VERSION"
+  wait_for_release smoke-node-b "$VERSION"
+fi
 
-echo "Install smoke passed: control and both nodes ran $VERSION; heartbeat, claim, upgrade and rollback succeeded."
+echo "Install smoke passed: control and both nodes ran $VERSION; heartbeat, claim, upgrade, rollback and the" \
+  "rollout halt on a failed install succeeded."

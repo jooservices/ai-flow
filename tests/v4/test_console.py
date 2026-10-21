@@ -58,7 +58,14 @@ def test_no_new_libraries_and_both_themes_still_defined():
     assert "#" not in footer_css.replace("#f-", "")  # footer colours come from theme variables only
 
 
-def test_console_page_and_state_feed_the_footer(client):
+def test_console_page_and_state_feed_the_footer(ctx):
+    from fastapi.testclient import TestClient
+    from aiflow.v4.control.api import create_app
+    from aiflow.v4.control.ui import mount_ui
+    app = create_app(ctx)
+    mount_ui(app, ctx)  # as the control-api CLI does
+    app.state.sync_accounts()
+    client = TestClient(app)
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
     s = client.get("/v1/state").json()

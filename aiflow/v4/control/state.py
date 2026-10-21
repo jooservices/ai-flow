@@ -11,6 +11,10 @@ def _age(ts: datetime | None) -> int | None:
     return None if ts is None else int((datetime.now(timezone.utc) - ts).total_seconds())
 
 
+def _iso(ts: datetime | None) -> str | None:
+    return None if ts is None else ts.isoformat()
+
+
 def snapshot(ctx) -> dict[str, Any]:
     db = ctx.db
     repo = ctx.repo()
@@ -27,6 +31,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"], "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "last_heartbeat": _iso(n["last_heartbeat"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],

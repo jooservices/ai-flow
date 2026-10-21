@@ -3,8 +3,8 @@ import time
 from conftest import add_ticket
 
 
-def join(client, name):
-    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+def join(client, name, ip=""):
+    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret", "ip": ip})
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -231,3 +231,26 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+
+
+def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):
+    from datetime import datetime, timedelta, timezone
+
+    from aiflow.v4.control.state import NODE_OFFLINE_S
+
+    node = join(client, "node3", ip="192.0.2.55")
+    client.post("/v1/nodes/node3/heartbeat", json={"slots_total": 2, "metrics": {"hostname": "worker-3"}}, headers=node)
+    n = next(x for x in client.get("/v1/state").json()["nodes"] if x["name"] == "node3")
+    assert n["ip"] == "192.0.2.55"
+    assert n["status"] == "online"
+    first_seen = datetime.fromisoformat(n["last_heartbeat"])
+    assert first_seen.tzinfo is not None and n["heartbeat_age_s"] < 5
+
+    # no more heartbeats: the node turns offline but keeps the IP and the exact time it was last seen
+    last = datetime.now(timezone.utc) - timedelta(seconds=NODE_OFFLINE_S + 5)
+    ctx.db.run("UPDATE nodes SET last_heartbeat=%s WHERE name='node3'", (last,))
+    n = next(x for x in client.get("/v1/state").json()["nodes"] if x["name"] == "node3")
+    assert n["status"] == "offline"
+    assert n["ip"] == "192.0.2.55"
+    assert datetime.fromisoformat(n["last_heartbeat"]) == last
+    assert n["heartbeat_age_s"] >= NODE_OFFLINE_S

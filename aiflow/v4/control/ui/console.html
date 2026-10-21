@@ -375,6 +375,12 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function
 function pad(n) { return String(n).padStart(2, '0'); }
 function mmss(sec) { if (sec == null) return '—'; sec = Math.max(0, Math.floor(sec)); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s); }
 function ago(sec) { if (sec == null) return 'never'; sec = Math.max(0, Math.round(sec)); if (sec < 60) return sec + ' s ago'; if (sec < 3600) return Math.floor(sec / 60) + ' min ago'; if (sec < 86400) return Math.floor(sec / 3600) + ' h ' + Math.floor(sec % 3600 / 60) + ' min ago'; return Math.floor(sec / 86400) + ' d ago'; }
+function nodeLastSeen(n) {
+  if (!n.last_heartbeat) return 'never';
+  var age = (n.heartbeat_age_s || 0) + since();
+  var seen = when(n.last_heartbeat) + ' (' + ago(age) + ')';
+  return n.status === 'offline' ? 'last seen ' + seen : seen;
+}
 function tok(n) { n = Number(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n)); }
 function gib(b) { return b == null ? '—' : (b / 1073741824).toFixed(1) + ' GiB'; }
 function usd(v) { v = Number(v || 0); return v ? '$' + v.toFixed(v < 1 ? 3 : 2) : '—'; }
@@ -851,7 +857,7 @@ function drawerNode(name) {
   var n = nodeBy(name); if (!n) return drawerShell('node', esc(name), '', '<div class="empty">This node is no longer registered.</div>');
   var d = D(), accs = d.accounts.filter(function (a) { return a.node === n.name; }), m = n.metrics || {};
   var b = (n.purpose || n.notes ? '<div style="font-size:13.5px">' + esc(n.purpose || '') + (n.notes ? '<div class="small" style="margin-top:4px">' + esc(n.notes) + '</div>' : '') + '</div>' : '<div class="small">No purpose or notes yet: add <span class="mono">purpose</span> and <span class="mono">notes</span> to aiflow-control/nodes/' + esc(n.name) + '.yaml</div>') +
-    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Heartbeat', '<span data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span>') + fact('CPUs', String(m.cpus || '—')) + fact('Host', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
+    '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
   b += '<div class="dsec"><h4>Tools on this node</h4><div class="ver">';

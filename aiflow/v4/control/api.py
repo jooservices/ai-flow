@@ -50,6 +50,12 @@ WITH last AS (
 SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
 """
+# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try.
+INTAKE_BACKOFF_SQL = """
+SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
+WHERE step = 'intake' AND status <> 'running' AND started_at > now() - interval '1 day'
+ORDER BY ticket_key, started_at DESC
+"""
 
 
 def h(token: str) -> str:
@@ -352,6 +358,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "verify"})
+        if "intake_refiner" in roles:
+            waiting = {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL)
+                       if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
+                       and r["ended_at"] > utcnow() - timedelta(minutes=10)}
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
+                                " AND NOT ('aiflow-hold' = ANY(labels))"
+                                " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                if t["key"] in held or t["key"] in waiting:
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                out.append({**t, "step": "intake"})
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
@@ -523,6 +541,23 @@ def create_app(ctx: Ctx) -> FastAPI:
               {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
         return {"ok": True}
 
+    @app.post("/v1/jira/{key}/description")
+    def jira_description(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "jira", "description", {"chars": len(body.body)})
+        if run["ticket_key"] != key:
+            raise HTTPException(403, "run is for another ticket")
+        if run["step"] != "intake":
+            raise HTTPException(403, "only an intake run replaces the description")
+        if not body.body.strip():
+            raise HTTPException(400, "the new description is empty")
+        ctx.jira.set_description(key, body.body)
+        ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (body.body, key))
+        audit("jira", "description", key, body.run_id, body.fence, run["account_id"], True, "replaced",
+              {"chars": len(body.body)})
+        ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
+                        node=node, outcome="replaced")
+        return {"ok": True}
+
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")
     def github_token(body: GitHubTokenBody, node: str = Depends(node_auth)) -> dict:
@@ -604,6 +639,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
         if run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             d = Decision("deny", "a verify run reviews and tests; it does not edit code")
+        elif run["step"] == "intake" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            d = Decision("deny", "an intake run rewrites the ticket text; it does not edit code")
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""))

@@ -16,7 +16,7 @@ log = logging.getLogger("aiflow4.notify")
 ICON = {"critical": "[CRITICAL]", "warning": "[WARNING]", "info": "[INFO]"}
 
 
-def send(severity: str, title: str, detail: str = "", link: str = "") -> list[str]:
+def send(severity: str, title: str, detail: str = "", link: str = "", recipient: str = "") -> list[str]:
     sent: list[str] = []
     subject = f"{ICON.get(severity, '')} AI Flow: {title}"
     body = detail + (f"\n\n{link}" if link else "")
@@ -25,7 +25,7 @@ def send(severity: str, title: str, detail: str = "", link: str = "") -> list[st
         try:
             msg = EmailMessage()
             msg["From"] = os.environ.get("AIFLOW4_SMTP_FROM", "aiflow4@aiflow4.local")
-            msg["To"] = os.environ.get("AIFLOW4_ALERT_EMAIL", "owner@aiflow4.local")
+            msg["To"] = recipient or os.environ.get("AIFLOW4_ALERT_EMAIL", "owner@aiflow4.local")
             msg["Subject"] = subject
             msg.set_content(body or title)
             with smtplib.SMTP(host, int(os.environ.get("AIFLOW4_SMTP_PORT", "25")), timeout=10) as s:

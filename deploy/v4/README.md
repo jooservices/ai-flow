@@ -12,6 +12,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
+- [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with fenced approve and rework actions
 
 ## Tools on a node
 

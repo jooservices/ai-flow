@@ -14,7 +14,7 @@ import httpx
 from ..core.text import adf_to_text, text_to_adf
 
 ORDER = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Human review", "Done"]
-FIELDS = ["summary", "status", "issuetype", "priority", "labels", "description", "parent", "issuelinks",
+FIELDS = ["summary", "status", "issuetype", "priority", "labels", "description", "parent", "issuelinks", "assignee",
           "created", "updated", "resolutiondate"]
 
 
@@ -84,6 +84,10 @@ class Jira:
             "labels": list(f.get("labels") or []), "summary": f.get("summary") or "",
             "description": adf_to_text(f.get("description")) if isinstance(f.get("description"), dict) else (f.get("description") or ""),
             "parent_key": (f.get("parent") or {}).get("key"), "blocked_by": blocked_by,
+            "assignee": ({"name": (f.get("assignee") or {}).get("displayName", ""),
+                          "email": (f.get("assignee") or {}).get("emailAddress", ""),
+                          "account_id": (f.get("assignee") or {}).get("accountId", "")}
+                         if f.get("assignee") else None),
             "jira_created": _ts(f.get("created")), "jira_updated": _ts(f.get("updated")),
             "done_at": _ts(f.get("resolutiondate")),
         }

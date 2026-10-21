@@ -185,6 +185,30 @@ def test_delivery_report_button_loads_markdown_into_copyable_drawer():
     assert "window.navigator.clipboard.writeText(text)" in page and "document.execCommand('copy')" in page
 
 
+def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
+    ticket = {
+        "key": "TESTFLOW-28", "summary": "Reviewer queue", "description": "Ticket details",
+        "jira_url": "https://jira.test/browse/TESTFLOW-28",
+        "pr": {"url": "https://github.com/jooservices/testflow/pull/28", "number": 28,
+               "title": "Reviewer queue", "additions": 8, "deletions": 2, "changed_files": 3},
+        "verify": {"outcome": "human", "verdict": "PASS", "summary": "Verify passed",
+                   "checks": "pytest passed", "findings": ""},
+        "preview_url": "https://preview.testflow.test",
+    }
+    driver = f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (s) {{ return s === '#view-review' ? root : null; }};
+S.reviews = [{json.dumps(ticket)}];
+renderReviews();
+console.log(root.innerHTML);
+"""
+    out = run_script(driver)
+    for text in ("Human review queue", "TESTFLOW-28", "Ticket details", "pull/28", "Files changed",
+                 "Additions", "Deletions", "pytest passed", "Preview environment", "Approve and merge", "Send for rework"):
+        assert text in out
+    assert 'data-view="review"' in html() and 'id="view-review"' in html()
+
+
 def test_gatus_link_is_configurable(monkeypatch):
     monkeypatch.setenv("AIFLOW4_GATUS_URL", "https://status.example/")
     assert Settings.from_env().gatus_url == "https://status.example/"

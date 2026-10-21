@@ -90,6 +90,19 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 
 /* panels */
 .panel{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; display:flex; flex-direction:column; gap:12px; min-width:0}
+.review-list{display:grid; gap:14px}
+.review-card{gap:14px}
+.review-title{display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap}
+.review-title h2{margin:0; font-family:var(--f-cond); font-size:19px}
+.review-content{white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); max-height:280px; overflow:auto}
+.review-facts{display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px}
+.review-fact{background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:9px 10px; min-width:0}
+.review-fact .label{color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.04em}
+.review-fact .value{margin-top:3px; overflow-wrap:anywhere}
+.review-actions{display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start}
+.review-actions textarea{flex:1 1 320px; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--surface-2)}
+.review-auth{display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-weight:500}
+.review-auth input{width:min(360px,100%); min-height:38px; border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:var(--surface-2)}
 .panel-h{display:flex; align-items:center; gap:10px 12px; flex-wrap:wrap}
 .panel-h h2{margin:0; font-family:var(--f-cond); font-size:17px; font-weight:600; letter-spacing:.01em; text-wrap:balance}
 .panel-h .hint{color:var(--muted); font-size:13px}
@@ -379,6 +392,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-sa" aria-controls="view-sa" aria-selected="false" data-act="view" data-view="sa">SA</button>
       <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-view="lead">Team Lead</button>
       <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
+      <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
     </div>
     <div class="spacer"></div>
@@ -403,6 +417,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div id="bform"></div>
     <div id="bcr"></div>
   </section>
+  <section class="view" id="view-review" role="tabpanel" aria-labelledby="tab-review" hidden></section>
   <section class="view" id="view-stakeholder" role="tabpanel" aria-labelledby="tab-stakeholder" hidden>
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
@@ -427,7 +442,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 <script>
 (function () {
 'use strict';
-/* AI Flow v4 console: Command Center and Delivery, rendered from the live registry (/v1/state every 5 s,
+/* AI Flow v4 console: Command Center, Delivery, Business, Human review and Stakeholder, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
 
@@ -474,7 +489,7 @@ var S = {
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
-  biz: null, bizError: '', bizLoading: null,
+  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
 };
@@ -483,6 +498,7 @@ function viewOf(path) {
   if (path.indexOf('/delivery') === 0) return 'delivery';
   if (path.indexOf('/lead') === 0) return 'lead';
   if (path.indexOf('/business') === 0) return 'business';
+  if (path.indexOf('/review') === 0) return 'review';
   if (path.indexOf('/stakeholder') === 0) return 'stakeholder';
   return 'cc';
 }
@@ -582,6 +598,17 @@ function pollAnalytics() {
     if (S.view === 'delivery' && S.data) renderDBody();
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
+}
+function loadReviews() {
+  fetch('/v1/reviews', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) { S.reviews = d.tickets || []; S.reviewsError = ''; if (S.view === 'review') renderReviews(); })
+    .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(); });
+}
+function pollReviews() {
+  if (S.view === 'review') loadReviews();
+  setTimeout(pollReviews, 15000);
 }
 function notify(prevInc, prevRuns) {
   var d = D();
@@ -1024,6 +1051,53 @@ function renderDBody() {
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   $('#dbody').innerHTML = h;
+}
+
+/* ---------- Human review ---------- */
+function renderReviews() {
+  var root = $('#view-review'); if (!root) return;
+  var rows = S.reviews || [], h = '<section class="panel"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Tickets waiting for a reviewer · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
+  h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Required for approve and rework; held only in this page until it is closed.</span>';
+  if (S.reviewsError) h += '<div class="empty" style="color:var(--crit)">Could not load the review queue: ' + esc(S.reviewsError) + '</div>';
+  else if (S.reviews === null) h += '<div class="empty">Loading review queue…</div>';
+  else if (!rows.length) h += '<div class="empty">No tickets are waiting for human review.</div>';
+  h += '</section>';
+  if (rows.length) {
+    h += '<div class="review-list">';
+    rows.forEach(function (t) {
+      var pr = t.pr || {}, ver = t.verify || {}, diff = [
+        ['Files changed', pr.changed_files], ['Additions', pr.additions], ['Deletions', pr.deletions]
+      ];
+      h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill('info', 'Human review', true) + '</div>';
+      if (t.description) h += '<div class="review-content">' + esc(t.description) + '</div>';
+      h += '<div class="review-facts"><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
+      diff.forEach(function (x) { h += '<div class="review-fact"><div class="label">' + x[0] + '</div><div class="value mono">' + (x[1] == null ? '—' : esc(x[1])) + '</div></div>'; });
+      h += '<div class="review-fact"><div class="label">Verify</div><div class="value">' + (ver.outcome ? pill(runTone(ver.outcome), (ver.verdict ? ver.verdict + ' · ' : '') + ver.outcome) : '—') + (ver.checks ? '<div class="small muted" style="margin-top:4px">' + esc(ver.checks) + '</div>' : '') + '</div></div></div>';
+      if (ver.summary) h += '<div><strong>Verify result:</strong> ' + esc(ver.summary) + '</div>';
+      if (ver.findings) h += '<div class="review-content"><strong>Findings:</strong>\n' + esc(ver.findings) + '</div>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(t.jira_url) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
+      if (t.preview_url) h += '<a class="btn sm" href="' + esc(t.preview_url) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
+      h += '</div><div class="review-actions"><textarea aria-label="Reviewer comment for ' + esc(t.key) + '" placeholder="Comment required to send this ticket for rework"></textarea><button class="btn" data-act="review-approve" data-key="' + esc(t.key) + '">Approve and merge</button><button class="btn danger" data-act="review-rework" data-key="' + esc(t.key) + '">Send for rework</button></div></article>';
+    });
+    h += '</div>';
+  }
+  root.innerHTML = h;
+}
+function submitReview(key, action, comment) {
+  var tokenField = $('[data-reviewer-token]');
+  S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
+  if (!S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
+  if (action === 'rework' && !String(comment || '').trim()) { toast('Comment required', 'Add a comment before sending the ticket for rework.', 'warn'); return; }
+  fetch('/v1/reviews/' + encodeURIComponent(key) + '/' + action, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.reviewerToken },
+    body: JSON.stringify(action === 'rework' ? { comment: comment } : {})
+  }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) {
+    if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
+    else toast(action === 'approve' ? 'Ticket approved' : 'Ticket sent for rework', key + (d.status ? ' · ' + d.status : ''), 'ok');
+    loadReviews();
+  }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 
 /* ---------- Team Lead epic coverage and portable reports ---------- */
@@ -1595,6 +1669,7 @@ function render() {
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
+  else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
@@ -1615,7 +1690,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -1624,6 +1699,7 @@ function setView(v) {
   showView();
   try { history.pushState(null, '', v === 'cc' ? '/cc' : '/' + v); } catch (e) { /* file preview */ }
   render();
+  if (v === 'review') loadReviews();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -1634,6 +1710,11 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'refresh-reviews') loadReviews();
+  else if (act === 'review-approve' || act === 'review-rework') {
+    var card = el.closest('[data-review-card]'), note = card && $('textarea', card);
+    submitReview(el.getAttribute('data-key'), act === 'review-approve' ? 'approve' : 'rework', note ? note.value : '');
+  }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
   else if (act === 'jump') flash(el.getAttribute('data-target'));
@@ -1654,6 +1735,9 @@ document.addEventListener('click', function (e) {
     document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
     try { localStorage.setItem('aiflow4-theme', dark ? 'light' : 'dark'); } catch (x) { /* storage off */ }
   }
+});
+document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
 });
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && S.drawer) closeAll();
@@ -1692,7 +1776,7 @@ try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentE
 loadPrefs();
 showView();
 render();
-poll(); pollServices(); pollAnalytics();
+poll(); pollServices(); pollAnalytics(); pollReviews();
 setInterval(tick, 1000);
 })();
 </script>

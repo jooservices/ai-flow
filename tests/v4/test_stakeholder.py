@@ -1,6 +1,7 @@
 """Stakeholder deployment links, review data, and Jira verdicts."""
 from __future__ import annotations
 
+from pathlib import Path
 import uuid
 
 import httpx
@@ -56,6 +57,11 @@ def test_stakeholder_urls_normalize_missing_keys_to_empty(ctx, tmp_path):
     response = client.get("/v1/stakeholder/TESTWP")
     assert response.status_code == 200
     assert response.json()["urls"] == {"develop": "https://uat.example.test", "production": ""}
+
+
+def test_stakeholder_page_is_routed_by_traefik():
+    compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
+    assert "PathPrefix(`/stakeholder`)" in compose.read_text()
 
 
 def test_stakeholder_change_feed_shows_latest_ticket_epic_and_release_or_commit(ctx, tmp_path):

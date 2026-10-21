@@ -1,5 +1,5 @@
 """Dashboards: Command Center (/cc), Delivery (/delivery), SA health (/sa), Team Lead (/lead),
-Business (/business) and Stakeholder (/stakeholder), one console fed by /v1/state and relevant view APIs.
+Business (/business), Human review (/review) and Stakeholder (/stakeholder), fed by /v1/state and relevant view APIs.
 
 All views are fed by the live registry; the Business view adds
 /v1/business/<project>/change-requests (see control/business.py).
@@ -29,6 +29,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/sa", include_in_schema=False)
     @app.get("/lead", include_in_schema=False)
     @app.get("/business", include_in_schema=False)
+    @app.get("/review", include_in_schema=False)
     @app.get("/stakeholder", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})

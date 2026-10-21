@@ -4,6 +4,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -197,6 +198,17 @@ def test_github_connect_is_owner_only_and_manifest_requires_public_https_url(cli
     response = client.get("/v1/integrations/github/manifest/start?organization=acme")
     assert response.status_code == 503
     assert "AIFLOW4_PUBLIC_URL" in response.text
+
+
+def test_github_and_jira_connect_docs_configure_public_url_in_control_env_file():
+    github_doc = re.sub(r"\s+", " ", Path("docs/v4/github-connect.md").read_text())
+    jira_doc = re.sub(r"\s+", " ", Path("docs/v4/jira-connect.md").read_text())
+    env_file = "`/etc/aiflow/secrets/control/aiflow4.env`"
+
+    assert "Set `AIFLOW4_PUBLIC_URL`" in github_doc and f"in {env_file}" in github_doc
+    assert "Set `AIFLOW4_PUBLIC_URL`" in jira_doc and f"in {env_file}" in jira_doc
+    assert "compose file passes this value through" not in github_doc.lower()
+    assert "environment used by `docker compose`" not in github_doc
 
 
 def test_integrations_ui_and_repo_refresh_controls_are_present(client, ctx):

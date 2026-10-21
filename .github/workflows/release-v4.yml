@@ -48,7 +48,21 @@ jobs:
     needs: v4-tests
     if: github.repository == 'jooservices/ai-flow'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - name: Checkout full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,17 +86,69 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/master
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "revision=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          PUBLISHED_RELEASES=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+            --json isDraft,isPrerelease,publishedAt,tagName \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | sort_by(.publishedAt) | reverse | .[].tagName')
+          RELEASE_BASE=$(git rev-parse "$GITHUB_SHA^")
+          PREVIOUS=""
+          while IFS= read -r candidate; do
+            [[ "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || continue
+            candidate_commit=$(git rev-parse --verify "$candidate^{commit}" 2>/dev/null || true)
+            [[ -n "$candidate_commit" ]] || continue
+            if git merge-base --is-ancestor "$candidate_commit" "$RELEASE_BASE"; then
+              PREVIOUS=$candidate
+              break
+            fi
+          done <<< "$PUBLISHED_RELEASES"
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
+
+      - name: Download previous published release for upgrade and rollback
+        if: steps.release.outputs.previous != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS: ${{ steps.release.outputs.previous }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/aiflow4-previous"
+          gh release download "$PREVIOUS" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/aiflow4-previous" \
+            --pattern "aiflow4-$PREVIOUS.tar.gz" \
+            --pattern "aiflow4-$PREVIOUS.tar.gz.sigstore.json"
 
       - name: Build tarball and conventional changelog
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          PREVIOUS: ${{ steps.release.outputs.previous }}
         run: |
           mkdir -p dist
           git archive --format=tar.gz --output="dist/aiflow4-$VERSION.tar.gz" "$VERSION" \
             aiflow pyproject.toml uv.lock prompts deploy
-          PREVIOUS=$(git describe --tags --match 'v[0-9]*' --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)
           python3 -m aiflow.v4.core.release_notes "$VERSION" --previous "$PREVIOUS" > dist/CHANGELOG.md
           (cd dist && sha256sum "aiflow4-$VERSION.tar.gz" > SHA256SUMS)
+
+      - name: Sign release tarball with GitHub OIDC
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          cosign sign-blob --yes \
+            --bundle "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+            "dist/aiflow4-$VERSION.tar.gz"
+
+      - name: Install release on Ubuntu systemd control and two nodes
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          PREVIOUS: ${{ steps.release.outputs.previous }}
+        run: |
+          if [ -n "$PREVIOUS" ] \
+            && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" ] \
+            && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json" ]; then
+            bash deploy/v4/ci/install-smoke.sh "$VERSION" \
+              "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+              "$PREVIOUS" "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" \
+              "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json"
+          else
+            bash deploy/v4/ci/install-smoke.sh "$VERSION" \
+              "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json"
+          fi
 
       - name: Build and push control-api image to GHCR
         env:
@@ -98,13 +164,10 @@ jobs:
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-      - name: Sign tarball and image with GitHub OIDC
+      - name: Sign control-api image with GitHub OIDC
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          cosign sign-blob --yes \
-            --bundle "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
-            "dist/aiflow4-$VERSION.tar.gz"
           cosign sign --yes "$IMAGE"
 
       - name: Create GitHub Release and upload assets

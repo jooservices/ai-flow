@@ -377,8 +377,13 @@ def test_full_claim_flow_with_fencing(client, ctx):
     assert client.post(f"/v1/runs/{run_id}/heartbeat", json={"fence": fence, "progress": {"phase": "ai"}}, headers=cc).status_code == 200
     assert client.post("/v1/jira/TESTWP-1/transition", json={"run_id": run_id, "fence": fence, "to": "In Progress"},
                        headers=cc).json()["status"] == "In Progress"
-    assert client.post("/v1/github/token", json={"run_id": run_id, "fence": fence, "repo": "jooservices/test-aiflow-wp"},
-                       headers=cc).json()["token"] == "ghs_fake"
+    github_token = client.post("/v1/github/token", json={"run_id": run_id, "fence": fence,
+                                                          "repo": "jooservices/test-aiflow-wp"},
+                               headers=cc).json()
+    assert github_token["token"] == "ghs_fake"
+    token_audit = ctx.db.one("SELECT result, payload FROM write_audit WHERE target='github' AND action='token'"
+                             " AND ticket='TESTWP-1' ORDER BY id DESC LIMIT 1")
+    assert token_audit["result"] == "issued" and "ghs_fake" not in str(token_audit["payload"])
     assert client.post("/v1/github/token", json={"run_id": run_id, "fence": fence, "repo": "jooservices/other"},
                        headers=cc).status_code == 403
     pr = client.post("/v1/github/pr", json={"run_id": run_id, "fence": fence, "repo": "test-aiflow-wp", "head": "TESTWP-1-x",

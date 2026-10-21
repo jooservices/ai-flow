@@ -239,6 +239,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .drawer-h .d-title{flex:1; min-width:0}
 .drawer-h h3{margin:2px 0 0; font-family:var(--f-cond); font-size:20px; font-weight:600; text-wrap:balance}
 .drawer-b{padding:16px 18px 28px; overflow:auto; display:flex; flex-direction:column; gap:18px}
+.report-md{margin:0; padding:12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.55 var(--f-mono); color:var(--text)}
 .dsec{display:flex; flex-direction:column; gap:8px}
 .dsec h4{margin:0; font-family:var(--f-cond); font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:600}
 .facts{display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:10px}
@@ -741,7 +742,7 @@ function renderDHead() {
   }
   h += '<span class="spacer"></span>';
   var p = d.projects.filter(function (x) { return x.key === S.project; })[0];
-  if (p) h += '<a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
+  if (p) h += '<button class="btn sm" data-act="open-report">Report</button><a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
   $('#dhead').innerHTML = h;
 }
 function epicOf(t, byKey) {
@@ -975,6 +976,14 @@ function drawerInc(id) {
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';
   return drawerShell('incident #' + esc(i.id), esc(i.title), pill(i.closed_at ? 'ok' : i.severity === 'critical' ? 'crit' : 'warn', i.closed_at ? 'Resolved' : i.severity), b);
 }
+function drawerReport() {
+  var r = S.drawer, label = r.epic ? esc(r.epic) : esc(r.id);
+  if (r.error) return drawerShell('project report', label, '', '<div class="empty">' + esc(r.error) + '</div>');
+  if (!r.text) return drawerShell('project report', label, '', '<div class="empty">Loading Markdown report…</div>');
+  var b = '<div style="display:flex;justify-content:flex-end"><button class="btn sm" data-act="copy-report">Copy Markdown</button></div>' +
+    '<pre class="report-md">' + esc(r.text) + '</pre>';
+  return drawerShell('project report', label, '', b);
+}
 function renderDrawer() {
   var d = $('#drawer'); if (!S.drawer) return;
   var k = S.drawer.kind, id = S.drawer.id, html = '';
@@ -982,6 +991,7 @@ function renderDrawer() {
   if (k === 'node') html = drawerNode(id);
   if (k === 'acc') html = drawerAcc(id);
   if (k === 'inc') html = drawerInc(id);
+  if (k === 'report') html = drawerReport();
   var body = $('.drawer-b', d), scroll = body ? body.scrollTop : 0;
   d.innerHTML = html;
   var nb = $('.drawer-b', d); if (nb) nb.scrollTop = scroll;
@@ -991,6 +1001,43 @@ function loadTicket(key) {
   fetch('/v1/tickets/' + encodeURIComponent(key), { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
     if (d) { S.ticket[key] = d; if (S.drawer && S.drawer.kind === 'ticket' && S.drawer.id === key) renderDrawer(); }
   }).catch(function () {});
+}
+function loadProjectReport(project, epic) {
+  var query = 'format=md' + (epic ? '&epic=' + encodeURIComponent(epic) : '');
+  fetch('/v1/projects/' + encodeURIComponent(project) + '/report?' + query, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('Report could not be loaded (' + r.status + ')');
+    return r.text();
+  }).then(function (text) {
+    if (S.drawer && S.drawer.kind === 'report' && S.drawer.id === project && S.drawer.epic === epic) {
+      S.drawer.text = text; renderDrawer();
+    }
+  }).catch(function (e) {
+    if (S.drawer && S.drawer.kind === 'report' && S.drawer.id === project && S.drawer.epic === epic) {
+      S.drawer.error = String(e.message || e); renderDrawer();
+    }
+  });
+}
+function openProjectReport(opener) {
+  lastFocus = opener || document.activeElement;
+  var epic = S.epic === 'all' ? null : S.epic;
+  S.drawer = { kind: 'report', id: S.project, epic: epic, text: '', error: '' };
+  renderDrawer();
+  $('#overlay').setAttribute('data-open', ''); $('#drawer').setAttribute('data-open', ''); $('#drawer').setAttribute('aria-hidden', 'false');
+  loadProjectReport(S.project, epic);
+  setTimeout(function () { var c = $('#drawer [data-act="close"]'); if (c) c.focus(); }, 60);
+}
+function copyReport() {
+  var text = S.drawer && S.drawer.text || '';
+  function copied(ok) { toast(ok ? 'Report copied' : 'Could not copy report', ok ? 'Markdown copied to clipboard' : 'Select and copy the report text', ok ? 'ok' : 'warn'); }
+  if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+    window.navigator.clipboard.writeText(text).then(function () { copied(true); }).catch(function () { copied(false); });
+    return;
+  }
+  var field = document.createElement('textarea'); field.value = text;
+  field.setAttribute('readonly', ''); field.style.position = 'fixed'; field.style.opacity = '0';
+  document.body.appendChild(field); field.select();
+  var ok = document.execCommand && document.execCommand('copy');
+  field.remove(); copied(Boolean(ok));
 }
 var lastFocus = null;
 function openDrawer(kind, id, opener) {
@@ -1062,6 +1109,8 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
   else if (act === 'open-inc') openDrawer('inc', el.getAttribute('data-id'), el);
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
+  else if (act === 'open-report') openProjectReport(el);
+  else if (act === 'copy-report') copyReport();
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; render(); }

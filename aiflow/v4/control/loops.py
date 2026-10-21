@@ -34,14 +34,20 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
+        done_at = t.get("done_at")
+        if t["status"] == "Done" and done_at is None:
+            done_at = t["jira_updated"]
         ctx.db.run(
             "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-            " jira_created, jira_updated, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s, now())"
+            " jira_created, jira_updated, done_at, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
+            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s, now())"
             " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
             " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, synced_at=now()",
-            t)
+            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated,"
+            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " ELSE tickets.done_at END, synced_at=now()",
+            {**t, "done_at": done_at})
         n += 1
     return n
 

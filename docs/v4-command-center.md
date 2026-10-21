@@ -18,3 +18,21 @@ A node is shown as offline when its heartbeat is older than 75 seconds, without 
 The node drawer shows the IP, joined time, hostname and last heartbeat. An offline node shows
 `last seen <time> (<age>)`, so operators can tell when and where it was last alive. The watchdog opens a
 `node_down` incident while the node is offline and closes it on the next heartbeat.
+
+## Project closing report
+
+Delivery's **Report** button opens the current project's Markdown closing report. If an epic is selected, the
+report covers its descendant tickets. Use **Copy Markdown** to paste the report into the project's study case.
+The API also returns the structured report at `GET /v1/projects/{key}/report`; add `?epic=KEY` to scope it to
+an epic or `?format=md` for Markdown.
+
+The period starts at the oldest ticket creation time in scope and ends at the latest completion time. Lead time
+is measured from Jira creation to completion. `done_at` records when the control plane first observes a ticket
+entering Done; existing Done tickets are backfilled from their current Jira update timestamp. Median and p90 lead
+times are calculated across completed tickets with both timestamps. AI time sums recorded run durations per
+completed ticket, then reports median and p90 over completed tickets with run history. Usage and run outcomes
+include all recorded runs for tickets in scope. Rework rounds count verify runs with outcome `rework`; tickets
+that needed the owner are taken from audited transitions to Needs owner, the current Needs owner status, or the
+`needs-owner` label.
+Incidents are included when their subject is a ticket in scope, so account-wide and node-wide incidents are not
+assigned to an individual project.

@@ -231,6 +231,53 @@ def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve
     assert "fetch('/api/default/" not in page and "fetch('/o2/" not in page
 
 
+def _sa_state(**overrides):
+    state = {
+        "nodes": [], "accounts": [], "incidents": [], "active_runs": [], "recent_runs": [], "tickets": [],
+        "events": [], "incidents_recent": [], "totals": {}, "versions": {}, "links": {"o2": "/o2/"},
+        "sa": {"thresholds": {"slots_used_percent": 80, "slots_duration_minutes": 30, "role_cooldown_minutes": 15,
+                              "idle_days": 7, "credential_expiry_days": 7},
+               "slots": {"used": 0, "total": 0, "utilization_percent": None}, "recommendations": [],
+               "provider_blocks": [], "policy_denials": [], "network_issues": []},
+    }
+    for key, value in overrides.items():
+        if key in state["sa"]:
+            state["sa"][key] = value
+        else:
+            state[key] = value
+    return state
+
+
+def test_sa_node_metrics_sent_as_strings_are_not_rendered_as_html():
+    payload = "<img src=x onerror=alert(1)>"
+    rendered = render_sa(_sa_state(nodes=[{
+        "name": "node1", "status": "online", "slots_total": 2, "slots_used": 1, "heartbeat_age_s": 5,
+        "metrics": {"cpu_pct": payload, "disk_free_pct": payload, "mem_total": payload, "mem_used": payload}}]))
+    assert "<img" not in rendered and "onerror" not in rendered
+    rendered = render_sa(_sa_state(nodes=[{
+        "name": "node1", "status": "online", "slots_total": 2, "slots_used": 1, "heartbeat_age_s": 5,
+        "metrics": {"cpu_pct": "42.4", "disk_free_pct": 61}}]))
+    assert "42%" in rendered and "61%" in rendered
+
+
+def test_sa_credential_expiry_label_uses_configured_days():
+    state = _sa_state(accounts=[{"id": "claude-01", "provider": "claude", "node": "node1", "status": "idle",
+                                 "credential_expires_at": "2026-10-30T00:00:00+00:00",
+                                 "credential_expiry_warning": True, "quota": {}, "roles": []}])
+    state["sa"]["thresholds"]["credential_expiry_days"] = 14
+    rendered = render_sa(state)
+    assert "Expires within 14 days" in rendered and "Expires within 7 days" not in rendered
+
+
+def test_sa_network_runs_show_attempt_and_retry_derived_from_runs():
+    rendered = render_sa(_sa_state(network_issues=[
+        {"source": "run", "ts": "2026-10-21T00:10:00+00:00", "ticket": "TESTWP-9", "error_kind": "network",
+         "attempts": 2, "retry": False, "detail": "connection reset"},
+        {"source": "run", "ts": "2026-10-21T00:00:00+00:00", "ticket": "TESTWP-9", "error_kind": "network",
+         "attempts": 1, "retry": True, "detail": "connection reset"}]))
+    assert "attempt 2 · not retried yet" in rendered and "attempt 1 · retried" in rendered
+
+
 def test_delivery_report_button_loads_markdown_into_copyable_drawer():
     page = html()
     assert 'data-act="open-report">Report</button>' in page

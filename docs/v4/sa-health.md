@@ -40,8 +40,11 @@ account table as soon as the control API records them.
 
 Policy denials show the account, ticket and denied command. Provider blocks list accounts in quota cooldown or
 signed-out state. Network diagnostics combine registry events (including a node heartbeat error buffered by the
-node agent until control connectivity returns) and runs whose `error_kind` is `network`. Retry indicators come
-from the recorded event or run retry metadata when present.
+node agent until control connectivity returns) and runs whose `error_kind` is `network`. For events, the retry
+column shows the `retry` / `attempts` fields the event carries. For runs, it is derived from the runs table itself:
+the attempt number counts the runs of the same ticket and step that started up to that run, and the failure is
+shown as retried once a later run of that ticket and step exists (otherwise "not retried yet"). Workers write no
+extra retry metadata. Node metrics are always rendered as numbers, so a malformed heartbeat cannot inject markup.
 
 The OpenObserve link opens the existing `/o2/` route in a new tab. The console reads the SA data from `/v1/state`;
 no browser request is made to OpenObserve.

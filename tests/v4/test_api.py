@@ -123,17 +123,27 @@ def test_sa_network_diagnostics_include_heartbeat_events_runs_and_retry(client, 
 
     ctx.events.emit("node.heartbeat.error", node="cc", reason="node-agent could not reach control",
                     error_kind="network", retry=True, attempts=2)
-    run_id = uuid.uuid4()
-    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind,details)"
-               " VALUES (%s,'TESTWP-51','TESTWP','dev','claude-01','cc',1,'finished','failed','network',%s)",
-               (run_id, J({"retry": True, "error_message": "connection reset"})))
+    # two network failures of the same ticket and step, then a successful retry; no retry metadata is written
+    for minutes, error_kind, outcome in ((30, "network", "failed"), (20, "network", "failed"), (10, "", "done")):
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind,"
+                   "details,started_at) VALUES (%s,'TESTWP-51','TESTWP','dev','claude-01','cc',1,'finished',%s,%s,"
+                   "%s,now() - make_interval(mins => %s))",
+                   (uuid.uuid4(), outcome, error_kind, J({"error_message": "connection reset"}), minutes))
+    # a single network failure of another ticket that has not been retried yet
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind)"
+               " VALUES (%s,'TESTWP-52','TESTWP','dev','claude-01','cc',1,'finished','failed','network')",
+               (uuid.uuid4(),))
     sa = client.get("/v1/state").json()["sa"]
     sources = {issue["source"] for issue in sa["network_issues"]}
     assert sources == {"event", "run"}
     event = next(issue for issue in sa["network_issues"] if issue["source"] == "event")
-    run = next(issue for issue in sa["network_issues"] if issue["source"] == "run")
     assert event["data"]["error_kind"] == "network" and event["data"]["retry"] is True
-    assert run["ticket"] == "TESTWP-51" and run["error_kind"] == "network" and run["retry"] is True
+    runs = [issue for issue in sa["network_issues"] if issue["source"] == "run"]
+    retried = sorted((r for r in runs if r["ticket"] == "TESTWP-51"), key=lambda r: r["attempts"])
+    assert [(r["attempts"], r["retry"]) for r in retried] == [(1, True), (2, True)]
+    assert all(r["error_kind"] == "network" and r["detail"] == "connection reset" for r in retried)
+    pending = next(r for r in runs if r["ticket"] == "TESTWP-52")
+    assert pending["attempts"] == 1 and pending["retry"] is False
 
 
 def test_command_center_events_survive_many_heartbeats(client, ctx):

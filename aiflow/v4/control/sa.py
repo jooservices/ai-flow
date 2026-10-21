@@ -109,11 +109,17 @@ def dashboard_data(ctx, nodes: list[dict], accounts: list[dict]) -> dict[str, An
         " FROM events WHERE type='node.heartbeat.error' OR data->>'error_kind'='network'"
         " OR (type LIKE 'network.%' AND data->>'retry'='true')"
         " ORDER BY id DESC LIMIT 50")
+    # Run-side retries are derived from the runs table itself: the attempt number is how many runs of the same
+    # ticket and step started up to this one, and the failure counts as retried once a later run of that step exists.
     network_runs = ctx.db.all(
-        "SELECT id, started_at AS ts, ticket_key AS ticket, project, account_id AS account, node, status,"
-        " outcome, error_kind, details->'retry' AS retry, details->>'error_message' AS detail FROM runs"
-        " WHERE error_kind='network' OR details->>'error_kind'='network'"
-        " ORDER BY started_at DESC LIMIT 50")
+        "SELECT r.id, r.started_at AS ts, r.ticket_key AS ticket, r.project, r.step, r.account_id AS account,"
+        " r.node, r.status, r.outcome, r.error_kind, r.details->>'error_message' AS detail,"
+        " (SELECT count(*) FROM runs p WHERE p.ticket_key=r.ticket_key AND p.step=r.step"
+        "  AND p.started_at <= r.started_at)::int AS attempts,"
+        " EXISTS (SELECT 1 FROM runs n WHERE n.ticket_key=r.ticket_key AND n.step=r.step"
+        "  AND n.started_at > r.started_at) AS retry"
+        " FROM runs r WHERE r.error_kind='network' OR r.details->>'error_kind'='network'"
+        " ORDER BY r.started_at DESC LIMIT 50")
     network_issues = [{"source": "event", **event} for event in network_events]
     network_issues.extend({"source": "run", **run} for run in network_runs)
     network_issues.sort(key=lambda issue: issue["ts"], reverse=True)

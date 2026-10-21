@@ -83,6 +83,12 @@ ln -sfn "$REL" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aif
 install -m 0644 "$REL"/deploy/v4/node/systemd/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q aiflow4-node-agent
+# Worker services resolve their executable through /srv/aiflow/current when they start. Restart active workers
+# after switching the symlink so a canary's runs execute the candidate release rather than an older process.
+mapfile -t WORKERS < <(systemctl list-units --state=active --plain --no-legend 'aiflow4-worker@*.service' | awk 'NF {print $1}')
+if ((${#WORKERS[@]})); then
+  systemctl restart "${WORKERS[@]}"
+fi
 systemctl restart aiflow4-node-agent
 sleep 15
 if ! systemctl is-active --quiet aiflow4-node-agent || ! /srv/aiflow/current/.venv/bin/aiflow4 version >/dev/null 2>&1; then

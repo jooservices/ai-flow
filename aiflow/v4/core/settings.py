@@ -47,6 +47,7 @@ class Settings:
     jira_email: str = ""
     jira_token: str = ""
     jira_projects: list[str] = field(default_factory=list)
+    canary_bug_project: str = "TESTFLOW"
     github_org: str = "jooservices"
     github_app_dir: str = "/etc/aiflow/secrets/github"
     control_repo: str = "/srv/aiflow/control/repos/aiflow-control"
@@ -73,6 +74,7 @@ class Settings:
         s.database_url = _env("DATABASE_URL", s.database_url)
         s.jira_site = _env("JIRA_SITE", s.jira_site)
         s.jira_projects = [p for p in _env("JIRA_PROJECTS", "").split(",") if p]  # empty: every project in the control repo
+        s.canary_bug_project = _env("CANARY_BUG_PROJECT", s.canary_bug_project)
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)
         s.control_repo = _env("CONTROL_REPO", s.control_repo)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy the newest published vX.Y.Z release whose commit is on master; roll back if health checks fail.
+# Deploy the newest published vX.Y.Z from master through a measured one-node canary.
 # Run by aiflow4-autodeploy.timer on the control-plane machine.
 set -uo pipefail
 ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
@@ -8,20 +8,22 @@ ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] && exec /usr/local/sbin/aiflow4-autodeploy-develop
 R=$ROOT/control/repos/ai-flow
 RELEASES=$ROOT/control/releases
-CUR=$(cat "$RELEASES/CURRENT" 2>/dev/null || true)
-git -C "$R" fetch -q origin master --tags || exit 0
-TARGET=$(git -C "$R" tag --merged origin/master --list 'v[0-9]*' --sort=-version:refname | head -n 1)
-[ -n "$TARGET" ] || { echo "no versioned release tag on master"; exit 0; }
-[ "$TARGET" != "$CUR" ] || exit 0
-ASSETS=$(gh release view "$TARGET" --repo jooservices/ai-flow --json assets --jq '.assets[].name' 2>/dev/null) || {
-  echo "release $TARGET has not been published yet"; exit 0
-}
-for asset in "aiflow4-$TARGET.tar.gz" "aiflow4-$TARGET.tar.gz.sigstore.json" SHA256SUMS; do
-  if ! grep -Fxq "$asset" <<<"$ASSETS"; then
-    echo "release $TARGET is missing $asset"; exit 0
-  fi
-done
-echo "deploying release $TARGET (was ${CUR:-none})"
+CURRENT_FILE=$RELEASES/CURRENT
+CANARY_FILE=$RELEASES/CANARY.json
+REJECTED_FILE=$RELEASES/CANARY_REJECTED
+CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
+CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-1200}
+CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
+CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-3600}
+CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
+CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
+CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
+AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
+
+mkdir -p "$RELEASES"
+exec 8>"$RELEASES/autodeploy.lock"
+flock -n 8 || { echo "another auto-deploy pass is running"; exit 0; }
+
 alert() { python3 - "$1" "$2" <<'P' || true
 import smtplib, sys
 from email.message import EmailMessage
@@ -29,40 +31,201 @@ m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow
 with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
+
+control_state() { curl -fsS http://127.0.0.1/v1/state; }
+canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
+now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
+# Retry Jira work even when the rollback incident already exists and CANARY.json has been removed.
+canary_cli retry-tickets || echo "could not retry pending canary flow-bug tickets" >&2
+write_canary() {
+  python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" "$5" <<'P'
+import json, os, sys
+path, target, node, previous, started, requested = sys.argv[1:]
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({"target": target, "node": node, "previous": previous, "started_at": started,
+               "requested_at": requested}, f)
+    f.write("\n")
+os.replace(tmp, path)
+P
+}
+# Reject the candidate: CANARY_REJECTED stops a retry, removing CANARY.json returns the node to CURRENT on its
+# next heartbeat, the registry gets an incident and a flow-bug, and the owner gets a CRITICAL alert.
+reject_canary() {
+  local why=$1 measurements=$2 commit
+  commit=$(git -C "$R" rev-list -n 1 "refs/tags/$TARGET" 2>/dev/null || true)
+  [ -n "$commit" ] || commit=unknown
+  printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+  rm -f "$CANARY_FILE"
+  canary_cli record-rollback --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
+    --commit "$commit" --measurements "$measurements" || echo "could not write canary rollback incident/ticket" >&2
+  echo "canary $TARGET $why; $NODE returned to $PREVIOUS"
+  alert "[CRITICAL] AI Flow: canary $TARGET rolled back" \
+    "Canary node $NODE returned to $PREVIOUS: $why. Suspected commit: $commit. The registry has a canary incident; a flow-bug ticket was requested."
+}
+
+if [ -f "$CANARY_FILE" ]; then
+  IFS=$'\t' read -r TARGET NODE PREVIOUS STARTED_AT REQUESTED_AT < <(python3 - "$CANARY_FILE" <<'P'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d["target"], d["node"], d["previous"], d.get("started_at") or "-", d.get("requested_at") or "-", sep="\t")
+except (OSError, ValueError, KeyError):
+    raise SystemExit("invalid canary state")
+P
+  ) || { echo "cannot read $CANARY_FILE" >&2; exit 1; }
+  [ -n "${TARGET:-}" ] && [ -n "${NODE:-}" ] && [ -n "${PREVIOUS:-}" ] || {
+    echo "canary state is incomplete" >&2; exit 1;
+  }
+  [ "$STARTED_AT" != - ] || STARTED_AT=
+  [ "$REQUESTED_AT" != - ] || REQUESTED_AT=
+  if [ -z "${STARTED_AT:-}" ]; then
+    NODE_RELEASE=$(control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); n=next((x for x in d["nodes"] if x["name"]==sys.argv[1]),None); print(n["release"] if n else "")' "$NODE" 2>/dev/null || true)
+    if [ "$NODE_RELEASE" != "$TARGET" ]; then
+      if [ -z "$REQUESTED_AT" ]; then
+        # State written before requested_at existed: start the install clock now.
+        write_canary "$TARGET" "$NODE" "$PREVIOUS" "" "$(now_utc)"
+        echo "waiting for canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown})"
+        exit 0
+      fi
+      WAITED=$(python3 -c 'import sys; from datetime import datetime,timezone; print(max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(sys.argv[1])).total_seconds())))' "$REQUESTED_AT") || WAITED=0
+      if [ "$WAITED" -ge "$CANARY_INSTALL_TIMEOUT_S" ]; then
+        # The installer switched back (exit 6) or the node is offline: the candidate never ran there.
+        WHY="was not installed on $NODE within ${CANARY_INSTALL_TIMEOUT_S}s (node reports ${NODE_RELEASE:-unknown})"
+        MEASUREMENTS=$(python3 -c 'import json,sys; zero={"runs":0,"infra_failures":0,"failure_rate":0.0}; print(json.dumps({"action":"rollback","rollback_reason":sys.argv[1],"canary":zero,"baseline":zero}))' "$WHY")
+        reject_canary "$WHY" "$MEASUREMENTS"
+        exit 0
+      fi
+      echo "waiting for canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown}, ${WAITED}s of ${CANARY_INSTALL_TIMEOUT_S}s)"
+      exit 0
+    fi
+    STARTED_AT=$(now_utc)
+    write_canary "$TARGET" "$NODE" "$PREVIOUS" "$STARTED_AT" "$REQUESTED_AT"
+    echo "canary node $NODE installed $TARGET; observation window started"
+    exit 0
+  fi
+
+  DECISION=$(canary_cli evaluate --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
+    --started-at "$STARTED_AT" --minimum-age-s "$CANARY_MIN_AGE_S" --minimum-runs "$CANARY_MIN_RUNS" \
+    --maximum-age-s "$CANARY_MAX_AGE_S" --failure-ratio "$CANARY_FAILURE_RATIO" \
+    --minimum-infra-failures "$CANARY_MIN_INFRA_FAILURES") || {
+      echo "could not read canary run measurements; keeping $TARGET isolated on $NODE" >&2; exit 1;
+    }
+  ACTION=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])' <<<"$DECISION")
+  case "$ACTION" in
+    wait)
+      echo "canary $TARGET on $NODE: $(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["reason"])' <<<"$DECISION")"
+      exit 0
+      ;;
+    rollback)
+      reject_canary "failed its infrastructure rate threshold" "$DECISION"
+      exit 0
+      ;;
+    promote)
+      UNDER_OBSERVED=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if "too few completed runs" in d["reason"] else "no")' <<<"$DECISION")
+      if [ "$UNDER_OBSERVED" = yes ]; then
+        canary_cli record-promotion --node "$NODE" --target "$TARGET" --measurements "$DECISION" \
+          --minimum-runs "$CANARY_MIN_RUNS" \
+          || echo "could not record under-observed canary note" >&2
+      fi
+      rm -f "$CANARY_FILE"
+      echo "canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
+      ;;
+    *) echo "unknown canary decision: $ACTION" >&2; exit 1 ;;
+  esac
+else
+  git -C "$R" fetch -q origin master --tags || exit 0
+  TARGET=$(git -C "$R" tag --merged origin/master --list 'v[0-9]*' --sort=-version:refname | head -n 1)
+  [ -n "$TARGET" ] || { echo "no versioned release tag on master"; exit 0; }
+  [ "$TARGET" != "$CUR" ] || exit 0
+  REJECTED=$(cat "$REJECTED_FILE" 2>/dev/null || true)
+  if [ "$TARGET" = "$REJECTED" ]; then
+    echo "release $TARGET already failed its canary; waiting for a newer release"
+    exit 0
+  fi
+  ASSETS=$(gh release view "$TARGET" --repo jooservices/ai-flow --json assets --jq '.assets[].name' 2>/dev/null) || {
+    echo "release $TARGET has not been published yet"; exit 0
+  }
+  for asset in "aiflow4-$TARGET.tar.gz" "aiflow4-$TARGET.tar.gz.sigstore.json" SHA256SUMS; do
+    if ! grep -Fxq "$asset" <<<"$ASSETS"; then
+      echo "release $TARGET is missing $asset"; exit 0
+    fi
+  done
+
+  # A commit id is the pre-versioned develop install and cannot be restored by a signed node update. Keep its
+  # existing control-plane health rollback path for the first tagged release; all version-to-version upgrades
+  # use the canary flow below.
+  if [[ ! $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "deploying first versioned release $TARGET (was ${CUR:-none})"
+    if aiflow4-deploy "$TARGET"; then
+      sleep 20
+      if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+         && curl -fsS -o /dev/null http://127.0.0.1/cc; then
+        echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed $TARGET" "Versioned release $TARGET passed the health checks (previous ${CUR:-none})."; exit 0
+      fi
+    fi
+    # Before the first versioned release, CURRENT is a commit id deployed by the old develop flow. Its image
+    # and build tree are still on this host, so restore them when health checks fail.
+    rollback_commit() {
+      local cf="$ROOT/build/$CUR/deploy/v4/control/compose.yaml" svc
+      docker image inspect "aiflow4/control:$CUR" >/dev/null 2>&1 || { echo "image aiflow4/control:$CUR is gone"; return 1; }
+      [ -f "$cf" ] || { echo "build tree of $CUR is gone"; return 1; }
+      for svc in control-api-a control-api-b control-loops; do
+        AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$CUR \
+          docker compose -f "$cf" up -d --no-deps "$svc" || return 1
+      done
+      printf '%s\n' "$CUR" > "$CURRENT_FILE.tmp" && mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE" || return 1
+      if [ -x "$ROOT/releases/$CUR/.venv/bin/aiflow4" ]; then
+        ln -sfn "$ROOT/releases/$CUR" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
+        systemctl restart aiflow4-node-agent
+      fi
+    }
+    echo "deploy of $TARGET unhealthy; rolling back to ${CUR:-none}"
+    ROLLED_BACK=no
+    if [[ $CUR =~ ^[0-9a-f]{7,40}$ ]]; then rollback_commit && ROLLED_BACK=yes; fi
+    if [ "$ROLLED_BACK" = yes ]; then
+      alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after deploying $TARGET; it runs $CUR again. Look at the release checks and control logs."
+    else
+      echo "no rollback happened; the control plane may still run $TARGET"
+      alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed, NOT rolled back" "The control plane was unhealthy after deploying $TARGET and could not be rolled back to ${CUR:-none}. It may still run $TARGET: restore it by hand, then look at the release checks and control logs."
+    fi
+    exit 1
+  fi
+
+  STATE=$(control_state) || { echo "control registry is unavailable; not starting a canary" >&2; exit 1; }
+  NODE=$(python3 -c 'import json,sys; configured,previous=sys.argv[1:]; nodes=json.load(sys.stdin).get("nodes",[]); eligible=lambda n:n.get("status")=="online" and n.get("release")==previous and n.get("accounts_assigned",0)>0; selected=next((n for n in nodes if n.get("name")==configured and eligible(n)),None) if configured else next(iter(sorted((n for n in nodes if eligible(n)),key=lambda n:n["name"])),None); print(selected["name"] if selected else "")' \
+    "$AIFLOW4_CANARY_NODE" "$CUR" <<<"$STATE") || exit 1
+  if [ -z "$NODE" ]; then
+    echo "no online node on $CUR with assigned accounts is available for canary"
+    exit 0
+  fi
+  echo "staging $TARGET for canary node $NODE; fleet remains on $CUR"
+  aiflow4-deploy --stage-only "$TARGET" || { echo "could not stage $TARGET" >&2; exit 1; }
+  write_canary "$TARGET" "$NODE" "$CUR" "" "$(now_utc)"
+  echo "canary $TARGET requested on $NODE; other nodes remain on $CUR"
+  exit 0
+fi
+
+# A promoted release is deployed to the control plane, then CURRENT makes it desired on every other node.
 if aiflow4-deploy "$TARGET"; then
   sleep 20
   if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
      && curl -fsS -o /dev/null http://127.0.0.1/cc; then
-    echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed $TARGET" "Versioned release $TARGET passed the health checks (previous ${CUR:-none})."; exit 0
+    echo "deployed $TARGET to the control plane; remaining nodes will update from CURRENT"
+    alert "[INFO] AI Flow: deployed $TARGET" "Canary on $NODE passed; release $TARGET is now desired by the fleet (previous $CUR)."
+    exit 0
   fi
 fi
-# Before the first versioned release, CURRENT is a commit id deployed by the old develop flow. Its image
-# (aiflow4/control:<id>), build tree and node release are still on this host, so it is restored from them.
-rollback_commit() {
-  local cf="$ROOT/build/$CUR/deploy/v4/control/compose.yaml" svc
-  docker image inspect "aiflow4/control:$CUR" >/dev/null 2>&1 || { echo "image aiflow4/control:$CUR is gone"; return 1; }
-  [ -f "$cf" ] || { echo "build tree of $CUR is gone"; return 1; }
-  for svc in control-api-a control-api-b control-loops; do
-    AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$CUR \
-      docker compose -f "$cf" up -d --no-deps "$svc" || return 1
-  done
-  printf '%s\n' "$CUR" > "$RELEASES/CURRENT.tmp" && mv -f "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT" || return 1
-  if [ -x "$ROOT/releases/$CUR/.venv/bin/aiflow4" ]; then
-    ln -sfn "$ROOT/releases/$CUR" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
-    systemctl restart aiflow4-node-agent
-  fi
-}
+
+# Keep the existing control-plane rollback for a health failure after the fleet promotion.
 echo "deploy of $TARGET unhealthy; rolling back to ${CUR:-none}"
 ROLLED_BACK=no
 if [[ $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   aiflow4-deploy "$CUR" && ROLLED_BACK=yes
-elif [[ $CUR =~ ^[0-9a-f]{7,40}$ ]]; then
-  rollback_commit && ROLLED_BACK=yes
 fi
-if [ $ROLLED_BACK = yes ]; then
-  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after deploying $TARGET; it runs $CUR again. Look at the release checks and control logs."
+if [ "$ROLLED_BACK" = yes ]; then
+  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after promoting $TARGET; it runs $CUR again. Look at the release checks and control logs."
 else
-  echo "no rollback happened; the control plane may still run $TARGET"
-  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed, NOT rolled back" "The control plane was unhealthy after deploying $TARGET and could not be rolled back to ${CUR:-none} (no previous release to restore, or the restore failed). It may still run $TARGET: restore it by hand, then look at the release checks and control logs."
+  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed, NOT rolled back" "The control plane was unhealthy after promoting $TARGET and could not be rolled back to ${CUR:-none}; restore it by hand, then look at the release checks and control logs."
 fi
 exit 1

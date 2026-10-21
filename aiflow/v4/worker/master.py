@@ -62,9 +62,12 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
     hb.start()
     try:
         snapshot = api.call("GET", "/v1/master/context", params={"run_id": c.run_id, "fence": c.fence})
+        flow_bugs = api.call("POST", "/v1/master/flow-bugs", {"run_id": c.run_id, "fence": c.fence})
+        snapshot["flow_bug_reports"] = flow_bugs.get("reports", [])
         hb.progress = {"phase": "master-review", "incidents": len(snapshot.get("open_incidents", [])),
                        "needs_owner": len(snapshot.get("needs_owner", [])),
-                       "running": len(snapshot.get("running_clocks", []))}
+                       "running": len(snapshot.get("running_clocks", [])),
+                       "flow_bugs": len(snapshot["flow_bug_reports"])}
         spec = RunSpec(prompt=build_prompt(c, snapshot), cwd=str(work),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=600, control_url=control_url, run_token=c.run_token,

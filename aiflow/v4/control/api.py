@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -632,5 +632,10 @@ def create_app(ctx: Ctx) -> FastAPI:
     def state() -> dict:
         from .state import snapshot
         return snapshot(ctx)
+
+    @app.get("/v1/analytics/daily")
+    def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
+        from .analytics import daily
+        return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
 
     return app

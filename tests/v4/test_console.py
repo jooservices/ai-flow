@@ -227,7 +227,9 @@ def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve
                   "git push", "TESTWP-3", "Signed out", "network down", "OpenObserve", "scheduled"):
         assert label in rendered
     page = html()
-    assert 'location.pathname.indexOf(\'/sa\')' in page
+    assert "function viewOf(path)" in page
+    assert run_script("console.log(['/cc', '/delivery', '/sa', '/business'].map(viewOf).join(','));") == \
+        "cc,delivery,sa,business\n"
     assert "fetch('/api/default/" not in page and "fetch('/o2/" not in page
 
 

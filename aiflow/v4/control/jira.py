@@ -100,6 +100,15 @@ class Jira:
                 for c in data.get("comments", [])[:limit]]
 
     # --- writes ---------------------------------------------------------------------------------------------
+    def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Story",
+                     labels: list[str] | None = None, parent: str = "") -> str:
+        """Create an issue and return its key; `parent` links it to an epic (team-managed and company-managed)."""
+        fields: dict[str, Any] = {"project": {"key": project}, "summary": summary, "issuetype": {"name": issuetype},
+                                  "description": text_to_adf(description), "labels": list(labels or [])}
+        if parent:
+            fields["parent"] = {"key": parent}
+        return self.call("POST", "/rest/api/3/issue", {"fields": fields})["key"]
+
     def transition_to(self, key: str, target: str) -> str:
         """Walk the workflow until `key` reaches `target`; direct transitions first, then the forward order."""
         for _ in range(10):

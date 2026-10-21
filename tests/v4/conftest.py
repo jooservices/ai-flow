@@ -100,6 +100,16 @@ class FakeJira:
     def add_worklog(self, key, seconds, started, comment):
         self.worklogs = getattr(self, "worklogs", []) + [(key, seconds, comment)]
 
+    initial_status = "Backlog"  # the status a new issue starts in
+
+    def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent=""):
+        self.created = getattr(self, "created", [])
+        key = f"{project}-{900 + len(self.created)}"
+        self.created.append({"key": key, "project": project, "summary": summary, "description": description,
+                             "issuetype": issuetype, "labels": list(labels or []), "parent": parent})
+        self.status_of[key] = self.initial_status
+        return key
+
 class FakeGitHub:
     def __init__(self) -> None:
         self.prs: list[dict] = []

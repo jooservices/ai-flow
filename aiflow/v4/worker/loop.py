@@ -21,6 +21,7 @@ from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
 from .triage import run_triage
+from .impact import run_impact
 from .intake import run_intake
 from .verify import run_verify
 from .master import run_master
@@ -135,7 +136,7 @@ class Worker:
                         last_dev_summary=r.get("last_dev_summary") or "",
                         verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
-                        related=r.get("related") or [])
+                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [])
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
@@ -146,6 +147,8 @@ class Worker:
                 res = run_master(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "intake":
                 res = run_intake(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "impact":
+                res = run_impact(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:
                 res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             try:

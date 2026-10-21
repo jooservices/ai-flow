@@ -8,8 +8,8 @@ This repository holds two generations of AI Flow. The current work is **v4**, a 
   (`aiflow/v4/worker`, `aiflow/v4/adapters`), node agent (`aiflow/v4/node`), shared core (`aiflow/v4/core`).
   Read the module docstrings first; they explain the design (leases and fencing, policy hook, verify, watchdog).
 - Run `uv run --frozen pytest tests/v4 -q`. The environment provides `AIFLOW4_TEST_REDIS_URL` and
-  `AIFLOW4_TEST_DATABASE_URL` (shared test services: Redis keys are prefixed per test, the test database is
-  dropped and rebuilt by the fixtures).
+  `AIFLOW4_TEST_DATABASE_URL` (shared test services: Redis keys are prefixed per test; each pytest session
+  creates its own database on that PostgreSQL server (copied from `AIFLOW4_TEST_DATABASE_TEMPLATE` when set, a database that already carries pgvector) and drops it at the end, so parallel runs do not interfere).
 - Do not add dependencies unless the ticket asks for them; `uv.lock` must stay consistent with `pyproject.toml`.
 - Document a new feature in its own file `docs/v4/<topic>.md` and add one line linking it under "Topics" in
   `deploy/v4/README.md`. Many tickets run in parallel: appending long sections to one shared file causes merge

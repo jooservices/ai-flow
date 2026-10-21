@@ -3,6 +3,9 @@
 # Run by aiflow4-autodeploy.timer on the control-plane machine.
 set -uo pipefail
 ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
+[ -r /etc/aiflow/deploy.env ] && { set -a; . /etc/aiflow/deploy.env; set +a; }
+# lab hosts on the develop channel follow origin/develop instead of signed releases (docs/v4/develop-channel.md)
+[ "${AIFLOW4_CHANNEL:-release}" = develop ] && exec /usr/local/sbin/aiflow4-autodeploy-develop
 R=$ROOT/control/repos/ai-flow
 RELEASES=$ROOT/control/releases
 CURRENT_FILE=$RELEASES/CURRENT

@@ -213,6 +213,73 @@ console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4
     assert "S.epic = e.target.value; savePrefs();" in page
 
 
+def poll_console(prefs: dict, state: dict) -> dict:
+    prelude = STUBS + f"""
+var store = {{'aiflow4-delivery': JSON.stringify({json.dumps(prefs)})}};
+localStorage = {{getItem: function (k) {{ return store[k] || null; }}, setItem: function (k, v) {{ store[k] = String(v); }}}};
+var state = {json.dumps(state)};
+fetch = function () {{ return Promise.resolve({{ok: true, json: function () {{ return Promise.resolve(state); }}}}); }};
+"""
+    driver = """
+var els = {};
+function el(id) {
+  if (!els[id]) els[id] = {innerHTML: '', textContent: '', hidden: false,
+    setAttribute: function () {}, getAttribute: function () { return null; },
+    removeAttribute: function () {}, classList: {add: function () {}, remove: function () {}},
+    appendChild: function () {}, scrollIntoView: function () {}, offsetWidth: 0};
+  return els[id];
+}
+document.querySelector = function (s) { return el(s); };
+document.getElementById = function (id) { return el('#' + id); };
+document.querySelectorAll = function () { return []; };
+var nativeTimeout = setTimeout;
+setTimeout = function (fn, ms) { if (ms === 5000 || ms === 15000 || ms === 60000) return; return nativeTimeout(fn, ms); };
+location.pathname = '/delivery'; S.view = 'delivery';
+loadPrefs();
+poll();
+setTimeout(function () {
+  console.log(JSON.stringify({project: S.project, typeFilter: S.typeFilter, epic: S.epic,
+    head: el('#dhead').innerHTML, body: el('#dbody').innerHTML,
+    saved: JSON.parse(store['aiflow4-delivery'])}));
+}, 30);
+"""
+    return json.loads(run_script(driver, prelude))
+
+
+def test_poll_falls_back_to_the_first_project_and_clears_a_stale_epic():
+    state = {
+        "projects": [{"key": "TESTFLOW", "repo": "jooservices/testflow"}, {"key": "OTHER", "repo": "jooservices/other"}],
+        "tickets": [
+            {"key": "TESTFLOW-2", "project": "TESTFLOW", "type": "Epic", "summary": "Two", "status": "To Do", "labels": []},
+            {"key": "TESTFLOW-3", "project": "TESTFLOW", "type": "Feature", "summary": "Work", "status": "To Do", "labels": []},
+        ],
+        "recent_runs": [], "active_runs": [], "incidents": [], "events": [], "totals": {}, "versions": {},
+    }
+    out = poll_console({"project": "GONE", "typeFilter": "all", "epic": "GONE-9"}, state)
+    assert out["project"] == "TESTFLOW"
+    assert out["epic"] == "all"
+    assert out["typeFilter"] == "all"
+    assert "TESTFLOW-3" in out["body"]
+    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "epic": "all"}
+
+
+def test_poll_clears_a_stale_epic_and_type_filter_in_the_current_project():
+    state = {
+        "projects": [{"key": "TESTFLOW", "repo": "jooservices/testflow"}],
+        "tickets": [
+            {"key": "TESTFLOW-2", "project": "TESTFLOW", "type": "Epic", "summary": "Two", "status": "To Do", "labels": []},
+            {"key": "TESTFLOW-3", "project": "TESTFLOW", "type": "Feature", "summary": "Work", "status": "To Do", "labels": []},
+        ],
+        "recent_runs": [], "active_runs": [], "incidents": [], "events": [], "totals": {}, "versions": {},
+    }
+    out = poll_console({"project": "TESTFLOW", "typeFilter": "Bug", "epic": "TESTFLOW-99"}, state)
+    assert out["project"] == "TESTFLOW"
+    assert out["epic"] == "all"
+    assert out["typeFilter"] == "all"
+    assert "TESTFLOW-3" in out["body"]
+    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "epic": "all"}
+
+
 def test_delivery_selection_storage_errors_are_ignored():
     prelude = STUBS + """
 localStorage = {getItem: function () { throw new Error('storage off'); },

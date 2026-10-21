@@ -45,4 +45,5 @@ after it. The same order is used in the epic picker and the Epics panel.
 The selected project tab, type filter and epic are kept in `localStorage` under `aiflow4-delivery` and restored
 on the next visit. Storage access is wrapped in `try`/`catch`, so a browser with storage disabled keeps working
 with the defaults (first project, all types and all epics). A remembered project that no longer exists falls
-back to the first project.
+back to the first project, and a remembered epic or type that the current project does not contain is reset to
+`all`; the corrected selection is saved so the board never stays filtered to zero tickets.

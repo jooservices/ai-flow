@@ -499,7 +499,18 @@ function poll() {
   }).then(function (d) {
     var prevInc = S.seenInc, prevRuns = S.seenRuns;
     S.data = d; S.fetchedAt = Date.now(); S.lastOk = Date.now(); S.error = '';
-    if (d.projects.length && !d.projects.some(function (p) { return p.key === S.project; })) S.project = d.projects[0].key;
+    var prefsChanged = false;
+    if (d.projects.length && !d.projects.some(function (p) { return p.key === S.project; })) {
+      S.project = d.projects[0].key; S.epic = 'all'; prefsChanged = true;
+    }
+    var tickets = projTickets();
+    if (S.epic !== 'all' && !tickets.some(function (t) { return t.type === 'Epic' && t.key === S.epic; })) {
+      S.epic = 'all'; prefsChanged = true;
+    }
+    if (S.typeFilter !== 'all' && !tickets.some(function (t) { return t.type !== 'Epic' && t.type === S.typeFilter; })) {
+      S.typeFilter = 'all'; prefsChanged = true;
+    }
+    if (prefsChanged) savePrefs();
     notify(prevInc, prevRuns);
     render();
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })

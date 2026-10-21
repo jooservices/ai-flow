@@ -1,7 +1,6 @@
 [Unit]
 Description=AI Flow v4 worker for account %i
-After=network-online.target aiflow4-node-agent.service
-PartOf=aiflow4-node-agent.service
+After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/aiflow/node.env

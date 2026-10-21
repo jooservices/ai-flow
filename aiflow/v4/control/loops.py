@@ -73,6 +73,29 @@ def watchdog(ctx: Ctx) -> None:
                           " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
         elif n["name"] in with_accounts or n["status"] != "online":
             close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
+    # orphans: Jira says In Progress but no run is working on it (a worker died between writes, a deploy, a manual
+    # move). After 10 quiet minutes the ticket goes back to To Do so it is never abandoned.
+    if ctx.jira:
+        for t in ctx.db.all(
+                "SELECT t.key FROM tickets t WHERE t.status = 'In Progress'"
+                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.status = 'running')"
+                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.started_at > now() - interval '10 minutes')"
+                " AND t.synced_at > now() - interval '5 minutes'"):
+            if ctx.leases.holder(t["key"]):
+                continue
+            try:
+                if ctx.jira.status(t["key"]) != "In Progress":
+                    continue
+                ctx.jira.transition_to(t["key"], "To Do")
+                ctx.jira.comment(t["key"], "AI Flow · watchdog · requeued\nWhat: The ticket was In Progress but no run had worked on it"
+                                 " for 10 minutes.\nWhy: A worker stopped between two updates, so nobody owned the ticket.\n"
+                                 "Next: Back to To Do; the next worker continues its branch.")
+                ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (t["key"],))
+                ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result) VALUES"
+                           " ('jira','transition',%s,'control',true,'To Do (orphan)')", (t["key"],))
+                ctx.events.emit("ticket.requeued", ticket=t["key"], reason="In Progress without a run for 10 minutes")
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not requeue orphan %s: %s", t["key"], e)
     # tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look)
     from .api import BACKOFF_SQL
     streak_sql = BACKOFF_SQL.split("SELECT ticket_key, fails FROM streak")[0] + "SELECT ticket_key, fails FROM streak"

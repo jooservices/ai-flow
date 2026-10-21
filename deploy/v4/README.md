@@ -27,6 +27,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
+- [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 
@@ -54,6 +55,8 @@ A project's `stack` in `aiflow-control/projects/<KEY>.yaml` selects the extra to
 |---|---|
 | `php-8.3` | `php`, `composer`, `wp` |
 | `python-3.12` | `python3`, `uv` |
+| `node-24` | `node` |
+| `playwright` | `node`, `playwright`, Chromium browser |
 
 Every node reports the node-wide tools above plus these stack tools, with each tool's version or `missing`,
 in its heartbeat. The Command Center node drawer shows a missing required tool in red. While a tool is

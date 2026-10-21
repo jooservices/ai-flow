@@ -255,7 +255,7 @@ def test_repair_installs_codex_when_reported_version_has_a_matching_prefix(monke
     assert result["healthy"] is True
     assert installs == [("codex", "0.4.1")]
     assert not operations._tool_version_ok("codex", "codex 0.4.10", "0.4.1")
-    assert not operations._tool_version_ok("codex", "codex 0.4.10", "0.4")
+    assert operations._tool_version_ok("codex", "codex 0.4.10", "0.4")
     assert operations._tool_version_ok("python3", "Python 3.12.3", "3.12")
 
 
@@ -294,6 +294,83 @@ def test_repair_installs_missing_required_toolchains_and_codex_host(monkeypatch)
     assert installs == ["uv", "python3", "composer", "wp", "codex-code-mode-host"]
 
 
+def test_agent_prepares_stack_tools_and_returns_the_post_install_preflight(monkeypatch):
+    required = ["git", "uv", "php", "composer", "wp"]
+    before = dict.fromkeys(required, "missing")
+    after = {"git": "git 2.43", "uv": "uv 0.5.0", "php": "PHP 8.3.12",
+             "composer": "Composer 2.8.9", "wp": "WP-CLI 2.12.0"}
+    snapshots = iter([before, after])
+    installs = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: next(snapshots))
+    monkeypatch.setattr(operations, "_install_component",
+                        lambda name, version, packages: installs.append((name, version)))
+
+    result = operations.prepare_project_toolchains({"WEB": "php-8.3"},
+                                                   {"tools": {"php": "8.3", "composer": "2.8", "wp": "2.12"}})
+
+    assert [name for name, _ in installs] == ["git", "uv", "php", "composer", "wp"]
+    assert dict(installs)["php"] == "8.3"
+    assert result["tools"] == after and result["gaps"] == {"WEB": []}
+
+
+def test_post_install_preflight_keeps_failed_tool_as_project_gap(monkeypatch):
+    required = ["git", "uv", "php", "composer", "wp"]
+    snapshots = iter([dict.fromkeys(required, "missing"), {
+        "git": "git 2.43", "uv": "uv 0.5.0", "php": "PHP 8.3.12", "composer": "missing",
+        "wp": "WP-CLI 2.12.0"}])
+    installs = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: next(snapshots))
+
+    def install(name, version, packages):
+        installs.append(name)
+        if name == "composer":
+            raise operations.OperationError("installer failed")
+
+    monkeypatch.setattr(operations, "_install_component", install)
+    result = operations.prepare_project_toolchains(
+        {"WEB": "php-8.3"}, {"tools": {"php": "8.3", "composer": "2.8", "wp": "2.12"}})
+
+    assert "composer" in installs
+    assert result["gaps"] == {"WEB": ["composer"]}
+
+
+def test_composer_uses_the_official_verified_installer(monkeypatch):
+    installer = b"official composer installer"
+    signature = hashlib.sha384(installer).hexdigest()
+    urls = []
+
+    def response(url, **kwargs):
+        urls.append(url)
+        return SimpleNamespace(text=signature, content=installer)
+
+    commands = []
+    monkeypatch.setattr(operations, "_resolve_composer_version", lambda _version: "2.8.9")
+    monkeypatch.setattr(operations, "_response", response)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kwargs:
+                        commands.append((command, kwargs)) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    operations._install_composer("2.8")
+
+    assert urls == ["https://composer.github.io/installer.sig", "https://getcomposer.org/installer"]
+    command = commands[0][0]
+    assert command[:2] == ["php", command[1]] and command[1].endswith("composer-setup.php")
+    assert "--version=2.8.9" in command and "--filename=composer" in command
+
+
+def test_wp_cli_uses_the_official_release_phar(monkeypatch):
+    calls = []
+    monkeypatch.setattr(operations, "_resolve_wp_version", lambda _version: "2.12.3")
+    monkeypatch.setattr(operations, "_github_release_asset",
+                        lambda *args: calls.append(("release", args)) or b"wp phar")
+    monkeypatch.setattr(operations, "_install_binary",
+                        lambda *args, **kwargs: calls.append(("install", args, kwargs)))
+
+    operations._install_wp("2.12")
+
+    assert calls == [("release", ("wp-cli/wp-cli", "v2.12.3", "wp-cli-2.12.3.phar")),
+                     ("install", ("wp", b"wp phar"), {})]
+
+
 def test_repair_passes_declared_os_packages_to_server_installer_module(monkeypatch):
     calls = []
     monkeypatch.setattr(agent, "tool_versions", lambda _names: {})
@@ -309,11 +386,21 @@ def test_supporting_tool_installer_routes_are_whitelisted(monkeypatch):
     routed = []
     for tool, helper in (("uv", "_install_uv"), ("python3", "_install_python"), ("node", "_install_node"),
                          ("gh", "_install_gh"), ("composer", "_install_composer"), ("wp", "_install_wp"),
-                         ("codex-code-mode-host", "_install_codex_host")):
+                         ("codex-code-mode-host", "_install_codex_host"), ("playwright", "_install_playwright"),
+                         ("playwright-browser", "_install_playwright_browser")):
         monkeypatch.setattr(operations, helper, lambda version, tool=tool: routed.append((tool, version)))
         operations._install_component(tool, "1.2.3", [])
     assert routed == [(tool, "1.2.3") for tool in
-                      ("uv", "python3", "node", "gh", "composer", "wp", "codex-code-mode-host")]
+                      ("uv", "python3", "node", "gh", "composer", "wp", "codex-code-mode-host", "playwright",
+                       "playwright-browser")]
+
+
+def test_node_24_major_line_resolves_to_latest_matching_official_release(monkeypatch):
+    monkeypatch.setattr(operations, "_linux_arch", lambda: ("x86_64", "x64"))
+    monkeypatch.setattr(operations, "_response", lambda *args, **kwargs: SimpleNamespace(json=lambda: [
+        {"version": "v25.1.0", "lts": False}, {"version": "v24.8.1", "lts": False},
+        {"version": "v22.20.0", "lts": "Jod"}]))
+    assert operations._resolve_node_version("24.x") == "24.8.1"
 
 
 def test_python_stack_pin_uses_uv_to_install_the_requested_minor_version(monkeypatch):
@@ -463,6 +550,122 @@ def test_node_agent_keeps_heartbeating_while_an_operation_runs(monkeypatch):
         runner.join(2)
     assert not runner.is_alive()
     assert result_posted.wait(1)
+
+
+def test_agent_retries_stack_preflight_after_release_and_versions_lock_changes(monkeypatch):
+    import time
+
+    stop = threading.Event()
+    condition = threading.Condition()
+    prepared = []
+    desired_states = [
+        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
+        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3", "composer": "2.8"}}},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3", "composer": "2.8"}}},
+    ]
+
+    class FakeApi:
+        def __init__(self, *args, **kwargs):
+            self.heartbeats = 0
+
+        def call(self, method, path, body=None, **kwargs):
+            if path.endswith("/heartbeat"):
+                self.heartbeats += 1
+                required_preparations = {2: 1, 4: 2, 5: 3}.get(self.heartbeats, 0)
+                if required_preparations:
+                    with condition:
+                        assert condition.wait_for(lambda: len(prepared) >= required_preparations, timeout=1)
+                    time.sleep(0.01)
+                desired = dict(desired_states[min(self.heartbeats - 1, len(desired_states) - 1)])
+                if self.heartbeats == len(desired_states):
+                    stop.set()
+                return {"desired": {**desired, "workers": [], "accounts": []}}
+            return {"operation": None}
+
+    def prepare(stacks, versions):
+        with condition:
+            prepared.append((stacks, versions))
+            condition.notify_all()
+        return {"tools": {}}
+
+    monkeypatch.setattr(agent, "ControlClient", FakeApi)
+    monkeypatch.setattr(agent, "metrics", lambda previous: ({}, previous))
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "tool_versions", lambda *_names: {})
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(operations, "prepare_project_toolchains", prepare)
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+
+    runner = threading.Thread(target=agent.run_agent, args=("http://control", "node1", "token"),
+                              kwargs={"every_s": 0, "manage_workers": False, "stop": stop})
+    runner.start()
+    runner.join(3)
+    assert not runner.is_alive()
+    with condition:
+        assert len(prepared) == 3
+    assert prepared[0][0] == prepared[1][0] == prepared[2][0]
+    assert prepared[0][1] == prepared[1][1]
+    assert prepared[2][1]["tools"]["composer"] == "2.8"
+
+
+def test_agent_applies_the_preflight_probe_once_and_keeps_refreshing_tool_versions(monkeypatch):
+    import time
+
+    stop = threading.Event()
+    prepared = threading.Event()
+    clock = {"now": 0.0}
+    reported = []
+    probes = []
+    desired = {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}},
+               "workers": [], "accounts": []}
+
+    class FakeApi:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, path, body=None, **kwargs):
+            if path.endswith("/heartbeat"):
+                if len(reported) == 1:
+                    assert prepared.wait(1)
+                    time.sleep(0.02)
+                reported.append(dict(body["tools"]))
+                clock["now"] += 400  # one heartbeat later; the refresh is due every 600 seconds
+                if len(reported) == 8:
+                    stop.set()
+                return {"desired": desired}
+            return {"operation": None}
+
+    def fake_tool_versions(*_names):
+        probes.append(clock["now"])
+        # The first probe runs at start; PHP is repaired by hand after the post-install preflight.
+        return {"php": "missing"} if len(probes) == 1 else {"php": "PHP 8.3.7"}
+
+    def prepare(stacks, versions):
+        prepared.set()
+        return {"tools": {"php": "missing"}}
+
+    monkeypatch.setattr(agent, "time", SimpleNamespace(time=lambda: clock["now"]))
+    monkeypatch.setattr(agent, "ControlClient", FakeApi)
+    monkeypatch.setattr(agent, "metrics", lambda previous: ({}, previous))
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "tool_versions", fake_tool_versions)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(operations, "prepare_project_toolchains", prepare)
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+
+    runner = threading.Thread(target=agent.run_agent, args=("http://control", "node1", "token"),
+                              kwargs={"every_s": 0, "manage_workers": False, "stop": stop})
+    runner.start()
+    runner.join(3)
+    assert not runner.is_alive()
+    assert len(reported) == 8
+    assert reported[2]["php"] == "missing"  # the post-install probe is reported once
+    assert len(probes) >= 2  # the 10-minute tool_versions() refresh still runs after preparation
+    assert reported[-1]["php"] == "PHP 8.3.7"
 
 
 def test_server_installer_argv_comes_from_the_module_whitelist():

@@ -48,10 +48,14 @@ The supported agent operations are `install` and `repair`. Tool names, version p
 units come from the control repo; request bodies cannot supply a command. AI CLI plans include Node.js before
 the fixed npm package install; the agent installs the pinned Node.js distribution if Node or npm is missing.
 AI CLIs use fixed npm package names with versions from `versions.lock`. The agent also installs `uv`, Python,
-GitHub CLI, Composer, WP-CLI and `codex-code-mode-host` from their official versioned releases. GitHub release asset digests, Node.js
-checksums and Composer checksums are verified before an artifact is installed. Python is installed through the
+GitHub CLI, Composer, WP-CLI and `codex-code-mode-host` from fixed recipes. GitHub release asset digests,
+Node.js checksums and the official Composer installer signature are verified before installation. Python is installed through the
 node's pinned uv release; the Codex host is selected from the same release as the pinned Codex CLI, and its
 installed version is recorded for later reconciliation.
+
+Project stacks are prepared automatically and checked against their `versions.lock` pins. See
+[Project toolchains on every node](project-toolchains.md) for the stack format, automatic host installation,
+project admission and retry behavior.
 
 Operating system components reuse the bash CLI of
 [`jooservices/server-installer`](https://github.com/jooservices/server-installer) (TESTFLOW-68), pinned to tag

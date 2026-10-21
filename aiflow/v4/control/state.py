@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import VERSION
-from ..core.toolchains import missing_tools
+from ..core.toolchains import missing_tools, toolchain_gaps
 from .sa import dashboard_data, thresholds
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
@@ -37,6 +37,10 @@ def snapshot(ctx) -> dict[str, Any]:
         projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
         required = repo.tools_for_node(n["name"], projects)
         configured = repo.nodes.get(n["name"])
+        stack_gaps = {tool for project in (configured.projects if configured else [])
+                      if project in repo.projects for tool in toolchain_gaps(
+                          n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
+                          require_pins=bool(repo.projects[project].stacks))}
         desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
@@ -46,7 +50,8 @@ def snapshot(ctx) -> dict[str, Any]:
                                             "unit": str(s.get("unit") or ""),
                                             "healthcheck_configured": bool(s.get("healthcheck"))}
                                            for s in desired_services],
-                      "missing_tools": missing_tools(n["tools"], required), "heartbeat_age_s": age,
+                      "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
+                      "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "idle_since": _iso(n["idle_since"]),

@@ -22,7 +22,7 @@ from urllib.parse import quote
 from . import memory
 from . import projects as project_lifecycle
 from . import rollout
-from ..core.toolchains import missing_tools
+from ..core.toolchains import toolchain_gaps
 from .incidents import close_incident, open_incident
 from .api import Ctx, notify_human_review
 from .db import J
@@ -202,16 +202,19 @@ def watchdog(ctx: Ctx) -> None:
                 # an offline node sends no heartbeat, so keep its incident: nobody confirmed the tools either way
                 tool_issues.add(subject)
                 continue
-            missing = missing_tools(n["tools"], project.tools)
-            if not missing:
+            gaps = toolchain_gaps(n["tools"], project.tools, repo.versions, project.stacks,
+                                  require_pins=bool(project.stacks))
+            if not gaps:
                 continue
             tool_issues.add(subject)
             open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses tools for {key}",
-                          f"Missing on {n['name']} for {key} ({project.stack or 'no stack'}): {', '.join(missing)}."
-                          " Install them on the node; the incident closes when a later heartbeat reports them.")
+                          f"Preflight on {n['name']} for {key} ({', '.join(project.stacks) or 'no stack'}) is unhealthy: "
+                          f"{', '.join(gaps)}. The node agent installs stack tools and retries after a release or "
+                          "toolchain update; the incident closes when a later heartbeat passes preflight.")
         # the CLIs of the AI providers whose accounts run on the node
         subject = f"{n['name']}:ai"
-        ai_missing = missing_tools(n["tools"], repo.provider_tools_for_node(n["name"])) if n["status"] == "online" else []
+        ai_missing = toolchain_gaps(n["tools"], repo.provider_tools_for_node(n["name"]), repo.versions) \
+            if n["status"] == "online" else []
         if n["status"] != "online" and repo.provider_tools_for_node(n["name"]):
             tool_issues.add(subject)
         elif ai_missing:

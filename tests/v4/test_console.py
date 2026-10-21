@@ -391,14 +391,41 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge'].map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations']"
+                        ".map(viewOf).join(','));")
+    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
+    assert 'id="view-integrations"' in page
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge']" in page
+    assert "else if (S.view === 'integrations') renderIntegrations();" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations']" in page
+
+
+def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
+    status = {"connected": True, "source": "oauth", "state": "connected", "needs_reconnect": False, "kind": "oauth",
+              "site_name": "acme", "site_url": "https://acme.atlassian.net", "cloud_id": "cloud-1",
+              "account": "bot@acme.test", "scopes": ["read:jira-work", "write:jira-work", "offline_access"],
+              "expires_at": "2026-10-21T10:00:00+00:00", "connected_at": "2026-10-21T09:00:00+00:00",
+              "connected_by": "owner@example.test", "error": "", "disconnected_at": "", "disconnected_by": "",
+              "legacy_owner_env": False, "oauth_app": {"configured": True, "client_id": "client-1"},
+              "redirect_uri": "https://control.example.test/v1/integrations/jira/oauth/callback",
+              "requested_scopes": ["read:jira-work", "write:jira-work", "offline_access"]}
+    def render(data: dict) -> str:
+        return run_script("var root = {innerHTML: ''};"
+                          " document.querySelector = function (s) { return s === '#view-integrations' ? root : null; };"
+                          f" S.view = 'integrations'; S.integ.jira = {json.dumps(data)}; renderIntegrations();"
+                          " console.log(root.innerHTML);")
+
+    out = render(status)
+    for text in ("acme", "cloud-1", "bot@acme.test", "write:jira-work", "Disconnect", "Connect Jira",
+                 "/v1/integrations/jira/oauth/callback"):
+        assert text in out
+    assert 'type="password" data-integ-field="client_secret"' in out and 'type="password" data-integ-field="api_token"' in out
+    needs = render({**status, "connected": False, "needs_reconnect": True, "state": "needs_reconnect"})
+    assert "Reconnect needed" in needs and "Press Connect Jira again" in needs
 
 
 def test_knowledge_view_renders_resources_history_and_owner_approval_diff():

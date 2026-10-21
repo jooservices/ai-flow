@@ -1,7 +1,14 @@
-"""Jira gateway: the only component that talks to Jira (REST v3, basic auth with an API token).
+"""Jira gateway: the only component that talks to Jira (REST v3).
 
 Reads keep the registry's ticket mirror fresh; writes (transition, comment, fields) are issued only after the
 control API has checked the caller's fencing token. 429 answers are retried after Retry-After.
+
+Credentials: either a fixed (email, API token) pair against the site (basic auth), or an `auth` source
+(jira_connect.JiraAuth) asked before every request. The source returns the credential connected on the
+Integrations screen (OAuth 2.0 bearer through https://api.atlassian.com/ex/jira/<cloud id>, or basic auth with
+an API token) or the owner.env fallback; it refreshes an expiring OAuth token, and a 401 forces one refresh and a
+retry. With a source, the gateway is falsy while no credential is usable, so `if ctx.jira:` keeps meaning
+"Jira is connected".
 """
 from __future__ import annotations
 
@@ -29,19 +36,40 @@ def _ts(value: str | None) -> datetime | None:
 
 
 class Jira:
-    def __init__(self, site: str, email: str, token: str, timeout: float = 30.0, client: httpx.Client | None = None):
+    def __init__(self, site: str, email: str = "", token: str = "", timeout: float = 30.0,
+                 client: httpx.Client | None = None, auth: Any = None):
         self.site = site.rstrip("/")
-        self.c = client or httpx.Client(base_url=self.site, auth=(email, token), timeout=timeout,
-                                        headers={"Accept": "application/json"})
+        self.auth = auth
+        if auth is None:
+            self.c = client or httpx.Client(base_url=self.site, auth=(email, token), timeout=timeout,
+                                            headers={"Accept": "application/json"})
+        else:
+            self.c = client or httpx.Client(timeout=timeout, headers={"Accept": "application/json"})
         self.field_ids: dict[str, str] = {}
         self.last_limits: dict[str, str] = {}
+        self._base = ""
+
+    def __bool__(self) -> bool:
+        return self.auth is None or self.auth.available()
 
     # --- plumbing -------------------------------------------------------------------------------------------
     def call(self, method: str, path: str, json: Any = None, ok: tuple[int, ...] = (200, 201, 204),
              files: Any = None, headers: dict[str, str] | None = None) -> Any:
+        refreshed = False
         for attempt in range(6):
-            r = self.c.request(method, path, json=json, files=files, headers=headers)
+            url, send_headers, cred = path, headers, None
+            if self.auth is not None:
+                cred = self.auth.credential()
+                if cred.base_url != self._base:  # another site or credential: custom field ids may differ
+                    self._base, self.field_ids = cred.base_url, {}
+                url = cred.base_url + path
+                send_headers = {**(headers or {}), **cred.headers()}
+            r = self.c.request(method, url, json=json, files=files, headers=send_headers)
             self.last_limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-ratelimit")}
+            if r.status_code == 401 and cred is not None and cred.kind == "oauth" and not refreshed:
+                refreshed = True  # the access token was revoked or expired early: refresh once and retry
+                self.auth.credential(force_refresh=True, stale=cred)
+                continue
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(min(30, int(r.headers.get("Retry-After", "0") or 0) or 2 ** attempt))
                 continue

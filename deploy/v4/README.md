@@ -19,6 +19,33 @@ them with the vendor's installer, then sign each account in with that account's 
 Supporting tools reported by the node agent are `git`, `gh`, `node`, `uv` and `docker`; install the ones the
 projects and release commands on the node need.
 
+### Project stacks and missing tools
+
+A project's `stack` in `aiflow-control/projects/<KEY>.yaml` selects the extra tools its nodes need:
+
+| Stack | Extra tools |
+|---|---|
+| `php-8.3` | `php`, `composer`, `wp` |
+| `python-3.12` | `python3`, `uv` |
+
+Every node reports the node-wide tools above plus these stack tools, with each tool's version or `missing`,
+in its heartbeat. The Command Center node drawer shows a missing required tool in red. While a tool is
+missing, the watchdog opens a warning incident titled `node <name> misses tools for <PROJECT>` and closes
+it when a later heartbeat reports the tool. If the node goes offline, the incident stays open because no
+heartbeat has confirmed the tools; it also closes when the node or the project is removed. Add a stack to
+the mapping in `aiflow/v4/core/toolchains.py` when a project starts using it.
+
+### Claude policy relay
+
+The node agent listens on `127.0.0.1:8471` for Claude's policy hook and forwards decisions to the control API.
+It retries connection errors and 5xx responses for up to 60 seconds, and writes each decision to the node
+agent journal (`journalctl -u aiflow4-node-agent`). The node heartbeat includes `metrics.policy_relay.enabled`
+and `metrics.policy_relay.healthy`.
+
+The relay is enabled by default. Set `AIFLOW4_POLICY_RELAY=0` in `/etc/aiflow/node.env` to have Claude call
+the control URL directly; the node agent and worker units both read that file. Set it to `1` to enable the
+relay explicitly.
+
 ### Codex code-mode host
 
 Codex 0.163 and later cannot run shell commands without the `codex-code-mode-host` binary. The node agent

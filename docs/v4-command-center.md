@@ -19,6 +19,11 @@ The node drawer shows the IP, joined time, hostname and last heartbeat. An offli
 `last seen <time> (<age>)`, so operators can tell when and where it was last alive. The watchdog opens a
 `node_down` incident while the node is offline and closes it on the next heartbeat.
 
+The node drawer also lists the tools the node's project stacks need. A tool whose heartbeat value is
+`missing` (or is absent from an older heartbeat) is shown in red. The watchdog opens a warning incident
+`node <name> misses tools for <PROJECT>` for each affected project and closes it when a heartbeat reports
+the tool. Stacks map to tools in `aiflow/v4/core/toolchains.py`.
+
 ## Project closing report
 
 Delivery's **Report** button opens the current project's Markdown closing report. If an epic is selected, the

@@ -347,6 +347,10 @@ console.log(JSON.stringify({html: el('#bhead').innerHTML + el('#bbody').innerHTM
 @pytest.mark.parametrize(("answer", "usable"), [
     (ASSESSMENT, True),
     ("SIZE: S\nEPICS: none\nTICKETS: none\nRISKS:\n- none\nCONFLICTS:\n- none\nIMPACT: DONE\n", True),
+    (ASSESSMENT.replace("EPICS: TESTWP-1\n", ""), False),
+    (ASSESSMENT.replace("TICKETS: TESTWP-3, TESTWP-4\n", ""), False),
+    (ASSESSMENT.replace("EPICS: TESTWP-1", "EPICS: unknown"), False),
+    (ASSESSMENT.replace("TICKETS: TESTWP-3, TESTWP-4", "TICKETS: TESTWP-3, unknown"), False),
     (ASSESSMENT.replace("IMPACT: DONE", ""), False),
     (ASSESSMENT.replace("SIZE: M", "SIZE: XL"), False),
     (ASSESSMENT.replace("CONFLICTS:\n- TESTWP-3 rewrites the same template\n", ""), False),
@@ -359,9 +363,14 @@ def test_parse_assessment(answer, usable):
         assert "Affected epics: none" in impact.render(parsed) and "- none" in impact.render(parsed)
 
 
-def test_unusable_assessment_posts_nothing_and_retries_later(iclient, ctx, tmp_path, monkeypatch):
+@pytest.mark.parametrize("answer", [
+    "It is big.",
+    ASSESSMENT.replace("EPICS: TESTWP-1\n", ""),
+    ASSESSMENT.replace("TICKETS: TESTWP-3, TESTWP-4\n", ""),
+])
+def test_unusable_assessment_posts_nothing_and_retries_later(iclient, ctx, tmp_path, monkeypatch, answer):
     key = post_cr(iclient, title="Dark mode", description="Add a dark theme.").json()["key"]
-    res, _, _ = assess(iclient, ctx, tmp_path, monkeypatch, key, answer="It is big.")
+    res, _, _ = assess(iclient, ctx, tmp_path, monkeypatch, key, answer=answer)
     assert res["outcome"] == "failed" and not ctx.jira.comments
     assert candidates(iclient) == []  # waits before the next try
     listed = iclient.get("/v1/business/TESTWP/change-requests").json()["change_requests"]

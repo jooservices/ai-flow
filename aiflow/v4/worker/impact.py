@@ -28,13 +28,22 @@ from .notes import note
 log = logging.getLogger("aiflow4.impact")
 DONE = re.compile(r"^IMPACT:\s*DONE\b", re.M)
 SIZE = re.compile(r"^SIZE:\s*([SML])\b", re.M | re.I)
-KEYS = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
 BULLETS = r"^{0}:[ \t]*\n((?:[ \t]*[-*].*(?:\n|$))+)"
 
 
-def _keys(text: str, label: str) -> list[str]:
-    m = re.search(rf"^{label}:\s*(.*)$", text, re.M)
-    return list(dict.fromkeys(KEYS.findall(m.group(1)))) if m else []
+def _keys(text: str, label: str) -> list[str] | None:
+    """Parse one required issue-key field; None means missing or malformed."""
+    m = re.search(rf"^{label}:[ \t]*(.*?)[ \t]*$", text, re.M)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    if value.lower() == "none":
+        return []
+    items = [item.strip() for item in value.split(",")]
+    if not items or any(not KEY.fullmatch(item) for item in items):
+        return None
+    return list(dict.fromkeys(items))
 
 
 def _bullets(text: str, label: str) -> list[str] | None:
@@ -49,10 +58,11 @@ def parse(text: str) -> dict | None:
     """AI answer -> {"size", "epics", "tickets", "risks", "conflicts"}, or None when the answer is not usable."""
     text = text or ""
     size = SIZE.search(text)
+    epics, tickets = _keys(text, "EPICS"), _keys(text, "TICKETS")
     risks, conflicts = _bullets(text, "RISKS"), _bullets(text, "CONFLICTS")
-    if not DONE.search(text) or not size or risks is None or conflicts is None:
+    if not DONE.search(text) or not size or epics is None or tickets is None or risks is None or conflicts is None:
         return None
-    return {"size": size.group(1).upper(), "epics": _keys(text, "EPICS"), "tickets": _keys(text, "TICKETS"),
+    return {"size": size.group(1).upper(), "epics": epics, "tickets": tickets,
             "risks": risks, "conflicts": conflicts}
 
 

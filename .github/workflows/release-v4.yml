@@ -96,7 +96,7 @@ jobs:
             --build-arg "AIFLOW4_REVISION=$GITHUB_SHA" \
             -f deploy/v4/control/Dockerfile -t "$IMAGE" .
           docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_ENV"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Sign tarball and image with GitHub OIDC
         env:

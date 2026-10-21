@@ -56,9 +56,12 @@ defaults to `/gatus/`; set `AIFLOW4_GATUS_URL` on the control API when Gatus is 
 Accounts with the `master` role can take `triage` runs for tickets in Needs owner unless the ticket already has
 the `owner-escalated` label. The last account that ran development is excluded. Verify and triage candidates
 are offered before new development work. Triage reads the ticket, last developer summary, latest verify findings,
-recent Jira comments, and the configured project's base branch in a read-only checkout.
+recent Jira comments, and the configured project's base branch in a read-only checkout. A triage run that fails,
+times out or returns no valid decision backs off like dev and verify (2, 4, 8, 16 then 30 minutes), so a broken
+ticket does not starve development.
 
-An `ANSWER` posts a Jira comment with What, Why, Result, and Next, then moves the ticket to To Do. An
+An `ANSWER` posts a Jira comment with What, Why, Result, and Next, then moves the ticket to To Do. The next dev
+run on the ticket gets the question and the answer in its prompt, so it continues instead of stopping again. An
 `ESCALATE` posts the same comment shape, adds `owner-escalated`, and alerts configured notify channels. The
 alert is critical when another ticket is blocked by this one. The Runs table records both outcomes under the
 `triage` step; an owner can resume an escalated ticket by resolving the decision and removing that label.

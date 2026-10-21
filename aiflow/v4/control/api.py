@@ -361,10 +361,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 out.append({**t, "step": "verify"})
         if "master" in roles:
+            triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
                                 " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
                                 (projects,)):
-                if t["key"] in held:
+                if t["key"] in held or t["key"] in triage_cooling:
                     continue
                 dev = last_dev(t["key"])
                 if dev and dev["account_id"] == acc.id:
@@ -438,6 +439,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
             if dev and dev["branch"]:
                 extra["branch"] = dev["branch"]
+            # the master AI's answer to the question a dev run stopped on, until a dev run finishes or blocks again
+            a = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='triage'"
+                           " AND outcome='answered' ORDER BY started_at DESC LIMIT 1", (t["key"],))
+            if a and not ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key=%s AND step='dev' AND started_at > %s"
+                                    " AND outcome IN ('done', 'blocked') LIMIT 1", (t["key"], a["started_at"])):
+                q = ctx.db.one("SELECT summary FROM runs WHERE ticket_key=%s AND step='dev' AND outcome='blocked'"
+                               " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
+                extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
+                extra["triage_question"] = (q or {}).get("summary") or ""
         if body.step == "triage":
             extra.update(triage_context)
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,

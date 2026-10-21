@@ -1,9 +1,9 @@
 [Unit]
-Description=AI Flow v4 auto-deploy every 10 minutes
+Description=AI Flow v4 auto-deploy and canary monitor every minute
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=10min
+OnUnitActiveSec=1min
 Persistent=true
 
 [Install]

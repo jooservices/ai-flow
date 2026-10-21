@@ -80,6 +80,25 @@ def test_node_drawer_shows_registration_details_online_and_last_seen_offline():
     assert "The node stopped sending heartbeats." in offline
 
 
+def test_node_drawer_lists_missing_project_tools_in_red():
+    now = datetime.now(timezone.utc)
+    node = {
+        "name": "node3", "ip": "192.0.2.55", "role": "worker", "status": "online",
+        "slots_total": 2, "slots_used": 0, "release": "v1",
+        "metrics": {"hostname": "worker-3", "cpus": 8},
+        "tools": {"php": "PHP 8.3.0", "composer": "missing"},
+        "missing_tools": ["composer", "wp"],
+        "heartbeat_age_s": 12, "joined_at": (now - timedelta(days=1, hours=2)).isoformat(),
+        "last_heartbeat": (now - timedelta(seconds=12)).isoformat(),
+        "purpose": "", "notes": "", "capabilities": [], "projects": ["TESTWP"],
+    }
+
+    drawer = render_drawer(node)
+    assert '<span class="vk">composer</span><span class="vv bad">missing</span>' in drawer
+    assert '<span class="vk">wp</span><span class="vv bad">missing</span>' in drawer
+    assert "Missing for this node's project stacks: composer, wp." in drawer
+
+
 def test_layout_uses_the_full_width_with_a_wider_gutter_on_large_screens():
     style = css()
     assert "max-width:1400px" not in style

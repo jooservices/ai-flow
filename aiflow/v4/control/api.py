@@ -306,7 +306,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": current_release(),
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
-                            "versions": repo.versions}}
+                            "tools": repo.tools_for_node(node), "versions": repo.versions}}
 
     # --- releases: nodes follow the release the control plane runs (written by aiflow4-deploy) ---------------
     RELEASES = Path("/srv/aiflow/control/releases")

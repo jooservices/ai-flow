@@ -8,22 +8,6 @@ usage() {
 }
 
 [[ $# -eq 3 || $# -eq 6 ]] || usage
-VERSION=$1
-TARBALL=$(realpath "$2")
-BUNDLE=$(realpath "$3")
-[[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || usage
-[[ -s $TARBALL && -s $BUNDLE ]] || { echo "candidate release assets are missing" >&2; exit 2; }
-
-PREVIOUS_VERSION=""
-PREVIOUS_TARBALL=""
-PREVIOUS_BUNDLE=""
-if [[ $# -eq 6 ]]; then
-  PREVIOUS_VERSION=$4
-  PREVIOUS_TARBALL=$(realpath "$5")
-  PREVIOUS_BUNDLE=$(realpath "$6")
-  [[ $PREVIOUS_VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || usage
-  [[ -s $PREVIOUS_TARBALL && -s $PREVIOUS_BUNDLE ]] || { echo "previous release assets are missing" >&2; exit 2; }
-fi
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 COSIGN=$(command -v cosign || true)
@@ -31,21 +15,10 @@ COSIGN=$(command -v cosign || true)
 COSIGN=$(realpath "$COSIGN")
 
 WORK=$(mktemp -d "${RUNNER_TEMP:-/tmp}/aiflow4-install-smoke.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
 ARTIFACTS=$WORK/artifacts
-mkdir -p "$ARTIFACTS"
-cp "$TARBALL" "$ARTIFACTS/aiflow4-$VERSION.tar.gz"
-cp "$BUNDLE" "$ARTIFACTS/aiflow4-$VERSION.tar.gz.sigstore.json"
-if [[ -n $PREVIOUS_VERSION ]]; then
-  cp "$PREVIOUS_TARBALL" "$ARTIFACTS/aiflow4-$PREVIOUS_VERSION.tar.gz"
-  cp "$PREVIOUS_BUNDLE" "$ARTIFACTS/aiflow4-$PREVIOUS_VERSION.tar.gz.sigstore.json"
-else
-  # The first tagged release has no older signed version. Exercise the supported transition from the
-  # tagged commit's parent (the pre-release develop build) into the signed release instead.
-  PARENT=$(git rev-parse "${GITHUB_SHA:?GITHUB_SHA is required for a tagged install smoke test}^")
-  git archive --format=tar.gz --output="$ARTIFACTS/aiflow4-baseline-$PARENT.tar.gz" "$PARENT" \
-    aiflow pyproject.toml uv.lock prompts deploy
-  PREVIOUS_VERSION=$PARENT
-fi
+source "$ROOT/deploy/v4/ci/install-smoke-artifacts.sh"
+prepare_install_smoke_artifacts "$ROOT" "$ARTIFACTS" "$@" || usage
 
 NAME="aiflow4-smoke-$$"
 NETWORK="$NAME-net"
@@ -221,7 +194,7 @@ NODE_BOOTSTRAP
     --join-token-file /run/aiflow4-smoke/join-token --name "$node" --control http://control:8080 >/dev/null
   docker exec "$container" rm -f /run/aiflow4-smoke/join-token
 
-  if [[ -n $PREVIOUS_VERSION ]]; then
+  if [[ $BASELINE -eq 0 ]]; then
     local checksum
     checksum=$(sha256sum "$ARTIFACTS/aiflow4-$PREVIOUS_VERSION.tar.gz" | awk '{print $1}')
     docker exec --env PREVIOUS_VERSION="$PREVIOUS_VERSION" --env CHECKSUM="$checksum" "$container" bash -se <<'INSTALL_PREVIOUS'

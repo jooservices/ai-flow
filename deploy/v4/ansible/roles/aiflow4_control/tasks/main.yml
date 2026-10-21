@@ -1,0 +1,48 @@
+---
+- name: Check pinned installer settings
+  ansible.builtin.assert:
+    that:
+      - aiflow4_control_server_installer_tag == 'v1.1.0'
+      - >-
+        aiflow4_control_modules.split(',') ==
+        ['packages', 'timesync', 'docker', 'docker_group', 'ulimits']
+      - >-
+        aiflow4_control_si_environment.keys()
+        | select('match', '^SI_[A-Z0-9_]+$')
+        | list | length == aiflow4_control_si_environment | length
+
+- name: Download pinned server-installer release
+  ansible.builtin.get_url:
+    url: >-
+      {{ 'https://github.com/jooservices/server-installer/archive/refs/tags/'
+         ~ aiflow4_control_server_installer_tag ~ '.tar.gz' }}
+    dest: '{{ aiflow4_control_server_installer_archive }}'
+    mode: '0644'
+
+- name: Create pinned installer directory
+  ansible.builtin.file:
+    path: '{{ aiflow4_control_server_installer_root }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Unpack pinned server-installer CLI
+  ansible.builtin.unarchive:
+    src: '{{ aiflow4_control_server_installer_archive }}'
+    dest: '{{ aiflow4_control_server_installer_root }}'
+    remote_src: true
+    creates: '{{ aiflow4_control_server_installer_bin }}'
+
+- name: Prepare control host OS through server-installer
+  ansible.builtin.command:
+    argv:
+      - '{{ aiflow4_control_server_installer_bin }}'
+      - apply
+      - --modules
+      - '{{ aiflow4_control_modules }}'
+      - --preflight
+  environment: '{{ aiflow4_control_si_environment }}'
+  register: aiflow4_control_preflight
+  changed_when: "'changed' in aiflow4_control_preflight.stdout | lower"
+  no_log: true

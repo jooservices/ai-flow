@@ -12,6 +12,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
+- [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
@@ -33,6 +34,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
+- [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 
 ## Tools on a node
 

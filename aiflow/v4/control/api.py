@@ -91,6 +91,7 @@ class HeartbeatBody(BaseModel):
     slots_total: int = 1
     slots_used: int = 0
     release_version: str = ""
+    release_protocol: int = 0
     tools: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
@@ -317,8 +318,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
+        # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
+        # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
+        release = current_release() if body.release_protocol >= 1 else ""
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
-                            "release": current_release(),
+                            "release": release,
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "tools": repo.tools_for_node(node), "versions": repo.versions}}
 

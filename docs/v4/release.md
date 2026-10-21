@@ -79,27 +79,37 @@ The installer entry point is:
 aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
 ```
 
-### Nodes still on the agent from before signed releases
+### Nodes still on an older agent
 
-An older node agent unpacks the new installer from the tarball and calls it with only
-`aiflow4-node-install <release.tar.gz> <vX.Y.Z>`. The installer accepts that call: it uses the
-`.sigstore.json` bundle and `SHA256SUMS` next to the tarball when present, and otherwise fetches them from the
-control API with the node token from `/etc/aiflow/node.env`. It then checks the checksum and cosign signature
-exactly as above. When a file cannot be fetched or verification fails, it reports the rejection to
-`/v1/nodes/{name}/release-failures` (a critical incident) and installs nothing. After the first signed release is
-installed, the new agent calls the installer with all four arguments.
+An older agent may extract the installer from a release archive and execute it before checking the archive's
+signature. The control API therefore advertises automatic releases only to agents that report
+`release_protocol: 1`, which the signed-release agent sends in its heartbeat. Legacy agents receive an empty
+release target, and the installer rejects the old two-argument call with a critical incident. Bootstrap these
+nodes manually; do not let a legacy agent execute an installer extracted from a not-yet-verified archive.
 
-Such a node therefore needs cosign before it can move to the first signed release. If cosign is missing, the
-installer refuses, opens the incident and prints the command to run. One-time manual step on that node:
+On the node, install cosign using a trusted administrative process, then stage the tarball, its signature bundle
+and `SHA256SUMS` from the matching GitHub Release. Verify the archive before extracting or running its installer:
 
-1. Install cosign ([instructions](https://docs.sigstore.dev/cosign/system_config/installation/)).
-2. Either wait for the next heartbeat retry (every 10 minutes) or install by hand from the files the control
-   host serves:
+```sh
+VERSION=v4.1.0
+TAR="aiflow4-$VERSION.tar.gz"
+BUNDLE="$TAR.sigstore.json"
+SUMS=SHA256SUMS
+cosign verify-blob "$TAR" --bundle "$BUNDLE" \
+  --certificate-identity "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --check "$SUMS"
+SHA256=$(awk -v f="$TAR" '$2 == f || $2 == "*" f {print $1; exit}' "$SUMS")
+BOOTSTRAP=$(mktemp -d)
+tar -xzf "$TAR" -C "$BOOTSTRAP" deploy/v4/bin/aiflow4-node-install
+sudo install -m 0755 "$BOOTSTRAP/deploy/v4/bin/aiflow4-node-install" /usr/local/sbin/aiflow4-node-install
+sudo /usr/local/sbin/aiflow4-node-install "$PWD/$TAR" "$VERSION" "$PWD/$BUNDLE" "$SHA256"
+rm -rf "$BOOTSTRAP"
+```
 
-   ```sh
-   aiflow4-node-install /srv/aiflow/releases/incoming/aiflow4-vX.Y.Z.tar.gz vX.Y.Z \
-     /path/to/aiflow4-vX.Y.Z.tar.gz.sigstore.json <sha256 from SHA256SUMS>
-   ```
+The manual signature verification establishes trust in the extracted installer; the installer then checks the
+checksum and signature again before unpacking the full release or switching `/srv/aiflow/current`. Once the new
+agent reports `release_protocol: 1`, later signed releases are eligible for automatic updates.
 
 Do not install a tarball from a branch or commit hash. To make a release, merge the change to `master`, create a
 `vX.Y.Z` tag on that commit, then use the corresponding published GitHub Release.

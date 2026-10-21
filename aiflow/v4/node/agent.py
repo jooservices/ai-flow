@@ -212,9 +212,17 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
     inc.mkdir(parents=True, exist_ok=True)
     tar = inc / f"aiflow4-{version}.tar.gz"
     bundle = inc / f"aiflow4-{version}.tar.gz.sigstore.json"
-    manifest_response = api.c.get(f"/v1/releases/{version}/manifest", timeout=30)
+    try:
+        manifest_response = api.c.get(f"/v1/releases/{version}/manifest", timeout=30)
+    except Exception as exc:  # noqa: BLE001 - an advertised release without its manifest is a verification failure
+        detail = f"release manifest unavailable: {type(exc).__name__}"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
+        return
     if manifest_response.status_code != 200:
-        log.warning("release %s manifest unavailable: %s", version, manifest_response.status_code)
+        detail = f"release manifest unavailable (HTTP {manifest_response.status_code})"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
         return
     try:
         manifest = manifest_response.json()
@@ -230,13 +238,29 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
         _report_release_rejection(api, node, version, detail)
         return
 
-    response = api.c.get(tar_url, timeout=120)
-    if response.status_code != 200:
-        log.warning("release %s tarball unavailable: %s", version, response.status_code)
+    try:
+        response = api.c.get(tar_url, timeout=120)
+    except Exception as exc:  # noqa: BLE001 - all required signed assets must exist before installation
+        detail = f"release tarball unavailable: {type(exc).__name__}"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
         return
-    signature_response = api.c.get(bundle_url, timeout=120)
+    if response.status_code != 200:
+        detail = f"release tarball unavailable (HTTP {response.status_code})"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
+        return
+    try:
+        signature_response = api.c.get(bundle_url, timeout=120)
+    except Exception as exc:  # noqa: BLE001 - an advertised release without its signature cannot be installed
+        detail = f"release signature bundle unavailable: {type(exc).__name__}"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
+        return
     if signature_response.status_code != 200:
-        log.warning("release %s signature bundle unavailable: %s", version, signature_response.status_code)
+        detail = f"release signature bundle unavailable (HTTP {signature_response.status_code})"
+        log.error("rejecting release %s: %s", version, detail)
+        _report_release_rejection(api, node, version, detail)
         return
     tar_tmp = tar.with_suffix(tar.suffix + ".tmp")
     bundle_tmp = bundle.with_suffix(bundle.suffix + ".tmp")
@@ -283,6 +307,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
                 desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
+                    "release_protocol": 1,
                     "tools": tools,
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},

@@ -85,7 +85,7 @@ def test_node_release_api_serves_version_tarball_checksum_and_signature(client, 
     monkeypatch.setattr(control_api, "RELEASES", tmp_path)
     headers = _join(client, "node-release")
 
-    heartbeat = client.post("/v1/nodes/node-release/heartbeat", json={}, headers=headers)
+    heartbeat = client.post("/v1/nodes/node-release/heartbeat", json={"release_protocol": 1}, headers=headers)
     assert heartbeat.json()["desired"]["release"] == "v4.2.1"
     assert client.get("/v1/releases/v4.2.1/manifest").status_code == 401
 
@@ -122,6 +122,7 @@ def test_node_release_failure_opens_incident(client, ctx):
 def test_release_installer_verifies_before_unpacking_or_switching_current():
     installer = Path("deploy/v4/bin/aiflow4-node-install").read_text()
     assert installer.index("cosign verify-blob") < installer.index('tar -xzf "$TAR"')
+    assert installer.index("cosign verify-blob") < installer.index('install -m 0755 "$REL/deploy/v4/bin/aiflow4-node-install')
     assert installer.index("cosign verify-blob") < installer.index('ln -sfn "$REL"')
 
 
@@ -158,57 +159,71 @@ def _legacy_node(tmp_path, version="v4.2.1"):
     return tar
 
 
-# curl stub: logs argv and the config read on stdin, serves the release's bundle and SHA256SUMS
+# curl stub: logs arguments and the config read on stdin for installer incident reporting
 _CURL = """
 LOG={log}
 echo "ARGS $*" >> "$LOG"; echo "STDIN $(cat)" >> "$LOG"
-out=""; url="${{@: -1}}"
-while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
-case "$url" in
-  *.sigstore.json) printf '{{"bundle": true}}' > "$out" ;;
-  */SHA256SUMS) printf '%s  %s\\n' {digest} {name} ;;
-  */release-failures) ;;
-  *) exit 22 ;;
-esac
+url="${{@: -1}}"
+case "$url" in */release-failures) ;; *) exit 22 ;; esac
 """
 
 
-def _run_installer(tmp_path, tar, version, stubs):
+def _run_installer(tmp_path, tar, version, stubs, bundle=None, checksum=None):
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_NODE_ENV": str(tmp_path / "node.env")}
-    return subprocess.run(["bash", str(INSTALLER), str(tar), version], env=env, capture_output=True, text=True,
+    args = ["bash", str(INSTALLER), str(tar), version]
+    if bundle is not None:
+        args.extend([str(bundle), checksum])
+    return subprocess.run(args, env=env, capture_output=True, text=True,
                           timeout=60)
 
 
-def test_installer_legacy_two_argument_call_fetches_signature_and_rejects_bad_signature(tmp_path):
+def test_installer_legacy_two_argument_call_requires_manual_bootstrap_and_reports_incident(tmp_path):
     tar = _legacy_node(tmp_path)
     log = tmp_path / "curl.log"
-    digest = hashlib.sha256(tar.read_bytes()).hexdigest()
-    stubs = {"curl": _CURL.format(log=log, digest=digest, name=tar.name),
-             "cosign": f'echo "$*" > {tmp_path / "cosign.args"}; echo "invalid signature" >&2; exit 1\n'}
+    stubs = {"curl": _CURL.format(log=log, digest="unused", name=tar.name),
+             "cosign": f'touch {tmp_path / "cosign.ran"}\n'}
 
     result = _run_installer(tmp_path, tar, "v4.2.1", stubs)
 
     assert result.returncode == 4, result.stderr
-    assert "release signature verification failed for v4.2.1" in result.stderr
+    assert "legacy automatic upgrade is disabled" in result.stderr
     calls = log.read_text()
-    assert "http://control.test/v1/releases/v4.2.1.tar.gz.sigstore.json" in calls
-    assert "http://control.test/v1/releases/v4.2.1/SHA256SUMS" in calls
+    assert "/v1/releases/" not in calls
     assert "-X POST" in calls and "http://control.test/v1/nodes/node-old/release-failures" in calls
     assert '"release_version": "v4.2.1"' in calls
     # the node token reaches curl on stdin, never on its command line
     assert all("secret-node-token" not in line for line in calls.splitlines() if line.startswith("ARGS"))
     assert 'header = "Authorization: Bearer secret-node-token"' in calls
-    cosign_args = (tmp_path / "cosign.args").read_text()
-    assert f"verify-blob {tar} --bundle {tar}.sigstore.json" in cosign_args
-    assert "release-v4.yml@refs/tags/v4.2.1" in cosign_args
+    assert not (tmp_path / "cosign.ran").exists()
 
 
-def test_installer_legacy_call_without_cosign_is_rejected_loudly_with_an_incident(tmp_path):
+def test_installer_four_argument_call_verifies_signature_before_unpacking(tmp_path):
     tar = _legacy_node(tmp_path)
+    bundle = Path(f"{tar}.sigstore.json")
+    bundle.write_text("{}")
     log = tmp_path / "curl.log"
     digest = hashlib.sha256(tar.read_bytes()).hexdigest()
+    stubs = {"curl": _CURL.format(log=log, digest="unused", name=tar.name),
+             "cosign": f'echo "$*" > {tmp_path / "cosign.args"}; echo "invalid signature" >&2; exit 1\n'}
 
-    result = _run_installer(tmp_path, tar, "v4.2.1", {"curl": _CURL.format(log=log, digest=digest, name=tar.name)})
+    result = _run_installer(tmp_path, tar, "v4.2.1", stubs, bundle, digest)
+
+    assert result.returncode == 4
+    assert "release signature verification failed for v4.2.1" in result.stderr
+    cosign_args = (tmp_path / "cosign.args").read_text()
+    assert f"verify-blob {tar} --bundle {bundle}" in cosign_args
+    assert "release-v4.yml@refs/tags/v4.2.1" in cosign_args
+    assert "release-failures" in log.read_text()
+
+
+def test_installer_four_argument_call_without_cosign_is_rejected_loudly_with_an_incident(tmp_path):
+    tar = _legacy_node(tmp_path)
+    bundle = Path(f"{tar}.sigstore.json")
+    bundle.write_text("{}")
+    log = tmp_path / "curl.log"
+
+    result = _run_installer(tmp_path, tar, "v4.2.1", {"curl": _CURL.format(log=log, digest="unused", name=tar.name)},
+                            bundle, hashlib.sha256(tar.read_bytes()).hexdigest())
 
     assert result.returncode == 4
     assert "cosign is required" in result.stderr
@@ -216,21 +231,19 @@ def test_installer_legacy_call_without_cosign_is_rejected_loudly_with_an_inciden
     assert "/v1/nodes/node-old/release-failures" in log.read_text()
 
 
-def test_installer_legacy_call_uses_local_bundle_and_rejects_checksum_mismatch(tmp_path):
+def test_installer_four_argument_call_rejects_checksum_mismatch_before_signature_check(tmp_path):
     tar = _legacy_node(tmp_path)
-    Path(f"{tar}.sigstore.json").write_text("{}")
-    (tar.parent / "SHA256SUMS").write_text(f"{'0' * 64}  {tar.name}\n")
+    bundle = Path(f"{tar}.sigstore.json")
+    bundle.write_text("{}")
     log = tmp_path / "curl.log"
     stubs = {"curl": _CURL.format(log=log, digest="unused", name=tar.name),
              "cosign": f"touch {tmp_path / 'cosign.ran'}\n"}
 
-    result = _run_installer(tmp_path, tar, "v4.2.1", stubs)
+    result = _run_installer(tmp_path, tar, "v4.2.1", stubs, bundle, "0" * 64)
 
     assert result.returncode == 4
     assert "release checksum verification failed for v4.2.1" in result.stderr
-    calls = log.read_text()
-    assert "sigstore.json" not in calls and "SHA256SUMS" not in calls  # the files next to the tarball were used
-    assert "release-failures" in calls
+    assert "release-failures" in log.read_text()
     assert not (tmp_path / "cosign.ran").exists()
 
 

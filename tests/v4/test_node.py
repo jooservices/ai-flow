@@ -160,6 +160,7 @@ def test_node_heartbeat_reports_policy_relay_health(monkeypatch):
 
     heartbeat = clients[0].calls[0][0][2]
     assert heartbeat["metrics"]["policy_relay"] == {"enabled": True, "healthy": True}
+    assert heartbeat["release_protocol"] == 1
     assert relays[0].started and relays[0].stopped
 
 
@@ -180,9 +181,10 @@ def test_a_slow_tool_check_is_not_reported_missing(monkeypatch):
 class _ReleaseResponse:
     status_code = 200
 
-    def __init__(self, content: bytes, payload: dict | None = None):
+    def __init__(self, content: bytes, payload: dict | None = None, status_code: int = 200):
         self.content = content
         self.payload = payload
+        self.status_code = status_code
 
     def json(self):
         return self.payload
@@ -230,6 +232,57 @@ def test_self_update_rejects_bad_signature_reports_incident_and_does_not_install
                           {"release_version": version,
                            "detail": "cosign signature verification failed: invalid signature"},
                           {"retries": 1})]
+    assert not subprocess_calls
+
+
+def test_self_update_reports_unavailable_manifest_or_signature_as_verification_failure(tmp_path, monkeypatch):
+    import hashlib
+
+    subprocess_calls = []
+    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(agent.subprocess, "run", lambda *args, **kwargs: subprocess_calls.append(args[0]))
+
+    for version, missing_asset, expected_detail in (
+        ("v4.2.2", "manifest", "release manifest unavailable (HTTP 404)"),
+        ("v4.2.3", "signature", "release signature bundle unavailable (HTTP 404)"),
+    ):
+        tarball = b"signed archive bytes"
+        manifest = {"version": version, "sha256": hashlib.sha256(tarball).hexdigest(),
+                    "tarball": f"/v1/releases/{version}.tar.gz",
+                    "signature": f"/v1/releases/{version}.tar.gz.sigstore.json"}
+
+        class FakeHTTP:
+            def get(self, url, timeout):
+                if url == f"/v1/releases/{version}/manifest":
+                    if missing_asset == "manifest":
+                        return _ReleaseResponse(b"", status_code=404)
+                    return _ReleaseResponse(b"", manifest)
+                if url == manifest["tarball"]:
+                    return _ReleaseResponse(tarball)
+                if url == manifest["signature"]:
+                    if missing_asset == "signature":
+                        return _ReleaseResponse(b"", status_code=404)
+                    return _ReleaseResponse(b"signature bundle")
+                raise AssertionError(f"unexpected release URL: {url}")
+
+        class FakeAPI:
+            def __init__(self):
+                self.c = FakeHTTP()
+                self.calls = []
+
+            def call(self, method, path, body=None, **kwargs):
+                self.calls.append((method, path, body, kwargs))
+
+        api = FakeAPI()
+        agent._update_tried.clear()
+
+        agent.self_update(api, version, "node-7")
+
+        assert api.calls == [("POST", "/v1/nodes/node-7/release-failures",
+                              {"release_version": version, "detail": expected_detail}, {"retries": 1})]
+        assert not (tmp_path / f"aiflow4-{version}.tar.gz").exists()
+
     assert not subprocess_calls
 
 

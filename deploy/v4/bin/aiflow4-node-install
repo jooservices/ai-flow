@@ -1,12 +1,11 @@
 #!/bin/bash
 # Install a signed AI Flow v4 release on this node.
 #   aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
-# A node agent from before signed releases calls it as `aiflow4-node-install <release.tar.gz> <vX.Y.Z>`. Then the
-# signature bundle and SHA256SUMS are taken from next to the tarball or fetched from the control API, and the
-# release is verified the same way. A rejected release is reported to the control API as an incident.
+# Legacy two-argument upgrades are disabled because those agents execute this script from an unverified archive.
+# Bootstrap them manually only after an administrator verifies the archive with a trusted cosign installation.
 set -euo pipefail
 if [ $# -ne 2 ] && [ $# -ne 4 ]; then
-  echo "usage: aiflow4-node-install <release.tar.gz> <vX.Y.Z> [<release.sigstore.json> <sha256>]" >&2; exit 2
+  echo "usage: aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>" >&2; exit 2
 fi
 TAR=$1; VERSION=$2; BUNDLE=${3:-}; EXPECTED_SHA256=${4:-}
 if [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -36,22 +35,9 @@ reject() {
 }
 
 if [ $# -eq 2 ]; then
-  echo "called without a signature bundle and checksum (node agent before signed releases); fetching them" >&2
-  [ -f "$TAR" ] || { echo "release tarball is missing" >&2; exit 2; }
-  BUNDLE=$TAR.sigstore.json
-  SUMS=$(dirname "$TAR")/SHA256SUMS
-  if [ ! -s "$BUNDLE" ] && ! control -o "$BUNDLE" "$CONTROL_URL/v1/releases/$VERSION.tar.gz.sigstore.json"; then
-    rm -f "$BUNDLE"; reject "could not get the signature bundle of $VERSION from the control API"
-  fi
-  if [ -s "$SUMS" ] && grep -q "aiflow4-$VERSION.tar.gz\$" "$SUMS"; then
-    SUMS_TEXT=$(cat "$SUMS")
-  elif ! SUMS_TEXT=$(control "$CONTROL_URL/v1/releases/$VERSION/SHA256SUMS"); then
-    reject "could not get SHA256SUMS of $VERSION from the control API"
-  fi
-  EXPECTED_SHA256=$(awk -v f="aiflow4-$VERSION.tar.gz" '$2 == f || $2 == "*" f {print $1; exit}' <<<"$SUMS_TEXT")
+  reject "legacy automatic upgrade is disabled; manually bootstrap from a signature-verified release with all four installer arguments"
 fi
 if [[ ! $EXPECTED_SHA256 =~ ^[0-9a-f]{64}$ ]]; then
-  [ $# -eq 2 ] && reject "SHA256SUMS of $VERSION has no valid checksum for the tarball"
   echo "invalid release checksum" >&2; exit 2
 fi
 if [[ ! -f $TAR || ! -f $BUNDLE ]]; then

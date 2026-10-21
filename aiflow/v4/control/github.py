@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import base64
+import os
 import threading
 import time
 from datetime import datetime
@@ -27,16 +28,56 @@ class GitHubError(RuntimeError):
 class GitHubApp:
     def __init__(self, app_dir: str, org: str, client: httpx.Client | None = None) -> None:
         d = Path(app_dir)
-        self.meta = json.loads((d / "app.json").read_text())
-        self.key = (d / "app.pem").read_text()
+        self.dir = d
+        self.meta: dict[str, Any] = {}
+        self.key = ""
         self.org = org
         self.c = client or httpx.Client(base_url=API, timeout=30, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "aiflow4"})
         self._inst: int | None = None
         self._cache: dict[str, tuple[str, float]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._config_stamp: tuple[int, int] | None = None
+        self._refresh_config(force=True)
+
+    def _refresh_config(self, force: bool = False) -> None:
+        """Reload a connection saved by another API replica without restarting workers or control loops."""
+        try:
+            stamp = ((self.dir / "app.json").stat().st_mtime_ns, (self.dir / "app.pem").stat().st_mtime_ns)
+        except OSError:
+            if force:
+                raise
+            return
+        with self._lock:
+            if not force and stamp == self._config_stamp:
+                return
+            import fcntl
+
+            lock_path = self.dir / ".connection.lock"
+            lock_fd = os.open(lock_path, os.O_RDONLY) if lock_path.exists() else None
+            try:
+                if lock_fd is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_SH)
+                stamp = ((self.dir / "app.json").stat().st_mtime_ns,
+                         (self.dir / "app.pem").stat().st_mtime_ns)
+                meta = json.loads((self.dir / "app.json").read_text(encoding="utf-8"))
+                key = (self.dir / "app.pem").read_text(encoding="utf-8")
+            finally:
+                if lock_fd is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
+            if not isinstance(meta, dict) or not meta.get("id") or not key.startswith("-----BEGIN "):
+                raise GitHubError("GitHub App configuration is invalid")
+            changed = meta != self.meta or key != self.key
+            self.meta, self.key = meta, key
+            self.org = str(meta.get("account_login") or self.org)
+            self._inst = int(meta["installation_id"]) if meta.get("installation_id") else None
+            self._config_stamp = stamp
+            if changed:
+                self._cache.clear()
 
     def _jwt(self) -> str:
+        self._refresh_config()
         now = int(time.time())
         return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": str(self.meta["id"])}, self.key, algorithm="RS256")
 
@@ -47,12 +88,34 @@ class GitHubApp:
         return r.json() if r.content else None
 
     def installation_id(self) -> int:
+        self._refresh_config()
         if self._inst is None:
-            self._inst = int(self._req("GET", f"/orgs/{self.org}/installation", self._jwt())["id"])
+            endpoint = f"/orgs/{self.org}/installation" if self.org else "/installation"
+            self._inst = int(self._req("GET", endpoint, self._jwt())["id"])
         return self._inst
+
+    def app_details(self) -> dict[str, Any]:
+        """Read non-secret metadata for the current app using its app JWT."""
+        return self._req("GET", "/app", self._jwt())
+
+    def app_installations(self) -> list[dict[str, Any]]:
+        """List installations for this app so an owner can select an account after importing it."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            rows = self._req("GET", f"/app/installations?per_page=100&page={page}", self._jwt()) or []
+            out.extend(rows)
+            if len(rows) < 100:
+                return out
+            page += 1
+
+    def installation_details(self, installation_id: int) -> dict[str, Any]:
+        """Resolve and verify an installation id against this App's credentials."""
+        return self._req("GET", f"/app/installations/{int(installation_id)}", self._jwt())
 
     def token(self, repo: str | None = None, permissions: dict[str, str] | None = None) -> tuple[str, datetime]:
         """Installation token, optionally narrowed to one repo and to the given permissions; cached ~50 min."""
+        self._refresh_config()
         perms = permissions or {"contents": "write", "pull_requests": "write", "metadata": "read"}
         cache_key = f"{repo}|{sorted(perms.items())}"
         with self._lock:
@@ -97,6 +160,7 @@ class GitHubApp:
 
     def installation_repositories(self) -> list[dict[str, str]]:
         """List repositories this GitHub App installation can access."""
+        self._refresh_config()
         out: list[dict[str, str]] = []
         page = 1
         while True:

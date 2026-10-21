@@ -23,6 +23,7 @@ from .dev import Claimed, run_dev
 from .triage import run_triage
 from .intake import run_intake
 from .verify import run_verify
+from .master import run_master
 
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
@@ -111,7 +112,9 @@ class Worker:
             self.probe()
         if not self.probe_ok:
             return False
-        cands = self.api.call("GET", "/v1/work/candidates", params={"account": self.account})["tickets"]
+        master = self.api.call("GET", "/v1/master/candidate", params={"account": self.account}).get("candidate")
+        cands = ([master] if master else []) + self.api.call(
+            "GET", "/v1/work/candidates", params={"account": self.account})["tickets"]
         if not cands:
             return False
         for cand in cands:
@@ -136,6 +139,8 @@ class Worker:
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "triage":
                 res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "master":
+                res = run_master(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "intake":
                 res = run_intake(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:

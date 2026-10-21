@@ -10,11 +10,12 @@ class CodexAdapter(Adapter):
     provider = "codex"
 
     def argv(self, spec: RunSpec) -> list[str]:
-        cmd = ["codex", "exec", "--json", "--cd", spec.cwd, "--sandbox", "workspace-write",
-               "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true",
-               "-c", "features.apps=false",
-               # the shared caches and temp dir on disk (see scratch_env) are writable inside the sandbox
-               "-c", f'sandbox_workspace_write.writable_roots=["{scratch_root(spec)}"]']
+        cmd = ["codex", "exec", "--json", "--cd", spec.cwd, "--sandbox", spec.sandbox,
+               "-c", 'approval_policy="never"', "-c", "features.apps=false"]
+        if spec.sandbox == "workspace-write":
+            cmd += ["-c", "sandbox_workspace_write.network_access=true",
+                    # the shared caches and temp dir on disk (see scratch_env) are writable inside the sandbox
+                    "-c", f'sandbox_workspace_write.writable_roots=["{scratch_root(spec)}"]']
         if spec.model:
             cmd += ["-m", spec.model]
         if spec.effort:

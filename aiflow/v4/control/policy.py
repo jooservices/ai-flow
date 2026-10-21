@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import glob
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -79,6 +80,67 @@ class Decision:
     def hook_output(self) -> dict:
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": self.decision,
                                        "permissionDecisionReason": self.reason}}
+
+
+MASTER_ACTIONS = {"jira_comment", "jira_update", "dev_reply", "requeue", "incident_open", "incident_close",
+                  "notify_owner", "escalate_to_owner"}
+# Matched only against what the master requests (the action name, its intent and an explicit category), never
+# against observations such as "node1 is offline" or "the run passed the hard limit, restart it": monitoring
+# talks about nodes, servers and restarts all the time, and those follow-ups are allowed master work.
+ESCALATE_TO_OWNER_CATEGORIES = ("infrastructure", "secret", "production_release")
+ESCALATE_TO_OWNER_DEFAULTS = {
+    "infrastructure": [
+        r"\b(?:change|modify|upgrade|downgrade|reconfigure|configure|provision|decommission|migrate|resize|"
+        r"thay đổi|nâng cấp|hạ cấp|cấu hình|cấp phát)\b.{0,60}\b"
+        r"(?:infrastructure|infra|hạ tầng|cluster|firewall|dns|load balancer|vpc|terraform|ansible)\b",
+        r"\b(?:infrastructure|infra|hạ tầng|cluster|firewall|dns|load balancer|vpc|terraform|ansible)\b"
+        r".{0,60}\b(?:change|modify|upgrade|downgrade|reconfigure|configure|provision|decommission|migrate|resize|"
+        r"thay đổi|nâng cấp|hạ cấp|cấu hình|cấp phát)\b",
+        r"\b(?:provision|decommission)\b.{0,60}\b(?:server|máy chủ|vm|node)\b",
+        r"\binfra(?:structure)?[ _]change\b|\bchange[ _]infra(?:structure)?\b",
+    ],
+    "secret": [
+        r"\b(?:rotate|change|create|delete|revoke|expose|reveal|replace|reset|xoay vòng|thu hồi|tiết lộ|thay thế|"
+        r"thay đổi)\b.{0,60}\b"
+        r"(?:secrets?|bí mật|credentials?|thông tin xác thực|password|mật khẩu|private key|api key|access token)\b",
+        r"\b(?:secrets?|bí mật|credentials?|thông tin xác thực|password|mật khẩu|private key|api key|access token)\b"
+        r".{0,60}\b(?:rotate|change|create|delete|revoke|expose|reveal|replace|reset|xoay vòng|thu hồi|tiết lộ|"
+        r"thay thế|thay đổi)\b",
+    ],
+    "production_release": [
+        r"\b(?:release|deploy|publish|roll out|ship|phát hành|triển khai|đưa lên)\b.{0,100}\b"
+        r"(?:production|prod|sản xuất)\b",
+        r"\b(?:production|prod|sản xuất)\b.{0,100}\b"
+        r"(?:release|deploy|publish|roll out|ship|phát hành|triển khai|đưa lên)\b",
+    ],
+}
+
+
+def decide_master_action(policy: dict, action: str, intent: str, category: str = "") -> Decision:
+    """Allow only the master control API actions; always escalate protected operational work.
+
+    `intent` is the request itself (what the master wants done), not the observation that led to it."""
+    if action == "escalate_to_owner":
+        return Decision("escalate", "escalate_to_owner was explicitly requested")
+    if category in ESCALATE_TO_OWNER_CATEGORIES:
+        return Decision("escalate", f"escalate_to_owner: {category}")
+    rules = {key: list(patterns) for key, patterns in ESCALATE_TO_OWNER_DEFAULTS.items()}
+    for category, patterns in ((policy or {}).get("escalate_to_owner") or {}).items():
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        rules.setdefault(category, []).extend(patterns)
+    text = re.sub(r"[_-]+", " ", f"{action}\n{intent or ''}")[:5000]
+    for category, patterns in rules.items():
+        for pattern in patterns:
+            try:
+                if re.search(str(pattern), text, flags=re.IGNORECASE):
+                    return Decision("escalate", f"escalate_to_owner: {category}")
+            except re.error:
+                # Invalid control-repo policy must not weaken mandatory protected-action rules.
+                continue
+    if action not in MASTER_ACTIONS:
+        return Decision("deny", f"master action '{action}' is not allowed")
+    return Decision("allow", "allowed master control API action")
 
 
 def _intake_segments(command: str) -> list[str]:

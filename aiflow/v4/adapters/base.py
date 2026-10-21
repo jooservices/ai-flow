@@ -43,6 +43,7 @@ class RunSpec:
     run_token: str = ""
     log_path: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
+    sandbox: str = "workspace-write"
 
 
 @dataclass

@@ -89,6 +89,10 @@ class Leases:
     def holder(self, key: str) -> str | None:
         return self.r.get(self._k("lease", key))
 
+    def master_holder(self, scope: str = "global") -> str | None:
+        """Current fenced owner of a master monitoring scope, if any."""
+        return self.holder(f"master:{scope}")
+
     def ttl_ms(self, key: str) -> int:
         return int(self.r.pttl(self._k("lease", key)))
 

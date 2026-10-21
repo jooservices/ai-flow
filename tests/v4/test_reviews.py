@@ -1,11 +1,14 @@
 import uuid
 
+import pytest
+
 from conftest import add_ticket
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.control import notify
 from aiflow.v4.core.controlrepo import Project
+from aiflow.v4.core.settings import Settings
 
 
 def add_review_run(ctx, key, step="dev", pr_url="https://github.com/jooservices/test-aiflow-wp/pull/42",
@@ -58,6 +61,13 @@ def test_review_page_is_routed_by_traefik():
 
     compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
     assert "PathPrefix(`/review`)" in compose.read_text()
+
+
+def test_reviewer_token_is_loaded_from_control_environment(monkeypatch):
+    monkeypatch.delenv("AIFLOW4_SECRET_FILES", raising=False)
+    monkeypatch.setenv("AIFLOW4_REVIEWER_TOKEN", "configured-review-secret")
+
+    assert Settings.from_env().reviewer_token == "configured-review-secret"
 
 
 def test_jira_sync_notifies_assignee_when_require_human_ticket_enters_review(ctx, monkeypatch):
@@ -122,7 +132,7 @@ def test_notify_email_targets_assignee_and_uses_owner_as_fallback(monkeypatch):
 
 def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
     add_review_ticket(ctx, "TESTWP-83")
-    response = client.post("/v1/reviews/TESTWP-83/approve")
+    response = client.post("/v1/reviews/TESTWP-83/approve", headers={"Authorization": "Bearer review-secret"})
 
     assert response.status_code == 200
     assert response.json() == {"merged": True, "sha": "abc123", "status": "Done"}
@@ -138,9 +148,48 @@ def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
 
 def test_reviewer_rework_records_comment_label_and_returns_ticket_to_todo(client, ctx):
     add_review_ticket(ctx, "TESTWP-84")
-    response = client.post("/v1/reviews/TESTWP-84/rework", json={"comment": "Please add coverage for retries."})
+    response = client.post("/v1/reviews/TESTWP-84/rework", json={"comment": "Please add coverage for retries."},
+                           headers={"Authorization": "Bearer review-secret"})
 
     assert response.status_code == 200 and response.json()["status"] == "To Do"
     assert ("TESTWP-84", "Human review requested rework:\n\nPlease add coverage for retries.") in ctx.jira.comments
     ticket = ctx.db.one("SELECT status, labels FROM tickets WHERE key='TESTWP-84'")
     assert ticket["status"] == "To Do" and "rework" in ticket["labels"]
+
+
+@pytest.mark.parametrize(("action", "body"), [
+    ("approve", None),
+    ("rework", {"comment": "Please add coverage for retries."}),
+])
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-secret"])
+def test_reviewer_actions_reject_unauthorized_requests_before_claiming_run(client, ctx, action, body, authorization):
+    key = "TESTWP-85"
+    add_review_ticket(ctx, key)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    response = client.post(f"/v1/reviews/{key}/{action}", json=body, headers=headers)
+
+    assert response.status_code == 401
+    qa_runs = ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'", (key,))
+    assert qa_runs["n"] == 0
+    assert ctx.leases.holder(key) is None
+    assert getattr(ctx.github, "merged", []) == []
+    assert ctx.jira.comments == []
+
+
+@pytest.mark.parametrize(("action", "body"), [
+    ("approve", None),
+    ("rework", {"comment": "Please add coverage for retries."}),
+])
+def test_reviewer_actions_fail_closed_when_reviewer_token_is_unconfigured(client, ctx, action, body):
+    key = "TESTWP-86"
+    add_review_ticket(ctx, key)
+    ctx.settings.reviewer_token = ""
+
+    response = client.post(f"/v1/reviews/{key}/{action}", json=body,
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 503
+    qa_runs = ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'", (key,))
+    assert qa_runs["n"] == 0
+    assert ctx.leases.holder(key) is None

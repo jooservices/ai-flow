@@ -309,6 +309,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(401, "unknown node token")
         return row["name"]
 
+    def reviewer_auth(authorization: str = Header(default="")) -> str:
+        configured = ctx.settings.reviewer_token
+        if not configured:
+            raise HTTPException(503, "reviewer actions are not configured")
+        scheme, separator, token = authorization.partition(" ")
+        if (not separator or scheme.lower() != "bearer" or not token.strip()
+                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            raise HTTPException(401, "reviewer authorization required",
+                                headers={"WWW-Authenticate": "Bearer"})
+        return "reviewer"
+
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
         ctx.db.run("INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
@@ -1175,7 +1186,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"tickets": out}
 
     @app.post("/v1/reviews/{key}/approve")
-    def approve_review(key: str) -> dict:
+    def approve_review(key: str, _reviewer: str = Depends(reviewer_auth)) -> dict:
         ticket, run_id, fence, number = reviewer_run(key)
         try:
             run = fenced(run_id, fence, "github", "merge", {"number": number})
@@ -1209,7 +1220,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(502, "could not complete the review approval") from e
 
     @app.post("/v1/reviews/{key}/rework")
-    def request_review_rework(key: str, body: ReviewerBody) -> dict:
+    def request_review_rework(key: str, body: ReviewerBody, _reviewer: str = Depends(reviewer_auth)) -> dict:
         comment = body.comment.strip()
         if not comment:
             raise HTTPException(400, "a rework comment is required")

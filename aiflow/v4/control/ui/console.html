@@ -101,6 +101,8 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 .review-fact .value{margin-top:3px; overflow-wrap:anywhere}
 .review-actions{display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start}
 .review-actions textarea{flex:1 1 320px; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--surface-2)}
+.review-auth{display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-weight:500}
+.review-auth input{width:min(360px,100%); min-height:38px; border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:var(--surface-2)}
 .panel-h{display:flex; align-items:center; gap:10px 12px; flex-wrap:wrap}
 .panel-h h2{margin:0; font-family:var(--f-cond); font-size:17px; font-weight:600; letter-spacing:.01em; text-wrap:balance}
 .panel-h .hint{color:var(--muted); font-size:13px}
@@ -484,7 +486,7 @@ var S = {
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
-  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '',
+  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
 };
@@ -945,6 +947,7 @@ function renderDBody() {
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
   var rows = S.reviews || [], h = '<section class="panel"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Tickets waiting for a reviewer · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
+  h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Required for approve and rework; held only in this page until it is closed.</span>';
   if (S.reviewsError) h += '<div class="empty" style="color:var(--crit)">Could not load the review queue: ' + esc(S.reviewsError) + '</div>';
   else if (S.reviews === null) h += '<div class="empty">Loading review queue…</div>';
   else if (!rows.length) h += '<div class="empty">No tickets are waiting for human review.</div>';
@@ -971,9 +974,12 @@ function renderReviews() {
   root.innerHTML = h;
 }
 function submitReview(key, action, comment) {
+  var tokenField = $('[data-reviewer-token]');
+  S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
+  if (!S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
   if (action === 'rework' && !String(comment || '').trim()) { toast('Comment required', 'Add a comment before sending the ticket for rework.', 'warn'); return; }
   fetch('/v1/reviews/' + encodeURIComponent(key) + '/' + action, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.reviewerToken },
     body: JSON.stringify(action === 'rework' ? { comment: comment } : {})
   }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
@@ -1618,6 +1624,9 @@ document.addEventListener('click', function (e) {
     document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
     try { localStorage.setItem('aiflow4-theme', dark ? 'light' : 'dark'); } catch (x) { /* storage off */ }
   }
+});
+document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
 });
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && S.drawer) closeAll();

@@ -150,7 +150,8 @@ class FakeGitHub:
 
 @pytest.fixture
 def ctx(db, leases, control_repo):
-    s = Settings(join_token="join-secret", lease_ms=90_000, jira_projects=["TESTWP"])
+    s = Settings(join_token="join-secret", reviewer_token="review-secret", lease_ms=90_000,
+                 jira_projects=["TESTWP"])
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     return c

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal
 import subprocess
 import threading
@@ -200,6 +201,13 @@ def scratch_env(spec: RunSpec) -> dict[str, str]:
             (root / sub).mkdir(parents=True, exist_ok=True)
             os.chmod(root / sub, 0o1777)  # shared by the AI user's runs; sticky like /tmp
         except OSError:
+            pass
+    if os.geteuid() == 0:
+        # the worker runs as root, the AI as aiflow-worker: Codex's sandbox creates <root>/.git to protect it,
+        # which fails ("bwrap: Can't mkdir") when the AI user does not own the writable root
+        try:
+            shutil.chown(root, "aiflow-worker", "aiflow-worker")
+        except (LookupError, OSError):
             pass
     return {"TMPDIR": str(root / "tmp"), "UV_CACHE_DIR": str(root / "uv"), "npm_config_cache": str(root / "npm"),
             "COMPOSER_CACHE_DIR": str(root / "composer"), "PIP_CACHE_DIR": str(root / "pip")}

@@ -18,9 +18,11 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
 - [Command Center node operations](../../docs/v4/node-operations.md): owner-only install, desired-state repair, one-time join commands and audited operation logs
+- [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
+- [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 
 ## Tools on a node
 

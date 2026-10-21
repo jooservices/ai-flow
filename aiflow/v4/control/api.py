@@ -32,6 +32,7 @@ from ..core.settings import Settings
 from ..core.toolchains import missing_tools, pinned_version
 from . import business, memory
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
+from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
@@ -320,6 +321,10 @@ class ChangeRequestBody(BaseModel):
     title: str = ""
     description: str = ""
     epic: str = ""
+
+
+class CloseProjectBody(BaseModel):
+    actor: str = "owner"
 
 
 class StakeholderVerdictBody(BaseModel):
@@ -1537,13 +1542,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
                   "an impact run only comments", {"to": body.to})
             raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
-        previous = ctx.db.one("SELECT status, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
+        previous = ctx.db.one("SELECT project, type, status, labels, summary, fields FROM tickets WHERE key=%s", (key,))
         status = ctx.jira.transition_to(key, body.to)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
                    " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
+        if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
+            try:
+                project_lifecycle.report_done_epic(ctx, previous["project"], key)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not generate completion report for epic %s: %s", key, e)
         if previous and previous["status"] != "Human review" and status == "Human review":
             notify_human_review(ctx, key, {**previous, "key": key})
         return {"status": status}
@@ -1901,6 +1911,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             return HTMLResponse(render_html(report))
         return report
 
+    @app.post("/v1/projects/{key}/close")
+    def close_project(key: str, body: CloseProjectBody | None = None) -> dict:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        result = project_lifecycle.close_project(ctx, key, body.actor if body else "owner")
+        return {"project": key, "status": result["status"], "version": result["version"],
+                "report": result.get("report"), "markdown": result.get("markdown"),
+                "study_case_ref": result["study_case_ref"], "created": result["created"],
+                "sent_channels": result["sent_channels"]}
+
+    @app.get("/v1/projects/{key}/study-cases")
+    def project_study_cases(key: str, limit: int = Query(50, ge=1, le=100)) -> dict:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        cases = project_lifecycle.study_cases(ctx.db, key, limit)
+        return {"project": key, "study_cases": cases}
+
     # --- Business view: change requests (same access as the console, no node token) -----------------------------
     def business_project(key: str) -> str:
         if key not in ctx.repo().projects:
@@ -2075,5 +2102,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/memory/search")
     def memory_search(q: str = "", project: str = "", limit: int = 10) -> dict:
         return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
+
+    @app.get("/v1/memory/study-cases")
+    def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+        return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
 
     return app

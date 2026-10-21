@@ -322,6 +322,20 @@ def test_delivery_report_button_loads_markdown_into_copyable_drawer():
     assert "window.navigator.clipboard.writeText(text)" in page and "document.execCommand('copy')" in page
 
 
+def test_delivery_offers_project_close_and_suggests_it_when_all_tickets_are_done():
+    out = json.loads(run_script("""
+console.log(JSON.stringify({
+  suggested: projectCloseControl({key: 'TESTWP', close_suggested: true}),
+  open: projectCloseControl({key: 'TESTWP', close_suggested: false}),
+  closed: projectCloseControl({key: 'TESTWP', closed: true, report_version: 2})
+}));
+"""))
+    assert 'All project tickets are Done. Ready to close.' in out["suggested"]
+    assert 'data-act="close-project" data-p="TESTWP"' in out["suggested"]
+    assert 'data-act="close-project"' in out["open"]
+    assert "Closed · study case v2" in out["closed"]
+
+
 def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
     ticket = {
         "key": "TESTFLOW-28", "summary": "Reviewer queue", "description": "Ticket details",

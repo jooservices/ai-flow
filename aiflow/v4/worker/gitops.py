@@ -126,7 +126,8 @@ class Git:
         if os.geteuid() == 0:
             os.chown(path, 0, 0)
         os.chmod(path, 0o555)
-        return self.run("rev-parse", "HEAD", cwd=path).strip()
+        # root owns the checkout and git runs as the AI user: without safe.directory git refuses it ("dubious ownership")
+        return self.run("-c", f"safe.directory={path}", "rev-parse", "HEAD", cwd=path).strip()
 
     def remove_worktree(self, mirror: Path, path: Path) -> None:
         """Remove a triage checkout after the AI process has stopped, then prune its Git metadata."""

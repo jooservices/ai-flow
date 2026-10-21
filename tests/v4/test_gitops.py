@@ -58,7 +58,13 @@ def test_triage_checkout_is_detached_from_base_and_read_only(tmp_path):
     g.run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=mirror)
     g.run("fetch", "-q", "origin", cwd=mirror)
     wt = tmp_path / "srv" / "triage" / "TESTWP-1"
+    calls = []
+    run = g.run
+    g.run = lambda *a, **k: calls.append(a) or run(*a, **k)
     head = g.readonly_worktree(mirror, wt, "origin/develop")
+    g.run = run
+    # root owns the checkout, git runs as the AI user: rev-parse must trust the path
+    assert ("-c", f"safe.directory={wt}", "rev-parse", "HEAD") in calls
 
     assert len(head) == 40 and (wt / "a.txt").read_text() == "develop\n"
     assert (wt / "a.txt").stat().st_uid == (0 if os.geteuid() == 0 else os.geteuid())

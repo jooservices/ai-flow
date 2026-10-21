@@ -23,6 +23,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..core.toolchains import (STACK_TOOLS, locked_version, pinned_version, toolchain_gaps,
+                               tools_for_stacks_in_project, version_matches)
+
 AI_PACKAGES = {
     "claude": "@anthropic-ai/claude-code",
     "codex": "@openai/codex",
@@ -43,7 +46,8 @@ _REPORTED_VERSION = re.compile(
     r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){1,2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?)(?![A-Za-z0-9])")
 _PYTHON_VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\Z")
 _INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp",
-                  "gh", "claude", "codex", "codex-code-mode-host", "grok", "opencode")
+                  "playwright", "playwright-browser", "gh", "claude", "codex", "codex-code-mode-host",
+                  "grok", "opencode")
 
 
 class OperationError(RuntimeError):
@@ -286,6 +290,55 @@ def _normalized_version(version: str, tool: str, *, default: str = "") -> str:
     return value.removeprefix("v")
 
 
+def _resolve_node_version(version: str) -> str:
+    pin = _check_version(version)
+    if pin and _SEMVER.fullmatch(pin):
+        return pin.removeprefix("v")
+    try:
+        index = _response("https://nodejs.org/dist/index.json", timeout=45).json()
+    except ValueError as exc:
+        raise OperationError("Node.js release index is invalid") from exc
+    selected = next((row for row in index if isinstance(row, dict) and isinstance(row.get("version"), str)
+                     and (version_matches(row["version"], pin) if pin else row.get("lts"))), None)
+    if not selected:
+        raise OperationError("Node.js has no release matching versions.lock")
+    return str(selected["version"]).removeprefix("v")
+
+
+def _resolve_composer_version(version: str) -> str:
+    pin = _check_version(version)
+    if not pin:
+        return ""
+    try:
+        releases = _response("https://getcomposer.org/versions", timeout=45).json().get("stable", [])
+    except (ValueError, AttributeError) as exc:
+        raise OperationError("Composer release metadata is invalid") from exc
+    match = next((str(item.get("version", "")) for item in releases if isinstance(item, dict)
+                 and version_matches(item.get("version"), pin)), "")
+    if not match:
+        raise OperationError("Composer has no stable release matching versions.lock")
+    return match.removeprefix("v")
+
+
+def _resolve_wp_version(version: str) -> str:
+    pin = _check_version(version)
+    if pin and _SEMVER.fullmatch(pin):
+        return pin.removeprefix("v")
+    endpoint = ("https://api.github.com/repos/wp-cli/wp-cli/releases/latest" if not pin else
+                "https://api.github.com/repos/wp-cli/wp-cli/releases?per_page=100")
+    try:
+        payload = _response(endpoint, timeout=45).json()
+    except ValueError as exc:
+        raise OperationError("WP-CLI release metadata is invalid") from exc
+    releases = payload if isinstance(payload, list) else [payload]
+    for release in releases:
+        tag = str((release or {}).get("tag_name", ""))
+        match = _SEMVER.fullmatch(tag)
+        if match and (not pin or version_matches(tag, pin)):
+            return tag.removeprefix("v")
+    raise OperationError("WP-CLI has no release matching versions.lock")
+
+
 def _install_uv(version: str) -> None:
     arch, _ = _linux_arch()
     normalized = _normalized_version(version, "uv")
@@ -318,13 +371,7 @@ def _install_python(version: str) -> None:
 
 def _install_node(version: str) -> None:
     _, node_arch = _linux_arch()
-    normalized = _normalized_version(version, "node")
-    if not normalized:
-        index = _response("https://nodejs.org/dist/index.json", timeout=45).json()
-        current = next((row for row in index if row.get("lts")), None)
-        if not current:
-            raise OperationError("Node.js has no published LTS release")
-        normalized = str(current["version"]).removeprefix("v")
+    normalized = _resolve_node_version(version)
     asset_name = f"node-v{normalized}-linux-{node_arch}.tar.xz"
     sums = _response(f"https://nodejs.org/dist/v{normalized}/SHASUMS256.txt", timeout=45).text
     expected = next((line.split()[0] for line in sums.splitlines()
@@ -381,27 +428,28 @@ def _install_gh(version: str) -> None:
 
 
 def _install_composer(version: str) -> None:
-    reference = _normalized_version(version, "composer") or "latest-stable"
-    base = f"https://getcomposer.org/download/{reference}/composer.phar"
-    payload = _response(base, timeout=300).content
-    digest_text = _response(base + ".sha256sum", timeout=45).text.strip()
-    expected = digest_text.split()[0] if digest_text.split() else ""
-    if not re.fullmatch(r"[0-9a-f]{64}", expected) or hashlib.sha256(payload).hexdigest() != expected:
-        raise OperationError("Composer checksum verification failed")
-    _install_binary("composer", payload)
+    target_version = _resolve_composer_version(version)
+    signature = _response("https://composer.github.io/installer.sig", timeout=45).text.strip()
+    installer = _response("https://getcomposer.org/installer", timeout=45).content
+    if not re.fullmatch(r"[0-9a-f]{96}", signature) or hashlib.sha384(installer).hexdigest() != signature:
+        raise OperationError("Composer installer signature verification failed")
+    with tempfile.TemporaryDirectory(prefix="aiflow4-composer-") as tmp:
+        installer_path = Path(tmp) / "composer-setup.php"
+        installer_path.write_bytes(installer)
+        command = ["php", str(installer_path), "--install-dir=/usr/local/bin", "--filename=composer"]
+        if target_version:
+            command.append(f"--version={target_version}")
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OperationError(f"Composer installer could not run ({type(exc).__name__})") from exc
+        if result.returncode:
+            raise OperationError(f"Composer installer failed (exit {result.returncode})")
 
 
 def _install_wp(version: str) -> None:
-    normalized = _normalized_version(version, "wp")
+    normalized = _resolve_wp_version(version)
     tag = f"v{normalized}" if normalized else ""
-    if not normalized:
-        response = _response("https://api.github.com/repos/wp-cli/wp-cli/releases/latest", timeout=45)
-        try:
-            tag = str(response.json()["tag_name"])
-        except (ValueError, KeyError) as exc:
-            raise OperationError("WP-CLI release metadata is invalid") from exc
-        normalized = _normalized_version(tag, "wp")
-        tag = f"v{normalized}"
     asset = f"wp-cli-{normalized}.phar"
     payload = _github_release_asset("wp-cli/wp-cli", tag, asset)
     _install_binary("wp", payload)
@@ -420,6 +468,29 @@ def _install_codex_host(version: str) -> None:
     parent = Path(codex_path).resolve().parent if codex_path else Path("/usr/local/bin")
     _install_binary("codex-code-mode-host", binary, directory=parent)
     _install_file("codex-code-mode-host.version", f"{normalized}\n".encode(), directory=parent)
+
+
+def _install_playwright(version: str) -> None:
+    pinned = _check_version(version, required=True)
+    try:
+        result = subprocess.run(["npm", "install", "--global", "--no-audit", "--no-fund", "--registry",
+                                 "https://registry.npmjs.org", f"playwright@{pinned}"],
+                                capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"Playwright installer could not run ({type(exc).__name__})") from exc
+    if result.returncode:
+        raise OperationError(f"Playwright installer failed (exit {result.returncode})")
+
+
+def _install_playwright_browser(version: str) -> None:
+    if not shutil.which("playwright"):
+        _install_playwright(version)
+    try:
+        result = subprocess.run(["playwright", "install", "chromium"], capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"Playwright Chromium installer could not run ({type(exc).__name__})") from exc
+    if result.returncode:
+        raise OperationError(f"Playwright Chromium installer failed (exit {result.returncode})")
 
 
 def _install_component(name: str, version: str, packages: list[str]) -> None:
@@ -465,21 +536,18 @@ def _install_component(name: str, version: str, packages: list[str]) -> None:
     if name == "codex-code-mode-host":
         _install_codex_host(version)
         return
+    if name == "playwright":
+        _install_playwright(version)
+        return
+    if name == "playwright-browser":
+        _install_playwright_browser(version)
+        return
 
     raise OperationError(f"component is not in the install whitelist: {name}")
 
 
 def _version_ok(actual: str, expected: str) -> bool:
-    if actual in ("", "missing", "timeout"):
-        return False
-    if not expected:
-        return True
-    match = _REPORTED_VERSION.search(actual)
-    if not match:
-        return False
-    reported = match.group(1).removeprefix("v")
-    pinned = expected.removeprefix("v")
-    return reported == pinned
+    return version_matches(actual, expected)
 
 
 def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
@@ -487,14 +555,49 @@ def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
         if actual.startswith("codex-code-mode-host "):
             return _version_ok(actual, expected)
         return not expected and actual.startswith("present ") and actual != "present "
-    # PHP and Python stack pins may intentionally name only a major/minor release line.
-    if name in {"php", "python3"} and re.fullmatch(r"v?\d+\.\d+", expected):
-        match = _REPORTED_VERSION.search(actual)
-        if match:
-            reported = match.group(1).removeprefix("v")
-            pinned = expected.removeprefix("v")
-            return reported == pinned or reported.startswith(pinned + ".")
     return _version_ok(actual, expected)
+
+
+def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[str, Any]) -> dict[str, Any]:
+    """Install and preflight every configured project stack on this host.
+
+    The API remains responsible for project admission using the next heartbeat. This routine only installs
+    fixed, whitelisted components and returns a fresh local probe so that heartbeat can report convergence.
+    """
+    if not isinstance(project_stacks, dict) or not isinstance(versions, dict):
+        return {"tools": {}, "gaps": {}}
+    from .agent import tool_versions
+
+    project_tools: dict[str, list[str]] = {
+        str(project): tools_for_stacks_in_project(stacks)
+        for project, stacks in project_stacks.items()
+    }
+    required = list(dict.fromkeys(tool for values in project_tools.values() for tool in values))
+    if not required:
+        return {"tools": {}, "gaps": {}}
+    before = tool_versions(required)
+    per_project_stacks = {str(project): stacks for project, stacks in project_stacks.items()}
+    selected = set()
+    for project, tools in project_tools.items():
+        selected.update(toolchain_gaps(before, tools, versions, per_project_stacks[project], require_pins=True))
+    ordered = sorted(selected, key=lambda tool: (
+        _INSTALL_ORDER.index(tool) if tool in _INSTALL_ORDER else len(_INSTALL_ORDER), tool))
+    for tool in ordered:
+        stacks = next((per_project_stacks[project] for project, tools in project_tools.items() if tool in tools), [])
+        stack_tools = {required for stack in (stacks if isinstance(stacks, list) else [stacks])
+                       for required in STACK_TOOLS.get(str(stack), ())}
+        if tool in stack_tools and not locked_version(versions, tool):
+            continue
+        version = pinned_version(versions, tool, stacks)
+        try:
+            _install_component(tool, version, [])
+        except Exception as exc:  # noqa: BLE001 - keep preparing unrelated tools/projects after one installer fails
+            import logging
+            logging.getLogger("aiflow4.node").warning("toolchain install failed for %s: %s", tool, type(exc).__name__)
+    after = tool_versions(required)
+    gaps = {project: toolchain_gaps(after, tools, versions, per_project_stacks[project], require_pins=True)
+            for project, tools in project_tools.items()}
+    return {"tools": after, "gaps": gaps}
 
 
 def _service_health(service: dict[str, Any]) -> dict[str, Any]:

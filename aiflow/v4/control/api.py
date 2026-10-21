@@ -393,7 +393,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "intake"})
-            out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
+        out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}

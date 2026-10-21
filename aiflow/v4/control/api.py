@@ -328,9 +328,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         return FileResponse(f, media_type="application/gzip")
 
     # --- work -----------------------------------------------------------------------------------------------
-    def last_dev(key: str) -> dict | None:
+    def last_dev(key: str, done: bool = False) -> dict | None:
+        """The latest finished dev run; done=True: the latest one that delivered work (a failed or blocked run
+        in between does not answer the reviewer's findings)."""
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
-                          " ORDER BY started_at DESC LIMIT 1", (key,))
+                          + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
     def eligible(account_id: str, node: str) -> list[dict]:
         """Tickets this account may take now: verification of finished work first, then development."""
@@ -428,7 +430,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
         p = repo.projects[t["project"]]
         extra: dict[str, Any] = {}
-        dev = last_dev(t["key"])
+        dev = last_dev(t["key"], done=True) or last_dev(t["key"])
         if body.step == "verify" and dev:
             extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                            "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],

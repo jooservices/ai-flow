@@ -78,6 +78,34 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def join_bootstrap_command(token: str, name: str, control: str, version: str, checksum: str) -> str:
+    """One line for a machine without AI Flow: fetch the signed release with the join token, check its SHA-256 and
+    cosign signature, install it with the release's own aiflow4-node-install, then join with the full binary path.
+    The script travels to `sudo bash -s` on stdin, so the token never appears in a process argument list."""
+    identity = f"https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{version}"
+    steps = [
+        "set -euo pipefail",
+        f"T={shlex.quote(token)}", f"C={shlex.quote(control)}", f"V={shlex.quote(version)}",
+        f"S={shlex.quote(checksum)}", f"N={shlex.quote(name)}",
+        'D=$(mktemp -d)', "trap 'rm -rf \"$D\"' EXIT", 'A="$D/aiflow4-$V.tar.gz"',
+        "get() { curl -fsS --max-time 600 -K <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$T\")"
+        ' -o "$2" "$C$1"; }',
+        'get "/v1/releases/$V.tar.gz" "$A"', 'get "/v1/releases/$V.tar.gz.sigstore.json" "$A.sigstore.json"',
+        'echo "$S  $A" | sha256sum -c --quiet -',
+        'command -v cosign >/dev/null || { echo "install cosign to verify the AI Flow release" >&2; exit 3; }',
+        f'cosign verify-blob "$A" --bundle "$A.sigstore.json" --certificate-identity {shlex.quote(identity)}'
+        " --certificate-oidc-issuer https://token.actions.githubusercontent.com",
+        'mkdir "$D/src"', 'tar -xzf "$A" -C "$D/src"',
+        "install -d -m 0755 /etc/aiflow",
+        "[ -e /etc/aiflow/node.env ] || printf 'AIFLOW4_CONTROL_URL=%s\\nAIFLOW4_NODE_NAME=%s\\nAIFLOW4_SLOTS=1\\n'"
+        ' "$C" "$N" > /etc/aiflow/node.env',
+        'bash "$D/src/deploy/v4/bin/aiflow4-node-install" "$A" "$V" "$A.sigstore.json" "$S"',
+        '/srv/aiflow/current/.venv/bin/aiflow4 node join --name "$N" --join-token-stdin --control "$C" <<<"$T"',
+        "systemctl restart aiflow4-node-agent",
+    ]
+    return f"printf '%s\\n' {shlex.quote('; '.join(steps))} | sudo bash -s"
+
+
 @dataclass
 class Ctx:
     settings: Settings
@@ -304,6 +332,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not row:
             raise HTTPException(401, "unknown node token")
         return row["name"]
+
+    def release_reader(authorization: str = Header(default="")) -> str:
+        """A node token, or an unexpired, unconsumed join token so a new machine can fetch the signed release."""
+        token = authorization.removeprefix("Bearer ").strip()
+        if token:
+            row = ctx.db.one("SELECT node FROM node_join_tokens WHERE token_hash=%s AND consumed_at IS NULL"
+                             " AND expires_at > now()", (h(token),))
+            if row:
+                return row["node"]
+        return node_auth(authorization)
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
@@ -552,6 +590,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != body.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             audit("node", "join_command", name, "", None, user.subject, False, "invalid node name")
             raise HTTPException(400, "invalid node name")
+        version = current_release()
+        try:
+            _, _, _, checksum = release_assets(version)
+        except HTTPException as exc:
+            audit("node", "join_command", name, "", None, user.subject, False, "no signed release is published")
+            raise HTTPException(409, "no signed release is published; run aiflow4-deploy first") from exc
         token = secrets.token_urlsafe(32)
         expires_at = utcnow() + timedelta(minutes=10)
         audit_payload = {"expires_at": expires_at.isoformat(), "ssh_password_saved": False}
@@ -563,9 +607,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit_in(connection, "node", "join_command", name, "", None, user.subject, True,
                      "one-time join command created", audit_payload)
         control = ctx.settings.public_url.rstrip("/")
-        command = (f"printf '%s' {shlex.quote(token)} | sudo aiflow4 node join --name {shlex.quote(name)} "
-                   f"--join-token-stdin --control {shlex.quote(control)}"
-                   " && sudo systemctl enable --now aiflow4-node-agent")
+        command = join_bootstrap_command(token, name, control, version, checksum)
         ctx.events.emit("node.join_command.created", node=name, outcome="created",
                         reason="one-time token expires in 10 minutes", data={"actor": user.subject})
         return {"node": name, "command": command, "expires_at": expires_at.isoformat(), "expires_in_s": 600}
@@ -687,12 +729,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         return FileResponse(sums, media_type="text/plain", filename="SHA256SUMS")
 
     @app.get("/v1/releases/{version}.tar.gz.sigstore.json")
-    def release_signature(version: str, _node: str = Depends(node_auth)) -> FileResponse:
+    def release_signature(version: str, _node: str = Depends(release_reader)) -> FileResponse:
         _, bundle, _, _ = release_assets(version)
         return FileResponse(bundle, media_type="application/json", filename=f"aiflow4-{version}.tar.gz.sigstore.json")
 
     @app.get("/v1/releases/{sha}.tar.gz")
-    def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
+    def release_file(sha: str, node: str = Depends(release_reader)) -> FileResponse:
         if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", sha):
             f, _, _, _ = release_assets(sha)
         elif re.fullmatch(r"[0-9a-f]{7,40}", sha):  # old, already-installed releases remain downloadable

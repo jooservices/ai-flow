@@ -45,11 +45,31 @@ its health check. A successful operation reports installed tool versions and gre
 
 The supported agent operations are `install` and `repair`. Tool names, version pins, package names and service
 units come from the control repo; request bodies cannot supply a command. AI CLIs use fixed npm package names
-with versions from `versions.lock`. Packages, Docker and PHP are delegated to the shared
-[`jooservices/server-installer`](https://github.com/jooservices/server-installer) module. The node runtime
-adapter expects its Python entry points `install_packages(packages=[...])`, `install_docker()`, and
-`install_php(version=...)`; missing module/API errors fail the operation without falling back to shell package
-managers. Other supporting tools use `install_tool(name=..., version=...)` from the same module.
+with versions from `versions.lock`.
+
+Operating system components reuse the bash CLI of
+[`jooservices/server-installer`](https://github.com/jooservices/server-installer) (TESTFLOW-68), pinned to tag
+`v1.1.0` at the fixed path `/opt/server-installer/v1.1.0/bin/server-installer`. The agent runs it without a
+shell, with an argv built from a fixed map; any other component name is rejected:
+
+| Component | Command |
+| --- | --- |
+| `packages`, `git` | `server-installer apply --modules packages` (base packages: zip, unzip, nano, git) |
+| `docker` | `server-installer apply --modules docker` |
+| `php` | `SI_PHP_VERSION=<MAJOR.MINOR from versions.lock> server-installer apply --modules php` |
+
+Inherited `SI_*` variables are removed before the call. After the `packages` module, every package listed in the
+node file is checked with `dpkg-query`; a package the module does not provide fails the operation instead of
+falling back to `apt`. Install the installer on each node (as root) before using these components:
+
+```bash
+git clone --depth 1 --branch v1.1.0 https://github.com/jooservices/server-installer /opt/server-installer/v1.1.0
+```
+
+A missing installer fails the operation with that path in the message. Tools with neither a server-installer
+module nor a fixed npm recipe (`uv`, `gh`, `node`, `composer`, `wp`, `python3`) are not installed by the agent;
+repair reports them as not in the install whitelist, and they belong in the node's base image or a
+server-installer profile.
 
 `GET /v1/nodes/{name}/operations/next` is node-token protected. The agent claims one queued operation and posts
 its verified result to `/result`. The Command Center log is `GET /v1/nodes/{name}/operations`, available only
@@ -57,10 +77,26 @@ to owner and lead sessions.
 
 ## Nodes without an agent
 
-The owner can create a one-line `aiflow4 node join --join-token-stdin` command from the Command Center. Its
-random join capability expires after 10 minutes, is accepted once for the requested node name and is stored in
-PostgreSQL only as a SHA-256 hash. The command also enables the installed node-agent systemd unit. The owner
-SSH password is neither requested nor stored. VM creation remains the separate TESTFLOW-55 flow.
+The owner can create a one-line join command from the Command Center. It works on a machine where AI Flow is
+not installed yet: `printf '%s\n' '<script>' | sudo bash -s`. The script reaches root on stdin, so the token is
+never a process argument. It:
+
+1. downloads the current signed release (`/srv/aiflow/control/releases/CURRENT`) and its sigstore bundle from
+   the control API, authenticated with the join token;
+2. checks the SHA-256 from the release `SHA256SUMS` and the cosign signature of the `release-v4.yml` workflow
+   for that tag;
+3. writes `/etc/aiflow/node.env` (control URL, node name, one slot) only if the file does not exist;
+4. installs the release with that release's own `deploy/v4/bin/aiflow4-node-install`;
+5. runs `/srv/aiflow/current/.venv/bin/aiflow4 node join --join-token-stdin` and restarts
+   `aiflow4-node-agent`.
+
+The machine needs `curl`, `cosign`, `uv` and Python 3.12, which `aiflow4-node-install` already requires. With
+no published signed release the API refuses to create the command (409) and audits the refusal.
+
+The random join token expires after 10 minutes, is accepted once for the requested node name and is stored in
+PostgreSQL only as a SHA-256 hash. Until it is used it also authorizes downloading the release tarball and
+signature; after the join only the node token does. The owner SSH password is neither requested nor stored. VM
+creation remains the separate TESTFLOW-55 flow.
 
 AI account authorization remains the TESTFLOW-76 flow; node install and repair do not read or change account
 credentials.

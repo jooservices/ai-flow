@@ -1,14 +1,17 @@
 """Execute owner-requested node reconciliation using a small, fixed operation whitelist.
 
-The node agent never accepts a shell command from the API. OS packages, Docker and PHP are delegated to the
-shared ``server_installer`` module; AI CLI installs use a fixed package map and exact versions from versions.lock.
+The node agent never accepts a shell command from the API. OS packages, git, Docker and PHP run the pinned
+jooservices/server-installer bash CLI (``server-installer apply --modules <id>``) with an argv built from a fixed
+map; AI CLI installs use a fixed npm package map and exact versions from versions.lock. A tool with no
+whitelisted installer fails the operation with a clear reason instead of falling back to a shell.
 Services are started through systemd with a validated unit name and checked locally before success is reported.
 """
 from __future__ import annotations
 
-import importlib
+import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,7 +22,11 @@ AI_PACKAGES = {
     "grok": "@vibe-kit/grok-cli",
     "opencode": "opencode-ai",
 }
-SYSTEM_COMPONENTS = {"packages", "docker", "php"}
+# jooservices/server-installer (TESTFLOW-68) is a bash CLI, pinned to a reviewed tag at a fixed root-owned path.
+SERVER_INSTALLER_VERSION = "v1.1.0"
+SERVER_INSTALLER = Path(f"/opt/server-installer/{SERVER_INSTALLER_VERSION}/bin/server-installer")
+# Component -> server-installer module id. git ships in the installer's base `packages` module.
+SERVER_INSTALLER_MODULES = {"packages": "packages", "git": "packages", "docker": "docker", "php": "php"}
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}\Z")
 _SAFE_PACKAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+:_-]{0,127}\Z")
 _SAFE_UNIT = re.compile(r"[A-Za-z0-9_.@-]{1,180}\.service\Z")
@@ -38,25 +45,63 @@ def _check_version(value: str, *, required: bool = False) -> str:
     return version
 
 
-def _server_installer():
+def server_installer_command(name: str, version: str = "") -> tuple[list[str], dict[str, str]]:
+    """The fixed argv and SI_* settings for a whitelisted OS component; no shell and no request-supplied text."""
+    module = SERVER_INSTALLER_MODULES.get(name)
+    if module is None:
+        raise OperationError(f"component is not in the server-installer whitelist: {name}")
+    settings: dict[str, str] = {}
+    if module == "php" and version:
+        match = re.match(r"(\d+\.\d+)", _check_version(version))
+        if not match:
+            raise OperationError("PHP version in versions.lock must start with MAJOR.MINOR")
+        settings["SI_PHP_VERSION"] = match.group(1)
+    return [str(SERVER_INSTALLER), "apply", "--modules", module], settings
+
+
+def _missing_packages(packages: list[str]) -> list[str]:
+    missing = []
+    for package in packages:
+        try:
+            result = subprocess.run(["dpkg-query", "-W", "-f=${Status}", package],
+                                    capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            missing.append(package)
+            continue
+        if result.returncode or "install ok installed" not in result.stdout:
+            missing.append(package)
+    return missing
+
+
+def _run_server_installer(name: str, version: str) -> None:
+    command, settings = server_installer_command(name, version)
+    if not SERVER_INSTALLER.is_file():
+        raise OperationError(f"jooservices/server-installer {SERVER_INSTALLER_VERSION} is not installed at "
+                             f"{SERVER_INSTALLER}")
+    # Drop inherited SI_* values so only the pinned settings above reach the installer modules.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SI_")} | settings
     try:
-        return importlib.import_module("server_installer")
-    except ImportError as exc:
-        raise OperationError("shared server-installer module is not installed on this node") from exc
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1800, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"server-installer could not run for {name} ({type(exc).__name__})") from exc
+    if result.returncode:
+        raise OperationError(f"server-installer failed for {name} (exit {result.returncode})")
 
 
 def _install_component(name: str, version: str, packages: list[str]) -> None:
-    """Use the shared installer for OS packages, Docker and PHP, and fixed package recipes for AI CLIs."""
-    if name in SYSTEM_COMPONENTS:
-        installer = _server_installer()
-        if name == "packages":
-            if not packages or any(not _SAFE_PACKAGE.fullmatch(p) for p in packages):
-                raise OperationError("control repo packages must be a non-empty list of safe package names")
-            installer.install_packages(packages=packages)
-        elif name == "docker":
-            installer.install_docker()
-        else:
-            installer.install_php(version=_check_version(version))
+    """Use jooservices/server-installer for OS components and fixed npm recipes for AI CLIs."""
+    if name == "packages":
+        if not packages or any(not _SAFE_PACKAGE.fullmatch(p) for p in packages):
+            raise OperationError("control repo packages must be a non-empty list of safe package names")
+        _run_server_installer(name, version)
+        missing = _missing_packages(packages)
+        if missing:
+            raise OperationError("packages not provided by the server-installer packages module: "
+                                 + ", ".join(missing))
+        return
+
+    if name in SERVER_INSTALLER_MODULES:
+        _run_server_installer(name, version)
         return
 
     if name in AI_PACKAGES:
@@ -68,16 +113,6 @@ def _install_component(name: str, version: str, packages: list[str]) -> None:
             raise OperationError(f"{name} installer could not run ({type(exc).__name__})") from exc
         if result.returncode:
             raise OperationError(f"{name} installer failed (exit {result.returncode})")
-        return
-
-    if name == "codex-code-mode-host":
-        installer = _server_installer()
-        installer.install_codex_code_mode_host(version=_check_version(version, required=True))
-        return
-
-    if name in {"git", "uv", "gh", "node", "composer", "wp", "python3"}:
-        installer = _server_installer()
-        installer.install_tool(name=name, version=_check_version(version))
         return
 
     raise OperationError(f"component is not in the install whitelist: {name}")

@@ -28,6 +28,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
+- [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 
 ## Tools on a node
 

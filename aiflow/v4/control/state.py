@@ -20,8 +20,10 @@ def _iso(ts: datetime | None) -> str | None:
 
 
 def snapshot(ctx) -> dict[str, Any]:
+    from . import api as control_api, rollout
     db = ctx.db
     repo = ctx.repo()
+    releases = control_api.RELEASES
     sa_thresholds = thresholds(repo)
     nodes = []
     assigned: dict[str, int] = {}
@@ -52,6 +54,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
                       "projects": projects,
+                      "version_policy": rollout.node_policy(ctx, n["name"], n["release_version"], releases),
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
     runs_per_account: dict[str, int] = {}
@@ -150,7 +153,9 @@ def snapshot(ctx) -> dict[str, Any]:
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets, "incidents": incidents, "incidents_recent": incidents_recent,
-        "events": events, "sa": sa,
+        "events": events, "sa": sa, "rollout": rollout.summary(db),
+        "version_policy": {"control": ctx.settings.control_version or VERSION,
+                           "max_minor_lag": ctx.settings.version_max_minor_lag},
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),
                    "tokens_out_24h": int(today["tout"]), "done_24h": today["done"], "failed_24h": today["failed"]},
     }

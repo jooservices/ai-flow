@@ -30,7 +30,7 @@ from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import missing_tools, pinned_version
-from . import business, knowledge, memory
+from . import business, knowledge, memory, rollout
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -881,10 +881,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status FROM nodes WHERE name=%s", (node,))
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, last_heartbeat=now(), idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now())"
-                   " ELSE NULL END WHERE name=%s",
+                   " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
+                   " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics),
-                    body.slots_used, node))
+                    body.release_protocol, body.slots_used, node))
         for account_id, expires_at in body.credential_expiries.items():
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
                        (expires_at, account_id, node))
@@ -923,7 +923,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
-        release = current_release(node) if body.release_protocol >= 1 else ""
+        # Signed-release agents follow the fleet rollout (canary, waves, rollback: docs/v4/fleet-upgrade.md).
+        release = fleet_release(node, body.release_version) if body.release_protocol >= 1 else ""
         joined_node = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
         node_projects = repo.projects_for_node(node, joined_node.get("projects") or [], joined_node.get("dynamic", False))
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
@@ -1112,17 +1113,18 @@ def create_app(ctx: Ctx) -> FastAPI:
     def current_release(node: str = "") -> str:
         # During a canary, only the selected node sees the candidate. The file is written by the host updater
         # and shared read-only with control containers; CURRENT remains the fleet-wide stable release.
-        try:
-            import json
-            canary = json.loads((RELEASES / "CANARY.json").read_text())
-            if canary.get("node") == node and canary.get("target"):
-                return str(canary["target"])
-        except (OSError, ValueError, AttributeError):
-            pass
-        try:
-            return (RELEASES / "CURRENT").read_text().strip()
-        except OSError:
-            return ""
+        canary = rollout.canary_override(RELEASES)
+        if node and canary.get("node") == node and canary.get("target"):
+            return str(canary["target"])
+        return rollout.read_current(RELEASES)
+
+    def fleet_release(node: str, reported: str) -> str:
+        """CURRENT moves the fleet through a rollout: the canary and wave members get it, other nodes keep the
+        previous release, and a halted rollout sends its members back."""
+        canary = rollout.canary_override(RELEASES)
+        if canary.get("node") == node and canary.get("target"):
+            return str(canary["target"])
+        return rollout.desired_release(ctx, node, reported, rollout.read_current(RELEASES))
 
     def tagged_release(version: str) -> Path:
         if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
@@ -1185,6 +1187,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         from .incidents import open_incident
         opened = open_incident(ctx, "release_verification", f"{node}:{body.release_version}", "critical", title, detail)
         ctx.events.emit("node.release_rejected", node=node, release_version=body.release_version, detail=detail)
+        rollout.release_rejected(ctx, node, body.release_version, detail)
         return {"recorded": True, "opened": opened}
 
     @app.post("/v1/nodes/{name}/worktrees/sweep")
@@ -1355,6 +1358,9 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        policy = rollout.node_compatible(ctx, node, RELEASES)
+        if not policy["compatible"]:
+            return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
         return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
                              "step": t["step"]} for t in eligible(account, node)[:20]]}
 
@@ -1372,6 +1378,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
+        policy = rollout.node_compatible(ctx, node, RELEASES)
+        if not policy["compatible"]:
+            return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
         candidates = [master_candidate(body.account, node)] if body.step == "master" else eligible(body.account, node)
         tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))

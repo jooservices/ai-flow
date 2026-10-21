@@ -7,6 +7,7 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
+  aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
@@ -134,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+    pu = sub.add_parser("upgrade-check")
+    pu.add_argument("--target", required=True)
+    pu.add_argument("--current", default="")
+    pu.add_argument("--migrations", default="")
+    pu.add_argument("--baseline", default="")
     pw = sub.add_parser("worker")
     pw.add_argument("--account", required=True)
     a = ap.parse_args(argv)
@@ -142,6 +148,21 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "version":
         print(VERSION)
         return 0
+    if a.cmd == "upgrade-check":
+        # Run from the new release before the control plane switches to it; exit 9 blocks the upgrade.
+        from types import SimpleNamespace
+        from .control.db import DB, MIGRATIONS
+        from .control.events import Events
+        from .control.rollout import check_upgrade, record_check
+        db = DB(s.database_url, max_size=2)
+        try:
+            result = check_upgrade(db, a.target, Path(a.migrations) if a.migrations else MIGRATIONS,
+                                   Path(a.baseline) if a.baseline else None, a.current, s.version_max_minor_lag)
+            record_check(SimpleNamespace(db=db, settings=s, events=Events(db, s.o2_url, s.o2_basic)), result)
+            print(json.dumps(result, separators=(",", ":")))
+        finally:
+            db.close()
+        return 0 if result["ok"] else 9
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)

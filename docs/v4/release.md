@@ -53,7 +53,9 @@ The image tag is also its version and includes OCI source, version and revision 
 
 ## Node download and verification
 
-Node heartbeats receive the control plane's `CURRENT` release version. The authenticated release API exposes:
+Node heartbeats receive the control plane's `CURRENT` release through a rolling upgrade: a canary node first,
+then waves, with an automatic rollback on a failed health check ([Fleet upgrade](fleet-upgrade.md)). The
+authenticated release API exposes:
 
 - `GET /v1/releases/{version}/manifest`: version, SHA-256 digest, and links to the archive, signature bundle and checksum
   file.

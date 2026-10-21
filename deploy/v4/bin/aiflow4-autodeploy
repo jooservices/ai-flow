@@ -33,6 +33,15 @@ P
 }
 
 control_state() { curl -fsS http://127.0.0.1/v1/state; }
+# aiflow4-deploy exits 9 when the pre-upgrade check refused TARGET; nothing changed on the control plane. Remember
+# the release so the timer does not retry it until a newer one is published.
+upgrade_blocked() {
+  printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+  echo "pre-upgrade check blocked $TARGET; the control plane keeps ${CUR:-its release}"
+  alert "[CRITICAL] AI Flow: upgrade to $TARGET blocked" \
+    "The pre-upgrade check refused $TARGET (migration changed or deleted, or a node would leave the version skew policy). The control plane keeps ${CUR:-its release}; the reasons are in the upgrade_blocked incident."
+  exit 1
+}
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 # Retry Jira work even when the rollback incident already exists and CANARY.json has been removed.
@@ -157,7 +166,9 @@ else
   # use the canary flow below.
   if [[ ! $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     echo "deploying first versioned release $TARGET (was ${CUR:-none})"
-    if aiflow4-deploy "$TARGET"; then
+    aiflow4-deploy "$TARGET"; RC=$?
+    [ "$RC" -ne 9 ] || upgrade_blocked
+    if [ "$RC" -eq 0 ]; then
       sleep 20
       if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
          && curl -fsS -o /dev/null http://127.0.0.1/cc; then
@@ -206,8 +217,11 @@ else
   exit 0
 fi
 
-# A promoted release is deployed to the control plane, then CURRENT makes it desired on every other node.
-if aiflow4-deploy "$TARGET"; then
+# A promoted release is deployed to the control plane, then CURRENT starts the rolling node upgrade
+# (canary node, then waves; docs/v4/fleet-upgrade.md).
+aiflow4-deploy "$TARGET"; RC=$?
+[ "$RC" -ne 9 ] || upgrade_blocked
+if [ "$RC" -eq 0 ]; then
   sleep 20
   if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
      && curl -fsS -o /dev/null http://127.0.0.1/cc; then

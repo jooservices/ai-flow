@@ -1,6 +1,9 @@
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from conftest import add_ticket
+from aiflow.v4.control.db import J
 
 
 def join(client, name, ip=""):
@@ -274,6 +277,125 @@ def test_restart_sync_keeps_join_reported_ip_and_last_heartbeat(client, ctx):
     assert after["ip"] == "192.0.2.77"
     assert after["last_heartbeat"] == before["last_heartbeat"]
     assert after["metrics"]["hostname"] == "cc-worker"
+
+
+def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
+    add_ticket(ctx.db, "TESTWP-100", status="Done", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic', jira_created=%s, jira_updated=%s, done_at=%s WHERE key='TESTWP-100'",
+               (datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 1, 8, tzinfo=timezone.utc),
+                datetime(2025, 1, 8, tzinfo=timezone.utc)))
+    created = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for i, days in enumerate((7, 6, 5, 4, 3, 2), start=101):
+        add_ticket(ctx.db, f"TESTWP-{i}", status="Done", labels=())
+        ctx.db.run("UPDATE tickets SET type=%s, parent_key='TESTWP-100', jira_created=%s, jira_updated=%s, done_at=%s"
+                   " WHERE key=%s", ("Story" if i % 2 else "Task", created, created + timedelta(days=days),
+                                      created + timedelta(days=days), f"TESTWP-{i}"))
+
+    runs = [
+        ("TESTWP-101", "dev", "claude-01", "claude", "opus", "done", 100, 40, .10, 100),
+        ("TESTWP-101", "verify", "codex-01", "codex", "gpt-6-luna", "rework", 20, 5, .02, 20),
+        ("TESTWP-101", "dev", "claude-01", "claude", "opus", "done", 50, 25, .05, 50),
+        ("TESTWP-102", "dev", "codex-01", "codex", "gpt-6-luna", "done", 30, 10, .03, 40),
+    ]
+    for ticket, step, account, provider, model, outcome, tin, tout, cost, duration in runs:
+        started = created + timedelta(days=1)
+        ctx.db.run(
+            "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+            "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+            " VALUES (%s,%s,'TESTWP',%s,%s,%s,%s,'cc',1,'finished',%s,%s,%s,%s,%s,%s)",
+            (str(uuid.uuid4()), ticket, step, account, provider, model, outcome, started,
+             started + timedelta(seconds=duration), tin, tout, cost))
+    ctx.db.run("INSERT INTO write_audit (target,action,ticket,actor,accepted,result,payload)"
+               " VALUES ('jira','transition','TESTWP-102','codex-01',true,'Needs owner',%s)",
+               (J({"to": "Needs owner"}),))
+    ctx.db.run("INSERT INTO incidents (severity,kind,subject,title,opened_at)"
+               " VALUES ('warning','ticket_stuck','TESTWP-101','TESTWP-101 failed repeatedly',%s)",
+               (created + timedelta(days=2),))
+    ctx.db.run("INSERT INTO incidents (severity,kind,subject,title)"
+               " VALUES ('warning','account_quota','claude-01','account out of quota')")
+
+    response = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-100"})
+    assert response.status_code == 200
+    report = response.json()
+    assert report["period"] == {
+        "start": created.isoformat(), "end": (created + timedelta(days=7)).isoformat(), "days": 7.0,
+    }
+    assert report["tickets"] == {"total": 6, "done": 6, "done_by_type": {"Story": 3, "Task": 3}}
+    assert report["lead_time"] == {"sample_size": 6, "median_seconds": 388800.0, "p90_seconds": 604800.0}
+    assert report["ai_time"] == {"sample_size": 2, "median_seconds": 105.0, "p90_seconds": 170.0,
+                                  "total_seconds": 210.0}
+    assert report["runs_by_outcome"] == {"done": 3, "rework": 1}
+    assert report["rework_rounds"] == {"count": 1, "tickets": [{"key": "TESTWP-101", "rounds": 1}]}
+    usage = report["usage"]
+    assert (usage["tokens_in"], usage["tokens_out"], usage["tokens_total"], usage["cost_usd"]) == (200, 80, 280, .2)
+    by_account = {row["account"]: row for row in usage["by_account"]}
+    assert by_account["claude-01"] == {"account": "claude-01", "runs": 2, "tokens_in": 150,
+                                        "tokens_out": 65, "tokens_total": 215, "cost_usd": .15}
+    by_model = {(row["provider"], row["model"]): row for row in usage["by_model"]}
+    assert by_model[("codex", "gpt-6-luna")]["tokens_total"] == 65
+    assert report["incidents_opened"]["count"] == 1
+    assert report["incidents_opened"]["items"][0]["ticket"] == "TESTWP-101"
+    assert report["owner_needed"] == {"count": 1, "tickets": [{"key": "TESTWP-102", "summary": "Summary of TESTWP-102"}]}
+    assert [r["key"] for r in report["slowest_tickets"]] == [
+        "TESTWP-101", "TESTWP-102", "TESTWP-103", "TESTWP-104", "TESTWP-105"]
+
+    whole_project = client.get("/v1/projects/TESTWP/report").json()
+    assert whole_project["tickets"]["done"] == 6
+    markdown = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-100", "format": "md"})
+    assert markdown.status_code == 200 and markdown.headers["content-type"].startswith("text/markdown")
+    assert "# Project report: TESTWP-100" in markdown.text
+    assert "| Story | 3 |" in markdown.text and "median 4.5d, p90 7.0d (n=6)" in markdown.text
+    assert "Tokens: 280 (200 in, 80 out)" in markdown.text and "TESTWP-102 · Summary of TESTWP-102" in markdown.text
+    assert client.get("/v1/projects/UNKNOWN/report").status_code == 404
+    assert client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-101"}).status_code == 404
+    assert client.get("/v1/projects/TESTWP/report", params={"format": "html"}).status_code == 400
+
+
+def test_jira_sync_uses_resolution_date_for_done_ticket_insert_and_keeps_it_on_edits(ctx):
+    from aiflow.v4.control.jira import FIELDS, Jira
+    from aiflow.v4.control.loops import jira_sync
+
+    completed = datetime(2025, 2, 3, 12, tzinfo=timezone.utc)
+    issue = {"key": "TESTWP-501", "fields": {
+        "summary": "Already complete", "status": {"name": "Done"}, "issuetype": {"name": "Task"},
+        "created": "2025-02-01T12:00:00.000+0000", "updated": "2025-02-05T12:00:00.000+0000",
+        "resolutiondate": "2025-02-03T12:00:00.000+0000",
+    }}
+    ctx.jira.search = lambda _jql: [issue]
+    ctx.jira.normalize = Jira.normalize
+
+    assert "resolutiondate" in FIELDS
+    assert jira_sync(ctx, full=True) == 1
+    row = ctx.db.one("SELECT status, jira_updated, done_at FROM tickets WHERE key='TESTWP-501'")
+    assert row["status"] == "Done"
+    assert row["jira_updated"] == datetime(2025, 2, 5, 12, tzinfo=timezone.utc)
+    assert row["done_at"] == completed
+
+    issue["fields"]["updated"] = "2025-02-10T12:00:00.000+0000"
+    assert jira_sync(ctx, full=True) == 1
+    row = ctx.db.one("SELECT jira_updated, done_at FROM tickets WHERE key='TESTWP-501'")
+    assert row["jira_updated"] == datetime(2025, 2, 10, 12, tzinfo=timezone.utc)
+    assert row["done_at"] == completed
+
+
+def test_project_report_markdown_escapes_jira_text(client, ctx):
+    add_ticket(ctx.db, "TESTWP-510", status="Done", labels=())
+    created = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    done = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    summary = "Slow | title\n\n## Injected\n![image](https://attacker.test) <img src=x> ~~hidden~~"
+    ctx.db.run("UPDATE tickets SET summary=%s, jira_created=%s, jira_updated=%s, done_at=%s WHERE key='TESTWP-510'",
+               (summary, created, done, done))
+    ctx.db.run("INSERT INTO incidents (severity,kind,subject,title,opened_at) VALUES ('warning','test','TESTWP-510',%s,%s)",
+               ("Problem\n\n## Forged heading\n[link](https://attacker.test)", done))
+
+    markdown = client.get("/v1/projects/TESTWP/report", params={"format": "md"}).text
+
+    assert "\n\n## Injected" not in markdown
+    assert "\n\n## Forged heading" not in markdown
+    assert "Slow \\| title \\#\\# Injected \\!\\[image\\]\\(https://attacker.test\\) \\<img src=x\\> \\~\\~hidden\\~\\~" in markdown
+    assert "Problem \\#\\# Forged heading \\[link\\]\\(https://attacker.test\\)" in markdown
+    assert "![image](https://attacker.test)" not in markdown
+    assert "<img src=x>" not in markdown
 
 
 def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):

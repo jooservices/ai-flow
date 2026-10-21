@@ -138,6 +138,15 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
 
 
+def test_delivery_report_button_loads_markdown_into_copyable_drawer():
+    page = html()
+    assert 'data-act="open-report">Report</button>' in page
+    assert "format=md" in page and "loadProjectReport(S.project, epic)" in page
+    assert "function drawerReport()" in page and 'data-act="copy-report">Copy Markdown</button>' in page
+    assert "else if (act === 'copy-report') copyReport()" in page
+    assert "window.navigator.clipboard.writeText(text)" in page and "document.execCommand('copy')" in page
+
+
 def test_gatus_link_is_configurable(monkeypatch):
     monkeypatch.setenv("AIFLOW4_GATUS_URL", "https://status.example/")
     assert Settings.from_env().gatus_url == "https://status.example/"

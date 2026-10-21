@@ -76,11 +76,8 @@ def watchdog(ctx: Ctx) -> None:
     # project stacks: an online node must have every tool its projects need, or a person installs it
     repo = ctx.repo()
     tool_issues: set[str] = set()
-    for n in ctx.db.all("SELECT name, status, tools FROM nodes"):
-        node = repo.nodes.get(n["name"])
-        if not node:
-            continue
-        for key in node.projects:
+    for n in ctx.db.all("SELECT name, status, tools, projects, dynamic FROM nodes"):
+        for key in repo.projects_for_node(n["name"], n["projects"] or [], n["dynamic"]):
             project = repo.projects.get(key)
             if not project:
                 continue

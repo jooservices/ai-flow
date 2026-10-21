@@ -5,10 +5,11 @@ from pathlib import Path
 
 from aiflow.v4.control import api as control_api
 from aiflow.v4.core.release_notes import git_commits, render_changelog
+from conftest import join_node
 
 
 def _join(client, name):
-    response = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+    response = join_node(client, name)
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['node_token']}"}
 

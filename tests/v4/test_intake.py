@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 from aiflow.v4.adapters import RunResult
 from aiflow.v4.control.api import create_app
 from aiflow.v4.core.controlrepo import ControlRepo
@@ -31,7 +31,7 @@ def iclient(ctx, control_repo):
     app = create_app(ctx)
     app.state.sync_accounts()
     c = TestClient(app)
-    token = c.post("/v1/nodes/join", json={"name": "cc", "join_token": "join-secret"}).json()["node_token"]
+    token = join_node(c, "cc").json()["node_token"]
     c.headers.update({"Authorization": f"Bearer {token}"})
     return c
 

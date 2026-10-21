@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Bootstrap a new v4 node using a five-minute, single-use token from Command Center.
+set -euo pipefail
+
+CONTROL_URL=__AIFLOW4_CONTROL_URL__
+SERVER_INSTALLER_TAG=v1.1.0
+COSIGN_VERSION=v3.1.4
+TOKEN=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --token) [ $# -ge 2 ] || { echo "--token needs a value" >&2; exit 2; }; TOKEN=$2; shift 2 ;;
+    *) echo "usage: curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T" >&2; exit 2 ;;
+  esac
+done
+[ -n "$TOKEN" ] || { echo "a short-lived --token from Command Center is required" >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 2; }
+
+WORK=$(mktemp -d /tmp/aiflow4-node-join.XXXXXX)
+chmod 700 "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+TOKEN_BODY=$WORK/token.json
+umask 077
+printf '{"join_token":"%s"}' "$TOKEN" > "$TOKEN_BODY"
+unset TOKEN
+
+# Read the project stack before consuming the token so an expired or invalid token changes no host state.
+curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$TOKEN_BODY" \
+  "$CONTROL_URL/v1/nodes/join-tokens/inspect" -o "$WORK/grant.json"
+read -r NODE_NAME NODE_ROLE PROJECT_KEY STACK RELEASE_VERSION < <(python3 - "$WORK/grant.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print(*(d[k] for k in ("name", "role", "project", "stack", "release")))
+PY
+)
+
+# Redeem immediately so a slow package install cannot run past the five-minute token expiry.
+curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$TOKEN_BODY" \
+  "$CONTROL_URL/v1/nodes/join" -o "$WORK/join.json"
+rm -f "$TOKEN_BODY"
+read -r JOINED_NAME JOINED_RELEASE < <(python3 - "$WORK/join.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print(d["node"], d["release"])
+PY
+)
+[ "$JOINED_NAME" = "$NODE_NAME" ] && [ "$JOINED_RELEASE" = "$RELEASE_VERSION" ] || {
+  echo "join response did not match the inspected node grant" >&2; exit 1;
+}
+NODE_TOKEN_FILE=/srv/aiflow/state/node.token
+install -d -m 0700 /srv/aiflow/state
+python3 - "$WORK/join.json" "$NODE_TOKEN_FILE" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+p = sys.argv[2]
+fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(d["node_token"] + "\n")
+PY
+install -d -m 0755 /etc/aiflow
+cat > /etc/aiflow/node.env <<EOF
+AIFLOW4_CONTROL_URL=$CONTROL_URL
+AIFLOW4_NODE_NAME=$NODE_NAME
+AIFLOW4_NODE_TOKEN_FILE=$NODE_TOKEN_FILE
+AIFLOW4_SLOTS=2
+AIFLOW4_POLICY_RELAY=1
+AIFLOW4_SELF_UPDATE=1
+EOF
+chmod 0600 /etc/aiflow/node.env
+
+# OS setup and preflight stay in server-installer. v1.1.0 is pinned; the node profile proposal is documented
+# separately because that profile must be added to server-installer by its owner/lead.
+curl -fsSL --max-time 120 "https://github.com/jooservices/server-installer/archive/refs/tags/${SERVER_INSTALLER_TAG}.tar.gz" \
+  -o "$WORK/server-installer.tar.gz"
+tar -xzf "$WORK/server-installer.tar.gz" -C "$WORK"
+SI_BIN=$WORK/server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer
+[ -x "$SI_BIN" ] || { echo "pinned server-installer CLI is missing" >&2; exit 1; }
+"$SI_BIN" apply --modules packages,timesync,docker,docker_group --preflight
+
+# AI Flow owns the userland runtimes, agent, worker, project tools and provider CLIs.
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq nodejs npm git python3 python3-venv ca-certificates curl >/dev/null
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y -q nodejs npm git python3 ca-certificates curl
+else
+  echo "AI Flow node bootstrap currently supports Ubuntu/Debian and RHEL-family package managers" >&2
+  exit 1
+fi
+
+curl -fsSL --max-time 60 https://astral.sh/uv/install.sh -o "$WORK/uv-install.sh"
+UV_INSTALL_DIR=/usr/local/bin sh "$WORK/uv-install.sh" >/dev/null
+uv python install 3.12 >/dev/null
+PY312=$(uv python find 3.12)
+ln -sfn "$PY312" /usr/local/bin/python3.12
+ln -sfn "$PY312" /usr/local/bin/python3
+
+if [[ "$STACK" =~ ^php-([0-9]+\.[0-9]+)$ ]]; then
+  SI_PHP_VERSION=${BASH_REMATCH[1]} SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight
+  curl -fsSL --max-time 60 https://getcomposer.org/installer -o "$WORK/composer-setup.php"
+  php "$WORK/composer-setup.php" --install-dir=/usr/local/bin --filename=composer >/dev/null
+  curl -fsSL --max-time 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+  chmod 0755 /usr/local/bin/wp
+elif [ "$STACK" = python-3.12 ]; then
+  uv python install 3.12 >/dev/null
+fi
+
+if ! id aiflow-worker >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir /srv/aiflow --shell /usr/sbin/nologin aiflow-worker
+fi
+install -d -o aiflow-worker -g aiflow-worker /srv/aiflow/accounts /srv/aiflow/cache/ai/tmp /srv/aiflow/work
+install -d -o root -g root -m 0700 /srv/aiflow/state
+python3 - "$WORK/join.json" <<'PY'
+import json, os, pwd, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+worker = pwd.getpwnam("aiflow-worker")
+for account in d.get("accounts", []):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", account):
+        raise SystemExit("invalid account id in control repo")
+    path = os.path.join("/srv/aiflow/accounts", account)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chown(path, worker.pw_uid, worker.pw_gid)
+PY
+
+npm install --global @anthropic-ai/claude-code @openai/codex @vibe-kit/grok-cli opencode-ai >/dev/null
+CODEX_VERSION=$(codex --version | sed -nE 's/.* ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
+[ -n "$CODEX_VERSION" ] || { echo "could not determine the installed Codex CLI version" >&2; exit 1; }
+case "$(uname -m)" in
+  x86_64) CODEX_HOST_ARCH=x86_64 ;;
+  aarch64) CODEX_HOST_ARCH=aarch64 ;;
+  *) echo "unsupported architecture for Codex code-mode host: $(uname -m)" >&2; exit 1 ;;
+esac
+CODEX_HOST_ARCHIVE="codex-code-mode-host-${CODEX_HOST_ARCH}-unknown-linux-musl.tar.gz"
+curl -fsSL --max-time 120 "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${CODEX_HOST_ARCHIVE}" \
+  -o "$WORK/codex-host.tar.gz"
+mkdir -p "$WORK/codex-host"
+tar -xzf "$WORK/codex-host.tar.gz" -C "$WORK/codex-host"
+CODEX_HOST=$(find "$WORK/codex-host" -type f -name codex-code-mode-host -print -quit)
+[ -n "$CODEX_HOST" ] || { echo "Codex release did not contain codex-code-mode-host" >&2; exit 1; }
+CODEX_BIN=$(readlink -f "$(command -v codex)")
+install -m 0755 "$CODEX_HOST" "$(dirname "$CODEX_BIN")/codex-code-mode-host"
+case "$(uname -m)" in
+  x86_64) COSIGN_ARCH=amd64; COSIGN_SHA256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
+  aarch64) COSIGN_ARCH=arm64; COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
+  *) echo "unsupported architecture for signed release verification: $(uname -m)" >&2; exit 1 ;;
+esac
+curl -fsSL --max-time 120 "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${COSIGN_ARCH}" \
+  -o "$WORK/cosign"
+echo "$COSIGN_SHA256  $WORK/cosign" | sha256sum --check --status || { echo "cosign checksum verification failed" >&2; exit 1; }
+install -m 0755 "$WORK/cosign" /usr/local/bin/cosign
+
+api_get() {
+  local api_token=$1; shift
+  printf 'header = "Authorization: Bearer %s"\n' "$api_token" | curl -fsS -K - --max-time 120 "$@"
+}
+api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL/v1/releases/$RELEASE_VERSION/manifest" -o "$WORK/manifest.json"
+TARBALL_PATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tarball"])' "$WORK/manifest.json")
+SIGNATURE_PATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["signature"])' "$WORK/manifest.json")
+SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$WORK/manifest.json")
+api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL$TARBALL_PATH" -o "$WORK/release.tar.gz"
+api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL$SIGNATURE_PATH" -o "$WORK/release.sigstore.json"
+/usr/local/sbin/aiflow4-node-install "$WORK/release.tar.gz" "$RELEASE_VERSION" \
+  "$WORK/release.sigstore.json" "$SHA256"
+echo "Node $NODE_NAME joined AI Flow. Sign in to its AI CLI as aiflow-worker when ready."

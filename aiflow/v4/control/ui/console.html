@@ -465,6 +465,7 @@ var S = {
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   biz: null, bizError: '', bizLoading: null,
+  join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
 };
@@ -682,7 +683,7 @@ function renderCC() {
 
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span></div><div class="nodes">';
-  if (!d.nodes.length) h += '<div class="empty">No node has joined. Run <span class="mono">aiflow4 node join</span> on a machine.</div>';
+  if (!d.nodes.length) h += '<div class="empty">No node has joined. Create a one-use join command below and run it on the new machine.</div>';
   d.nodes.forEach(function (n) {
     var accs = d.accounts.filter(function (a) { return a.node === n.name; });
     var runs = d.active_runs.filter(function (r) { return r.node === n.name; }).length;
@@ -711,6 +712,7 @@ function renderCC() {
     h += '<li><span class="f-time">' + hhmm(e.ts) + '</span><span class="f-type" data-tone="' + tn + '">' + esc(e.type) + '</span><span class="f-text">' + (subj ? '<b>' + esc(subj) + '</b> ' : '') + esc([e.outcome, e.reason].filter(Boolean).join(' · ')) + '</span></li>';
   });
   h += '</ul></section></div>';
+  h += '<div id="node-onboarding"></div>';
 
   h += '<section class="panel" id="p-accounts" aria-labelledby="h-acc"><div class="panel-h"><h2 id="h-acc">AI accounts</h2><span class="hint">Quota belongs to an account. Each worker checks its account every 30 minutes and after any limit.</span><span class="spacer"></span><div class="seg" role="group" aria-label="Filter accounts">';
   [['all', 'All'], ['working', 'Working'], ['idle', 'Ready'], ['cooldown', 'No quota'], ['bad', 'Failing']].forEach(function (f) {
@@ -753,7 +755,53 @@ function renderCC() {
 
   h += '<section class="panel" aria-labelledby="h-ver"><div class="panel-h"><h2 id="h-ver">Versions</h2><span class="hint">Pinned in aiflow-control/versions.lock, reported by each node</span></div>' + versionsBox() + '</section></div></div>';
 
+  var oldJoin = $('#node-onboarding');
+  var focusId = oldJoin && oldJoin.contains(document.activeElement) ? document.activeElement.id : '';
+  var focusStart = focusId && document.activeElement.selectionStart;
+  var focusEnd = focusId && document.activeElement.selectionEnd;
   $('#view-cc').innerHTML = h;
+  if (oldJoin) $('#node-onboarding').replaceWith(oldJoin);
+  if (focusId) {
+    var focusTarget = $('#' + focusId);
+    if (focusTarget) { focusTarget.focus(); if (focusTarget.setSelectionRange && focusStart != null) focusTarget.setSelectionRange(focusStart, focusEnd); }
+  }
+  renderNodeJoin();
+}
+
+function renderNodeJoin(force) {
+  var host = $('#node-onboarding'); if (!host) return;
+  var projects = D().projects || [];
+  if (!S.join.project && projects.length) S.join.project = projects[0].key;
+  var sig = [projects.map(function (p) { return p.key; }).join(','), S.join.busy, S.join.error,
+    S.join.command, S.join.expires_at, S.join.copied].join('|');
+  if (!force && sig === S.join.sig) return;
+  S.join.sig = sig;
+  var h = '<section class="panel" id="p-node-join"><div class="panel-h"><h2 id="h-node-join">Join a node</h2><span class="hint">Create a one-use token for one node and project. It expires in five minutes.</span></div>';
+  h += '<form class="crform" id="node-join-form" novalidate><label for="join-name">Node name<input id="join-name" required maxlength="63" autocomplete="off" value="' + esc(S.join.name) + '"></label>';
+  h += '<label for="join-role">Role<select id="join-role"><option value="worker"' + (S.join.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (S.join.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
+  h += '<label for="join-project">Project<select id="join-project">';
+  projects.forEach(function (p) { h += '<option value="' + esc(p.key) + '"' + (S.join.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; });
+  h += '</select></label><label for="join-key">Provisioning key<input id="join-key" type="password" required autocomplete="off" value="' + esc(S.join.provision_key) + '"></label>';
+  h += '<div><button class="btn primary" type="submit"' + (S.join.busy || !projects.length ? ' disabled' : '') + '>' + (S.join.busy ? 'Creating…' : 'Create join command') + '</button></div>';
+  if (S.join.error) h += '<div class="err" role="alert">' + esc(S.join.error) + '</div>';
+  if (S.join.command) h += '<label class="wide" for="join-command">Run on the new Ubuntu node before ' + esc(when(S.join.expires_at)) + '<textarea id="join-command" rows="2" readonly onclick="this.select()">' + esc(S.join.command) + '</textarea></label><div><button class="btn" type="button" data-act="copy-join">' + (S.join.copied ? 'Copied' : 'Copy command') + '</button></div>';
+  h += '<div class="small wide">The provisioning key is the control plane’s configured AIFLOW4_JOIN_TOKEN. It only authorizes token creation; the short-lived join token contains no AI account credentials.</div></form></section>';
+  host.innerHTML = h;
+}
+
+function submitNodeJoin() {
+  if (S.join.busy) return;
+  S.join.error = ''; S.join.command = ''; S.join.copied = false; S.join.busy = true; renderNodeJoin(true);
+  fetch('/v1/nodes/join-tokens', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provision_key: S.join.provision_key, name: S.join.name, role: S.join.role, project: S.join.project })
+  }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'Join token request failed (' + r.status + ')'); return d; });
+  }).then(function (d) {
+    S.join.provision_key = '';
+    S.join.expires_at = d.expires_at;
+    S.join.command = 'curl -fsSL ' + location.origin + '/v1/install.sh | sudo sh -s -- --token ' + d.token;
+  }).catch(function (e) { S.join.error = String(e.message || e); })
+    .then(function () { S.join.busy = false; renderNodeJoin(true); });
 }
 function accMatch(a, f) {
   if (f === 'all') return true;
@@ -1430,6 +1478,14 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
   else if (act === 'open-report') openProjectReport(el);
   else if (act === 'copy-report') copyReport();
+  else if (act === 'copy-join') {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      S.join.error = 'Clipboard access failed; select and copy the command manually.'; renderNodeJoin(true);
+    } else {
+      navigator.clipboard.writeText(S.join.command).then(function () { S.join.copied = true; renderNodeJoin(true); })
+        .catch(function () { S.join.error = 'Clipboard access failed; select and copy the command manually.'; renderNodeJoin(true); });
+    }
+  }
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; S.sh.renderKey = ''; savePrefs(); render(); }
@@ -1447,9 +1503,11 @@ document.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && e.target.matches && e.target.matches('tr[data-act]')) e.target.click();
 });
 var CR_FIELDS = { 'cr-title': 'title', 'cr-desc': 'description', 'cr-epic': 'epic' };
+var JOIN_FIELDS = { 'join-name': 'name', 'join-key': 'provision_key' };
 document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
+  if (JOIN_FIELDS[e.target.id]) S.join[JOIN_FIELDS[e.target.id]] = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key') && e.target.getAttribute('data-sh-field') !== 'screenshot') {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {}; S.sh.forms[key][field] = e.target.value;
@@ -1458,6 +1516,8 @@ document.addEventListener('input', function (e) {
 document.addEventListener('change', function (e) {
   if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
+  if (e.target.id === 'join-role') S.join.role = e.target.value;
+  if (e.target.id === 'join-project') S.join.project = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key')) {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {};
@@ -1467,6 +1527,7 @@ document.addEventListener('change', function (e) {
 });
 document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
+  if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
 });
 window.addEventListener('popstate', function () { setView(viewOf(location.pathname)); });
 

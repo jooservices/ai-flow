@@ -1,21 +1,97 @@
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
 def join(client, name, ip=""):
-    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret", "ip": ip})
+    r = join_node(client, name, ip=ip)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
 
 def test_join_requires_the_join_token(client):
-    assert client.post("/v1/nodes/join", json={"name": "cc", "join_token": "nope"}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens", json={"provision_key": "nope", "name": "cc",
+                                                       "project": "TESTWP"}).status_code == 403
+    assert client.post("/v1/nodes/join", json={"join_token": "nope"}).status_code == 403
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}).status_code == 401
+
+
+def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(client, ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr(control_api, "RELEASES", tmp_path)
+    (tmp_path / "CURRENT").write_text("v1.2.3")
+    issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-new",
+                                                         "role": "worker", "project": "TESTWP",
+                                                         "ai_account": "must-not-be-stored"})
+    assert issued.status_code == 200
+    data = issued.json()
+    assert set(data) == {"token", "name", "role", "project", "expires_at"}
+    assert data["name"] == "node-new" and data["role"] == "worker" and data["project"] == "TESTWP"
+    assert len(data["token"]) >= 40 and "must-not-be-stored" not in data["token"]
+    preview = client.post("/v1/nodes/join-tokens/inspect", json={"join_token": data["token"]})
+    assert preview.status_code == 200
+    assert preview.json() == {"name": "node-new", "role": "worker", "project": "TESTWP", "stack": "",
+                              "release": "v1.2.3"}
+
+    joined = client.post("/v1/nodes/join", json={"join_token": data["token"]})
+    assert joined.status_code == 200
+    assert {k: joined.json()[k] for k in ("node", "role", "project", "stack", "release")} == {
+        "node": "node-new", "role": "worker", "project": "TESTWP", "stack": "", "release": "v1.2.3"}
+    node = ctx.db.one("SELECT role,projects,token_hash FROM nodes WHERE name='node-new'")
+    assert node["role"] == "worker" and node["projects"] == ["TESTWP"]
+    assert node["token_hash"] != joined.json()["node_token"]
+    assert client.post("/v1/nodes/join", json={"join_token": data["token"]}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": data["token"]}).status_code == 403
+
+    expired = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-expired",
+                                                         "role": "worker", "project": "TESTWP"}).json()["token"]
+    ctx.db.run("UPDATE node_join_tokens SET expires_at=now()-interval '1 second' WHERE token_hash=%s",
+               (control_api.h(expired),))
+    assert client.post("/v1/nodes/join", json={"join_token": expired}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": expired}).status_code == 403
+
+
+def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_release(client):
+    response = client.get("/v1/install.sh")
+    assert response.status_code == 200
+    script = response.text
+    assert "CONTROL_URL=http://testserver" in script
+    assert "SERVER_INSTALLER_TAG=v1.1.0" in script
+    assert "apply --modules packages,timesync,docker,docker_group --preflight" in script
+    assert "SI_PHP_VERSION" in script and "--modules php --preflight" in script
+    assert "useradd --system" in script and "aiflow-worker" in script
+    assert "npm install --global @anthropic-ai/claude-code @openai/codex" in script
+    assert "aiflow4-node-install" in script and "node_token" in script
+    assert "__AIFLOW4_CONTROL_URL__" not in script
+
+
+def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
+    page = Path("aiflow/v4/control/ui/console.html").read_text()
+    docs = Path("docs/v4/node-join.md").read_text()
+    assert "Join a node" in page and "join-tokens" in page and "--token ' + d.token" in page
+    assert "AIFLOW4_JOIN_TOKEN" in page and "codex login --device-auth" in docs
+    assert "AI provider credential" in docs and "never sent to the control plane" in docs
+
+
+def test_joined_project_node_is_online_preflight_green_and_can_claim_project_ticket(client, ctx):
+    headers = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-71")
+    heartbeat = client.post("/v1/nodes/node1/heartbeat", json={
+        "tools": {"git": "git version 2", "uv": "uv 0.1", "codex": "codex 1.0",
+                  "codex-code-mode-host": "present /usr/local/bin/codex-code-mode-host"},
+        "slots_total": 2,
+    }, headers=headers)
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["desired"]["projects"] == ["TESTWP"]
+    node = next(n for n in client.get("/v1/state").json()["nodes"] if n["name"] == "node1")
+    assert node["status"] == "online" and node["missing_tools"] == [] and node["projects"] == ["TESTWP"]
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=headers)
+    assert candidates.status_code == 200
+    assert [t["key"] for t in candidates.json()["tickets"]] == ["TESTWP-71"]
 
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):

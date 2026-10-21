@@ -114,16 +114,26 @@ class ControlRepo:
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
 
-    def tools_for_node(self, node: str) -> list[str]:
+    def tools_for_node(self, node: str, projects: list[str] | None = None) -> list[str]:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
         out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
-        for p in (n.projects if n else []):
+        for p in (projects if projects is not None else (n.projects if n else [])):
             if p in self.projects:
                 for tool in tools_for_stack(self.projects[p].stack):
                     if tool not in out:
                         out.append(tool)
         return out
+
+    def projects_for_node(self, node: str, bound_projects: list[str], dynamic: bool = False) -> list[str]:
+        """Return a joined node's bound projects, constrained by node YAML when it is control-repo managed."""
+        allowed = set(bound_projects)
+        if not dynamic:
+            configured = self.nodes.get(node)
+            if not configured:
+                return []
+            allowed.intersection_update(configured.projects)
+        return [key for key in bound_projects if key in allowed and key in self.projects]
 
     def provider_tools_for_node(self, node: str) -> list[str]:
         return tools_for_providers(a.provider for a in self.accounts_on(node))

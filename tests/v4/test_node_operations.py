@@ -14,10 +14,26 @@ import pytest
 
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4 import cli
 from aiflow.v4.node import agent, operations
 
 
 SESSION_SECRET = "test-console-session-secret-at-least-32-bytes"
+
+
+def test_cli_keeps_canary_commands_and_stdin_join_tokens(capsys):
+    with pytest.raises(SystemExit) as join_help:
+        cli.main(["node", "join", "--help"])
+    assert join_help.value.code == 0
+    join_options = capsys.readouterr().out
+    assert "--join-token-file" in join_options and "--join-token-stdin" in join_options
+
+    with pytest.raises(SystemExit) as canary_help:
+        cli.main(["canary", "--help"])
+    assert canary_help.value.code == 0
+    canary_commands = capsys.readouterr().out
+    assert all(action in canary_commands for action in (
+        "evaluate", "record-rollback", "record-promotion", "retry-tickets"))
 
 
 def sign_in(client, ctx, role="owner", subject="owner@example.test"):

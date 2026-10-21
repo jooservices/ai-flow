@@ -789,7 +789,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
-        release = current_release() if body.release_protocol >= 1 else ""
+        release = current_release(node) if body.release_protocol >= 1 else ""
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": release,
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
@@ -968,7 +968,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"id": parsed_id, "status": status}
 
     # --- releases: nodes follow a tagged, signed release written by aiflow4-deploy ---------------------------
-    def current_release() -> str:
+    def current_release(node: str = "") -> str:
+        # During a canary, only the selected node sees the candidate. The file is written by the host updater
+        # and shared read-only with control containers; CURRENT remains the fleet-wide stable release.
+        try:
+            import json
+            canary = json.loads((RELEASES / "CANARY.json").read_text())
+            if canary.get("node") == node and canary.get("target"):
+                return str(canary["target"])
+        except (OSError, ValueError, AttributeError):
+            pass
         try:
             return (RELEASES / "CURRENT").read_text().strip()
         except OSError:

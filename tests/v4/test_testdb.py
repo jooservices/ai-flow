@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 
 import psycopg
 import pytest
@@ -48,7 +49,7 @@ def test_sweep_drops_old_and_legacy_idle_databases_but_keeps_young_and_used_ones
     young = admin.make(testdb.new_name(now - 60))
     legacy = admin.make("aiflow4_t_" + "ab12cd34ef56")
     used = admin.make(testdb.new_name(now - 4 * 3600))
-    other = admin.make("aiflow4_not_a_test_db")
+    other = admin.make(f"aiflow4_not_a_test_db_{uuid.uuid4().hex}")
     with psycopg.connect(make_conninfo(DATABASE_URL, dbname=used)):  # a live session keeps its database
         dropped = testdb.sweep(DATABASE_URL, now=now)
         assert old in dropped and legacy in dropped

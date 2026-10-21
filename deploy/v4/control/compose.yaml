@@ -20,7 +20,7 @@ x-app: &app
     AIFLOW4_SMTP_PORT: "1025"
     OTEL_SERVICE_NAME: aiflow4-control
   volumes:
-    - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github:ro
+    - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
     - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
     - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro

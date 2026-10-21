@@ -24,7 +24,7 @@ from . import jira_connect, memory
 from . import projects as project_lifecycle
 from . import rollout
 from ..core.toolchains import toolchain_gaps
-from .incidents import close_incident, open_incident
+from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
 from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
@@ -280,6 +280,12 @@ def watchdog(ctx: Ctx) -> None:
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL"):
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
+    # a flow that stands still and a configuration that keeps a project from getting work
+    try:
+        check_stack_pins(ctx)
+        check_idle_flow(ctx)
+    except Exception as e:  # noqa: BLE001 - a failing check must not stop the rest of the watchdog
+        log.warning("idle and pin checks failed: %s", e)
     # runs whose lease disappeared (worker died, node down, network split)
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])

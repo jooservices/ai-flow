@@ -419,7 +419,8 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
-    assert 'id="view-integrations"' in page
+    assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
+    assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
@@ -439,12 +440,13 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
     def render(data: dict) -> str:
         return run_script("var root = {innerHTML: ''};"
                           " document.querySelector = function (s) { return s === '#view-integrations' ? root : null; };"
-                          f" S.view = 'integrations'; S.integ.jira = {json.dumps(data)}; renderIntegrations();"
+                          f" S.view = 'integrations'; S.consoleUser = {{role: 'owner'}};"
+                          f" S.integ.jira = {json.dumps(data)}; renderIntegrations();"
                           " console.log(root.innerHTML);")
 
     out = render(status)
-    for text in ("acme", "cloud-1", "bot@acme.test", "write:jira-work", "Disconnect", "Connect Jira",
-                 "/v1/integrations/jira/oauth/callback"):
+    for text in ("Connect GitHub", "Create a GitHub App", "acme", "cloud-1", "bot@acme.test",
+                 "write:jira-work", "Disconnect", "Connect Jira", "/v1/integrations/jira/oauth/callback"):
         assert text in out
     assert 'type="password" data-integ-field="client_secret"' in out and 'type="password" data-integ-field="api_token"' in out
     needs = render({**status, "connected": False, "needs_reconnect": True, "state": "needs_reconnect"})

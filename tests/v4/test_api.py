@@ -462,3 +462,12 @@ def test_in_progress_ticket_without_a_run_is_requeued(client, ctx):
     watchdog(ctx)
     assert ctx.jira.status_of["TESTWP-40"] == "To Do"
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "To Do"
+
+
+def test_nodes_follow_the_current_release(client, ctx, tmp_path, monkeypatch):
+    n1 = join(client, "node1")
+    hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1).json()
+    assert "release" in hb["desired"]
+    assert client.get("/v1/releases/zzz.tar.gz", headers=n1).status_code in (400, 404)
+    assert client.get("/v1/releases/abc1234.tar.gz", headers=n1).status_code == 404
+    assert client.get("/v1/releases/abc1234.tar.gz").status_code == 401

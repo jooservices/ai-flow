@@ -11,7 +11,10 @@ if [ -n "$BUNDLE" ]; then
   git push -q origin "$REF" 2>&1 | grep -v '^remote:' || true
 else
   git fetch -q origin
-  case "$REF" in */*) ;; *) REF="origin/$REF" ;; esac   # deploy what GitHub has, not a stale local branch
+  case "$REF" in
+    */*) ;;
+    *) if echo "$REF" | grep -Eq '^[0-9a-f]{7,40}$'; then :; else REF="origin/$REF"; fi ;;   # a commit, or GitHub's branch
+  esac
 fi
 SHA=$(git rev-parse --short=10 "$REF")
 B=/srv/aiflow/build/$SHA; rm -rf "$B"; mkdir -p "$B"; git archive "$REF" | tar -x -C "$B"
@@ -29,9 +32,13 @@ AIFLOW4_IMAGE_TAG=$SHA docker compose -f "$CF" up -d --no-deps control-loops 2>&
 mkdir -p /srv/aiflow/control/releases
 TAR=/srv/aiflow/control/releases/aiflow4-$SHA.tar.gz
 git archive --format=tar.gz -o "$TAR" "$REF"
-install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" /usr/local/sbin/
+install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" "$B/deploy/v4/bin/aiflow4-autodeploy" /usr/local/sbin/
+install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable -q --now aiflow4-autodeploy.timer
 mkdir -p /root/.bridge/out/release; rm -f /root/.bridge/out/release/*.tar.gz
 cp "$TAR" /root/.bridge/out/release/; echo "$SHA" > /root/.bridge/out/release/SHA
+# nodes follow CURRENT through their heartbeat; write it before this node restarts its agent
+echo "$SHA" > /srv/aiflow/control/releases/CURRENT.tmp && mv /srv/aiflow/control/releases/CURRENT.tmp /srv/aiflow/control/releases/CURRENT
 aiflow4-node-install "$TAR" "$SHA"
+ls -1t /srv/aiflow/control/releases/aiflow4-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep 10 releases
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
 echo "deployed $SHA"

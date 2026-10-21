@@ -1,0 +1,8 @@
+[Unit]
+Description=AI Flow v4: deploy develop when it moved and CI passed
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aiflow4-autodeploy
+TimeoutStartSec=1800

@@ -6,15 +6,17 @@ fencing is enforced in exactly one place; every accepted or refused write is rec
 from __future__ import annotations
 
 import hashlib
+import re
 import logging
 import secrets
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -296,8 +298,27 @@ def create_app(ctx: Ctx) -> FastAPI:
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+                            "release": current_release(),
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "versions": repo.versions}}
+
+    # --- releases: nodes follow the release the control plane runs (written by aiflow4-deploy) ---------------
+    RELEASES = Path("/srv/aiflow/control/releases")
+
+    def current_release() -> str:
+        try:
+            return (RELEASES / "CURRENT").read_text().strip()
+        except OSError:
+            return ""
+
+    @app.get("/v1/releases/{sha}.tar.gz")
+    def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            raise HTTPException(400, "bad release id")
+        f = RELEASES / f"aiflow4-{sha}.tar.gz"
+        if not f.is_file():
+            raise HTTPException(404, "no such release")
+        return FileResponse(f, media_type="application/gzip")
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str) -> dict | None:

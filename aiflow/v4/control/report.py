@@ -129,6 +129,13 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
         "SELECT key, project, status, type, summary, description, parent_key, labels, jira_created, jira_updated, done_at"
         " FROM tickets WHERE project=%s ORDER BY key", (project_key,))
     by_key = {t["key"]: t for t in all_tickets}
+    project_epics = [ticket for ticket in all_tickets if ticket["type"] == "Epic"]
+    done_epics = sum(ticket["status"] == "Done" for ticket in project_epics)
+    project_close_suggestion = {
+        "suggested": bool(project_epics) and done_epics == len(project_epics),
+        "epics_done": done_epics,
+        "epics_total": len(project_epics),
+    }
     if epic_key:
         epic = by_key.get(epic_key)
         if not epic or epic["type"] != "Epic":
@@ -230,6 +237,7 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
     slowest.sort(key=lambda row: (-row["lead_time_seconds"], row["key"]))
     return {
         "project": project_key, "epic": epic_key,
+        "project_close_suggestion": project_close_suggestion,
         "period": {"start": _iso(period_start), "end": _iso(period_end), "days": period_days},
         "tickets": {"total": len(tickets), "done": len(completed), "in_progress": sum(
             t["status"] in {"In Progress", "In Verify", "Human review"} for t in tickets),
@@ -279,9 +287,16 @@ def render_markdown(report: dict[str, Any]) -> str:
            f"- In progress (In Progress, In Verify, Human review): {tickets['in_progress']}",
            f"- Needs owner: {tickets['needs_owner']}", f"- Rework rounds: {report['rework_rounds']['count']}",
            f"- Lead time: {_duration(report['lead_time'])}",
-           f"- Tokens: {report['usage']['tokens_total']}", f"- Estimated cost: ${report['usage']['cost_usd']:.6f} USD", "",
-           "## Tickets", "", f"Done: {tickets['done']} of {tickets['total']}", "",
-           "| Type | Done |", "| --- | ---: |"]
+           f"- Tokens: {report['usage']['tokens_total']}", f"- Estimated cost: ${report['usage']['cost_usd']:.6f} USD", ""]
+    suggestion = report["project_close_suggestion"]
+    if suggestion["suggested"]:
+        out += ["", "## Project closure", "",
+                f"All {suggestion['epics_done']} epics are Done. AI Flow suggests considering project closure.", ""]
+    else:
+        out += ["", "## Project closure", "",
+                f"Project closure is not suggested: {suggestion['epics_done']} of {suggestion['epics_total']} epics are Done.", ""]
+    out += ["## Tickets", "", f"Done: {tickets['done']} of {tickets['total']}", "",
+            "| Type | Done |", "| --- | ---: |"]
     out.extend(f"| {_md_text(kind)} | {count} |" for kind, count in tickets["done_by_type"].items())
     if not tickets["done_by_type"]:
         out.append("| — | 0 |")
@@ -404,6 +419,11 @@ def render_html(report: dict[str, Any]) -> str:
     if not rows:
         rows.append('<tr><td colspan="8">No child tickets.</td></tr>')
     state = "Insufficient tasks found" if coverage["insufficient_tasks"] else "No task coverage gaps found"
+    suggestion = report["project_close_suggestion"]
+    project_closure = (f"All {suggestion['epics_done']} epics are Done. AI Flow suggests considering project closure."
+                       if suggestion["suggested"] else
+                       f"Project closure is not suggested: {suggestion['epics_done']} of "
+                       f"{suggestion['epics_total']} epics are Done.")
     lead = _duration(report["lead_time"])
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -424,6 +444,7 @@ body{font:14px/1.5 system-ui,sans-serif;color:#172033;margin:28px}h1,h2{margin:.
 <div><strong>""" + str(report["usage"]["tokens_total"]) + """</strong>Tokens</div>
 <div><strong>$""" + f"{report['usage']['cost_usd']:.6f}" + """</strong>Estimated cost (USD)</div>
 </div>
+<h2>Project closure</h2><p>""" + html.escape(project_closure) + """</p>
 <h2>Requirement coverage · <span class=""" + ("gap" if coverage["insufficient_tasks"] else "") + """>""" + state + """</span></h2>
 <table><thead><tr><th>Ticket</th><th>Parent</th><th>Status</th><th>Acceptance criteria · verify result</th><th>Rework</th><th>Tokens</th><th>Cost (USD)</th><th>Gap</th></tr></thead><tbody>""" + "".join(rows) + """</tbody></table>
 </body></html>"""

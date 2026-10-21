@@ -34,9 +34,16 @@ def snapshot(ctx) -> dict[str, Any]:
             status = "offline"
         projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
         required = repo.tools_for_node(n["name"], projects)
+        configured = repo.nodes.get(n["name"])
+        desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"],
+                      "has_agent": bool(n["token_hash"]), "required_tools": required,
+                      "desired_services": [{"name": str(s.get("name") or s.get("unit") or "service"),
+                                            "unit": str(s.get("unit") or ""),
+                                            "healthcheck_configured": bool(s.get("healthcheck"))}
+                                           for s in desired_services],
                       "missing_tools": missing_tools(n["tools"], required), "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
                       "last_heartbeat": _iso(n["last_heartbeat"]),

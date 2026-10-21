@@ -20,8 +20,9 @@ the `aiflow-worker` system user and per-account homes, installs the shared uv-ma
 `/opt/aiflow/python` (without replacing the operating system's `python3` command), installs the project tools
 and AI CLIs, downloads the current signed AI Flow release, verifies its checksum and cosign signature, then
 extracts and runs that release's `deploy/v4/bin/aiflow4-node-install` helper. The installed node agent then
-follows the current signed release on later heartbeats. The equivalent CLI flow accepts a short-lived token
-file with `aiflow4 node join --join-token-file /path/to/token`; the node name is taken from the token grant.
+follows the current signed release on later heartbeats. The equivalent CLI flow accepts a short-lived token file
+or standard input with `aiflow4 node join --join-token-file /path/to/token` or
+`aiflow4 node join --join-token-stdin`; the node name, role, and project come from the token grant.
 
 ## Accounts and sign-in
 

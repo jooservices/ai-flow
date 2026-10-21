@@ -71,6 +71,9 @@ class Node:
     purpose: str = ""
     notes: str = ""
     location: str = ""
+    tools: list[str] = field(default_factory=list)
+    packages: list[str] = field(default_factory=list)
+    services: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -120,7 +123,12 @@ class ControlRepo:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
         out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
-        for p in (projects if projects is not None else (n.projects if n else [])):
+        installable = set(NODE_TOOLS).union(*(set(tools) for tools in STACK_TOOLS.values()))
+        for tool in (n.tools if n else []):
+            if tool in installable and tool not in out:
+                out.append(tool)
+        project_keys = projects if projects is not None else (n.projects if n else [])
+        for p in project_keys:
             if p in self.projects:
                 for tool in tools_for_stack(self.projects[p].stack):
                     if tool not in out:

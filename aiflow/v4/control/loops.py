@@ -119,7 +119,10 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
 
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
-    keys = ctx.settings.jira_projects or sorted(ctx.repo().projects)
+    configured = ctx.repo().projects
+    # The control repo is authoritative when it contains project definitions: added projects join sync
+    # automatically and paused or removed projects stop being queried on the next pass.
+    keys = sorted(key for key, project in configured.items() if not project.paused)
     if not ctx.jira or not keys:
         return 0
     projects = ",".join(keys)

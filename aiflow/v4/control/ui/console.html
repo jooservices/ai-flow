@@ -251,6 +251,15 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .knowledge-form textarea{min-height:230px;resize:vertical;font-family:var(--f-mono);font-size:12px;line-height:1.5}.knowledge-history{display:grid;gap:9px}.knowledge-version{border:1px solid var(--line);border-radius:9px;padding:10px;background:var(--surface-2)}
 .knowledge-version pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:4px 0 10px;padding:8px;border-radius:7px;background:var(--surface)}
 @media(max-width:850px){.knowledge-grid{grid-template-columns:minmax(0,1fr)}}
+.project-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.project-form label{display:grid;gap:5px;color:var(--muted);font-size:12px}
+.project-form input,.project-form select,.project-form textarea{width:100%;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface-2);color:var(--fg)}
+.project-form textarea{min-height:82px;resize:vertical;font-family:var(--f-mono);font-size:12px}
+.project-form .wide{grid-column:1/-1}
+.project-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.project-checks{display:grid;gap:7px;border:1px solid var(--line-soft);border-radius:10px;padding:12px;background:var(--surface-2)}
+.project-checks ul{margin:0;padding-left:20px}.project-checks .bad{color:var(--crit)}.project-checks .good{color:var(--good)}
+.project-table{overflow:auto}.project-table table{min-width:720px}
 .bd{display:flex; flex-direction:column; gap:8px}
 .bd-row{display:grid; grid-template-columns:96px minmax(0,1fr) 64px; gap:10px; align-items:center; font-size:12.5px}
 .bd-bar{display:flex; height:16px; border-radius:6px; overflow:hidden; background:var(--track)}
@@ -402,6 +411,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
+      <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -431,6 +441,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div id="sbody" class="view"></div>
   </section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
+  <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -495,6 +506,8 @@ var ICON = {
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
+  projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
+    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
@@ -506,6 +519,7 @@ var S = {
   knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' }
 };
 function viewOf(path) {
+  if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/sa') === 0) return 'sa';
   if (path.indexOf('/delivery') === 0) return 'delivery';
   if (path.indexOf('/lead') === 0) return 'lead';
@@ -611,6 +625,74 @@ function pollConsoleSession() {
     if (S.drawer && S.drawer.kind === 'node' && consoleReader()) loadNodeOperations(S.drawer.id);
   }).catch(function () { S.consoleUser = null; render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
+}
+function projectResponseError(response) {
+  return response.json().then(function (data) {
+    if (response.ok) return data;
+    var detail = data.detail || ('HTTP ' + response.status);
+    if (typeof detail === 'object') {
+      if (detail.missing_statuses && detail.missing_statuses.length) return Promise.reject(new Error('Missing Jira statuses: ' + detail.missing_statuses.join(', ')));
+      return Promise.reject(new Error(detail.message || JSON.stringify(detail)));
+    }
+    return Promise.reject(new Error(String(detail)));
+  });
+}
+function loadProjectList() {
+  fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
+    .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+}
+function loadProjectCatalog() {
+  if (S.projectAdmin.catalog || S.projectAdmin.busy) return;
+  S.projectAdmin.busy = true; S.projectAdmin.error = ''; renderProjects();
+  fetch('/v1/projects/catalog', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) {
+      S.projectAdmin.catalog = d;
+      var form = S.projectAdmin.form;
+      if (!form.site && d.jira_sites && d.jira_sites.length) form.site = d.jira_sites[0];
+      if (!form.repo && d.github_repos && d.github_repos.length) form.repo = d.github_repos[0].full_name;
+      S.projectAdmin.error = '';
+    }).catch(function (e) { S.projectAdmin.error = String(e.message || e); })
+    .then(function () { S.projectAdmin.busy = false; renderProjects(); });
+}
+function projectRequestBody() {
+  var f = S.projectAdmin.form;
+  return { site: f.site, project: f.project, repo: f.repo, base: f.base || 'develop', stack: f.stack || '',
+    checks: String(f.checks || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean),
+    priority: Number(f.priority), parallel_limit: Number(f.parallel_limit), merge_method: f.merge_method };
+}
+function runProjectPreflight() {
+  S.projectAdmin.busy = true; S.projectAdmin.error = ''; S.projectAdmin.preflight = null; renderProjects();
+  fetch('/v1/projects/preflight', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(projectRequestBody()) }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { S.projectAdmin.preflight = d; })
+    .catch(function (e) { S.projectAdmin.error = String(e.message || e); })
+    .then(function () { S.projectAdmin.busy = false; renderProjects(); });
+}
+function saveProject() {
+  S.projectAdmin.busy = true; S.projectAdmin.error = ''; renderProjects();
+  fetch('/v1/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(projectRequestBody()) }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) {
+      toast('Project added', d.project + ' · bot commit ' + (d.commit || 'created'), 'ok');
+      S.projectAdmin.showForm = false; S.projectAdmin.preflight = null; S.projectAdmin.catalog = null;
+      loadProjectList(); poll();
+    }).catch(function (e) { S.projectAdmin.error = String(e.message || e); })
+    .then(function () { S.projectAdmin.busy = false; renderProjects(); });
+}
+function setProjectPaused(key, paused) {
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/pause', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: paused }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast(paused ? 'Project paused' : 'Project resumed', d.project, 'ok'); loadProjectList(); poll(); })
+    .catch(function (e) { toast('Could not update project', String(e.message || e), 'warn'); });
+}
+function removeManagedProject(key) {
+  if (!window.confirm('Remove ' + key + ' from AI Flow? Jira and GitHub data will be kept.')) return;
+  fetch('/v1/projects/' + encodeURIComponent(key), { method: 'DELETE' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast('Project removed', d.project + ' was removed from AI Flow.', 'ok'); loadProjectList(); poll(); })
+    .catch(function (e) { toast('Could not remove project', String(e.message || e), 'warn'); });
 }
 function loadNodeOperations(name) {
   if (!consoleReader()) return;
@@ -1995,6 +2077,65 @@ function renderFooter() {
   [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
 }
 
+function renderProjects() {
+  var root = $('#view-projects'); if (!root) return;
+  var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
+  h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
+  if (consoleOwner()) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
+  h += '</div>';
+  if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
+  else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
+  else {
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Actions</th></tr></thead><tbody>';
+    rows.forEach(function (p) {
+      h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc(p.repo) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
+      if (consoleOwner()) {
+        h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
+        h += '<button class="btn sm danger" data-act="project-remove" data-key="' + esc(p.key) + '">Remove</button>';
+      }
+      h += '</div></td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can add, pause, resume or remove projects.</div>';
+  h += '</section>';
+  if (state.showForm && consoleOwner()) {
+    var form = state.form, catalog = state.catalog || {}, jiraProjects = catalog.jira_projects || [], repos = catalog.github_repos || [];
+    h += '<section class="panel"><div class="panel-h"><h2>Add project</h2><span class="hint">Preflight runs before any control repo change.</span></div>';
+    if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+    if (state.busy && !catalog.jira_sites) h += '<div class="muted">Loading connected Jira projects and GitHub repositories…</div>';
+    if (catalog.jira_sites) {
+      h += '<form class="project-form" onsubmit="return false">';
+      h += '<label>Connected Jira site<select data-project-field="site">' + catalog.jira_sites.map(function (site) { return '<option value="' + esc(site) + '"' + (form.site === site ? ' selected' : '') + '>' + esc(site) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Jira project key or URL<input data-project-field="project" list="jira-project-options" value="' + esc(form.project) + '" placeholder="ABC or Jira project URL"><datalist id="jira-project-options">' + jiraProjects.map(function (p) { return '<option value="' + esc(p.key) + '" label="' + esc(p.name) + '"></option>'; }).join('') + '</datalist></label>';
+      h += '<label>GitHub repository<select data-project-field="repo">' + repos.map(function (r) { return '<option value="' + esc(r.full_name) + '"' + (form.repo === r.full_name ? ' selected' : '') + '>' + esc(r.full_name) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
+      h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
+      h += '<label>Parallel limit<input type="number" min="1" max="100" data-project-field="parallel_limit" value="' + esc(form.parallel_limit) + '"></label>';
+      h += '<label>Merge method<select data-project-field="merge_method">' + ['squash', 'merge', 'rebase'].map(function (method) { return '<option value="' + method + '"' + (form.merge_method === method ? ' selected' : '') + '>' + method + '</option>'; }).join('') + '</select></label>';
+      h += '<label class="wide">Checks, one command per line<textarea data-project-field="checks" placeholder="composer install&#10;vendor/bin/phpunit">' + esc(form.checks) + '</textarea></label></form>';
+      if (state.preflight) {
+        var pf = state.preflight;
+        h += '<div class="project-checks"><strong>Preflight result</strong>';
+        h += pf.missing_statuses.length ? '<div class="bad">Missing Jira workflow statuses:</div><ul class="bad">' + pf.missing_statuses.map(function (status) { return '<li>' + esc(status) + '</li>'; }).join('') + '</ul>' : '<div class="good">Jira workflow has all required statuses.</div>';
+        h += pf.branch_exists ? '<div class="good">Base branch exists in the selected repository.</div>' : '<div class="bad">Base branch is missing from the selected repository.</div>';
+        h += '<strong>Node toolchains</strong>';
+        if (!pf.nodes.length) h += '<div class="muted">No nodes have reported a heartbeat yet.</div>';
+        pf.nodes.forEach(function (n) { h += '<div class="' + (n.ready ? 'good' : 'bad') + '">' + esc(n.name) + ': ' + (n.ready ? 'ready' : 'missing ' + esc(n.missing_tools.join(', '))) + '</div>'; });
+        h += '</div>';
+      }
+      h += '<div class="project-actions"><button class="btn" data-act="project-preflight"' + (state.busy ? ' disabled' : '') + '>Run preflight</button>';
+      h += '<button class="btn primary" data-act="project-save"' + (!state.preflight || !state.preflight.ok || state.busy ? ' disabled' : '') + '>Save project</button>';
+      h += '<button class="btn" data-act="project-add-cancel">Cancel</button></div>';
+    }
+    h += '</section>';
+  }
+  root.innerHTML = h;
+}
+
 function render() {
   renderLive();
   renderFooter();
@@ -2006,6 +2147,7 @@ function render() {
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
   else if (S.view === 'knowledge') renderKnowledge();
+  else if (S.view === 'projects') renderProjects();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2025,7 +2167,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -2036,6 +2178,7 @@ function setView(v) {
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
+  if (v === 'projects') loadProjectList();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -2046,6 +2189,14 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'project-add-open') {
+    S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog();
+  }
+  else if (act === 'project-add-cancel') { S.projectAdmin.showForm = false; S.projectAdmin.preflight = null; S.projectAdmin.error = ''; renderProjects(); }
+  else if (act === 'project-preflight') runProjectPreflight();
+  else if (act === 'project-save') saveProject();
+  else if (act === 'project-pause') setProjectPaused(el.getAttribute('data-key'), el.getAttribute('data-paused') === 'true');
+  else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();
   else if (act === 'review-approve' || act === 'review-rework') {
     var card = el.closest('[data-review-card]'), note = card && $('textarea', card);
@@ -2121,12 +2272,28 @@ document.addEventListener('click', function (e) {
   }
 });
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-project-field]')) {
+    var field = e.target.getAttribute('data-project-field');
+    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.preflight = null;
+    var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
+    var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
+  }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
     S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
+  }
+});
+document.addEventListener('change', function (e) {
+  if (e.target && e.target.matches('[data-project-field]')) {
+    var field = e.target.getAttribute('data-project-field');
+    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.preflight = null;
+    var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
+    var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
   }
 });
 document.addEventListener('keydown', function (e) {
@@ -2179,6 +2346,7 @@ loadPrefs();
 showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);
+if (S.view === 'projects') loadProjectList();
 poll(); pollServices(); pollAnalytics(); pollConsoleSession(); pollReviews();
 setInterval(tick, 1000);
 })();

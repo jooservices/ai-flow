@@ -45,6 +45,8 @@ class Project:
     limits: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     priority: int = 5          # lower first: workers serve the projects in this order
+    paused: bool = False       # paused projects remain configured but do not sync or receive new claims
+    nodes: list[str] = field(default_factory=list)  # optional node assignments for projects created in the console
 
     @property
     def repo_name(self) -> str:
@@ -63,6 +65,14 @@ class Project:
     def stacks(self) -> list[str]:
         """Normalized stack names, preserving support for the original single-string form."""
         return normalize_stacks(self.stack)
+
+    @property
+    def parallel_limit(self) -> int:
+        """Maximum number of simultaneous runs for this project; zero means unlimited."""
+        try:
+            return max(0, int((self.limits or {}).get("parallel", 0)))
+        except (TypeError, ValueError):
+            return 0
 
 
 @dataclass
@@ -156,9 +166,15 @@ class ControlRepo:
         """Return the projects this node serves, using YAML as authority for configured nodes."""
         configured = self.nodes.get(node)
         if configured:
-            return [key for key in configured.projects if key in self.projects]
+            assigned = list(configured.projects)
+            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            return [key for key in dict.fromkeys(assigned)
+                    if key in self.projects and not self.projects[key].paused]
         if dynamic:
-            return [key for key in bound_projects if key in self.projects]
+            assigned = list(bound_projects)
+            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            return [key for key in dict.fromkeys(assigned)
+                    if key in self.projects and not self.projects[key].paused]
         return []
 
     def provider_tools_for_node(self, node: str) -> list[str]:

@@ -712,3 +712,21 @@ def test_failing_verify_backs_off(client, ctx):
     client.post(f"/v1/runs/{v['run_id']}/release", json={"fence": v["fence"]}, headers=n1)
     cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
     assert all(c["key"] != "TESTWP-41" for c in cands)
+
+
+def test_worktree_sweep_names_finished_tickets_and_spent_run_checkouts(client, ctx):
+    from tests.v4.conftest import add_ticket
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-1", "Done")
+    add_ticket(ctx.db, "TESTWP-2", "In Progress")
+    add_ticket(ctx.db, "TESTWP-3", "Done")
+    ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, node, fence) VALUES"
+               " (gen_random_uuid(), 'TESTWP-3', 'TESTWP', 'verify', 'claude-01', 'cc', 1)")
+    dirs = ["TESTWP/TESTWP-1-feature", "TESTWP/TESTWP-1-feature--verify", "TESTWP/TESTWP-2-feature",
+            "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2--triage-abc", "TESTWP/TESTWP-3-feature", "TESTWP/probe",
+            "TESTWP/../etc"]
+    r = client.post("/v1/nodes/cc/worktrees/sweep", json={"dirs": dirs}, headers=cc)
+    assert r.status_code == 200
+    assert sorted(r.json()["remove"]) == ["TESTWP/TESTWP-1-feature", "TESTWP/TESTWP-1-feature--verify",
+                                          "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2--triage-abc"]
+    assert client.post("/v1/nodes/node1/worktrees/sweep", json={"dirs": []}, headers=cc).status_code == 403

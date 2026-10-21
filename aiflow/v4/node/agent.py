@@ -41,7 +41,9 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             continue
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            out[name] = (p.stdout or p.stderr).strip().splitlines()[0][:80] if (p.stdout or p.stderr) else "?"
+            output = (p.stdout or p.stderr).strip()
+            version = output.splitlines()[0][:80] if output else ""
+            out[name] = version if p.returncode == 0 and version else "missing"
         except (OSError, subprocess.TimeoutExpired):
             out[name] = "missing"
     return out

@@ -9,7 +9,7 @@ def test_node_tool_versions_include_codex_code_mode_host(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return SimpleNamespace(stdout=f"{cmd[0]} 1.0\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} 1.0\n", stderr="")
 
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
     versions = agent.tool_versions()
@@ -21,17 +21,41 @@ def test_node_tool_versions_report_codex_code_mode_host_missing(monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[0] == "codex-code-mode-host":
             raise FileNotFoundError(cmd[0])
-        return SimpleNamespace(stdout="ok\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
     assert agent.tool_versions()["codex-code-mode-host"] == "missing"
+
+
+def test_node_tool_versions_report_nonzero_exit_with_output_as_missing(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "php":
+            return SimpleNamespace(returncode=1, stdout="", stderr="PHP startup error\n")
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} version\n", stderr="")
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    versions = agent.tool_versions()
+    assert versions["php"] == "missing"
+    assert versions["composer"] == "composer version"
+
+
+def test_node_tool_versions_report_success_without_output_as_missing(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "composer":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} version\n", stderr="")
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    versions = agent.tool_versions()
+    assert versions["composer"] == "missing"
+    assert versions["php"] == "php version"
 
 
 def test_node_tool_versions_report_stack_tools(monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[0] == "wp":
             raise FileNotFoundError(cmd[0])
-        return SimpleNamespace(stdout=f"{cmd[0]} version\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} version\n", stderr="")
 
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
     versions = agent.tool_versions()
@@ -58,7 +82,7 @@ def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypa
     def fake_run(cmd, **kwargs):
         if cmd[0] == "wp":
             raise FileNotFoundError(cmd[0])
-        return SimpleNamespace(stdout=f"{cmd[0]} version\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"{cmd[0]} version\n", stderr="")
 
     monkeypatch.setattr(agent, "ControlClient", FakeApi)
     monkeypatch.setattr(agent, "metrics", lambda prev: ({"hostname": "node1"}, (1, 1)))

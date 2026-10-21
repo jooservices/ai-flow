@@ -12,7 +12,8 @@ from typing import Any
 
 import yaml
 
-from .toolchains import NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_stack, tools_for_stacks
+from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
+                         tools_for_stacks)
 
 __all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
            "tools_for_stack", "tools_for_stacks"]
@@ -113,11 +114,18 @@ class ControlRepo:
         return [a for a in self.accounts if a.node == node]
 
     def tools_for_node(self, node: str) -> list[str]:
-        """Tools the node needs for every project it serves. Unknown nodes need only the node tools."""
+        """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
+        out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
-        if not n:
-            return list(NODE_TOOLS)
-        return tools_for_stacks(self.projects[p].stack for p in n.projects if p in self.projects)
+        for p in (n.projects if n else []):
+            if p in self.projects:
+                for tool in tools_for_stack(self.projects[p].stack):
+                    if tool not in out:
+                        out.append(tool)
+        return out
+
+    def provider_tools_for_node(self, node: str) -> list[str]:
+        return tools_for_providers(a.provider for a in self.accounts_on(node))
 
     def account(self, account_id: str) -> Account | None:
         return next((a for a in self.accounts if a.id == account_id), None)

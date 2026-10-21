@@ -56,6 +56,31 @@ Download `codex-code-mode-host` from the same GitHub release as the installed `c
 directory on `PATH` (for example `/usr/local/bin`). Install both from the same release: a host from a
 different release may not speak the protocol of the `codex` it runs beside.
 
+## Intake refinement
+
+Tickets written by people go to the **Intake** status first. Accounts with the `intake_refiner` role in
+`aiflow-control/accounts.yaml` see them as step `intake` (after verify work, before development); `aiflow-hold`
+and `explicit_only` work as for the other steps. The worker checks out the project's base branch and runs
+`prompts/v4/intake.md` with the ticket text and the repository's `docs/SPEC.md` (when present). An intake run
+may read files but never change them: the policy hook denies the editor tools and allows only inspection
+commands in the shell (`ls`, `cat`, `grep`, `find` without `-exec`/`-delete`, `git log/show/diff/status`, ...;
+no redirects or command substitution), ignoring the project's command allowlist. The run gets no project
+environment (`/etc/aiflow/projects/<KEY>.env` is not passed to it). The AI answers with one of two results:
+
+- **Rewrite**: the original description is kept as a Jira comment ("original description kept"), the
+  description is replaced with the template (business requirement, acceptance criteria AC1.., technical notes,
+  definition of done) through the fenced `POST /v1/jira/{key}/description`, the `aiflow-ready` label is added
+  and the ticket moves to **To Do**. Run outcome `refined`.
+- **Questions**: the questions are written as a comment and the ticket moves to **Needs owner**. Run outcome
+  `questions`. Answer them in the description and move the ticket back to Intake for another pass.
+
+`POST /v1/jira/{key}/description` takes `{"run_id", "fence", "body"}` like the other Jira writes: a stale fence
+gets 409 (audited as refused), a run of another ticket or of a step other than `intake` gets 403 and an empty
+body gets 400. A rewrite that lacks one of the four template headings (in order) or an `AC1` line under the
+acceptance criteria is not saved. An intake run that ends without a usable answer (outcome `failed`, the summary
+names what was missing) leaves the ticket in Intake;
+it is offered again 10 minutes after the failure.
+
 ## Console (Command Center and Delivery)
 
 `/cc` and `/delivery` use the full window width: a 16 px gutter on each side, 24 px on screens wider than

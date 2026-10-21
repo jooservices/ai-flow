@@ -1,5 +1,6 @@
 from aiflow.v4.core.controlrepo import ControlRepo, Project
-from aiflow.v4.core.toolchains import NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_stack, tools_for_stacks
+from aiflow.v4.core.toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
+                                      tools_for_stack, tools_for_stacks)
 
 
 def join(client, name):
@@ -11,18 +12,18 @@ def join(client, name):
 def test_stack_values_map_to_node_and_project_tools():
     assert STACK_TOOLS["php-8.3"] == ("php", "composer", "wp")
     assert STACK_TOOLS["python-3.12"] == ("python3", "uv")
-    assert tools_for_stack("php-8.3") == list(NODE_TOOLS) + ["php", "composer", "wp"]
+    assert tools_for_stack("php-8.3") == list(BASE_TOOLS) + ["php", "composer", "wp"]
     assert "python3" in tools_for_stack("python-3.12")
-    assert tools_for_stack("unknown") == list(NODE_TOOLS)
+    assert tools_for_stack("unknown") == list(BASE_TOOLS)
     assert tools_for_stacks(["php-8.3", "python-3.12"]) == list(NODE_TOOLS) + ["php", "composer", "wp", "python3"]
+    # AI CLIs are required by the providers of a node's accounts, not by project stacks
+    assert tools_for_providers(["codex", "claude"]) == ["codex", "codex-code-mode-host", "claude"]
 
 
 def test_project_tools_follow_the_stack_and_missing_is_explicit():
     project = Project(key="TESTWP", repo="jooservices/test-aiflow-wp", stack="php-8.3")
-    assert project.tools == list(NODE_TOOLS) + ["php", "composer", "wp"]
-    assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == \
-        ["claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker", "git", "node", "uv", "gh",
-         "composer", "wp"]
+    assert project.tools == list(BASE_TOOLS) + ["php", "composer", "wp"]
+    assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == ["git", "uv", "composer", "wp"]
 
 
 def test_control_repo_reads_the_project_stack_and_node_tool_union(control_repo):
@@ -30,8 +31,8 @@ def test_control_repo_reads_the_project_stack_and_node_tool_union(control_repo):
         "key: TESTWP\nrepo: jooservices/test-aiflow-wp\nstack: php-8.3\n")
     repo = ControlRepo.load(control_repo)
     assert repo.projects["TESTWP"].stack == "php-8.3"
-    assert repo.projects["TESTWP"].tools == list(NODE_TOOLS) + ["php", "composer", "wp"]
-    assert repo.tools_for_node("cc") == list(NODE_TOOLS) + ["php", "composer", "wp"]
+    assert repo.projects["TESTWP"].tools == list(BASE_TOOLS) + ["php", "composer", "wp"]
+    assert repo.tools_for_node("cc") == list(BASE_TOOLS) + ["claude", "opencode", "php", "composer", "wp"]
 
 
 def test_watchdog_warns_when_a_node_misses_tools_for_a_project(client, ctx):
@@ -43,7 +44,7 @@ def test_watchdog_warns_when_a_node_misses_tools_for_a_project(client, ctx):
     tools.update({"php": "PHP 8.3.0", "composer": "missing", "wp": "WP-CLI 2.10"})
     response = client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "tools": tools}, headers=cc)
 
-    assert response.json()["desired"]["tools"] == list(NODE_TOOLS) + ["php", "composer", "wp"]
+    assert response.json()["desired"]["tools"] == list(BASE_TOOLS) + ["claude", "opencode", "php", "composer", "wp"]
     node = next(n for n in client.get("/v1/state").json()["nodes"] if n["name"] == "cc")
     assert node["missing_tools"] == ["composer"]
 

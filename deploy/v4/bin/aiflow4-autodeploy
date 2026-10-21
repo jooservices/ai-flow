@@ -14,6 +14,7 @@ CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
 CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-3600}
 CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
 CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
+CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
 AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
 
 mkdir -p "$RELEASES"
@@ -30,24 +31,40 @@ P
 
 control_state() { curl -fsS http://127.0.0.1/v1/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
+now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
-  python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" <<'P'
+  python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" "$5" <<'P'
 import json, os, sys
-path, target, node, previous, started = sys.argv[1:]
+path, target, node, previous, started, requested = sys.argv[1:]
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
-    json.dump({"target": target, "node": node, "previous": previous, "started_at": started}, f)
+    json.dump({"target": target, "node": node, "previous": previous, "started_at": started,
+               "requested_at": requested}, f)
     f.write("\n")
 os.replace(tmp, path)
 P
 }
+# Reject the candidate: CANARY_REJECTED stops a retry, removing CANARY.json returns the node to CURRENT on its
+# next heartbeat, the registry gets an incident and a flow-bug, and the owner gets a CRITICAL alert.
+reject_canary() {
+  local why=$1 measurements=$2 commit
+  commit=$(git -C "$R" rev-list -n 1 "refs/tags/$TARGET" 2>/dev/null || true)
+  [ -n "$commit" ] || commit=unknown
+  printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+  rm -f "$CANARY_FILE"
+  canary_cli record-rollback --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
+    --commit "$commit" --measurements "$measurements" || echo "could not write canary rollback incident/ticket" >&2
+  echo "canary $TARGET $why; $NODE returned to $PREVIOUS"
+  alert "[CRITICAL] AI Flow: canary $TARGET rolled back" \
+    "Canary node $NODE returned to $PREVIOUS: $why. Suspected commit: $commit. The registry has a canary incident; a flow-bug ticket was requested."
+}
 
 if [ -f "$CANARY_FILE" ]; then
-  read -r TARGET NODE PREVIOUS STARTED_AT < <(python3 - "$CANARY_FILE" <<'P'
+  IFS=$'\t' read -r TARGET NODE PREVIOUS STARTED_AT REQUESTED_AT < <(python3 - "$CANARY_FILE" <<'P'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    print(d["target"], d["node"], d["previous"], d.get("started_at", ""), sep="\t")
+    print(d["target"], d["node"], d["previous"], d.get("started_at") or "-", d.get("requested_at") or "-", sep="\t")
 except (OSError, ValueError, KeyError):
     raise SystemExit("invalid canary state")
 P
@@ -55,14 +72,30 @@ P
   [ -n "${TARGET:-}" ] && [ -n "${NODE:-}" ] && [ -n "${PREVIOUS:-}" ] || {
     echo "canary state is incomplete" >&2; exit 1;
   }
+  [ "$STARTED_AT" != - ] || STARTED_AT=
+  [ "$REQUESTED_AT" != - ] || REQUESTED_AT=
   if [ -z "${STARTED_AT:-}" ]; then
     NODE_RELEASE=$(control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); n=next((x for x in d["nodes"] if x["name"]==sys.argv[1]),None); print(n["release"] if n else "")' "$NODE" 2>/dev/null || true)
     if [ "$NODE_RELEASE" != "$TARGET" ]; then
-      echo "waiting for canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown})"
+      if [ -z "$REQUESTED_AT" ]; then
+        # State written before requested_at existed: start the install clock now.
+        write_canary "$TARGET" "$NODE" "$PREVIOUS" "" "$(now_utc)"
+        echo "waiting for canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown})"
+        exit 0
+      fi
+      WAITED=$(python3 -c 'import sys; from datetime import datetime,timezone; print(max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(sys.argv[1])).total_seconds())))' "$REQUESTED_AT") || WAITED=0
+      if [ "$WAITED" -ge "$CANARY_INSTALL_TIMEOUT_S" ]; then
+        # The installer switched back (exit 6) or the node is offline: the candidate never ran there.
+        WHY="was not installed on $NODE within ${CANARY_INSTALL_TIMEOUT_S}s (node reports ${NODE_RELEASE:-unknown})"
+        MEASUREMENTS=$(python3 -c 'import json,sys; zero={"runs":0,"infra_failures":0,"failure_rate":0.0}; print(json.dumps({"action":"rollback","rollback_reason":sys.argv[1],"canary":zero,"baseline":zero}))' "$WHY")
+        reject_canary "$WHY" "$MEASUREMENTS"
+        exit 0
+      fi
+      echo "waiting for canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown}, ${WAITED}s of ${CANARY_INSTALL_TIMEOUT_S}s)"
       exit 0
     fi
-    STARTED_AT=$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())')
-    write_canary "$TARGET" "$NODE" "$PREVIOUS" "$STARTED_AT"
+    STARTED_AT=$(now_utc)
+    write_canary "$TARGET" "$NODE" "$PREVIOUS" "$STARTED_AT" "$REQUESTED_AT"
     echo "canary node $NODE installed $TARGET; observation window started"
     exit 0
   fi
@@ -80,15 +113,7 @@ P
       exit 0
       ;;
     rollback)
-      COMMIT=$(git -C "$R" rev-list -n 1 "refs/tags/$TARGET" 2>/dev/null || true)
-      [ -n "$COMMIT" ] || COMMIT=unknown
-      printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
-      rm -f "$CANARY_FILE"
-      canary_cli record-rollback --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
-        --commit "$COMMIT" --measurements "$DECISION" || echo "could not write canary rollback incident/ticket" >&2
-      echo "canary $TARGET failed its infrastructure rate threshold; $NODE returned to $PREVIOUS"
-      alert "[CRITICAL] AI Flow: canary $TARGET rolled back" \
-        "Canary node $NODE returned to $PREVIOUS. Suspected commit: $COMMIT. The registry has the measured run rates and a canary incident; a flow-bug ticket was requested."
+      reject_canary "failed its infrastructure rate threshold" "$DECISION"
       exit 0
       ;;
     promote)
@@ -171,7 +196,7 @@ else
   fi
   echo "staging $TARGET for canary node $NODE; fleet remains on $CUR"
   aiflow4-deploy --stage-only "$TARGET" || { echo "could not stage $TARGET" >&2; exit 1; }
-  write_canary "$TARGET" "$NODE" "$CUR" ""
+  write_canary "$TARGET" "$NODE" "$CUR" "" "$(now_utc)"
   echo "canary $TARGET requested on $NODE; other nodes remain on $CUR"
   exit 0
 fi

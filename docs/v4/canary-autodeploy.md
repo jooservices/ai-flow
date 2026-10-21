@@ -16,7 +16,14 @@ AIFLOW4_CANARY_MAX_AGE_S=3600
 AIFLOW4_CANARY_FAILURE_RATIO=2
 AIFLOW4_CANARY_MIN_INFRA_FAILURES=3
 AIFLOW4_CANARY_NODE=
+AIFLOW4_CANARY_INSTALL_TIMEOUT_S=1800
 ```
+
+`CANARY.json` records `requested_at` when the candidate is requested. If the canary node has not reported the
+candidate installed within `AIFLOW4_CANARY_INSTALL_TIMEOUT_S` (default 30 minutes, never more than
+`AIFLOW4_CANARY_MAX_AGE_S` by default), for example because the installer switched back to the previous release
+or the node went offline, the deployer takes the rollback path below: it writes `CANARY_REJECTED`, removes
+`CANARY.json`, opens the incident with the flow-bug ticket and sends a CRITICAL alert.
 
 For each measurement, the registry counts completed runs on the candidate node since the clock started. An
 infrastructure failure is a run with a nonempty `error_kind` other than `quota`, a `blocked` run with `infra`, or

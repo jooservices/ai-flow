@@ -116,8 +116,10 @@ def record_rollback(ctx, *, node: str, target: str, previous: str, commit: str,
 
     canary = measurements["canary"]
     baseline = measurements["baseline"]
-    title = f"Canary rollback: {target} on {node} exceeded infrastructure failure rate"
-    detail = (f"Candidate release: {target}\nPrevious release: {previous}\nCanary node: {node}\n"
+    # The deployer sets rollback_reason when the canary never installed the candidate (install timeout).
+    reason = measurements.get("rollback_reason") or "exceeded infrastructure failure rate"
+    title = f"Canary rollback: {target} on {node} {reason}"
+    detail = (f"Reason: {reason}\nCandidate release: {target}\nPrevious release: {previous}\nCanary node: {node}\n"
               f"Suspected commit: {commit}\nCanary runs: {canary['runs']}\n"
               f"Canary infrastructure failures: {canary['infra_failures']}\n"
               f"Canary infrastructure failure rate: {canary['failure_rate']:.4f}\n"
@@ -128,8 +130,7 @@ def record_rollback(ctx, *, node: str, target: str, previous: str, commit: str,
     issue = ""
     if opened and ctx.jira:
         summary = f"[flow-bug] Canary rollback for {target} ({commit[:12]})"
-        description = ("AI Flow auto-deployer rolled back a canary release after its infrastructure failure rate "
-                       "reached the configured threshold.\n\n" + detail)
+        description = (f"AI Flow auto-deployer rolled back a canary release: {reason}.\n\n" + detail)
         try:
             issue = ctx.jira.create_issue(ctx.settings.canary_bug_project, summary, description,
                                           issuetype="Bug", labels=["flow-bug"])

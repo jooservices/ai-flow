@@ -246,6 +246,12 @@ def test_canary_rollback_opens_incident_and_flow_bug_with_suspected_commit():
     assert jira.created[3:] == ("Bug", ["flow-bug"])
     assert any("INSERT INTO incidents" in call[0] and "critical" in call[1] for call in db.calls)
 
+    zero = {"runs": 0, "infra_failures": 0, "failure_rate": 0.0}
+    record_rollback(ctx, node="canary", target="v4.4.0", previous="v4.2.0", commit="0123456789abcdef",
+                    measurements={"rollback_reason": "was not installed on canary within 1800s",
+                                  "canary": zero, "baseline": zero})
+    assert "was not installed on canary within 1800s" in jira.created[2]
+
 
 def test_under_observed_promotion_records_the_run_count_and_configured_minimum():
     class DB:
@@ -451,7 +457,9 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
     return result, log.read_text(), (releases / "CURRENT").read_text().strip()
 
 
-def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None):
+def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, requested=None, healthy=True):
+    """active: the canary installed the candidate at `now`; requested: the candidate was requested at that time
+    and the canary node still reports the previous release."""
     root = tmp_path / "srv"
     releases = root / "control" / "releases"
     releases.mkdir(parents=True)
@@ -467,7 +475,11 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None):
     if active:
         started = now or datetime.now(timezone.utc) - timedelta(minutes=21)
         (releases / "CANARY.json").write_text(json.dumps({"target": "v4.3.0", "node": "canary",
-                                                           "previous": "v4.2.0", "started_at": started.isoformat()}))
+                                                           "previous": "v4.2.0", "started_at": started.isoformat(),
+                                                           "requested_at": started.isoformat()}))
+    elif requested is not None:
+        (releases / "CANARY.json").write_text(json.dumps({"target": "v4.3.0", "node": "canary", "previous": "v4.2.0",
+                                                           "started_at": "", "requested_at": requested.isoformat()}))
     if decision is None:
         decision = {"action": "promote", "reason": "minimum canary time and completed run count reached",
                     "canary": {"runs": 5, "infra_failures": 0, "failure_rate": 0.0},
@@ -484,7 +496,8 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None):
                           f'echo "$1" > {releases}/CURRENT\nexit 0\n',
         "docker": f'echo "docker $*" >> {log}\n'
                   f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
-        "curl": f'case "$*" in *"/v1/state"*) cat {state} ;; */healthz*|*/cc*) exit 0 ;; *) exit 7 ;; esac\n',
+        "curl": f'case "$*" in *"/v1/state"*) cat {state} ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
+                f' *) exit 7 ;; esac\n',
         "python3": py,
         "sleep": "exit 0\n",
     }
@@ -520,8 +533,46 @@ def test_autodeploy_stages_candidate_for_one_node_before_changing_current(tmp_pa
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deploy --stage-only v4.3.0" in calls
     assert current == "v4.2.0"
+    requested_at = datetime.fromisoformat(state.pop("requested_at"))
     assert state == {"target": "v4.3.0", "node": "canary", "previous": "v4.2.0", "started_at": ""}
+    assert abs((datetime.now(timezone.utc) - requested_at).total_seconds()) < 60
     assert "deploy v4.3.0" not in calls
+
+
+def test_autodeploy_keeps_waiting_while_the_canary_install_is_within_its_timeout(tmp_path):
+    requested = datetime.now(timezone.utc) - timedelta(minutes=5)
+    result, calls, current, state, releases = _canary_autodeploy(tmp_path, requested=requested)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "waiting for canary node canary to install v4.3.0" in result.stdout
+    assert state["requested_at"] == requested.isoformat()
+    assert not (releases / "CANARY_REJECTED").exists()
+    assert "record-rollback" not in calls and "alert" not in calls
+
+
+def test_autodeploy_rolls_back_a_canary_that_never_installs_within_the_timeout(tmp_path):
+    requested = datetime.now(timezone.utc) - timedelta(minutes=31)
+    result, calls, current, state, releases = _canary_autodeploy(tmp_path, requested=requested)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert current == "v4.2.0"
+    assert state is None
+    assert (releases / "CANARY_REJECTED").read_text().strip() == "v4.3.0"
+    assert "canary record-rollback --node canary --target v4.3.0 --previous v4.2.0 --commit abcdef0123456789" in calls
+    assert "was not installed on canary within 1800s" in calls
+    assert "alert [CRITICAL] AI Flow: canary v4.3.0 rolled back" in calls
+    assert "deploy v4.3.0" not in calls
+
+
+def test_autodeploy_rolls_back_the_control_plane_with_aiflow4_deploy_when_promotion_is_unhealthy(tmp_path):
+    result, calls, current, state, _ = _canary_autodeploy(tmp_path, active=True, healthy=False)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "deploy v4.3.0" in calls
+    assert "deploy v4.2.0" in calls
+    assert current == "v4.2.0"
+    assert state is None
+    assert "alert [CRITICAL] AI Flow: auto-deploy of v4.3.0 rolled back" in calls
 
 
 def test_autodeploy_rolls_back_only_the_canary_when_fake_registry_rate_exceeds_baseline(tmp_path):

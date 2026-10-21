@@ -136,6 +136,20 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
     tickets = [t for t in all_tickets if t["type"] != "Epic" and
                (not epic_key or _under_epic(t, epic_key, by_key))]
     ticket_keys = [t["key"] for t in tickets]
+    if not ticket_keys:
+        return {
+            "project": project_key, "epic": epic_key,
+            "period": {"start": None, "end": None, "days": None},
+            "tickets": {"total": 0, "done": 0, "in_progress": 0, "needs_owner": 0, "done_by_type": {}},
+            "lead_time": _duration_stats([]), "ai_time": {**_duration_stats([]), "total_seconds": 0},
+            "runs_by_outcome": {}, "rework_rounds": {"count": 0, "tickets": []},
+            "usage": {"tokens_in": 0, "tokens_out": 0, "tokens_total": 0, "cost_usd": 0.0,
+                      "by_account": [], "by_model": []},
+            "incidents_opened": {"count": 0, "items": []}, "owner_needed": {"count": 0, "tickets": []},
+            "slowest_tickets": [],
+            "requirement_coverage": _requirement_coverage(tickets, {}, {}, {}, {}, epic_key),
+            "lessons": ["No lessons can be inferred from the recorded project history yet."],
+        }
     completed = [t for t in tickets if t["status"] == "Done"]
     done_at = {t["key"]: t["done_at"] or t["jira_updated"] for t in completed}
     done_by_type = dict(sorted(Counter(t["type"] for t in completed).items()))
@@ -228,7 +242,7 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
         item["opened_at"] = _iso(item["opened_at"])
     ai_total = sum(ai_seconds_by_ticket.values())
     slowest.sort(key=lambda row: (-row["lead_time_seconds"], row["key"]))
-    return {
+    report = {
         "project": project_key, "epic": epic_key,
         "period": {"start": _iso(period_start), "end": _iso(period_end), "days": period_days},
         "tickets": {"total": len(tickets), "done": len(completed), "in_progress": sum(
@@ -247,6 +261,20 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
         "slowest_tickets": slowest[:5],
         "requirement_coverage": coverage,
     }
+    lessons = []
+    if rework_tickets:
+        lessons.append(f"Clarify acceptance criteria for the {len(rework_tickets)} ticket(s) that needed"
+                       f" {sum(r['rounds'] for r in rework_tickets)} rework round(s).")
+    if owner_needed:
+        lessons.append(f"Bring owner decisions into intake earlier for the {len(owner_needed)} ticket(s) that needed"
+                       " owner input.")
+    if incidents:
+        lessons.append(f"Review the {len(incidents)} recorded incident(s) and their causes before repeating this"
+                       " project setup.")
+    if not lessons:
+        lessons.append("The recorded history shows no rework, owner escalation, or incident; keep the successful workflow.")
+    report["lessons"] = lessons
+    return report
 
 
 def _duration_value(seconds: float) -> str:
@@ -340,6 +368,8 @@ def render_markdown(report: dict[str, Any]) -> str:
                 for r in report["slowest_tickets"])
     if not report["slowest_tickets"]:
         out.append("| — | — | — | No completed tickets with timestamps |")
+    out += ["", "## Lessons", ""]
+    out.extend(f"- {_md_text(lesson)}" for lesson in report["lessons"])
     return "\n".join(out) + "\n"
 
 

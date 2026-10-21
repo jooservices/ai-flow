@@ -86,6 +86,8 @@ class ControlRepo:
     accounts: list[Account]
     nodes: dict[str, Node]
     projects: dict[str, Project]
+    policy_projects: dict[str, dict[str, Any]] = field(default_factory=dict)
+    policy_archived: bool = False
     ref: str = ""
 
     @classmethod
@@ -112,9 +114,19 @@ class ControlRepo:
         head = r / ".git" / "HEAD"
         if head.is_file():
             ref = head.read_text().strip()
-        return cls(root=r, versions=y("versions.lock", {}), policy=y("policy/default.yaml", {}),
+        policy_file = r / "policy/default.yaml"
+        policy_archived = policy_file.is_file() and "# aiflow4-archived: true" in policy_file.read_text(encoding="utf-8").splitlines()[:3]
+        policy_projects: dict[str, dict[str, Any]] = {}
+        for p in sorted((r / "policy/projects").glob("*.yaml")):
+            raw = p.read_text(encoding="utf-8")
+            if "# aiflow4-archived: true" in raw.splitlines()[:3]:
+                continue
+            data = yaml.safe_load(raw) or {}
+            if isinstance(data, dict):
+                policy_projects[p.stem] = data
+        return cls(root=r, versions=y("versions.lock", {}), policy={} if policy_archived else y("policy/default.yaml", {}),
                    profiles=y("profiles.yaml", {}), sa=y("sa.yaml", {}), accounts=accounts, nodes=nodes,
-                   projects=projects, ref=ref)
+                   projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref)
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
@@ -149,6 +161,8 @@ class ControlRepo:
 
     def policy_for(self, project: str | None) -> dict[str, Any]:
         base = dict(self.policy or {})
+        if project and project in self.policy_projects:
+            base.update(self.policy_projects[project])
         if project and project in self.projects and self.projects[project].policy:
             for k, v in self.projects[project].policy.items():
                 base[k] = v

@@ -1,10 +1,11 @@
 from aiflow.v4.core.controlrepo import ControlRepo, Project
 from aiflow.v4.core.toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
                                       pinned_version, tools_for_stack, tools_for_stacks)
+from conftest import join_node
 
 
 def join(client, name):
-    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+    r = join_node(client, name)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 

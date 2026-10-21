@@ -1,8 +1,9 @@
 # AI Flow v4 deployment
 
 The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`, which supervises one
-`aiflow4-worker@<account>` unit per account on that node. Install a release with `bin/aiflow4-node-install`
-(or `bin/aiflow4-deploy` from the control machine); the scripts live next to this file.
+`aiflow4-worker@<account>` unit per account on that node. Join a new node from Command Center with the
+`/v1/install.sh` command; install a release on an existing node with `bin/aiflow4-node-install` (or
+`bin/aiflow4-deploy` from the control machine). The release scripts live next to this file.
 
 ## Topics
 
@@ -22,6 +23,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
+- [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
@@ -29,8 +31,9 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 
 ## Tools on a node
 
-Every node needs the AI CLIs used by its accounts, on the `PATH` of the node agent and the workers. Install
-them with the vendor's installer, then sign each account in with that account's own `HOME`.
+Every node needs the AI CLIs used by its accounts, on the `PATH` of the node agent and the workers. The
+one-command bootstrap installs the supported CLIs. Sign each account in as `aiflow-worker` with that
+account's own `HOME`; see [Join a node](../../docs/v4/node-join.md).
 
 | AI CLI | Binary | Installation |
 |---|---|---|

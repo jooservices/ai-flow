@@ -85,6 +85,43 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def valid_control_host(value: str) -> bool:
+    """Accept only a DNS name or IP literal, optionally followed by a TCP port."""
+    if not value or any(char.isspace() or ord(char) < 0x21 or ord(char) > 0x7e for char in value):
+        return False
+
+    port_text = ""
+    if value.startswith("["):
+        match = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::([0-9]{1,5}))?", value)
+        if not match:
+            return False
+        try:
+            if ipaddress.ip_address(match.group(1)).version != 6:
+                return False
+        except ValueError:
+            return False
+        port_text = match.group(2) or ""
+    else:
+        if value.count(":") > 1:
+            return False
+        hostname, separator, port_text = value.partition(":")
+        if separator and not re.fullmatch(r"[0-9]{1,5}", port_text):
+            return False
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            if not re.fullmatch(
+                r"(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?",
+                hostname,
+            ):
+                return False
+        else:
+            if address.version != 4:
+                return False
+
+    return not port_text or 1 <= int(port_text) <= 65535
+
+
 def validated_join_control_url(value: str) -> str:
     """Validate the operator-configured API address advertised to a new machine."""
     control = str(value or "").strip()
@@ -98,7 +135,7 @@ def validated_join_control_url(value: str) -> str:
     except ValueError as exc:
         raise ValueError("join control URL is invalid") from exc
     if (parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or "?" in control or "#" in control):
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment or "?" in control or "#" in control):
         raise ValueError("join control URL must be an HTTP(S) URL without credentials, query, or fragment")
     normalized_host = host.rstrip(".").lower()
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
@@ -120,32 +157,10 @@ def validated_join_control_url(value: str) -> str:
     return control.rstrip("/")
 
 
-def join_bootstrap_command(token: str, name: str, control: str, version: str, checksum: str) -> str:
-    """One line for a machine without AI Flow: fetch the signed release with the join token, check its SHA-256 and
-    cosign signature, install it with the release's own aiflow4-node-install, then join with the full binary path.
-    The script travels to `sudo bash -s` on stdin, so the token never appears in a process argument list."""
-    identity = f"https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{version}"
-    steps = [
-        "set -euo pipefail",
-        f"T={shlex.quote(token)}", f"C={shlex.quote(control)}", f"V={shlex.quote(version)}",
-        f"S={shlex.quote(checksum)}", f"N={shlex.quote(name)}",
-        'D=$(mktemp -d)', "trap 'rm -rf \"$D\"' EXIT", 'A="$D/aiflow4-$V.tar.gz"',
-        "get() { curl -fsS --max-time 600 -K <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$T\")"
-        ' -o "$2" "$C$1"; }',
-        'get "/v1/releases/$V.tar.gz" "$A"', 'get "/v1/releases/$V.tar.gz.sigstore.json" "$A.sigstore.json"',
-        'echo "$S  $A" | sha256sum -c --quiet -',
-        'command -v cosign >/dev/null || { echo "install cosign to verify the AI Flow release" >&2; exit 3; }',
-        f'cosign verify-blob "$A" --bundle "$A.sigstore.json" --certificate-identity {shlex.quote(identity)}'
-        " --certificate-oidc-issuer https://token.actions.githubusercontent.com",
-        'mkdir "$D/src"', 'tar -xzf "$A" -C "$D/src"',
-        "install -d -m 0755 /etc/aiflow",
-        "[ -e /etc/aiflow/node.env ] || printf 'AIFLOW4_CONTROL_URL=%s\\nAIFLOW4_NODE_NAME=%s\\nAIFLOW4_SLOTS=1\\n'"
-        ' "$C" "$N" > /etc/aiflow/node.env',
-        'bash "$D/src/deploy/v4/bin/aiflow4-node-install" "$A" "$V" "$A.sigstore.json" "$S"',
-        '/srv/aiflow/current/.venv/bin/aiflow4 node join --name "$N" --join-token-stdin --control "$C" <<<"$T"',
-        "systemctl restart aiflow4-node-agent",
-    ]
-    return f"printf '%s\\n' {shlex.quote('; '.join(steps))} | sudo bash -s"
+def join_bootstrap_command(token: str, control: str) -> str:
+    """Return the documented single-command bootstrap for a five-minute, node-bound join token."""
+    installer = shlex.quote(f"{control.rstrip('/')}/v1/install.sh")
+    return f"curl -fsSL {installer} | sudo sh -s -- --token {shlex.quote(token)}"
 
 
 @dataclass
@@ -182,9 +197,20 @@ def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[
 
 # --- request bodies ---------------------------------------------------------------------------------------
 class JoinBody(BaseModel):
-    name: str
     join_token: str
+    name: str | None = Field(default=None, min_length=1, max_length=63)
     ip: str = ""
+
+
+class JoinTokenBody(BaseModel):
+    provision_key: str = Field(min_length=1, max_length=500)
+    name: str = Field(min_length=1, max_length=63)
+    role: str = Field(default="worker", min_length=1, max_length=32)
+    project: str = Field(min_length=1, max_length=32)
+
+
+class JoinInspectBody(BaseModel):
+    join_token: str = Field(min_length=1, max_length=200)
 
 
 class HeartbeatBody(BaseModel):
@@ -386,7 +412,9 @@ class NodeOperationResultBody(BaseModel):
 
 class JoinCommandBody(BaseModel):
     model_config = {"extra": "forbid"}
-    name: str
+    name: str = Field(min_length=1, max_length=63)
+    role: str = Field(default="", max_length=32)
+    project: str = Field(default="", max_length=32)
 
 
 # --- app --------------------------------------------------------------------------------------------------
@@ -414,9 +442,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         for n in repo.nodes.values():
             # Keep the IP a node reported at join: a restart must not replace where it was last seen with
             # the control repo value. Only a first insert (no join yet) takes the configured address.
-            ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total) VALUES (%s,%s,%s,%s)"
-                       " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total",
-                       (n.name, n.ip, n.role, n.slots))
+            ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total, projects) VALUES (%s,%s,%s,%s,%s)"
+                       " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total,"
+                       " projects=EXCLUDED.projects, dynamic=false",
+                       (n.name, n.ip, n.role, n.slots, n.projects))
 
     app.state.sync_accounts = sync_accounts
     _identity: list[tuple[str, str]] = []
@@ -438,10 +467,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         """A node token, or an unexpired, unconsumed join token so a new machine can fetch the signed release."""
         token = authorization.removeprefix("Bearer ").strip()
         if token:
-            row = ctx.db.one("SELECT node FROM node_join_tokens WHERE token_hash=%s AND consumed_at IS NULL"
+            row = ctx.db.one("SELECT node_name FROM node_join_tokens WHERE token_hash=%s AND used_at IS NULL"
                              " AND expires_at > now()", (h(token),))
             if row:
-                return row["node"]
+                return row["node_name"]
         return node_auth(authorization)
 
     def reviewer_auth(authorization: str = Header(default="")) -> str:
@@ -751,31 +780,100 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"ok": True, "version": VERSION}
 
     # --- nodes ----------------------------------------------------------------------------------------------
+    @app.get("/v1/install.sh", response_class=PlainTextResponse)
+    def node_install_script(request: Request) -> PlainTextResponse:
+        script = Path(__file__).resolve().parents[3] / "deploy" / "v4" / "bin" / "aiflow4-bootstrap"
+        if not script.is_file():
+            raise HTTPException(404, "node bootstrap installer is unavailable")
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+        scheme = (forwarded_proto or request.url.scheme).lower()
+        host = forwarded_host or request.headers.get("host", "") or request.url.netloc
+        if scheme not in ("http", "https") or not valid_control_host(host):
+            raise HTTPException(400, "invalid public control URL")
+        base_url = f"{scheme}://{host}"
+        return PlainTextResponse(script.read_text(encoding="utf-8").replace("__AIFLOW4_CONTROL_URL__", shlex.quote(base_url)))
+
+    def create_join_grant(name: str, role: str, project: str) -> tuple[str, datetime]:
+        """Create the shared five-minute grant used by both Command Center entry points."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
+            raise HTTPException(422, "invalid node name")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", role):
+            raise HTTPException(422, "invalid node role")
+        repo = ctx.repo()
+        if project not in repo.projects:
+            raise HTTPException(422, "unknown project")
+        dynamic = name not in repo.nodes
+        if not dynamic and project not in repo.nodes[name].projects:
+            raise HTTPException(422, "project is not assigned to this node in the control repo")
+        existing = ctx.db.one("SELECT name,status FROM nodes WHERE name=%s", (name,))
+        if existing and dynamic and existing["status"] == "online":
+            raise HTTPException(409, "an online node already uses this name")
+        token = secrets.token_urlsafe(32)
+        with ctx.db.pool.connection() as conn:
+            issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
+                                  " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
+                                  " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
+                                  " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
+                                  " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
+                                  " RETURNING expires_at",
+                                  (h(token), name, role, project, dynamic)).fetchone()
+            # Register a pending dynamic node so Command Center can show it before its first heartbeat.
+            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic) VALUES (%s,%s,'joined',%s,%s)"
+                         " ON CONFLICT (name) DO NOTHING", (name, role, [project], dynamic))
+        return token, issued["expires_at"]
+
+    @app.post("/v1/nodes/join-tokens")
+    def issue_join_token(body: JoinTokenBody) -> dict:
+        if not ctx.settings.join_token or not secrets.compare_digest(body.provision_key, ctx.settings.join_token):
+            raise HTTPException(403, "invalid provisioning key")
+        token, expires_at = create_join_grant(body.name, body.role, body.project)
+        ctx.events.emit("node.join_token_issued", node=body.name, reason=f"{body.role} · {body.project}")
+        return {"token": token, "name": body.name, "role": body.role, "project": body.project,
+                "expires_at": expires_at.isoformat()}
+
+    @app.post("/v1/nodes/join-tokens/inspect")
+    def inspect_join_token(body: JoinInspectBody) -> dict:
+        row = ctx.db.one("SELECT node_name,role,project FROM node_join_tokens"
+                         " WHERE token_hash=%s AND used_at IS NULL AND expires_at>now()", (h(body.join_token),))
+        if not row:
+            raise HTTPException(403, "invalid, expired, or used join token")
+        project = ctx.repo().projects.get(row["project"])
+        if not project:
+            raise HTTPException(409, "project is no longer configured")
+        release = current_release()
+        if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", release):
+            raise HTTPException(503, "no signed AI Flow release is deployed")
+        return {"name": row["node_name"], "role": row["role"], "project": row["project"],
+                "stack": project.stack, "release": release}
+
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", body.name):
-            raise HTTPException(400, "invalid node name")
-        shared_token_ok = bool(ctx.settings.join_token) and secrets.compare_digest(body.join_token,
-                                                                                   ctx.settings.join_token)
         token = secrets.token_urlsafe(32)
-        with ctx.db.pool.connection() as connection:
-            one_time = None
-            if not shared_token_ok and body.join_token:
-                one_time = connection.execute(
-                    "UPDATE node_join_tokens SET consumed_at=now() WHERE token_hash=%s AND node=%s"
-                    " AND consumed_at IS NULL AND expires_at > now() RETURNING node",
-                    (h(body.join_token), body.name)).fetchone()
-            if not shared_token_ok and not one_time:
-                raise HTTPException(403, "invalid join token")
-            connection.execute(
-                "INSERT INTO nodes (name, ip, token_hash, status) VALUES (%s,%s,%s,'joined')"
+        with ctx.db.pool.connection() as conn:
+            row = conn.execute(
+                "WITH grant_row AS (UPDATE node_join_tokens SET used_at=now()"
+                " WHERE token_hash=%s AND used_at IS NULL AND expires_at>now()"
+                " AND (%s::text IS NULL OR node_name=%s)"
+                " RETURNING node_name,role,project,dynamic)"
+                " INSERT INTO nodes (name,ip,role,token_hash,status,projects,dynamic)"
+                " SELECT node_name,%s,role,%s,'joined',ARRAY[project],dynamic FROM grant_row"
                 " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash,"
-                " ip=coalesce(nullif(EXCLUDED.ip,''), nodes.ip), status='joined'",
-                (body.name, body.ip, h(token)))
-            audit_in(connection, "node", "join", body.name, "", None, "node-agent", True, "node joined",
-                     {"ip_present": bool(body.ip)})
-        ctx.events.emit("node.joined", node=body.name)
-        return {"node": body.name, "node_token": token}
+                " ip=coalesce(nullif(EXCLUDED.ip,''),nodes.ip), role=EXCLUDED.role,projects=EXCLUDED.projects,"
+                " dynamic=EXCLUDED.dynamic,status='joined'"
+                " RETURNING name,role,projects,dynamic",
+                (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()
+            if row:
+                audit_in(conn, "node", "join", row["name"], "", None, "node-agent", True, "node joined",
+                         {"ip_present": bool(body.ip), "role": row["role"], "project": row["projects"][0]})
+        if not row:
+            raise HTTPException(403, "invalid, expired, or used join token")
+        ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
+        repo = ctx.repo()
+        project = repo.projects[row["projects"][0]]
+        return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
+                "stack": project.stack, "release": current_release(), "node_token": token,
+                "accounts": [a.id for a in repo.accounts_on(row["name"])]}
 
     @app.post("/v1/nodes/{name}/heartbeat")
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:
@@ -826,10 +924,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
         release = current_release(node) if body.release_protocol >= 1 else ""
+        joined_node = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
+        node_projects = repo.projects_for_node(node, joined_node.get("projects") or [], joined_node.get("dynamic", False))
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": release,
-                            "projects": repo.nodes[node].projects if node in repo.nodes else [],
-                            "tools": repo.tools_for_node(node), "versions": repo.versions}}
+                            "projects": node_projects,
+                            "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
     def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:
@@ -901,6 +1001,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != body.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             audit("node", "join_command", name, "", None, user.subject, False, "invalid node name")
             raise HTTPException(400, "invalid node name")
+        configured = ctx.repo().nodes.get(name)
+        role = body.role or (configured.role if configured else "worker")
+        project = body.project or (configured.projects[0] if configured and len(configured.projects) == 1 else "")
+        if not project:
+            audit("node", "join_command", name, "", None, user.subject, False, "project is required")
+            raise HTTPException(422, "select a project for this node")
         try:
             control = validated_join_control_url(ctx.settings.join_control_url)
         except ValueError as exc:
@@ -908,24 +1014,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(503, "configure AIFLOW4_JOIN_CONTROL_URL to an address reachable from joining nodes") from exc
         version = current_release()
         try:
-            _, _, _, checksum = release_assets(version)
+            release_assets(version)
         except HTTPException as exc:
             audit("node", "join_command", name, "", None, user.subject, False, "no signed release is published")
             raise HTTPException(409, "no signed release is published; run aiflow4-deploy first") from exc
-        token = secrets.token_urlsafe(32)
-        expires_at = utcnow() + timedelta(minutes=10)
-        audit_payload = {"expires_at": expires_at.isoformat(), "ssh_password_saved": False}
-        with ctx.db.pool.connection() as connection:
-            connection.execute("INSERT INTO node_join_tokens (token_hash, node, expires_at) VALUES (%s,%s,%s)",
-                               (h(token), name, expires_at))
-            connection.execute("INSERT INTO nodes (name, status) VALUES (%s,'joined')"
-                               " ON CONFLICT (name) DO NOTHING", (name,))
-            audit_in(connection, "node", "join_command", name, "", None, user.subject, True,
-                     "one-time join command created", audit_payload)
-        command = join_bootstrap_command(token, name, control, version, checksum)
+        try:
+            token, expires_at = create_join_grant(name, role, project)
+        except HTTPException as exc:
+            audit("node", "join_command", name, "", None, user.subject, False, str(exc.detail))
+            raise
+        audit("node", "join_command", name, "", None, user.subject, True, "one-time join command created",
+              {"expires_at": expires_at.isoformat(), "role": role, "project": project,
+               "ssh_password_saved": False})
+        command = join_bootstrap_command(token, control)
         ctx.events.emit("node.join_command.created", node=name, outcome="created",
-                        reason="one-time token expires in 10 minutes", data={"actor": user.subject})
-        return {"node": name, "command": command, "expires_at": expires_at.isoformat(), "expires_in_s": 600}
+                        reason="one-time token expires in five minutes", data={"actor": user.subject})
+        return {"node": name, "role": role, "project": project, "command": command,
+                "expires_at": expires_at.isoformat(), "expires_in_s": 300}
 
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
@@ -1119,7 +1224,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if ctx.leases.cooling(account_id):
             return []
-        projects = [p for p in (repo.nodes[node].projects if node in repo.nodes else []) if p in repo.projects]
+        node_row = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
+        projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
         out: list[dict] = []

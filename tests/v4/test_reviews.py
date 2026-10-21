@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 from aiflow.v4.control.loops import jira_sync
@@ -94,7 +94,7 @@ def test_jira_sync_notifies_assignee_when_require_human_ticket_enters_review(ctx
 
 def test_worker_transition_notifies_owner_when_assignee_is_missing(client, ctx, monkeypatch):
     add_ticket(ctx.db, "TESTWP-82", labels=("aiflow-ready", "require-human"))
-    cc = client.post("/v1/nodes/join", json={"name": "cc", "join_token": "join-secret"}).json()
+    cc = join_node(client, "cc").json()
     headers = {"Authorization": f"Bearer {cc['node_token']}"}
     run = client.post("/v1/work/claim", json={"ticket": "TESTWP-82", "account": "claude-01"}, headers=headers).json()
     calls = []
@@ -164,7 +164,7 @@ def test_reviewer_rework_comment_reaches_the_next_dev_claim(client, ctx):
                          headers={"Authorization": "Bearer review-secret"})
     assert review.status_code == 200
 
-    joined = client.post("/v1/nodes/join", json={"name": "cc", "join_token": "join-secret"}).json()
+    joined = join_node(client, "cc").json()
     node = {"Authorization": f"Bearer {joined['node_token']}"}
     dev = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=node).json()
 
@@ -174,7 +174,7 @@ def test_reviewer_rework_comment_reaches_the_next_dev_claim(client, ctx):
 def test_node_merge_endpoint_rejects_qa_runs(client, ctx):
     key = "TESTWP-88"
     add_review_ticket(ctx, key)
-    joined = client.post("/v1/nodes/join", json={"name": "node1", "join_token": "join-secret"}).json()
+    joined = join_node(client, "node1").json()
     node = {"Authorization": f"Bearer {joined['node_token']}"}
     run_id = str(uuid.uuid4())
     claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)

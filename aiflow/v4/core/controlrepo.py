@@ -131,7 +131,7 @@ class ControlRepo:
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
 
-    def tools_for_node(self, node: str) -> list[str]:
+    def tools_for_node(self, node: str, projects: list[str] | None = None) -> list[str]:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
         out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
@@ -139,12 +139,22 @@ class ControlRepo:
         for tool in (n.tools if n else []):
             if tool in installable and tool not in out:
                 out.append(tool)
-        for p in (n.projects if n else []):
+        project_keys = projects if projects is not None else (n.projects if n else [])
+        for p in project_keys:
             if p in self.projects:
                 for tool in tools_for_stack(self.projects[p].stack):
                     if tool not in out:
                         out.append(tool)
         return out
+
+    def projects_for_node(self, node: str, bound_projects: list[str], dynamic: bool = False) -> list[str]:
+        """Return the projects this node serves, using YAML as authority for configured nodes."""
+        configured = self.nodes.get(node)
+        if configured:
+            return [key for key in configured.projects if key in self.projects]
+        if dynamic:
+            return [key for key in bound_projects if key in self.projects]
+        return []
 
     def provider_tools_for_node(self, node: str) -> list[str]:
         return tools_for_providers(a.provider for a in self.accounts_on(node))

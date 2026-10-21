@@ -505,6 +505,81 @@ def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_
     assert all(not any("login" in str(argument) for argument in args) for args, _ in calls)
 
 
+def _configured_offline_install_root(tmp_path):
+    root = tmp_path / "root"
+    (root / "etc/aiflow").mkdir(parents=True)
+    (root / "srv/aiflow/state").mkdir(parents=True)
+    (root / "srv/aiflow/state/node.token").write_text("offline-test-node-token-123456\n")
+    (root / "etc/aiflow/node.env").write_text(
+        'AIFLOW4_CONTROL_URL="http://control.internal"\n'
+        'AIFLOW4_NODE_NAME="offline-node"\n'
+        'AIFLOW4_SLOTS="2"\n'
+        'AIFLOW4_NODE_TOKEN_FILE="/srv/aiflow/state/node.token"\n')
+    return root
+
+
+def test_offline_install_default_runner_accepts_text_and_finishes(tmp_path, monkeypatch):
+    bundle = _fixture_bundle(tmp_path)
+    root = _configured_offline_install_root(tmp_path)
+    state = {
+        "nodes": [{"name": "offline-node", "status": "online", "release": "v4.2.0",
+                   "missing_tools": [], "accounts_assigned": 1}],
+        "accounts": [{"id": "codex-01", "node": "offline-node", "status": "signed_out"}],
+    }
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[0].endswith("/bin/uv") and args[1] == "venv":
+            launcher = Path(args[-1]) / "bin/aiflow4"
+            launcher.parent.mkdir(parents=True)
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o755)
+        elif args[0] == "curl":
+            Path(args[args.index("--output") + 1]).write_text(json.dumps(state))
+        elif args[0] == "systemctl" and "list-units" in args:
+            return subprocess.CompletedProcess(args, 0, "aiflow4-worker@codex-01.service active running\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(offline.subprocess, "run", run)
+    result = offline.install_bundle(bundle, root=root, wait_seconds=0)
+
+    assert result["healthy"] is True
+    assert (root / "srv/aiflow/accounts/codex-01").is_dir()
+    assert any(args[0] == "dpkg" and "-i" in args for args, _ in calls)
+    assert sum(args[0].endswith("/bin/uv") for args, _ in calls) == 2
+    assert any(args[:2] == ["docker", "load"] for args, _ in calls)
+    assert any(args == ["systemctl", "restart", "aiflow4-node-agent.service"] for args, _ in calls)
+    assert all(kwargs.get("text") is True for _, kwargs in calls)
+
+
+@pytest.mark.parametrize("failing_command", ["dpkg", "uv", "docker", "systemctl"])
+def test_offline_install_default_runner_wraps_command_failures(tmp_path, monkeypatch, failing_command):
+    bundle = _fixture_bundle(tmp_path)
+    root = _configured_offline_install_root(tmp_path)
+
+    def run(args, **kwargs):
+        is_failure = (
+            (failing_command == "dpkg" and args[0] == "dpkg")
+            or (failing_command == "uv" and args[0].endswith("/bin/uv"))
+            or (failing_command == "docker" and args[0] == "docker")
+            or (failing_command == "systemctl" and args[:2] == ["systemctl", "daemon-reload"])
+        )
+        if is_failure:
+            return subprocess.CompletedProcess(args, 1, "", f"simulated {failing_command} failure")
+        if args[0].endswith("/bin/uv") and args[1] == "venv":
+            launcher = Path(args[-1]) / "bin/aiflow4"
+            launcher.parent.mkdir(parents=True)
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o755)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(offline.subprocess, "run", run)
+
+    with pytest.raises(offline.BundleError, match="command failed"):
+        offline.install_bundle(bundle, root=root, wait_seconds=0)
+
+
 def test_offline_install_fails_before_host_changes_when_checksum_is_invalid(tmp_path):
     bundle = _fixture_bundle(tmp_path)
     (bundle / "payload/requirements.txt").write_text("changed\n")

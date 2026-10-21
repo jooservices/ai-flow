@@ -40,8 +40,9 @@ class BundleError(RuntimeError):
 
 
 def _run(args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
-         input: str | None = None, check: bool = True, capture_output: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(args, cwd=cwd, env=env, input=input, text=True, capture_output=capture_output)
+         input: str | None = None, check: bool = True, capture_output: bool = True,
+         text: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(args, cwd=cwd, env=env, input=input, text=text, capture_output=capture_output)
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "").strip()
         raise BundleError(f"command failed ({result.returncode}): {' '.join(args)}{': ' + detail if detail else ''}")

@@ -14,6 +14,19 @@ def test_join_requires_the_join_token(client):
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}).status_code == 401
 
 
+def test_node_heartbeat_is_recorded_as_an_event(client, ctx):
+    cc = join(client, "cc")
+    response = client.post("/v1/nodes/cc/heartbeat", json={
+        "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
+    }, headers=cc)
+
+    assert response.status_code == 200
+    event = ctx.db.one("SELECT node, outcome, data FROM events WHERE type='node.heartbeat'")
+    assert event["node"] == "cc" and event["outcome"] == "online"
+    assert event["data"] == {"slots_total": 4, "slots_used": 2, "release_version": "4.0.0",
+                              "metrics": {"cpu_pct": 12.5}}
+
+
 def test_full_claim_flow_with_fencing(client, ctx):
     cc = join(client, "cc")
     assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]},

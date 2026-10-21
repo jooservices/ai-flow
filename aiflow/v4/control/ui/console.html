@@ -396,6 +396,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
    control plane knows. */
 
 var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20, ANALYTICS_MS = 60000, ANALYTICS_DAYS = 14;
+var PREFS_KEY = 'aiflow4-delivery';
 var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 function $(s, r) { return (r || document).querySelector(s); }
 function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
@@ -442,6 +443,32 @@ var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'Open
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
 function since() { return (Date.now() - S.fetchedAt) / 1000; }
+function loadPrefs() {
+  try {
+    var raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return;
+    var p = JSON.parse(raw);
+    if (!p || typeof p !== 'object') return;
+    if (typeof p.project === 'string') S.project = p.project;
+    if (typeof p.typeFilter === 'string') S.typeFilter = p.typeFilter;
+    if (typeof p.epic === 'string') S.epic = p.epic;
+  } catch (x) { /* storage off */ }
+}
+function savePrefs() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ project: S.project, typeFilter: S.typeFilter, epic: S.epic }));
+  } catch (x) { /* storage off */ }
+}
+function keyNumber(key) {
+  var m = String(key == null ? '' : key).match(/(\d+)(?!.*\d)/);
+  return m ? Number(m[1]) : Infinity;
+}
+function sortEpics(epics) {
+  return epics.slice().sort(function (a, b) {
+    var an = keyNumber(a.key), bn = keyNumber(b.key);
+    return an !== bn ? an - bn : String(a.key).localeCompare(String(b.key));
+  });
+}
 function nodeBy(n) { return D().nodes.filter(function (x) { return x.name === n; })[0]; }
 function accBy(id) { return D().accounts.filter(function (x) { return x.id === id; })[0]; }
 function ticketBy(k) { return D().tickets.filter(function (x) { return x.key === k; })[0]; }
@@ -472,7 +499,7 @@ function poll() {
   }).then(function (d) {
     var prevInc = S.seenInc, prevRuns = S.seenRuns;
     S.data = d; S.fetchedAt = Date.now(); S.lastOk = Date.now(); S.error = '';
-    if (!S.project && d.projects.length) S.project = d.projects[0].key;
+    if (d.projects.length && !d.projects.some(function (p) { return p.key === S.project; })) S.project = d.projects[0].key;
     notify(prevInc, prevRuns);
     render();
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })
@@ -734,7 +761,7 @@ function renderDHead() {
   h += '<div class="seg" role="group" aria-label="Type"><button data-act="type" data-t="all" aria-pressed="' + (S.typeFilter === 'all') + '">All types</button>';
   Object.keys(types).sort().forEach(function (t) { h += '<button data-act="type" data-t="' + esc(t) + '" aria-pressed="' + (S.typeFilter === t) + '">' + esc(t) + '</button>'; });
   h += '</div>';
-  var epics = projTickets().filter(function (t) { return t.type === 'Epic'; });
+  var epics = sortEpics(projTickets().filter(function (t) { return t.type === 'Epic'; }));
   if (epics.length) {
     h += '<label style="flex-direction:row;align-items:center;gap:8px;font-weight:400">Epic <select id="epicSel" style="width:auto;min-width:200px;max-width:340px"><option value="all">All epics</option>';
     epics.forEach(function (e) { h += '<option value="' + esc(e.key) + '"' + (S.epic === e.key ? ' selected' : '') + '>' + esc(e.key + ' ' + e.summary.slice(0, 50)) + '</option>'; });
@@ -776,7 +803,7 @@ function renderDBody() {
   h += kpi('Median dev run', med == null ? '—' : mmss(med), 'target ' + p.work_minutes.target + ' min · hard ' + p.work_minutes.hard, med != null && med > p.work_minutes.warn * 60 ? 'warn' : '', 'd-runs');
   h += '</section>';
 
-  var epics = all.filter(function (t) { return t.type === 'Epic'; });
+  var epics = sortEpics(all.filter(function (t) { return t.type === 'Epic'; }));
   if (epics.length) {
     h += '<section class="panel" id="d-epics" aria-labelledby="h-ep"><div class="panel-h"><h2 id="h-ep">Epics</h2><span class="hint">Progress of the work under each epic</span><span class="spacer"></span><div class="legend"><span><i class="st-done"></i>Done</span><span><i class="st-verify"></i>In verify or review</span><span><i class="st-progress"></i>In progress</span><span><i class="st-wait"></i>Needs owner</span><span><i class="st-todo"></i>Not started</span></div></div><div class="epics">';
     epics.forEach(function (e) {
@@ -1113,9 +1140,9 @@ document.addEventListener('click', function (e) {
   else if (act === 'copy-report') copyReport();
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
-  else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; render(); }
-  else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); renderDHead(); renderDBody(); tick(); }
-  else if (act === 'epic') { S.epic = el.getAttribute('data-key'); renderDHead(); renderDBody(); tick(); flash('d-board'); }
+  else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; savePrefs(); render(); }
+  else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); savePrefs(); renderDHead(); renderDBody(); tick(); }
+  else if (act === 'epic') { S.epic = el.getAttribute('data-key'); savePrefs(); renderDHead(); renderDBody(); tick(); flash('d-board'); }
   else if (act === 'theme') {
     var cur = document.documentElement.getAttribute('data-theme');
     var dark = cur ? cur === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -1131,12 +1158,13 @@ document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
 });
 document.addEventListener('change', function (e) {
-  if (e.target.id === 'epicSel') { S.epic = e.target.value; renderDBody(); tick(); }
+  if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
 });
 window.addEventListener('popstate', function () { setView(location.pathname.indexOf('/delivery') === 0 ? 'delivery' : 'cc'); });
 
 /* ---------- boot ---------- */
 try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }
+loadPrefs();
 $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
 $('#view-cc').hidden = S.view !== 'cc'; $('#view-delivery').hidden = S.view !== 'delivery';
 render();

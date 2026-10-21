@@ -25,6 +25,18 @@ var setInterval = function () {};
 """
 
 
+def run_script(driver: str, prelude: str = STUBS) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to run the console script")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    result = subprocess.run([node_js, "-"], input=prelude + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def render_drawer(node: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
@@ -152,3 +164,64 @@ def test_gatus_link_is_configurable(monkeypatch):
     assert Settings.from_env().gatus_url == "https://status.example/"
     monkeypatch.delenv("AIFLOW4_GATUS_URL")
     assert Settings.from_env().gatus_url == "/gatus/"
+
+
+def test_epics_are_sorted_by_the_numeric_part_of_their_key():
+    tickets = [
+        {"key": "TESTFLOW-19", "project": "TESTFLOW", "type": "Epic", "summary": "Nineteen", "status": "To Do", "labels": []},
+        {"key": "TESTFLOW-2", "project": "TESTFLOW", "type": "Epic", "summary": "Two", "status": "To Do", "labels": []},
+        {"key": "TESTFLOW-10", "project": "TESTFLOW", "type": "Epic", "summary": "Ten", "status": "To Do", "labels": []},
+        {"key": "TESTFLOW-1", "project": "TESTFLOW", "type": "Epic", "summary": "One", "status": "To Do", "labels": []},
+    ]
+    driver = f"""
+var head = {{innerHTML: ''}}, body = {{innerHTML: ''}};
+document.querySelector = function (s) {{
+  return s === '#dhead' ? head : s === '#dbody' ? body : null;
+}};
+S.data = {{projects: [{{key: 'TESTFLOW', repo: 'jooservices/testflow', work_minutes: {{target: 30, warn: 45, hard: 60}}}}], tickets: {json.dumps(tickets)},
+  recent_runs: [], active_runs: [], incidents: [], events: [], totals: {{}}, versions: {{}}}};
+S.project = 'TESTFLOW';
+renderDHead();
+renderDBody();
+console.log(JSON.stringify({{head: head.innerHTML, body: body.innerHTML}}));
+"""
+    out = json.loads(run_script(driver))
+    expected = ["TESTFLOW-1", "TESTFLOW-2", "TESTFLOW-10", "TESTFLOW-19"]
+    assert re.findall(r'<option value="(TESTFLOW-\d+)"', out["head"]) == expected
+    assert re.findall(r'data-act="epic" data-key="(TESTFLOW-\d+)"', out["body"]) == expected
+
+
+def test_delivery_selection_is_saved_and_restored_from_local_storage():
+    prelude = STUBS + """
+var store = {'aiflow4-delivery': JSON.stringify({project: 'TESTFLOW', typeFilter: 'Bug', epic: 'TESTFLOW-2'})};
+localStorage = {getItem: function (k) { return store[k] || null; }, setItem: function (k, v) { store[k] = String(v); }};
+"""
+    driver = """
+loadPrefs();
+var restored = {project: S.project, typeFilter: S.typeFilter, epic: S.epic};
+S.project = 'OTHER'; S.typeFilter = 'Feature'; S.epic = 'OTHER-7';
+savePrefs();
+console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4-delivery'])}));
+"""
+    out = json.loads(run_script(driver, prelude))
+    assert out["restored"] == {"project": "TESTFLOW", "typeFilter": "Bug", "epic": "TESTFLOW-2"}
+    assert out["saved"] == {"project": "OTHER", "typeFilter": "Feature", "epic": "OTHER-7"}
+    page = html()
+    assert "loadPrefs();" in page.split(BOOT, 1)[1]
+    assert "savePrefs(); render();" in page
+    assert "savePrefs(); renderDHead(); renderDBody();" in page
+    assert "S.epic = e.target.value; savePrefs();" in page
+
+
+def test_delivery_selection_storage_errors_are_ignored():
+    prelude = STUBS + """
+localStorage = {getItem: function () { throw new Error('storage off'); },
+                setItem: function () { throw new Error('storage off'); }};
+"""
+    driver = """
+loadPrefs();
+savePrefs();
+console.log(JSON.stringify({project: S.project, typeFilter: S.typeFilter, epic: S.epic}));
+"""
+    out = json.loads(run_script(driver, prelude))
+    assert out == {"project": None, "typeFilter": "all", "epic": "all"}

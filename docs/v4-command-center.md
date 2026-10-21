@@ -36,3 +36,13 @@ that needed the owner are taken from audited transitions to Needs owner, the cur
 `needs-owner` label.
 Incidents are included when their subject is a ticket in scope, so account-wide and node-wide incidents are not
 assigned to an individual project.
+
+## Delivery sorting and remembered filters
+
+Delivery sorts epics by the numeric part of their key, so `TESTFLOW-2` comes before `TESTFLOW-10` instead of
+after it. The same order is used in the epic picker and the Epics panel.
+
+The selected project tab, type filter and epic are kept in `localStorage` under `aiflow4-delivery` and restored
+on the next visit. Storage access is wrapped in `try`/`catch`, so a browser with storage disabled keeps working
+with the defaults (first project, all types and all epics). A remembered project that no longer exists falls
+back to the first project.

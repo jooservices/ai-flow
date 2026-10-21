@@ -603,7 +603,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "notify", "triage-alert", {"chars": len(body.detail)})
         if run["step"] != "triage":
             raise HTTPException(403, "only a triage run can alert the owner")
-        blocks = ctx.db.one("SELECT 1 FROM tickets WHERE %s::text = ANY(blocked_by) LIMIT 1", (run["ticket_key"],))
+        blocks = ctx.db.one("SELECT 1 FROM tickets WHERE status <> 'Done' AND %s::text = ANY(blocked_by) LIMIT 1",
+                            (run["ticket_key"],))
         severity = "critical" if blocks else "warning"
         sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
                            ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"

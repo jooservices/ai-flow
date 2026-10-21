@@ -67,6 +67,24 @@ def join(client, name):
     return {"Authorization": f"Bearer {response.json()['node_token']}"}
 
 
+def test_done_dependents_do_not_make_triage_alert_critical(client, ctx, monkeypatch):
+    headers = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-72", status="Needs owner")
+    add_ticket(ctx.db, "TESTWP-73", status="Done", blocked_by=["TESTWP-72"])
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-72", "account": "codex-01", "step": "triage"},
+                        headers=headers).json()
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link: sent.append(
+        (severity, title, detail, link)) or ["fake"])
+
+    response = client.post("/v1/notify/triage", json={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                       "detail": "The owner needs to decide."}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["severity"] == "warning"
+    assert sent[0][0] == "warning"
+
+
 @pytest.mark.parametrize(("decision", "outcome"), [
     ("DECISION: ANSWER\nANSWER: Keep the response shape backward compatible.\nWHY: The ticket's AC2 requires it.\n",
      "answered"),

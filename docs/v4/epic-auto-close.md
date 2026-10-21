@@ -1,9 +1,10 @@
 # Automatic epic completion
 
 During each `jira_sync`, AI Flow checks the mirrored child tickets of every epic in the configured Jira projects.
-An epic with at least one child moves to **Done** when every child is Done. If a child is later added or reopened
-while the epic is Done, the epic moves back to **To Do**. Child tickets nested under another ticket are included
-when their parent chain leads to the epic. An epic with no children is left unchanged.
+An epic with at least one child moves to **Done** when every child is Done. If a child is newly seen, moved under
+the epic, or reopened while the epic is Done, the epic moves back to **To Do**. An older unfinished child alone
+does not undo a lead's manual close. Child tickets nested under another ticket are included when their parent
+chain leads to the epic. An epic with no children is left unchanged.
 
 When Flow moves an epic to Done, it comments with the child count, UTC completion time and a link to the HTML
 epic report. If that completes the project's last open epic, the comment also suggests that the lead consider

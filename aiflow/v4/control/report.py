@@ -155,6 +155,7 @@ def build_report(ctx, project_key: str, epic_key: str | None = None) -> dict[str
             "incidents_opened": {"count": 0, "items": []}, "owner_needed": {"count": 0, "tickets": []},
             "slowest_tickets": [],
             "requirement_coverage": _requirement_coverage(tickets, {}, {}, {}, {}, epic_key),
+            "project_close_suggestion": project_close_suggestion,
             "lessons": ["No lessons can be inferred from the recorded project history yet."],
         }
     completed = [t for t in tickets if t["status"] == "Done"]

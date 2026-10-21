@@ -76,6 +76,17 @@ def watchdog(ctx: Ctx) -> None:
                           f"No heartbeat for {int(age or 0)} seconds. Its runs lose their lease after 90 s and go back to To Do.")
         elif n["status"] == "online":
             close_incident(ctx, "node_down", n["name"], "heartbeat is back")
+    # nodes that joined but have no AI account: they add slots, never work
+    repo = ctx.repo()
+    with_accounts = {a.node for a in repo.accounts}
+    for n in ctx.db.all("SELECT name, status FROM nodes"):
+        if n["status"] == "online" and n["name"] not in with_accounts:
+            where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
+            open_incident(ctx, "node_no_ai", n["name"], "warning", f"node {n['name']} has no AI account",
+                          f"{n['name']} is online{where}, but no AI account is assigned to it, so it cannot take any ticket."
+                          " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
+        elif n["name"] in with_accounts or n["status"] != "online":
+            close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
     # runs whose lease disappeared (worker died, node down, network split)
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])

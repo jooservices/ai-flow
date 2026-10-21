@@ -184,3 +184,15 @@ def test_rework_findings_reach_the_next_dev_run(client, ctx):
     ctx.db.run("UPDATE tickets SET status='To Do', labels=array['aiflow-ready','rework'] WHERE key='TESTWP-21'")
     d = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
     assert d["claimed"] and d["findings"] == "- core/x.php: missing nonce check" and d["branch"] == "TESTWP-21-y"
+
+
+def test_node_without_ai_accounts_is_flagged(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    n3 = join(client, "node3")
+    client.post("/v1/nodes/node3/heartbeat", json={"slots_total": 2}, headers=n3)
+    watchdog(ctx)
+    inc = ctx.db.one("SELECT severity, title, detail FROM incidents WHERE kind='node_no_ai' AND subject='node3' AND closed_at IS NULL")
+    assert inc["severity"] == "warning" and "no AI account" in inc["title"] and "not described" in inc["detail"]
+    s = client.get("/v1/state").json()
+    n = next(x for x in s["nodes"] if x["name"] == "node3")
+    assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False

@@ -466,7 +466,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(run["project"])
         if not project or project.repo.split("/")[-1] != body.repo.split("/")[-1]:
             raise HTTPException(403, "repository does not belong to the run's project")
-        token, expires = ctx.github.token(project.repo_name, {"contents": "write", "metadata": "read"})
+        token, expires = ctx.github.token(project.repo_name, {"contents": "write", "metadata": "read", "workflows": "write"})
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
               {"repo": project.repo, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}

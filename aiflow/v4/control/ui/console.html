@@ -403,7 +403,7 @@ var S = {
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true
 };
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
@@ -531,7 +531,9 @@ function renderCC() {
   var d = D();
   var online = d.nodes.filter(function (n) { return n.status === 'online'; });
   var offline = d.nodes.filter(function (n) { return n.status === 'offline'; });
-  var slots = d.nodes.reduce(function (s, n) { return s + (n.status === 'online' ? n.slots_total : 0); }, 0);
+  var hasAcc = {}; d.accounts.forEach(function (a) { hasAcc[a.node] = 1; });
+  var slots = d.nodes.reduce(function (s, n) { return s + (n.status === 'online' && hasAcc[n.name] ? n.slots_total : 0); }, 0);
+  var idleSlots = d.nodes.reduce(function (s, n) { return s + (n.status === 'online' && !hasAcc[n.name] ? n.slots_total : 0); }, 0);
   var used = d.active_runs.length;
   var ready = d.accounts.filter(function (a) { return a.status === 'idle' || a.status === 'working' || a.status === 'probing'; });
   var cool = d.accounts.filter(function (a) { return a.status === 'cooldown'; }).length;
@@ -544,7 +546,7 @@ function renderCC() {
 
   var h = '<section class="kpis" aria-label="Summary">';
   h += kpi('Nodes online', online.length + ' / ' + d.nodes.length, offline.length ? offline.map(function (n) { return n.name; }).join(', ') + ' down' : (d.nodes.length ? 'all heartbeating' : 'no node joined yet'), offline.length ? 'crit' : '', 'p-nodes');
-  h += kpi('Slots in use', used + ' / ' + slots, used ? used + ' AI run' + (used > 1 ? 's' : '') + ' now' : 'idle', '', 'p-nodes');
+  h += kpi('Slots in use', used + ' / ' + slots, (used ? used + ' AI run' + (used > 1 ? 's' : '') + ' now' : 'idle') + (idleSlots ? ' · ' + idleSlots + ' on nodes without AI' : ''), '', 'p-nodes');
   h += kpi('Accounts ready', ready.length + ' / ' + d.accounts.length, (cool ? cool + ' without quota' : 'all have quota') + (out ? ' · ' + out + ' failing' : ''), cool || out ? 'warn' : '', 'p-accounts');
   h += kpi('Highest quota use', topQ == null ? '—' : Math.round(topQ * 100) + '%', 'across reported windows', topQ != null && topQ >= 0.9 ? 'crit' : topQ != null && topQ >= 0.75 ? 'warn' : '', 'p-accounts');
   h += kpi('Runs · 24 h', String(t.runs_24h || 0), (t.done_24h || 0) + ' done · ' + (t.failed_24h || 0) + ' not done', t.failed_24h ? 'warn' : '', 'p-runs');
@@ -571,8 +573,9 @@ function renderCC() {
     var sl = ''; for (var i = 0; i < n.slots_total; i++) sl += '<span class="slot"' + (i < runs ? ' data-used' : '') + '></span>';
     var off = n.status === 'offline';
     h += '<button class="node" data-act="open-node" data-id="' + esc(n.name) + '"' + (off ? ' data-off' : '') + ' aria-label="Open node ' + esc(n.name) + '">';
-    h += '<span class="node-top"><span class="n-name">' + esc(n.name) + '</span><span class="mono muted" style="font-size:12px">' + esc(n.ip) + (n.name === 'cc' ? ' · control plane' : '') + '</span><span class="spacer"></span>' + pill(nodeTone(n), nodeLabel(n), n.status !== 'online') + '</span>';
+    h += '<span class="node-top"><span class="n-name">' + esc(n.name) + '</span><span class="mono muted" style="font-size:12px">' + esc(n.ip) + (n.name === 'cc' ? ' · control plane' : '') + '</span><span class="spacer"></span>' + (!off && !accs.length ? pill('warn', 'No AI') : '') + pill(nodeTone(n), nodeLabel(n), n.status !== 'online') + '</span>';
     if (off) h += '<span class="offnote">No heartbeat for ' + mmss((n.heartbeat_age_s || 0) + since()) + '. Its runs go back to To Do when their lease ends.</span>';
+    else if (!accs.length) h += '<span class="offnote" style="color:var(--warn)">No AI account on this node: it adds ' + n.slots_total + ' slots but cannot take work.' + (n.in_control_repo === false ? ' Not described in aiflow-control/nodes/.' : '') + '</span>';
     h += nodeMetrics(n);
     h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + esc(n.release || '—') + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
     h += '<span class="node-accs">';

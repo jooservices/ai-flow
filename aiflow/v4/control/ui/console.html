@@ -446,6 +446,7 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
+  consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
@@ -489,6 +490,8 @@ function nodeBy(n) { return D().nodes.filter(function (x) { return x.name === n;
 function accBy(id) { return D().accounts.filter(function (x) { return x.id === id; })[0]; }
 function ticketBy(k) { return D().tickets.filter(function (x) { return x.key === k; })[0]; }
 function incBy(id) { return D().incidents.concat(D().incidents_recent || []).filter(function (x) { return String(x.id) === String(id); })[0]; }
+function consoleOwner() { return S.consoleUser && S.consoleUser.role === 'owner'; }
+function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'lead'); }
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function nodeLabel(n) { return { online: 'Online', offline: 'Offline', draining: 'Draining', joined: 'Joining' }[n.status] || n.status; }
@@ -532,6 +535,56 @@ function poll() {
     if (S.view === 'business' && !S.bizLoading) loadBiz();  // assessments arrive while the page is open
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })
     .then(function () { setTimeout(poll, POLL_MS); });
+}
+function pollConsoleSession() {
+  fetch('/v1/console/session', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.consoleUser = d.authenticated ? d : null;
+    render();
+    if (S.drawer && S.drawer.kind === 'node' && consoleReader()) loadNodeOperations(S.drawer.id);
+  }).catch(function () { S.consoleUser = null; render(); })
+    .then(function () { setTimeout(pollConsoleSession, 15000); });
+}
+function loadNodeOperations(name) {
+  if (!consoleReader()) return;
+  fetch('/v1/nodes/' + encodeURIComponent(name) + '/operations', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.nodeOperations[name] = d.operations || [];
+    if (S.drawer && S.drawer.kind === 'node' && S.drawer.id === name) renderDrawer();
+  }).catch(function () { S.nodeOperations[name] = []; });
+}
+function startNodeOperation(name, action) {
+  S.operationBusy[name] = true; renderDrawer();
+  fetch('/v1/nodes/' + encodeURIComponent(name) + '/operations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: action })
+  }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) {
+    toast(action === 'repair' ? 'Repair queued' : 'Install queued', name + ' · ' + d.components.join(', '), 'info');
+    loadNodeOperations(name);
+  }).catch(function (e) { toast('Could not start operation', e.message, 'warn'); })
+    .then(function () { S.operationBusy[name] = false; renderDrawer(); });
+}
+function createJoinCommand(name) {
+  fetch('/v1/nodes/' + encodeURIComponent(name) + '/join-command', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name })
+  }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) {
+    S.joinCommands[name] = d; renderDrawer();
+    toast('Join command ready', 'It expires in 10 minutes and can be used once.', 'ok');
+  }).catch(function (e) { toast('Could not create join command', e.message, 'warn'); });
+}
+function copyJoinCommand(name) {
+  var join = S.joinCommands[name]; if (!join) return;
+  if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+    window.navigator.clipboard.writeText(join.command).then(function () { toast('Join command copied', '', 'ok'); })
+      .catch(function () { toast('Could not copy command', 'Select and copy the command below.', 'warn'); });
+  } else toast('Select and copy the join command', '', 'info');
 }
 function pollServices() {
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
@@ -665,7 +718,7 @@ function renderCC() {
   }
 
   h += '<div class="grid-2">';
-  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span></div><div class="nodes">';
+  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleOwner() ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
   if (!d.nodes.length) h += '<div class="empty">No node has joined. Run <span class="mono">aiflow4 node join</span> on a machine.</div>';
   d.nodes.forEach(function (n) {
     var accs = d.accounts.filter(function (a) { return a.node === n.name; });
@@ -1139,6 +1192,45 @@ function drawerNode(name) {
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
   b += '</div>';
+  if (consoleOwner()) {
+    b += '<div class="dsec"><h4>Install and repair</h4>';
+    if (n.status === 'online' && n.has_agent) {
+      b += '<div class="small">Install only components missing from the required toolchain, or reconcile versions.lock and desired services.</div>';
+      b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="node-install" data-node="' + esc(n.name) + '"' + (S.operationBusy[n.name] ? ' disabled' : '') + '>Install missing</button>';
+      b += '<button class="btn sm primary" data-act="node-repair" data-node="' + esc(n.name) + '"' + (S.operationBusy[n.name] ? ' disabled' : '') + '>Repair to desired state</button></div>';
+    } else {
+      b += '<div class="small">This node has no online agent. Generate a one-time join command from Command Center.</div>';
+    }
+    if (n.status !== 'online') b += '<button class="btn sm" data-act="join-command" data-node="' + esc(n.name) + '">Generate join command</button>';
+    var join = S.joinCommands[n.name];
+    if (join) b += '<div class="small">Expires ' + when(join.expires_at) + ' · one use</div><pre class="report-md">' + esc(join.command) + '</pre><button class="btn sm" data-act="copy-join" data-node="' + esc(n.name) + '">Copy command</button>';
+    b += '</div>';
+  } else if (S.consoleUser && S.consoleUser.role === 'lead') {
+    b += '<div class="dsec"><h4>Install and repair</h4><div class="small">Only an authenticated owner can install or repair a node.</div></div>';
+  }
+  var desiredServices = n.desired_services || [];
+  b += '<div class="dsec"><h4>Desired services</h4>';
+  if (!desiredServices.length) b += '<div class="empty">No node services are declared in the control repo.</div>';
+  else desiredServices.forEach(function (svc) { b += '<div class="small">' + esc(svc.name || svc.unit || 'service') + ' · ' + esc(svc.unit || 'unit missing') + (svc.healthcheck || svc.healthcheck_configured ? ' · health check configured' : ' · systemd active check') + '</div>'; });
+  b += '</div>';
+  if (n.status === 'online' && n.has_agent) b += '<div class="small">AI account authorization is handled separately; installation does not sign accounts in.</div>';
+  if (consoleReader()) {
+    var nodeOps = S.nodeOperations[n.name] || [];
+    b += '<div class="dsec"><h4>Operation log</h4>';
+    if (!nodeOps.length) b += '<div class="empty">No install or repair operations recorded.</div>';
+    else {
+      b += '<ul class="checklist">';
+      nodeOps.forEach(function (op) {
+        var toneName = op.status === 'completed' ? 'ico-ok' : op.status === 'failed' ? 'ico-fail' : '';
+        b += '<li><span class="' + toneName + '">' + (op.status === 'completed' ? ICON.ok : op.status === 'failed' ? ICON.fail : ICON.pend) + '</span><span><span class="mono small">' + when(op.created_at) + '</span> ' + esc(op.action) + ' · ' + esc(op.status) + ' · ' + esc(op.actor);
+        if (op.result && op.result.error) b += '<div class="small">' + esc(op.result.error) + '</div>';
+        if (op.result && op.result.services && op.result.services.length) b += '<div class="small">Services: ' + esc(op.result.services.map(function (s) { return s.name + ' ' + (s.healthy ? 'green' : 'failed'); }).join(', ')) + '</div>';
+        b += '</span></li>';
+      });
+      b += '</ul>';
+    }
+    b += '</div>';
+  }
   return drawerShell('node · ' + esc(n.ip), esc(n.name), pill(nodeTone(n), nodeLabel(n)), b);
 }
 function drawerAcc(id) {
@@ -1237,6 +1329,7 @@ function openDrawer(kind, id, opener) {
   lastFocus = opener || document.activeElement;
   S.drawer = { kind: kind, id: id };
   if (kind === 'ticket') loadTicket(id);
+  if (kind === 'node' && consoleReader()) loadNodeOperations(id);
   renderDrawer();
   $('#overlay').setAttribute('data-open', ''); $('#drawer').setAttribute('data-open', ''); $('#drawer').setAttribute('aria-hidden', 'false');
   setTimeout(function () { var c = $('#drawer [data-act="close"]'); if (c) c.focus(); }, 60);
@@ -1308,6 +1401,18 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
   else if (act === 'open-report') openProjectReport(el);
   else if (act === 'copy-report') copyReport();
+  else if (act === 'node-install') startNodeOperation(el.getAttribute('data-node'), 'install');
+  else if (act === 'node-repair') startNodeOperation(el.getAttribute('data-node'), 'repair');
+  else if (act === 'join-command') createJoinCommand(el.getAttribute('data-node'));
+  else if (act === 'copy-join') copyJoinCommand(el.getAttribute('data-node'));
+  else if (act === 'add-node') {
+    var newName = window.prompt('Node name');
+    if (newName) {
+      if (!nodeBy(newName)) D().nodes.push({ name: newName, ip: '', status: 'joined', has_agent: false, tools: {},
+        metrics: {}, projects: [], desired_services: [], missing_tools: [], heartbeat_age_s: null, slots_total: 1 });
+      openDrawer('node', newName, el); createJoinCommand(newName);
+    }
+  }
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; savePrefs(); render(); }
@@ -1343,7 +1448,7 @@ try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentE
 loadPrefs();
 showView();
 render();
-poll(); pollServices(); pollAnalytics();
+poll(); pollServices(); pollAnalytics(); pollConsoleSession();
 setInterval(tick, 1000);
 })();
 </script>

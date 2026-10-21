@@ -1,6 +1,6 @@
 from aiflow.v4.core.controlrepo import ControlRepo, Project
 from aiflow.v4.core.toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
-                                      tools_for_stack, tools_for_stacks)
+                                      pinned_version, tools_for_stack, tools_for_stacks)
 
 
 def join(client, name):
@@ -33,6 +33,17 @@ def test_control_repo_reads_the_project_stack_and_node_tool_union(control_repo):
     assert repo.projects["TESTWP"].stack == "php-8.3"
     assert repo.projects["TESTWP"].tools == list(BASE_TOOLS) + ["php", "composer", "wp"]
     assert repo.tools_for_node("cc") == list(BASE_TOOLS) + ["claude", "opencode", "php", "composer", "wp"]
+
+
+def test_node_can_declare_extra_installable_tools_and_versions_use_lock_then_stack(control_repo):
+    (control_repo / "nodes" / "cc.yaml").write_text("name: cc\nprojects: [TESTWP]\ntools: [docker]\n")
+    (control_repo / "projects" / "TESTWP.yaml").write_text(
+        "key: TESTWP\nrepo: jooservices/test-aiflow-wp\nstack: php-8.3\n")
+    repo = ControlRepo.load(control_repo)
+    assert "docker" in repo.tools_for_node("cc")
+    assert pinned_version(repo.versions, "claude") == "2.1.305"
+    assert pinned_version({"tools": {"codex": "0.4.1"}}, "codex-code-mode-host") == "0.4.1"
+    assert pinned_version({}, "php", [repo.projects["TESTWP"].stack]) == "8.3"
 
 
 def test_watchdog_warns_when_a_node_misses_tools_for_a_project(client, ctx):

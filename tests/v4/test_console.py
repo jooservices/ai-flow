@@ -37,7 +37,7 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
     return result.stdout
 
 
-def render_drawer(node: dict) -> str:
+def render_drawer(node: dict, console_user: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
@@ -47,6 +47,7 @@ def render_drawer(node: dict) -> str:
 var node = {json.dumps(node)};
 S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
           incidents: [], events: [], totals: {{}}, versions: {{}}}};
+S.consoleUser = {json.dumps(console_user)};
 S.fetchedAt = Date.now();
 console.log(drawerNode(node.name));
 """
@@ -109,6 +110,23 @@ def test_node_drawer_lists_missing_project_tools_in_red():
     assert '<span class="vk">composer</span><span class="vv bad">missing</span>' in drawer
     assert '<span class="vk">wp</span><span class="vv bad">missing</span>' in drawer
     assert "Missing for this node's project stacks: composer, wp." in drawer
+
+
+def test_node_drawer_exposes_owner_install_repair_join_and_lead_audit_view():
+    node = {"name": "node3", "ip": "192.0.2.55", "role": "worker", "status": "online",
+            "slots_total": 2, "slots_used": 0, "release": "v1", "metrics": {}, "tools": {"codex": "missing"},
+            "missing_tools": ["codex"], "has_agent": True, "required_tools": ["codex"],
+            "desired_services": [{"name": "worker-api", "unit": "worker-api.service",
+                                  "healthcheck_configured": True}], "projects": [], "heartbeat_age_s": 12}
+    owner = render_drawer(node, {"authenticated": True, "user": "owner", "role": "owner"})
+    assert 'data-act="node-install"' in owner and 'data-act="node-repair"' in owner
+    assert "worker-api.service" in owner and "health check configured" in owner
+    lead = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"})
+    assert 'data-act="node-install"' not in lead and 'data-act="node-repair"' not in lead
+    assert "Only an authenticated owner can install or repair a node." in lead
+    no_agent = dict(node, status="joined", has_agent=False)
+    join = render_drawer(no_agent, {"authenticated": True, "user": "owner", "role": "owner"})
+    assert 'data-act="join-command"' in join
 
 
 def test_layout_uses_the_full_width_with_a_wider_gutter_on_large_screens():

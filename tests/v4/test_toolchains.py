@@ -43,6 +43,8 @@ def test_node_can_declare_extra_installable_tools_and_versions_use_lock_then_sta
     assert "docker" in repo.tools_for_node("cc")
     assert pinned_version(repo.versions, "claude") == "2.1.305"
     assert pinned_version({"tools": {"codex": "0.4.1"}}, "codex-code-mode-host") == "0.4.1"
+    assert pinned_version({"tools": {"codex": "0.147.0", "codex_code_mode_host": "0.144.0"}},
+                          "codex-code-mode-host") == "0.147.0"
     assert pinned_version({}, "php", [repo.projects["TESTWP"].stack]) == "8.3"
 
 

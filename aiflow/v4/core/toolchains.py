@@ -31,7 +31,6 @@ STACK_TOOLS: dict[str, tuple[str, ...]] = {
 VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "claude": ("claude_code", "claude-code", "claude"),
     "codex": ("codex",),
-    "codex-code-mode-host": ("codex_code_mode_host", "codex-code-mode-host"),
     "grok": ("grok",),
     "opencode": ("opencode",),
     "docker": ("docker",),
@@ -48,6 +47,9 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
 
 def pinned_version(versions: dict[str, object] | None, tool: str, stacks: Iterable[str] = ()) -> str:
     """Version pin for a tool, using versions.lock first and the project's explicit stack version second."""
+    if tool == "codex-code-mode-host":
+        # The host binary must come from the same Codex release to speak its protocol.
+        return pinned_version(versions, "codex")
     locked = (versions or {}).get("tools") or {}
     if isinstance(locked, dict):
         for key in VERSION_KEYS.get(tool, (tool,)):
@@ -60,9 +62,6 @@ def pinned_version(versions: dict[str, object] | None, tool: str, stacks: Iterab
         prefix, sep, version = str(stack).partition("-")
         if sep and ((tool == "php" and prefix == "php") or (tool == "python3" and prefix == "python")):
             return version
-    if tool == "codex-code-mode-host":
-        # The host binary must come from the same Codex release to speak its protocol.
-        return pinned_version(versions, "codex")
     return ""
 
 

@@ -37,7 +37,7 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
     return result.stdout
 
 
-def render_drawer(node: dict, console_user: dict | None = None) -> str:
+def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
@@ -48,6 +48,7 @@ var node = {json.dumps(node)};
 S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
           incidents: [], events: [], totals: {{}}, versions: {{}}}};
 S.consoleUser = {json.dumps(console_user)};
+S.nodeOperations = {{[node.name]: {json.dumps(operations or [])}}};
 S.fetchedAt = Date.now();
 console.log(drawerNode(node.name));
 """
@@ -127,6 +128,18 @@ def test_node_drawer_exposes_owner_install_repair_join_and_lead_audit_view():
     no_agent = dict(node, status="joined", has_agent=False)
     join = render_drawer(no_agent, {"authenticated": True, "user": "owner", "role": "owner"})
     assert 'data-act="join-command"' in join
+
+
+def test_node_operation_log_escapes_service_names_from_saved_results():
+    service_name = '<img src=x onerror="alert(1)">'
+    node = {"name": "node3", "ip": "192.0.2.55", "status": "online", "metrics": {}, "tools": {},
+            "has_agent": True, "projects": [], "heartbeat_age_s": 12}
+    rendered = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"}, [{
+        "status": "completed", "action": "repair", "actor": "owner", "created_at": None,
+        "result": {"services": [{"name": service_name, "healthy": True}]},
+    }])
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; green" in rendered
+    assert service_name not in rendered
 
 
 def test_layout_uses_the_full_width_with_a_wider_gutter_on_large_screens():
@@ -264,6 +277,11 @@ def test_gatus_link_is_configurable(monkeypatch):
     assert Settings.from_env().gatus_url == "https://status.example/"
     monkeypatch.delenv("AIFLOW4_GATUS_URL")
     assert Settings.from_env().gatus_url == "/gatus/"
+
+
+def test_join_control_url_is_read_from_compose_environment(monkeypatch):
+    monkeypatch.setenv("AIFLOW4_JOIN_CONTROL_URL", "https://nodes.example.test/ai-flow")
+    assert Settings.from_env().join_control_url == "https://nodes.example.test/ai-flow"
 
 
 def test_epics_are_sorted_by_the_numeric_part_of_their_key():

@@ -27,7 +27,9 @@ from .policy_relay import PolicyRelay
 log = logging.getLogger("aiflow4.node")
 TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "codex-code-mode-host": ["sh", "-c", 'h="$(dirname "$(readlink -f "$(command -v codex)")")/codex-code-mode-host";'
-                                  ' test -x "$h" && echo "present $h"'], "grok": ["grok", "--version"],
+                                  ' test -x "$h" && { if test -r "$h.version"; then'
+                                  ' printf "codex-code-mode-host %s\\n" "$(head -n1 "$h.version")";'
+                                  ' else echo "present $h"; fi; }'], "grok": ["grok", "--version"],
          "opencode": ["opencode", "--version"], "docker": ["docker", "--version"], "git": ["git", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],

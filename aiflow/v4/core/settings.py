@@ -55,6 +55,7 @@ class Settings:
     o2_url: str = ""
     o2_basic: str = ""
     public_url: str = "http://127.0.0.1:18480"
+    join_control_url: str = ""
     gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
     # node / worker
     control_url: str = "http://10.44.0.10"
@@ -79,6 +80,7 @@ class Settings:
         s.console_session_secret = _env("CONSOLE_SESSION_SECRET", s.console_session_secret)
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)
+        s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)
         s.gatus_url = _env("GATUS_URL", s.gatus_url)
         s.control_url = _env("CONTROL_URL", s.control_url)
         s.node_name = _env("NODE_NAME", s.node_name)

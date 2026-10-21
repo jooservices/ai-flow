@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import shlex
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -96,6 +97,8 @@ def test_join_command_bootstraps_a_verified_release_before_joining(client, ctx, 
     sign_in(client, ctx)
     command = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"}).json()["command"]
     assert "\n" not in command
+    assert "https://control.example.test" in command
+    assert "127.0.0.1:18480" not in command
     script = bootstrap_script(command)
     steps = script.split("; ")
     token = next(step for step in steps if step.startswith("T="))[2:]
@@ -128,6 +131,28 @@ def test_join_command_requires_a_published_signed_release(client, ctx, tmp_path,
                       " LIMIT 1") == {"accepted": False, "result": "no signed release is published"}
 
 
+@pytest.mark.parametrize("control_url", [
+    "", "http://127.0.0.1:18480", "http://localhost:18480", "http://169.254.0.1", "http://0.0.0.0",
+    "http://127.1", "http://2130706433", "http://192.0.2.1", "http://[::ffff:127.0.0.1]",
+    "file:///tmp/control", "https://owner:secret@control.example.test", "https://control.example.test/path?q=x",
+    "https://control.example.test?",
+])
+def test_join_command_requires_an_explicit_non_local_control_url_before_creating_token(
+        client, ctx, tmp_path, monkeypatch, control_url):
+    publish_release(tmp_path, monkeypatch)
+    ctx.settings.join_control_url = control_url
+    sign_in(client, ctx)
+    response = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"})
+    assert response.status_code == 503
+    assert ctx.db.one("SELECT count(*) AS n FROM node_join_tokens WHERE node='fresh-node'")["n"] == 0
+    audit = ctx.db.one("SELECT accepted FROM write_audit WHERE action='join_command' ORDER BY id DESC LIMIT 1")
+    assert audit == {"accepted": False}
+
+
+def test_join_control_url_accepts_an_operator_routed_private_address():
+    assert control_api.validated_join_control_url("http://10.44.0.10:18480/") == "http://10.44.0.10:18480"
+
+
 def test_join_command_uses_a_single_use_token_and_never_accepts_ssh_password(client, ctx, tmp_path, monkeypatch):
     publish_release(tmp_path, monkeypatch)
     sign_in(client, ctx)
@@ -155,6 +180,7 @@ def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(
     headers = node_join(client, "node1")
     repo = ctx.repo()
     repo.projects["TESTWP"].stack = "php-8.3"
+    repo.nodes["node1"].packages = ["curl", "ca-certificates"]
     repo.nodes["node1"].services = [{"name": "worker-api", "unit": "worker-api.service",
                                      "healthcheck": "http://127.0.0.1:9000/health"}]
     repo.versions["tools"].update({"codex": "0.4.1", "php": "8.3.7", "composer": "2.8.1"})
@@ -167,6 +193,8 @@ def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(
     plan = {tool["name"]: tool["version"] for tool in op["payload"]["tools"]}
     assert set(repo.tools_for_node("node1")).issubset(plan)
     assert plan["codex"] == "0.4.1" and plan["php"] == "8.3.7" and plan["composer"] == "2.8.1"
+    package_plan = next(tool for tool in op["payload"]["tools"] if tool["name"] == "packages")
+    assert package_plan["packages"] == ["curl", "ca-certificates"]
     assert op["payload"]["services"] == repo.nodes["node1"].services
 
 
@@ -187,9 +215,125 @@ def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(m
     assert result["healthy"] is True
     assert result["services"] == [{"name": "worker-api", "unit": "worker-api.service", "healthy": True,
                                     "check": "green"}]
-    assert calls[0] == ["npm", "install", "--global", "--no-audit", "--no-fund", "@openai/codex@0.4.1"]
+    assert calls[0] == ["npm", "install", "--global", "--no-audit", "--no-fund", "--registry",
+                        "https://registry.npmjs.org", "@openai/codex@0.4.1"]
     assert calls[1:3] == [["systemctl", "enable", "--now", "worker-api.service"],
                           ["systemctl", "is-active", "--quiet", "worker-api.service"]]
+
+
+def test_repair_installs_missing_required_toolchains_and_codex_host(monkeypatch):
+    names = ["uv", "python3", "composer", "wp", "codex-code-mode-host"]
+    pins = {"uv": "0.5.0", "python3": "3.12", "composer": "2.8.1", "wp": "2.12.0",
+            "codex-code-mode-host": "0.4.1"}
+    snapshots = iter([dict.fromkeys(names, "missing"), {
+        "uv": "uv 0.5.0", "python3": "Python 3.12.3", "composer": "Composer 2.8.1",
+        "wp": "WP-CLI 2.12.0", "codex-code-mode-host": "codex-code-mode-host 0.4.1",
+    }])
+    installs = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: next(snapshots))
+    monkeypatch.setattr(operations, "_install_component", lambda name, version, packages: installs.append(name))
+
+    result = operations.execute({"payload": {"action": "repair", "tools": [
+        {"name": name, "version": pins[name], "packages": []} for name in reversed(names)], "services": []}})
+
+    assert result["healthy"] is True
+    assert installs == ["uv", "python3", "composer", "wp", "codex-code-mode-host"]
+
+
+def test_repair_passes_declared_os_packages_to_server_installer_module(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agent, "tool_versions", lambda _names: {})
+    monkeypatch.setattr(operations, "_run_server_installer",
+                        lambda name, version, packages=None: calls.append((name, version, packages)))
+    result = operations.execute({"payload": {"action": "repair", "tools": [
+        {"name": "packages", "version": "", "packages": ["curl", "ca-certificates"]}], "services": []}})
+    assert result["healthy"] is True
+    assert calls == [("packages", "", ["curl", "ca-certificates"])]
+
+
+def test_supporting_tool_installer_routes_are_whitelisted(monkeypatch):
+    routed = []
+    for tool, helper in (("uv", "_install_uv"), ("python3", "_install_python"), ("node", "_install_node"),
+                         ("gh", "_install_gh"), ("composer", "_install_composer"), ("wp", "_install_wp"),
+                         ("codex-code-mode-host", "_install_codex_host")):
+        monkeypatch.setattr(operations, helper, lambda version, tool=tool: routed.append((tool, version)))
+        operations._install_component(tool, "1.2.3", [])
+    assert routed == [(tool, "1.2.3") for tool in
+                      ("uv", "python3", "node", "gh", "composer", "wp", "codex-code-mode-host")]
+
+
+def test_python_stack_pin_uses_uv_to_install_the_requested_minor_version(monkeypatch):
+    calls = []
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/local/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kwargs: (
+        calls.append((command, kwargs)) or SimpleNamespace(returncode=0, stdout="", stderr="")))
+    operations._install_python("3.12")
+    assert calls[0][0] == ["uv", "python", "install", "3.12", "--default", "--install-dir",
+                           "/usr/local/lib/aiflow4/uv-python"]
+    assert calls[0][1]["env"]["UV_PYTHON_BIN_DIR"] == "/usr/local/bin"
+
+
+def test_codex_host_repair_requires_the_version_recorded_by_its_installer():
+    assert not operations._tool_version_ok("codex-code-mode-host", "present /usr/local/bin/codex-code-mode-host",
+                                           "0.4.1")
+    assert operations._tool_version_ok("codex-code-mode-host", "codex-code-mode-host 0.4.1", "0.4.1")
+    assert not operations._tool_version_ok("codex-code-mode-host", "codex-code-mode-host 0.4.0", "0.4.1")
+
+
+def test_codex_host_installer_uses_the_locked_release_and_installs_beside_codex(monkeypatch, tmp_path):
+    calls = []
+    codex_directory = tmp_path / "bin"
+    codex_directory.mkdir()
+    monkeypatch.setattr(operations, "_linux_arch", lambda: ("x86_64", "x64"))
+    monkeypatch.setattr(operations, "_github_release_asset", lambda *args: calls.append(("asset", args)) or b"archive")
+    monkeypatch.setattr(operations, "_archive_member", lambda payload, suffix: b"host binary")
+    monkeypatch.setattr(operations.shutil, "which", lambda name: str(codex_directory / "codex")
+                        if name == "codex" else None)
+    monkeypatch.setattr(operations, "_install_binary",
+                        lambda name, payload, directory: calls.append(("binary", name, payload, directory)))
+    monkeypatch.setattr(operations, "_install_file",
+                        lambda name, payload, directory: calls.append(("file", name, payload, directory)))
+    operations._install_codex_host("0.147.0")
+    assert calls[0] == ("asset", ("openai/codex", "rust-v0.147.0",
+                                   "codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz"))
+    assert calls[1] == ("binary", "codex-code-mode-host", b"host binary", codex_directory)
+    assert calls[2] == ("file", "codex-code-mode-host.version", b"0.147.0\n", codex_directory)
+
+
+def test_github_artifact_digest_is_verified_before_use(monkeypatch):
+    payload = b"released tool bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    api_url = "https://api.github.com/repos/owner/tool/releases/tags/v1.2.3"
+
+    class FakeResponse:
+        status_code = 200
+        content = payload
+        text = ""
+
+        def __init__(self, release=None):
+            self.release = release
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.release
+
+    def fake_get(url, **kwargs):
+        if url == api_url:
+            return FakeResponse({"assets": [{"name": "tool.tar.gz", "digest": f"sha256:{digest}",
+                                             "browser_download_url": "https://github.com/owner/tool/releases/download/v1.2.3/tool.tar.gz"}]})
+        return FakeResponse()
+
+    monkeypatch.setattr(operations.httpx, "get", fake_get)
+    assert operations._github_release_asset("owner/tool", "v1.2.3", "tool.tar.gz") == payload
+
+    monkeypatch.setattr(operations.httpx, "get", lambda url, **kwargs: FakeResponse(
+        {"assets": [{"name": "tool.tar.gz", "digest": "sha256:" + "0" * 64,
+                      "browser_download_url": "https://github.com/owner/tool/releases/download/v1.2.3/tool.tar.gz"}]})
+        if url == api_url else FakeResponse())
+    with pytest.raises(operations.OperationError, match="checksum verification failed"):
+        operations._github_release_asset("owner/tool", "v1.2.3", "tool.tar.gz")
 
 
 def test_node_agent_claims_whitelisted_operation_and_posts_its_result(monkeypatch):
@@ -229,43 +373,61 @@ def test_packages_docker_and_php_run_the_pinned_server_installer_without_a_shell
     monkeypatch.setattr(operations, "SERVER_INSTALLER", binary)
     monkeypatch.setenv("SI_PHP_MODE", "fpm")
     calls = []
+    package_modules = []
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        installed = command[0] == "dpkg-query"
-        return SimpleNamespace(returncode=0, stdout="install ok installed" if installed else "", stderr="")
+        if "aiflow4-server-installer-" in command[0]:
+            module = Path(command[0]).parent.parent / "modules" / "essentials" / "packages" / "module.sh"
+            package_modules.append(module.read_text())
+            assert '"zip" "unzip"' in package_modules[-1]
+            assert 'si_pkg_install "${SI_PACKAGES_LIST[@]}"' in package_modules[-1]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(operations.subprocess, "run", fake_run)
     operations._install_component("packages", "", ["zip", "unzip"])
     operations._install_component("docker", "27.5", [])
     operations._install_component("php", "8.3.7", [])
-    installer_calls = [(c, kw) for c, kw in calls if c[0] == str(binary)]
-    assert [c for c, _ in installer_calls] == [[str(binary), "apply", "--modules", m]
-                                               for m in ("packages", "docker", "php")]
+    installer_calls = [(c, kw) for c, kw in calls if len(c) >= 4 and c[-3] == "apply" and c[-2] == "--modules"]
+    assert len(installer_calls) == 3
+    assert installer_calls[0][0][-3:] == ["apply", "--modules", "packages"]
+    assert installer_calls[1][0] == [str(binary), "apply", "--modules", "docker"]
+    assert installer_calls[2][0] == [str(binary), "apply", "--modules", "php"]
     assert all("shell" not in kw for _, kw in installer_calls)
     assert installer_calls[2][1]["env"]["SI_PHP_VERSION"] == "8.3"
     assert all("SI_PHP_MODE" not in kw["env"] for _, kw in installer_calls)
-    assert [c for c, _ in calls if c[0] == "dpkg-query"] == [
-        ["dpkg-query", "-W", "-f=${Status}", "zip"], ["dpkg-query", "-W", "-f=${Status}", "unzip"]]
+    assert package_modules[0].count('"zip"') == 1 and package_modules[0].count('"unzip"') == 1
 
 
-def test_missing_server_installer_or_extra_packages_fail_the_operation(monkeypatch, tmp_path):
+def test_missing_server_installer_or_unsafe_extra_packages_fail_the_operation(monkeypatch, tmp_path):
     monkeypatch.setattr(operations, "SERVER_INSTALLER", tmp_path / "absent")
     with pytest.raises(operations.OperationError, match="server-installer v1.1.0 is not installed"):
         operations._install_component("docker", "", [])
     binary = tmp_path / "server-installer"
     binary.write_text("#!/bin/bash\n")
     monkeypatch.setattr(operations, "SERVER_INSTALLER", binary)
-    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kw: SimpleNamespace(
-        returncode=1 if command[0] == "dpkg-query" else 0, stdout="", stderr=""))
-    with pytest.raises(operations.OperationError, match="not provided by the server-installer packages module: curl"):
-        operations._install_component("packages", "", ["curl"])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        module = Path(command[0]).parent.parent / "modules" / "essentials" / "packages" / "module.sh"
+        source = module.read_text()
+        assert '"curl"' in source
+        assert 'si_pkg_install "${SI_PACKAGES_LIST[@]}"' in source
+        assert "module_verify()" in source and "module_check" in source
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(operations.subprocess, "run", fake_run)
+    operations._install_component("packages", "", ["curl"])
+    assert len(calls) == 1 and calls[0][-3:] == ["apply", "--modules", "packages"]
+    with pytest.raises(operations.OperationError, match="safe package names"):
+        operations._install_component("packages", "", ["curl;id"])
 
 
 def test_operation_whitelist_rejects_arbitrary_commands():
     with pytest.raises(operations.OperationError, match="not in the install whitelist"):
         operations._install_component("bash -c whoami", "", [])
     with pytest.raises(operations.OperationError, match="not in the install whitelist"):
-        operations._install_component("uv", "0.5.0", [])
+        operations._install_component("bash", "", [])
     with pytest.raises(operations.OperationError, match="whitelist"):
         operations.execute({"payload": {"action": "shell", "command": "id"}})

@@ -8,10 +8,12 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import ipaddress
 import re
 import logging
 import secrets
 import shlex
+import socket
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +45,9 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 RELEASES = Path("/srv/aiflow/control/releases")
+_NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
+))
 # A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
 # failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
 BACKOFF_SQL = """
@@ -76,6 +81,41 @@ def h(token: str) -> str:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def validated_join_control_url(value: str) -> str:
+    """Validate the operator-configured API address advertised to a new machine."""
+    control = str(value or "").strip()
+    if not control or "\\" in control or any(ord(char) < 32 or char.isspace() for char in control):
+        raise ValueError("join control URL is not configured")
+    try:
+        parsed = urlsplit(control)
+        host = parsed.hostname or ""
+        # Accessing .port validates malformed ports as well.
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("join control URL is invalid") from exc
+    if (parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or "?" in control or "#" in control):
+        raise ValueError("join control URL must be an HTTP(S) URL without credentials, query, or fragment")
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise ValueError("join control URL must not point to localhost")
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        try:
+            # Some URL stacks accept abbreviated or integer-form IPv4 literals; normalize those before checking.
+            address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+        except (OSError, ValueError):
+            address = None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if address and (address.is_loopback or address.is_unspecified or address.is_link_local or address.is_multicast
+                    or address.is_reserved or any(address.version == net.version and address in net
+                                                  for net in _NON_ROUTABLE_JOIN_NETWORKS)):
+        raise ValueError("join control URL must use an address reachable from joining nodes")
+    return control.rstrip("/")
 
 
 def join_bootstrap_command(token: str, name: str, control: str, version: str, checksum: str) -> str:
@@ -594,6 +634,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != body.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             audit("node", "join_command", name, "", None, user.subject, False, "invalid node name")
             raise HTTPException(400, "invalid node name")
+        try:
+            control = validated_join_control_url(ctx.settings.join_control_url)
+        except ValueError as exc:
+            audit("node", "join_command", name, "", None, user.subject, False, str(exc))
+            raise HTTPException(503, "configure AIFLOW4_JOIN_CONTROL_URL to an address reachable from joining nodes") from exc
         version = current_release()
         try:
             _, _, _, checksum = release_assets(version)
@@ -610,7 +655,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                                " ON CONFLICT (name) DO NOTHING", (name,))
             audit_in(connection, "node", "join_command", name, "", None, user.subject, True,
                      "one-time join command created", audit_payload)
-        control = ctx.settings.public_url.rstrip("/")
         command = join_bootstrap_command(token, name, control, version, checksum)
         ctx.events.emit("node.join_command.created", node=name, outcome="created",
                         reason="one-time token expires in 10 minutes", data={"actor": user.subject})

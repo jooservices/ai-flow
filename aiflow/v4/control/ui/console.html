@@ -1441,7 +1441,7 @@ function drawerNode(name) {
         var toneName = op.status === 'completed' ? 'ico-ok' : op.status === 'failed' ? 'ico-fail' : '';
         b += '<li><span class="' + toneName + '">' + (op.status === 'completed' ? ICON.ok : op.status === 'failed' ? ICON.fail : ICON.pend) + '</span><span><span class="mono small">' + when(op.created_at) + '</span> ' + esc(op.action) + ' · ' + esc(op.status) + ' · ' + esc(op.actor);
         if (op.result && op.result.error) b += '<div class="small">' + esc(op.result.error) + '</div>';
-        if (op.result && op.result.services && op.result.services.length) b += '<div class="small">Services: ' + esc(op.result.services.map(function (s) { return s.name + ' ' + (s.healthy ? 'green' : 'failed'); }).join(', ')) + '</div>';
+        if (op.result && op.result.services && op.result.services.length) b += '<div class="small">Services: ' + op.result.services.map(function (s) { return esc(s.name) + ' ' + (s.healthy ? 'green' : 'failed'); }).join(', ') + '</div>';
         b += '</span></li>';
       });
       b += '</ul>';

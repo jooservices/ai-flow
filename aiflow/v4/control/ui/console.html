@@ -358,6 +358,10 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .an-ok{background:var(--good); fill:var(--good)} .an-rework{background:var(--warn); fill:var(--warn)} .an-failed{background:var(--crit); fill:var(--crit)} .an-other{background:var(--faint); fill:var(--faint)}
 .st-done{background:var(--good)} .st-verify{background:var(--accent)} .st-progress{background:#7b6cff} .st-todo{background:var(--faint)} .st-wait{background:var(--warn)}
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
+.lead-controls{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.lead-controls label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.lead-controls select{min-width:210px;min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.lead-tablebox{width:100%;overflow:auto;border:1px solid var(--line);border-radius:9px}.lead-table{width:100%;border-collapse:collapse;min-width:920px}.lead-table th,.lead-table td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft)}
+.lead-table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--surface-2);white-space:nowrap}.lead-table ul{margin:0;padding-left:18px}.lead-table li{margin:2px 0}.lead-gap{color:var(--crit);font-weight:600}.lead-ac{white-space:normal;min-width:300px}.lead-tools{display:flex;gap:8px;flex-wrap:wrap}
 .empty{font-size:13px; color:var(--muted); padding:8px 0}
 .runs td, .runs th{white-space:nowrap}
 .runs tbody tr{cursor:pointer}
@@ -383,6 +387,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div class="tabs" role="tablist" aria-label="Views">
       <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Command Center</button>
       <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-view="delivery">Delivery</button>
+      <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-view="lead">Team Lead</button>
       <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
       <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
@@ -401,6 +406,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div class="dhead" id="dhead"></div>
     <div id="dbody" class="view"></div>
   </section>
+  <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
     <div id="bbody" class="view"></div>
@@ -477,11 +483,19 @@ var S = {
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
+  leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '',
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
 };
-function viewOf(path) { return path.indexOf('/delivery') === 0 ? 'delivery' : path.indexOf('/business') === 0 ? 'business' : path.indexOf('/review') === 0 ? 'review' : path.indexOf('/stakeholder') === 0 ? 'stakeholder' : 'cc'; }
+function viewOf(path) {
+  if (path.indexOf('/delivery') === 0) return 'delivery';
+  if (path.indexOf('/lead') === 0) return 'lead';
+  if (path.indexOf('/business') === 0) return 'business';
+  if (path.indexOf('/review') === 0) return 'review';
+  if (path.indexOf('/stakeholder') === 0) return 'stakeholder';
+  return 'cc';
+}
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
@@ -970,6 +984,90 @@ function submitReview(key, action, comment) {
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 
+/* ---------- Team Lead epic coverage and portable reports ---------- */
+function loadLeadReport(project, epic) {
+  var current = S.leadReport;
+  if (current && current.project === project && current.epic === epic &&
+      (current.loading || Date.now() - current.loadedAt < 30000)) return;
+  var entry = { project: project, epic: epic, loading: true, loadedAt: 0, data: null, error: '' };
+  S.leadReport = entry;
+  fetch('/v1/projects/' + encodeURIComponent(project) + '/report?epic=' + encodeURIComponent(epic), { cache: 'no-store' })
+    .then(function (r) { if (!r.ok) throw new Error('Epic report could not be loaded (' + r.status + ')'); return r.json(); })
+    .then(function (data) {
+      if (S.leadReport !== entry) return;
+      entry.data = data; entry.loading = false; entry.loadedAt = Date.now();
+      if (S.view === 'lead') renderLead();
+    }).catch(function (e) {
+      if (S.leadReport !== entry) return;
+      entry.error = String(e.message || e); entry.loading = false; entry.loadedAt = Date.now();
+      if (S.view === 'lead') renderLead();
+    });
+}
+function leadReportHref(format) {
+  return '/v1/projects/' + encodeURIComponent(S.project) + '/report?epic=' + encodeURIComponent(S.leadEpic) + '&format=' + format;
+}
+function leadDuration(stats) {
+  if (!stats || !stats.sample_size) return 'n/a';
+  return 'median ' + mmss(stats.median_seconds) + ' · p90 ' + mmss(stats.p90_seconds) + ' · n=' + stats.sample_size;
+}
+function renderLead() {
+  var root = $('#view-lead'), projects = D().projects, project = projects.filter(function (p) { return p.key === S.project; })[0];
+  var epics = sortEpics(projTickets().filter(function (t) { return t.type === 'Epic'; }));
+  if (!project && projects.length) { S.project = projects[0].key; project = projects[0]; }
+  if (!epics.some(function (e) { return e.key === S.leadEpic; })) S.leadEpic = epics.length ? epics[0].key : null;
+  var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Team Lead · Requirement coverage and progress</h1><span class="spacer"></span></div>';
+  h += '<div class="lead-controls"><label>Project<select id="leadProject">' + projects.map(function (p) {
+    return '<option value="' + esc(p.key) + '"' + (p.key === S.project ? ' selected' : '') + '>' + esc(p.key) + '</option>';
+  }).join('') + '</select></label><label>Epic<select id="leadEpic"' + (epics.length ? '' : ' disabled') + '>' +
+    epics.map(function (e) { return '<option value="' + esc(e.key) + '"' + (e.key === S.leadEpic ? ' selected' : '') + '>' + esc(e.key + ' · ' + e.summary) + '</option>'; }).join('') +
+    '</select></label><div class="lead-tools">' + (S.leadEpic ?
+      '<a class="btn sm" download href="' + esc(leadReportHref('md')) + '">Markdown</a>' +
+      '<a class="btn sm" download href="' + esc(leadReportHref('csv')) + '">CSV</a>' +
+      '<a class="btn sm" target="_blank" rel="noopener" href="' + esc(leadReportHref('html')) + '">Printable HTML</a>' : '') +
+      '</div></div></section>';
+  if (!epics.length) { root.innerHTML = h + '<section class="panel"><div class="empty">This project has no epics.</div></section>'; return; }
+  var report = S.leadReport;
+  if (!report || report.project !== S.project || report.epic !== S.leadEpic) {
+    root.innerHTML = h + '<section class="panel"><div class="empty">Loading epic coverage…</div></section>';
+    loadLeadReport(S.project, S.leadEpic); return;
+  }
+  if (report.loading) { root.innerHTML = h + '<section class="panel"><div class="empty">Loading epic coverage…</div></section>'; return; }
+  if (report.error) { root.innerHTML = h + '<section class="panel"><div class="empty">' + esc(report.error) + '</div></section>'; return; }
+  if (Date.now() - report.loadedAt >= 30000) loadLeadReport(S.project, S.leadEpic);
+  var data = report.data, t = data.tickets, usage = data.usage, coverage = data.requirement_coverage;
+  h += '<section class="kpis" aria-label="Epic progress">' +
+    kpi('Done / total', t.done + ' / ' + t.total, 'tickets completed', '', 'lead-coverage') +
+    kpi('In progress', String(t.in_progress), 'In Progress, In Verify, Human review', '', 'lead-coverage') +
+    kpi('Needs owner', String(t.needs_owner), 'currently waiting for an owner', t.needs_owner ? 'warn' : '', 'lead-coverage') +
+    kpi('Rework rounds', String(data.rework_rounds.count), 'verify requested changes', '', 'lead-coverage') +
+    kpi('Lead time', leadDuration(data.lead_time), 'completed tickets', '', 'lead-coverage') +
+    kpi('Tokens', tok(usage.tokens_total), usage.tokens_total + ' recorded', '', 'lead-coverage') +
+    kpi('Estimated cost', '$' + Number(usage.cost_usd).toFixed(6), 'USD from recorded runs', '', 'lead-coverage') + '</section>';
+  h += '<section class="panel" id="lead-coverage"><div class="panel-h"><h2>Requirement coverage</h2><span class="pill" data-tone="' + (coverage.insufficient_tasks ? 'crit' : 'ok') + '">' +
+    (coverage.insufficient_tasks ? 'Insufficient tasks' : 'No coverage gaps') + '</span><span class="hint">AC status reflects the latest completed verify verdict; PASS verifies each listed AC.</span></div>';
+  if (coverage.gaps.length) h += '<div class="lead-gap">' + coverage.gaps.map(function (g) {
+    return '<span class="pill" data-tone="crit">' + esc(g.ticket + ': ' + g.reason.replace(/_/g, ' ')) + '</span>';
+  }).join(' ') + '</div>';
+  if (!coverage.tickets.length) h += '<div class="empty">No child tickets under this epic.</div>';
+  else {
+    h += '<div class="lead-tablebox"><table class="lead-table"><thead><tr><th>Ticket / summary</th><th>Parent</th><th>Status</th><th>Latest verify</th><th>Acceptance criteria</th><th>Rework</th></tr></thead><tbody>';
+    coverage.tickets.forEach(function (ticket) {
+      var verify = ticket.verify.verdict || ticket.verify.outcome || 'No verify result';
+      var acHtml = ticket.acceptance_criteria.length ? '<ul>' + ticket.acceptance_criteria.map(function (ac) {
+        var label = ac.status === 'verified' ? 'Verified' : ac.status === 'not_verified' ? 'No verify result' : 'Not confirmed';
+        return '<li><span class="pill" data-tone="' + (ac.status === 'verified' ? 'ok' : 'warn') + '">' + label + '</span> <b>' + esc(ac.id) + ':</b> ' + esc(ac.text) + '</li>';
+      }).join('') + '</ul>' : '<span class="pill" data-tone="crit">No AC lines</span>';
+      h += '<tr><td><span class="mono">' + esc(ticket.key) + '</span><br>' + esc(ticket.summary) + '</td>' +
+        '<td class="mono">' + esc(ticket.parent_key || '—') + '</td><td>' + esc(ticket.status) + '</td>' +
+        '<td>' + esc(verify) + (ticket.verify.ended_at ? '<br><span class="small">' + esc(when(ticket.verify.ended_at)) + '</span>' : '') + '</td>' +
+        '<td class="lead-ac">' + acHtml + '</td><td>' + ticket.rework_rounds + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '</section>';
+  root.innerHTML = h;
+}
+
 /* ---------- Business: progress by epic, tickets waiting on the owner, change requests ----------
    Read-only on tickets: the only write is the change request form (a new Story in Backlog). The owner moves an
    assessed change request to Intake in Jira; nothing here changes a ticket's status. */
@@ -1450,7 +1548,13 @@ function renderFooter() {
 function render() {
   renderLive();
   renderFooter();
-  if (S.view === 'cc') renderCC(); else if (S.view === 'business') renderBusiness(); else if (S.view === 'review') renderReviews(); else if (S.view === 'stakeholder') renderStakeholder(); else { renderDHead(); renderDBody(); }
+  if (S.view === 'cc') renderCC();
+  else if (S.view === 'delivery') { renderDHead(); renderDBody(); }
+  else if (S.view === 'lead') renderLead();
+  else if (S.view === 'business') renderBusiness();
+  else if (S.view === 'review') renderReviews();
+  else if (S.view === 'stakeholder') renderStakeholder();
+  else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
 }
@@ -1469,7 +1573,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'business', 'review', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'lead', 'business', 'review', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -1530,6 +1634,10 @@ document.addEventListener('input', function (e) {
 });
 document.addEventListener('change', function (e) {
   if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
+  else if (e.target.id === 'leadProject') {
+    S.project = e.target.value; S.leadEpic = null; S.leadReport = null; S.epic = 'all'; savePrefs(); renderLead();
+  }
+  else if (e.target.id === 'leadEpic') { S.leadEpic = e.target.value; S.leadReport = null; renderLead(); }
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key')) {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');

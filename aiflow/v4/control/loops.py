@@ -3,7 +3,9 @@
 jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes. A changed status or
             aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline).
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
-            accounts whose cooldown ended. Opens and closes incidents, alerts people on critical ones.
+            accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
+            alerts people on critical ones.
+fleet       every 15 s: the rolling node upgrade toward CURRENT (canary, waves, halt, rollback; rollout.py).
 memory      every 60 s: tickets, finished run summaries and verify findings into the memory table (memory.index).
 Each loop runs on one control-plane instance at a time (leader key in Redis).
 """
@@ -19,6 +21,7 @@ from urllib.parse import quote
 
 from . import memory
 from . import projects as project_lifecycle
+from . import rollout
 from ..core.toolchains import toolchain_gaps
 from .incidents import close_incident, open_incident
 from .api import Ctx, notify_human_review
@@ -183,6 +186,9 @@ def watchdog(ctx: Ctx) -> None:
                           f"No heartbeat for {int(age or 0)} seconds. Its runs lose their lease after 90 s and go back to To Do.")
         elif n["status"] == "online":
             close_incident(ctx, "node_down", n["name"], "heartbeat is back")
+    # version skew: a node outside the control/node policy gets no new work until it runs a compatible release
+    from . import api as control_api
+    rollout.watch_skew(ctx, control_api.RELEASES)
     # project stacks: an online node must have every tool its projects need, or a person installs it
     repo = ctx.repo()
     tool_issues: set[str] = set()
@@ -358,9 +364,15 @@ def watchdog(ctx: Ctx) -> None:
                 close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
 
 
+def fleet_rollout(ctx: Ctx) -> dict | None:
+    """The rolling node upgrade toward CURRENT: health checks, next wave, halt and rollback (rollout.tick)."""
+    from . import api as control_api
+    return rollout.tick(ctx, rollout.read_current(control_api.RELEASES))
+
+
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -375,6 +387,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
                 last_wd = now
+            if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
+                fleet_rollout(ctx)
+                last_rollout = now
             if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
                 written = memory.index(ctx.db)
                 if any(written.values()):

@@ -24,7 +24,7 @@ from .gitops import Git
 from .notes import note, project_env
 
 log = logging.getLogger("aiflow4.verify")
-VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.M)
+VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
 
 
@@ -111,6 +111,11 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                              "duration_s": int(res.duration_s), "log": res.log_path}
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
+            return result
+        if verdict == "BLOCKED":
+            # the review itself could not run (sandbox, worktree): not the developer's fault, retry after backoff
+            result.update(outcome="failed", error_kind="infra",
+                          summary=f"review could not run: {(findings or text.strip())[-400:]}")
             return result
         if verdict == "FAIL":
             return _rework(c, api, jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks, t0=t0)

@@ -52,6 +52,8 @@ def test_verdict_and_findings_parsing():
     text = "looked at it\nCHECKS: phpunit ok\nVERDICT: FAIL\nFINDINGS:\n- core/a.php: missing escaping\n- tests: none for AC2\n"
     assert VERDICT.search(text).group(1) == "FAIL"
     assert findings_of(text) == "- core/a.php: missing escaping\n- tests: none for AC2"
+    blocked = "CHECKS: none\nVERDICT: BLOCKED\nFINDINGS:\n- environment: bwrap: Can't mkdir\n"
+    assert VERDICT.search(blocked).group(1) == "BLOCKED"
 
 
 def test_pr_title_is_a_conventional_commit_with_the_key():

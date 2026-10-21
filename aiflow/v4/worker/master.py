@@ -104,7 +104,7 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             if hb.lost.is_set():
                 raise LeaseLost()
             payload = {key: value for key, value in action.items() if key in {
-                "action", "ticket", "intent", "headline", "what", "why", "result", "next", "fields",
+                "action", "ticket", "intent", "category", "headline", "what", "why", "result", "next", "fields",
                 "add_labels", "remove_labels", "kind", "subject", "severity", "title", "detail", "target_status"}}
             payload.update(run_id=c.run_id, fence=c.fence)
             try:

@@ -388,3 +388,51 @@ def test_codex_master_runs_use_read_only_sandbox_without_network(tmp_path, monke
     argv = CodexAdapter().argv(adapter.spec)
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert not any("network_access=true" in item or "writable_roots" in item for item in argv)
+
+
+@pytest.mark.parametrize("category", ["infrastructure", "secret", "production_release"])
+def test_master_worker_forwards_category_so_protected_requests_escalate(client, ctx, monkeypatch, tmp_path, category):
+    from aiflow.v4.worker import master as worker_master
+    from aiflow.v4.worker.client import ControlClient
+    from aiflow.v4.worker.dev import Claimed
+
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    add_ticket(ctx.db, "TESTWP-240")
+    sent = []
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+
+    class Bridge:
+        def request(self, method, path, json=None, params=None):
+            return client.request(method, path, json=json, params=params, headers=cc)
+
+    api = ControlClient.__new__(ControlClient)
+    api.c = Bridge()
+    # The intent alone matches no protected pattern; only the explicit category makes it an owner decision.
+    plan = {"summary": "checked", "actions": [{"action": "jira_comment", "ticket": "TESTWP-240",
+                                               "intent": "post a follow-up", "category": category,
+                                               "headline": "follow-up", "what": "w", "why": "y",
+                                               "result": "r", "next": "n"}]}
+
+    class FakeAdapter:
+        def argv(self, _spec):
+            return []
+
+        def run(self, spec, _progress, stop=None):
+            return SimpleNamespace(tokens_in=1, tokens_out=1, cost_usd=0.0, quota={}, error_kind="", reset_at=None,
+                                   final_text=json.dumps(plan), log_path=spec.log_path)
+
+    monkeypatch.setattr(worker_master, "get_adapter", lambda _provider: FakeAdapter())
+    claimed = Claimed(run_id=master["run_id"], fence=master["fence"], run_token=master["run_token"],
+                      account="claude-01", provider="claude", model="opus", effort="high",
+                      ticket={"key": MASTER_SCOPE}, project={"node": "cc"}, identity=("bot", "bot@example.test"),
+                      step="master")
+    result = worker_master.run_master(api, claimed, str(tmp_path), "http://control.test", 30, [])
+
+    assert result["outcome"] == "done"
+    assert result["details"]["escalated"] == 1 and result["details"]["refused"] == 0
+    assert sent and len(ctx.jira.comments) == 1
+    assert "AI Flow · master · owner decision required" in ctx.jira.comments[0][1]
+    attempted = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action='jira_comment'",
+                           (master["run_id"],))
+    assert not attempted["accepted"] and category in attempted["result"]

@@ -1,23 +1,212 @@
 import csv
 import io
+import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
 def join(client, name, ip=""):
-    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret", "ip": ip})
+    r = join_node(client, name, ip=ip)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
 
 def test_join_requires_the_join_token(client):
-    assert client.post("/v1/nodes/join", json={"name": "cc", "join_token": "nope"}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens", json={"provision_key": "nope", "name": "cc",
+                                                       "project": "TESTWP"}).status_code == 403
+    assert client.post("/v1/nodes/join", json={"join_token": "nope"}).status_code == 403
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}).status_code == 401
+
+
+def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(client, ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr(control_api, "RELEASES", tmp_path)
+    (tmp_path / "CURRENT").write_text("v1.2.3")
+    issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-new",
+                                                         "role": "worker", "project": "TESTWP",
+                                                         "ai_account": "must-not-be-stored"})
+    assert issued.status_code == 200
+    data = issued.json()
+    assert set(data) == {"token", "name", "role", "project", "expires_at"}
+    assert data["name"] == "node-new" and data["role"] == "worker" and data["project"] == "TESTWP"
+    assert len(data["token"]) >= 40 and "must-not-be-stored" not in data["token"]
+    expires_at = datetime.fromisoformat(data["expires_at"])
+    assert timedelta(0) < expires_at - datetime.now(timezone.utc) <= timedelta(minutes=5)
+    preview = client.post("/v1/nodes/join-tokens/inspect", json={"join_token": data["token"]})
+    assert preview.status_code == 200
+    assert preview.json() == {"name": "node-new", "role": "worker", "project": "TESTWP", "stack": "",
+                              "release": "v1.2.3"}
+
+    joined = client.post("/v1/nodes/join", json={"join_token": data["token"]})
+    assert joined.status_code == 200
+    assert {k: joined.json()[k] for k in ("node", "role", "project", "stack", "release")} == {
+        "node": "node-new", "role": "worker", "project": "TESTWP", "stack": "", "release": "v1.2.3"}
+    node = ctx.db.one("SELECT role,projects,token_hash FROM nodes WHERE name='node-new'")
+    assert node["role"] == "worker" and node["projects"] == ["TESTWP"]
+    assert node["token_hash"] != joined.json()["node_token"]
+    assert client.post("/v1/nodes/join", json={"join_token": data["token"]}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": data["token"]}).status_code == 403
+
+    expired = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-expired",
+                                                         "role": "worker", "project": "TESTWP"}).json()["token"]
+    ctx.db.run("UPDATE node_join_tokens SET expires_at=now()-interval '1 second' WHERE token_hash=%s",
+               (control_api.h(expired),))
+    assert client.post("/v1/nodes/join", json={"join_token": expired}).status_code == 403
+    assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": expired}).status_code == 403
+
+
+def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_release(client):
+    response = client.get("/v1/install.sh")
+    assert response.status_code == 200
+    script = response.text
+    assert "CONTROL_URL=http://testserver" in script
+    assert 'python3 - "$CONTROL_URL" "$NODE_NAME" "$NODE_TOKEN_FILE" > /etc/aiflow/node.env' in script
+    assert "SERVER_INSTALLER_TAG=v1.1.0" in script
+    assert "apply --modules packages,timesync,docker,docker_group --preflight" in script
+    assert "SI_PHP_VERSION" in script and "--modules php --preflight" in script
+    assert "useradd --system" in script and "aiflow-worker" in script
+    assert "npm install --global @anthropic-ai/claude-code @openai/codex" in script
+    assert "node_token" in script
+    assert "__AIFLOW4_CONTROL_URL__" not in script
+
+    syntax = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+
+    # Account for each external command invoked by the bootstrap and assert where it comes from.
+    package_block = script.split('BOOTSTRAP_PACKAGES="', 1)[1].split('"', 1)[0]
+    packages = set(package_block.split())
+    package_sources = {
+        "bash": "bash", "curl": "curl", "python3": "python3", "tar": "tar", "chmod": "coreutils", "rm": "coreutils",
+        "install": "coreutils", "cat": "coreutils", "ln": "coreutils", "readlink": "coreutils",
+        "dirname": "coreutils", "sha256sum": "coreutils", "uname": "coreutils", "mkdir": "coreutils",
+        "sed": "sed", "find": "findutils", "useradd": "passwd", "npm": "npm", "codex": "npm",
+    }
+    assert set(package_sources.values()) <= packages
+    for executable, package in package_sources.items():
+        assert executable in script
+        assert package in packages
+    assert all(marker in script for marker in ("#!/bin/sh", "id -u", "mktemp -d", "command -v apt-get",
+                                                "command -v dnf", "apt-get install", "dnf install"))
+    assert "server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer" in script
+    assert "UV_INSTALL_DIR=/usr/local/bin sh \"$WORK/uv-install.sh\"" in script
+    assert "npm install --global @anthropic-ai/claude-code @openai/codex @vibe-kit/grok-cli opencode-ai" in script
+    assert "SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli \"$SI_BIN\" apply --modules php" in script
+    assert "getcomposer.org/installer" in script and "--filename=composer" in script
+    assert "wp-cli/builds/gh-pages/phar/wp-cli.phar" in script
+    assert "codex-code-mode-host-${CODEX_HOST_ARCH}" in script
+    assert "install -m 0755 \"$WORK/cosign\" /usr/local/bin/cosign" in script
+    assert "SERVER_INSTALLER_TAG=v1.1.0" in script
+    verify_at = script.index('verify-blob "$WORK/release.tar.gz"')
+    extract_at = script.index('tar -xzf "$WORK/release.tar.gz" -C "$WORK/release-bootstrap"')
+    install_at = script.index('"$RELEASE_INSTALLER" "$WORK/release.tar.gz"')
+    assert verify_at < extract_at < install_at
+    assert 'RELEASE_INSTALLER=$WORK/release-bootstrap/deploy/v4/bin/aiflow4-node-install' in script
+    assert '"$RELEASE_INSTALLER" "$WORK/release.tar.gz" "$RELEASE_VERSION"' in script
+    assert '/usr/local/sbin/aiflow4-node-install' not in script
+
+    writer_marker = 'python3 - "$CONTROL_URL" "$NODE_NAME" "$NODE_TOKEN_FILE" > /etc/aiflow/node.env <<\'PY\'\n'
+    writer = script.split(writer_marker, 1)[1].split("\nPY\n", 1)[0]
+    env_file = subprocess.run(
+        ["python3", "-c", writer, "https://control.example", "node-new", "/srv/aiflow/state/node.token"],
+        capture_output=True, text=True,
+    )
+    assert env_file.returncode == 0, env_file.stderr
+    assert env_file.stdout.splitlines() == [
+        'AIFLOW4_CONTROL_URL="https://control.example"',
+        'AIFLOW4_NODE_NAME="node-new"',
+        'AIFLOW4_NODE_TOKEN_FILE="/srv/aiflow/state/node.token"',
+        'AIFLOW4_SLOTS="2"',
+        'AIFLOW4_POLICY_RELAY="1"',
+        'AIFLOW4_SELF_UPDATE="1"',
+    ]
+    unsafe_env_file = subprocess.run(
+        ["python3", "-c", writer, "https://control.example$(touch${IFS}/tmp/pwned)", "node-new",
+         "/srv/aiflow/state/node.token"], capture_output=True, text=True,
+    )
+    assert unsafe_env_file.returncode != 0
+
+
+def test_bootstrap_python_uses_shared_uv_install_without_replacing_python3(client):
+    response = client.get("/v1/install.sh")
+    assert response.status_code == 200
+    script = response.text
+
+    assert script.index("umask 022") < script.index("UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12")
+    assert "install -d -m 0755 /opt/aiflow/python" in script
+    assert "UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12" in script
+    assert "PY312=$(UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python find 3.12)" in script
+    assert 'ln -sfn "$PY312" /usr/local/bin/python3.12' in script
+    # A root-run bootstrap must never make generic python3 resolve through root's 0700 home.
+    python_links = [line.strip() for line in script.splitlines()
+                    if line.lstrip().startswith("ln ") and "/usr/local/bin/python3" in line]
+    assert python_links == ['ln -sfn "$PY312" /usr/local/bin/python3.12']
+    assert "/root/.local/share/uv/python" not in script
+
+
+def test_install_script_rejects_shell_syntax_in_host_headers(client):
+    hostile_host = "control.example$(touch${IFS}/tmp/aiflow-host-injection)"
+    for headers in ({"host": hostile_host}, {"x-forwarded-host": hostile_host}):
+        response = client.get("/v1/install.sh", headers=headers)
+        assert response.status_code == 400
+
+
+def test_install_script_accepts_dns_and_ip_hosts_with_optional_ports(client):
+    dns = client.get("/v1/install.sh", headers={"host": "control.example:8443", "x-forwarded-proto": "https"})
+    assert dns.status_code == 200
+    assert "CONTROL_URL=https://control.example:8443" in dns.text
+
+    ipv6 = client.get("/v1/install.sh", headers={"host": "[2001:db8::1]:8080"})
+    assert ipv6.status_code == 200
+    assert "CONTROL_URL='http://[2001:db8::1]:8080'" in ipv6.text
+
+
+def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_tokens(client, ctx):
+    # Model a node row created by the old registry migration before project binding was added.
+    ctx.db.run("UPDATE nodes SET projects='{}',token_hash='',dynamic=false WHERE name='node1'")
+    before = ctx.db.one("SELECT token_hash,projects FROM nodes WHERE name='node1'")
+    assert before == {"token_hash": "", "projects": []}
+
+    client.app.state.sync_accounts()
+    after = ctx.db.one("SELECT token_hash,projects FROM nodes WHERE name='node1'")
+    assert after == {"token_hash": "", "projects": ["TESTWP"]}
+    assert ctx.repo().projects_for_node("node1", before["projects"], dynamic=False) == ["TESTWP"]
+
+    # A later control repo project assignment also takes effect without joining again.
+    from aiflow.v4.core.controlrepo import Project
+
+    ctx.repo().projects["TESTFLOW"] = Project(key="TESTFLOW", repo="jooservices/testflow")
+    ctx.repo().nodes["node1"].projects = ["TESTFLOW"]
+    assert ctx.repo().projects_for_node("node1", after["projects"], dynamic=False) == ["TESTFLOW"]
+
+
+def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
+    page = Path("aiflow/v4/control/ui/console.html").read_text()
+    docs = Path("docs/v4/node-join.md").read_text()
+    assert "Join a node" in page and "join-tokens" in page and "--token ' + d.token" in page
+    assert "AIFLOW4_JOIN_TOKEN" in page and "codex login --device-auth" in docs
+    assert "AI provider credential" in docs and "never sent to the control plane" in docs
+
+
+def test_joined_project_node_is_online_preflight_green_and_can_claim_project_ticket(client, ctx):
+    headers = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-71")
+    heartbeat = client.post("/v1/nodes/node1/heartbeat", json={
+        "tools": {"git": "git version 2", "uv": "uv 0.1", "codex": "codex 1.0",
+                  "codex-code-mode-host": "present /usr/local/bin/codex-code-mode-host"},
+        "slots_total": 2,
+    }, headers=headers)
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["desired"]["projects"] == ["TESTWP"]
+    node = next(n for n in client.get("/v1/state").json()["nodes"] if n["name"] == "node1")
+    assert node["status"] == "online" and node["missing_tools"] == [] and node["projects"] == ["TESTWP"]
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=headers)
+    assert candidates.status_code == 200
+    assert [t["key"] for t in candidates.json()["tickets"]] == ["TESTWP-71"]
 
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):

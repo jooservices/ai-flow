@@ -214,3 +214,10 @@ def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), pr
            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, labels=EXCLUDED.labels",
            (key, key.split("-")[0], status, list(labels), f"Summary of {key}", "Acceptance criteria:\n- AC1: works",
             priority, list(blocked_by)))
+
+
+def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
+    issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
+                                                         "role": role, "project": project})
+    assert issued.status_code == 200, issued.text
+    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})

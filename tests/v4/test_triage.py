@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import add_ticket
+from conftest import add_ticket, join_node
 from aiflow.v4.control.api import notify
 from aiflow.v4.worker import triage
 from aiflow.v4.worker.client import Conflict
@@ -62,7 +62,7 @@ class FakeAdapter:
 
 
 def join(client, name):
-    response = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+    response = join_node(client, name)
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['node_token']}"}
 

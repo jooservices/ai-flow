@@ -1,11 +1,12 @@
 from aiflow.v4.core.controlrepo import ControlRepo, Project
 from aiflow.v4.core.toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
-                                      pinned_version, toolchain_gaps, tools_for_stack, tools_for_stacks,
-                                      version_matches)
+                                       pinned_version, toolchain_gaps, tools_for_stack, tools_for_stacks,
+                                       version_matches)
+from conftest import join_node
 
 
 def join(client, name):
-    r = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+    r = join_node(client, name)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -148,6 +149,33 @@ def test_unhealthy_stack_blocks_only_its_project_and_watchdog_warns(client, ctx)
     assert set(keys) == {"TESTWP-930", "OTHER-930"}
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_tools'"
                       " AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 0
+
+
+def test_dynamic_node_receives_stack_preflight_and_is_gated_until_healthy(client, ctx):
+    from tests.v4.conftest import add_ticket
+
+    repo = ctx.repo()
+    repo.projects["TESTWP"].stack = "php-8.3"
+    repo.versions["tools"] = {"php": "8.3", "composer": "2.8", "wp": "2.12"}
+    repo.account("claude-01").node = "fresh-node"
+    ctx.db.run("UPDATE accounts SET node=%s WHERE id=%s", ("fresh-node", "claude-01"))
+    add_ticket(ctx.db, "TESTWP-931")
+
+    headers = join(client, "fresh-node")
+    tools = {"git": "git 2.43", "uv": "uv 0.5", "php": "PHP 8.3.10",
+             "composer": "Composer 2.7.9", "wp": "WP-CLI 2.12.0"}
+    response = client.post("/v1/nodes/fresh-node/heartbeat", json={"tools": tools}, headers=headers)
+    desired = response.json()["desired"]
+    assert desired["projects"] == ["TESTWP"]
+    assert desired["project_stacks"] == {"TESTWP": "php-8.3"}
+    assert "composer" in desired["tools"]
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert candidates.json()["tickets"] == []
+
+    tools["composer"] = "Composer 2.8.4"
+    client.post("/v1/nodes/fresh-node/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-931"]
 
 
 def test_watchdog_keeps_tool_incident_while_the_node_is_offline(client, ctx):

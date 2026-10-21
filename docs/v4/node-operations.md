@@ -13,8 +13,9 @@ secret and claims `sub` (user), `role` (`owner` or `lead`) and `exp` (Unix time)
 `aiflow.v4.control.console_auth.issue_session` to create the same token. Set the cookie as HttpOnly, Secure,
 SameSite=Strict and Path `/`. The control API ignores user and role headers.
 
-Only `owner` can install, repair or create a join command. `owner` and `lead` can read the per-node operation
-log. Missing, invalid and expired sessions fail closed; a lead write attempt is rejected and audited.
+Only `owner` can install, repair or use the per-node join-command action. The Join a node panel authorizes token
+creation with the configured `AIFLOW4_JOIN_TOKEN`. `owner` and `lead` can read the per-node operation log.
+Missing, invalid and expired sessions fail closed; a lead write attempt is rejected and audited.
 
 ## Desired state
 
@@ -89,26 +90,14 @@ The owner can create a one-line join command from the Command Center. The contro
 missing, loopback, link-local, unspecified and multicast addresses before creating a token; `AIFLOW4_PUBLIC_URL`
 is used for console links and is not used for node enrollment. Configure the join URL in the Compose environment
 on the control plane, such as `AIFLOW4_JOIN_CONTROL_URL=https://control.example.test` in the Compose `.env` file.
-The command works on a machine where AI Flow is not installed yet:
-`printf '%s\n' '<script>' | sudo bash -s`. The script reaches root on stdin, so the token is never a process
-argument. It:
+The copied command is `curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T`. The bootstrap
+validates the bound node, role, project, and stack before changing the host, then redeems the token and installs
+the pinned server-installer modules, `aiflow-worker`, project toolchain, AI CLIs, and signed AI Flow release as
+described in [Node join](node-join.md). The installer and node agent verify release checksums and signatures.
 
-1. downloads the current signed release (`/srv/aiflow/control/releases/CURRENT`) and its sigstore bundle from
-   the control API, authenticated with the join token;
-2. checks the SHA-256 from the release `SHA256SUMS` and the cosign signature of the `release-v4.yml` workflow
-   for that tag;
-3. writes `/etc/aiflow/node.env` (control URL, node name, one slot) only if the file does not exist;
-4. installs the release with that release's own `deploy/v4/bin/aiflow4-node-install`;
-5. runs `/srv/aiflow/current/.venv/bin/aiflow4 node join --join-token-stdin` and restarts
-   `aiflow4-node-agent`.
-
-The machine needs `curl`, `cosign`, `uv` and Python 3.12, which `aiflow4-node-install` already requires. With
-no published signed release the API refuses to create the command (409) and audits the refusal.
-
-The random join token expires after 10 minutes, is accepted once for the requested node name and is stored in
-PostgreSQL only as a SHA-256 hash. Until it is used it also authorizes downloading the release tarball and
-signature; after the join only the node token does. The owner SSH password is neither requested nor stored. VM
-creation remains the separate TESTFLOW-55 flow.
+The random join token expires after five minutes, is accepted once, and is stored in PostgreSQL only as a
+SHA-256 hash with its node, role, and project grant. The join command never accepts SSH passwords or AI account
+credentials. VM creation remains the separate TESTFLOW-55 flow.
 
 AI account authorization remains the TESTFLOW-76 flow; node install and repair do not read or change account
 credentials.

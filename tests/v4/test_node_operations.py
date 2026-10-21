@@ -16,6 +16,7 @@ from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4 import cli
 from aiflow.v4.node import agent, operations
+from conftest import join_node as issue_and_join
 
 
 SESSION_SECRET = "test-console-session-secret-at-least-32-bytes"
@@ -42,7 +43,7 @@ def sign_in(client, ctx, role="owner", subject="owner@example.test"):
 
 
 def node_join(client, name):
-    response = client.post("/v1/nodes/join", json={"name": name, "join_token": "join-secret"})
+    response = issue_and_join(client, name)
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['node_token']}"}
 
@@ -105,33 +106,21 @@ def publish_release(tmp_path, monkeypatch, version="v4.2.1"):
     return tarball, digest
 
 
-def bootstrap_script(command):
-    prefix, suffix = "printf '%s\\n' ", " | sudo bash -s"
-    assert command.startswith(prefix) and command.endswith(suffix)
-    [script] = shlex.split(command[len(prefix):-len(suffix)])
-    return script
-
-
-def test_join_command_bootstraps_a_verified_release_before_joining(client, ctx, tmp_path, monkeypatch):
+def test_join_command_uses_the_bound_installer_token_and_allows_signed_release_download(client, ctx, tmp_path,
+                                                                                         monkeypatch):
     tarball, digest = publish_release(tmp_path, monkeypatch)
     sign_in(client, ctx)
-    command = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"}).json()["command"]
+    response = client.post("/v1/nodes/fresh-node/join-command", json={
+        "name": "fresh-node", "role": "worker", "project": "TESTWP"})
+    assert response.status_code == 200
+    data = response.json()
+    command = data["command"]
     assert "\n" not in command
-    assert "https://control.example.test" in command
-    assert "127.0.0.1:18480" not in command
-    script = bootstrap_script(command)
-    steps = script.split("; ")
-    token = next(step for step in steps if step.startswith("T="))[2:]
-    assert token not in command.split(" | ")[1]  # the token reaches sudo on stdin, never as an argument
-    assert "V=v4.2.1" in steps and f"S={digest}" in steps
-    order = [next(i for i, step in enumerate(steps) if marker in step) for marker in (
-        'get "/v1/releases/$V.tar.gz"', "sha256sum -c", "cosign verify-blob",
-        "deploy/v4/bin/aiflow4-node-install", "/srv/aiflow/current/.venv/bin/aiflow4 node join",
-        "systemctl restart aiflow4-node-agent")]
-    assert order == sorted(order)
-    assert "@refs/tags/$V" not in script and "release-v4.yml@refs/tags/v4.2.1" in script
-    assert " aiflow4 node join" not in script.replace("/.venv/bin/aiflow4 node join", "")
-    assert subprocess.run(["bash", "-n", "-c", script]).returncode == 0
+    assert command.startswith("curl -fsSL https://control.example.test/v1/install.sh | sudo sh -s -- --token ")
+    token = shlex.split(command)[-1]
+    assert data["role"] == "worker" and data["project"] == "TESTWP" and data["expires_in_s"] == 300
+    saved = ctx.db.one("SELECT role,project,used_at FROM node_join_tokens WHERE node_name='fresh-node'")
+    assert saved == {"role": "worker", "project": "TESTWP", "used_at": None}
 
     # The join token, and only while it is unused, lets the new machine download the signed release.
     auth = {"Authorization": f"Bearer {token}"}
@@ -145,7 +134,8 @@ def test_join_command_bootstraps_a_verified_release_before_joining(client, ctx, 
 def test_join_command_requires_a_published_signed_release(client, ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(control_api, "RELEASES", tmp_path)
     sign_in(client, ctx)
-    response = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"})
+    response = client.post("/v1/nodes/fresh-node/join-command", json={
+        "name": "fresh-node", "role": "worker", "project": "TESTWP"})
     assert response.status_code == 409
     assert ctx.db.one("SELECT accepted, result FROM write_audit WHERE action='join_command' ORDER BY id DESC"
                       " LIMIT 1") == {"accepted": False, "result": "no signed release is published"}
@@ -162,9 +152,10 @@ def test_join_command_requires_an_explicit_non_local_control_url_before_creating
     publish_release(tmp_path, monkeypatch)
     ctx.settings.join_control_url = control_url
     sign_in(client, ctx)
-    response = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"})
+    response = client.post("/v1/nodes/fresh-node/join-command", json={
+        "name": "fresh-node", "role": "worker", "project": "TESTWP"})
     assert response.status_code == 503
-    assert ctx.db.one("SELECT count(*) AS n FROM node_join_tokens WHERE node='fresh-node'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM node_join_tokens WHERE node_name='fresh-node'")["n"] == 0
     audit = ctx.db.one("SELECT accepted FROM write_audit WHERE action='join_command' ORDER BY id DESC LIMIT 1")
     assert audit == {"accepted": False}
 
@@ -176,23 +167,28 @@ def test_join_control_url_accepts_an_operator_routed_private_address():
 def test_join_command_uses_a_single_use_token_and_never_accepts_ssh_password(client, ctx, tmp_path, monkeypatch):
     publish_release(tmp_path, monkeypatch)
     sign_in(client, ctx)
-    response = client.post("/v1/nodes/fresh-node/join-command", json={"name": "fresh-node"})
+    response = client.post("/v1/nodes/fresh-node/join-command", json={
+        "name": "fresh-node", "role": "worker", "project": "TESTWP"})
     assert response.status_code == 200
-    command = response.json()["command"]
-    assert "--join-token-stdin" in command
-    token = next(step for step in bootstrap_script(command).split("; ") if step.startswith("T="))[2:]
-    saved = ctx.db.one("SELECT token_hash, node, consumed_at FROM node_join_tokens WHERE node='fresh-node'")
-    assert saved["token_hash"] == hashlib.sha256(token.encode()).hexdigest() and saved["consumed_at"] is None
+    data = response.json()
+    command = data["command"]
+    token = shlex.split(command)[-1]
+    saved = ctx.db.one("SELECT token_hash, node_name, role, project, used_at FROM node_join_tokens"
+                       " WHERE node_name='fresh-node'")
+    assert saved == {"token_hash": hashlib.sha256(token.encode()).hexdigest(), "node_name": "fresh-node",
+                     "role": "worker", "project": "TESTWP", "used_at": None}
     audit = ctx.db.one("SELECT payload FROM write_audit WHERE action='join_command' ORDER BY id DESC LIMIT 1")
-    assert audit["payload"] == {"expires_at": response.json()["expires_at"], "ssh_password_saved": False}
+    assert audit["payload"] == {"expires_at": data["expires_at"], "role": "worker", "project": "TESTWP",
+                                "ssh_password_saved": False}
     assert "ssh_password" not in audit["payload"]
     assert client.post("/v1/nodes/fresh-node/join-command",
-                       json={"name": "fresh-node", "ssh_password": "not-accepted"}).status_code == 422
+                       json={"name": "fresh-node", "role": "worker", "project": "TESTWP",
+                             "ssh_password": "not-accepted"}).status_code == 422
 
     joined = client.post("/v1/nodes/join", json={"name": "fresh-node", "join_token": token})
     assert joined.status_code == 200
     assert client.post("/v1/nodes/join", json={"name": "fresh-node", "join_token": token}).status_code == 403
-    assert ctx.db.one("SELECT consumed_at IS NOT NULL AS consumed FROM node_join_tokens WHERE node='fresh-node'")[
+    assert ctx.db.one("SELECT used_at IS NOT NULL AS consumed FROM node_join_tokens WHERE node_name='fresh-node'")[
         "consumed"] is True
 
 

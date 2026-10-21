@@ -32,7 +32,8 @@ def snapshot(ctx) -> dict[str, Any]:
         status = n["status"]
         if status == "online" and (age is None or age > NODE_OFFLINE_S):
             status = "offline"
-        required = repo.tools_for_node(n["name"])
+        projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
+        required = repo.tools_for_node(n["name"], projects)
         configured = repo.nodes.get(n["name"])
         stack_gaps = {tool for project in (configured.projects if configured else [])
                       if project in repo.projects for tool in toolchain_gaps(
@@ -55,7 +56,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
-                      "projects": getattr(repo.nodes.get(n["name"]), "projects", []) or [],
+                      "projects": projects,
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
     runs_per_account: dict[str, int] = {}

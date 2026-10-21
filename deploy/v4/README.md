@@ -28,3 +28,14 @@ Download `codex-code-mode-host` from the same GitHub release as the installed `c
 (<https://github.com/openai/codex/releases>) and put the executable next to the `codex` binary, in the same
 directory on `PATH` (for example `/usr/local/bin`). Install both from the same release: a host from a
 different release may not speak the protocol of the `codex` it runs beside.
+
+## Console (Command Center and Delivery)
+
+`/cc` and `/delivery` use the full window width: a 16 px gutter on each side, 24 px on screens wider than
+1400 px, and no sideways scrolling on phones (wide tables and the board scroll inside their own box).
+
+The footer on every view shows the AI Flow version (the `ai_flow.ref` pinned in `versions.lock`, otherwise
+the version of the running control API), the environment (`AIFLOW4_ENV`), the control repo branch, links
+to OpenObserve (`/o2/`), Mailpit (`/mail/`) and Gatus, and the JOOservices copyright with the current year.
+All values come from `/v1/state` (`version`, `env`, `control_repo`, `versions`, `links`). The Gatus link
+defaults to `/gatus/`; set `AIFLOW4_GATUS_URL` on the control API when Gatus is published elsewhere.

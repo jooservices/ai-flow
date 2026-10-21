@@ -16,11 +16,12 @@ The bootstrap script first checks the token and reads its bound project stack. I
 `jooservices/server-installer` CLI pinned to **v1.1.0** with
 `server-installer apply --modules packages,timesync,docker,docker_group --preflight`. For a PHP project it
 also passes that project's version as `SI_PHP_VERSION` and `SI_PHP_MODE=cli` to the `php` module. It creates
-the `aiflow-worker` system user and per-account homes, installs the project tools and AI CLIs, downloads the
-current signed AI Flow release, verifies its checksum and cosign signature, then extracts and runs that
-release's `deploy/v4/bin/aiflow4-node-install` helper. The installed node agent then follows the current
-signed release on later heartbeats. The equivalent CLI redemption accepts the same short-lived token file with
-`aiflow4 node join --join-token-file /path/to/token`; the node name is taken from the token grant.
+the `aiflow-worker` system user and per-account homes, installs the shared uv-managed Python 3.12 under
+`/opt/aiflow/python` (without replacing the operating system's `python3` command), installs the project tools
+and AI CLIs, downloads the current signed AI Flow release, verifies its checksum and cosign signature, then
+extracts and runs that release's `deploy/v4/bin/aiflow4-node-install` helper. The installed node agent then
+follows the current signed release on later heartbeats. The equivalent CLI flow accepts a short-lived token
+file with `aiflow4 node join --join-token-file /path/to/token`; the node name is taken from the token grant.
 
 ## Accounts and sign-in
 

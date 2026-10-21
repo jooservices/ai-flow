@@ -24,6 +24,7 @@ trap 'exit 143' TERM
 TOKEN_BODY=$WORK/token.json
 umask 077
 printf '{"join_token":"%s"}' "$TOKEN" > "$TOKEN_BODY"
+umask 022
 unset TOKEN
 
 # Read the project stack before consuming the token so an expired or invalid token changes no host state.
@@ -125,10 +126,10 @@ fi
 
 curl -fsSL --max-time 60 https://astral.sh/uv/install.sh -o "$WORK/uv-install.sh"
 UV_INSTALL_DIR=/usr/local/bin sh "$WORK/uv-install.sh" >/dev/null
-uv python install 3.12 >/dev/null
-PY312=$(uv python find 3.12)
+install -d -m 0755 /opt/aiflow/python
+UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12 >/dev/null
+PY312=$(UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python find 3.12)
 ln -sfn "$PY312" /usr/local/bin/python3.12
-ln -sfn "$PY312" /usr/local/bin/python3
 
 PHP_VERSION=$(python3 - "$STACK" <<'PY'
 import re, sys
@@ -143,7 +144,7 @@ if [ -n "$PHP_VERSION" ]; then
   curl -fsSL --max-time 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
   chmod 0755 /usr/local/bin/wp
 elif [ "$STACK" = python-3.12 ]; then
-  uv python install 3.12 >/dev/null
+  UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12 >/dev/null
 fi
 
 if ! id aiflow-worker >/dev/null 2>&1; then

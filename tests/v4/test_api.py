@@ -131,6 +131,23 @@ def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_rel
     assert unsafe_env_file.returncode != 0
 
 
+def test_bootstrap_python_uses_shared_uv_install_without_replacing_python3(client):
+    response = client.get("/v1/install.sh")
+    assert response.status_code == 200
+    script = response.text
+
+    assert script.index("umask 022") < script.index("UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12")
+    assert "install -d -m 0755 /opt/aiflow/python" in script
+    assert "UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12" in script
+    assert "PY312=$(UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python find 3.12)" in script
+    assert 'ln -sfn "$PY312" /usr/local/bin/python3.12' in script
+    # A root-run bootstrap must never make generic python3 resolve through root's 0700 home.
+    python_links = [line.strip() for line in script.splitlines()
+                    if line.lstrip().startswith("ln ") and "/usr/local/bin/python3" in line]
+    assert python_links == ['ln -sfn "$PY312" /usr/local/bin/python3.12']
+    assert "/root/.local/share/uv/python" not in script
+
+
 def test_install_script_rejects_shell_syntax_in_host_headers(client):
     hostile_host = "control.example$(touch${IFS}/tmp/aiflow-host-injection)"
     for headers in ({"host": hostile_host}, {"x-forwarded-host": hostile_host}):

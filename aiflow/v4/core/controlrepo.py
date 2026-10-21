@@ -78,6 +78,7 @@ class ControlRepo:
     versions: dict[str, Any]
     policy: dict[str, Any]
     profiles: dict[str, Any]
+    sa: dict[str, Any]
     accounts: list[Account]
     nodes: dict[str, Node]
     projects: dict[str, Project]
@@ -108,7 +109,8 @@ class ControlRepo:
         if head.is_file():
             ref = head.read_text().strip()
         return cls(root=r, versions=y("versions.lock", {}), policy=y("policy/default.yaml", {}),
-                   profiles=y("profiles.yaml", {}), accounts=accounts, nodes=nodes, projects=projects, ref=ref)
+                   profiles=y("profiles.yaml", {}), sa=y("sa.yaml", {}), accounts=accounts, nodes=nodes,
+                   projects=projects, ref=ref)
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]

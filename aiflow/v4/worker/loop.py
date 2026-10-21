@@ -90,6 +90,7 @@ class Worker:
         try:
             self.api.call("POST", f"/v1/accounts/{self.account}/probe", {
                 "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
+                "credential_expires_at": res.credential_expires_at.isoformat() if res.credential_expires_at else None,
                 "quota": res.quota, "summary": summary, "duration_ms": int(res.duration_s * 1000),
                 "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd})
         except Exception as e:  # noqa: BLE001
@@ -102,7 +103,9 @@ class Worker:
             self.next_probe = now + max(300, min(wait, 6 * 3600))
         self.probe_ok = ok
         self.publish(state="idle" if ok else "unavailable", probe={"ok": ok, "error_kind": res.error_kind, "at": now,
-                                                                   "next": self.next_probe})
+                                                                   "next": self.next_probe,
+                                                                   "credential_expires_at": res.credential_expires_at.isoformat()
+                                                                   if res.credential_expires_at else None})
         log.info("probe %s: %s", self.account, "ok" if ok else summary)
         return ok
 

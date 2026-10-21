@@ -106,6 +106,20 @@ def worker_states() -> list[dict]:
     return out
 
 
+def credential_expiries(states: list[dict]) -> dict[str, str | None]:
+    """Forward explicit provider CLI expiry metadata from worker probes; absent values stay unknown."""
+    out: dict[str, str | None] = {}
+    for state in states:
+        account = str(state.get("account") or "")
+        probe = state.get("probe") or {}
+        if account and "credential_expires_at" in probe:
+            value = probe.get("credential_expires_at")
+            current = out.get(account)
+            if account not in out or (value and (not current or value < current)):
+                out[account] = value
+    return out
+
+
 def systemctl(*args: str) -> int:
     return subprocess.run(["systemctl", *args], capture_output=True).returncode
 
@@ -297,6 +311,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
+    pending_network_events: list[dict] = []
     try:
         while not stop.is_set():
             try:
@@ -311,7 +326,24 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "tools": tools,
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws}, retries=2)["desired"]
+                    "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+            except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
+                if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
+                    pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
+                                                   "retry": True, "attempts": 2,
+                                                   "reason": "node-agent could not reach the control API",
+                                                   "occurred_at": time.time()})
+                    pending_network_events = pending_network_events[-100:]
+                log.warning("heartbeat failed: %s", e)
+                stop.wait(every_s)
+                continue
+            if pending_network_events:
+                try:
+                    api.call("POST", "/v1/events", {"events": list(pending_network_events)})
+                    pending_network_events = []
+                except Exception as e:  # noqa: BLE001 - retry the event delivery on the next heartbeat
+                    log.warning("heartbeat error report not recorded: %s", type(e).__name__)
+            try:
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()

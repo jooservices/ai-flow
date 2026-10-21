@@ -175,3 +175,119 @@ def test_a_slow_tool_check_is_not_reported_missing(monkeypatch):
     from aiflow.v4.core.toolchains import missing_tools
     versions = agent.tool_versions()
     assert versions["composer"] == "timeout" and missing_tools(versions, ["composer"]) == []
+
+
+class _ReleaseResponse:
+    status_code = 200
+
+    def __init__(self, content: bytes, payload: dict | None = None):
+        self.content = content
+        self.payload = payload
+
+    def json(self):
+        return self.payload
+
+
+def test_self_update_rejects_bad_signature_reports_incident_and_does_not_install(tmp_path, monkeypatch):
+    import hashlib
+
+    version = "v4.2.1"
+    tarball = b"signed archive bytes"
+    bundle = b"untrusted signature bundle"
+    manifest = {"version": version, "sha256": hashlib.sha256(tarball).hexdigest(),
+                "tarball": f"/v1/releases/{version}.tar.gz",
+                "signature": f"/v1/releases/{version}.tar.gz.sigstore.json"}
+
+    class FakeHTTP:
+        def get(self, url, timeout):
+            if url == f"/v1/releases/{version}/manifest":
+                return _ReleaseResponse(b"", manifest)
+            if url == manifest["tarball"]:
+                return _ReleaseResponse(tarball)
+            if url == manifest["signature"]:
+                return _ReleaseResponse(bundle)
+            raise AssertionError(f"unexpected release URL: {url}")
+
+    class FakeAPI:
+        def __init__(self):
+            self.c = FakeHTTP()
+            self.calls = []
+
+        def call(self, method, path, body=None, **kwargs):
+            self.calls.append((method, path, body, kwargs))
+
+    api = FakeAPI()
+    subprocess_calls = []
+    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(agent, "verify_release_signature", lambda *_: (False, "invalid signature"))
+    monkeypatch.setattr(agent.subprocess, "run", lambda *args, **kwargs: subprocess_calls.append(args[0]))
+    agent._update_tried.clear()
+
+    agent.self_update(api, version, "node-7")
+
+    assert api.calls == [("POST", "/v1/nodes/node-7/release-failures",
+                          {"release_version": version,
+                           "detail": "cosign signature verification failed: invalid signature"},
+                          {"retries": 1})]
+    assert not subprocess_calls
+
+
+def test_self_update_schedules_install_only_after_checksum_and_signature_pass(tmp_path, monkeypatch):
+    import hashlib
+
+    version = "v4.2.1"
+    tarball = b"verified archive bytes"
+    bundle = b"verified signature bundle"
+    manifest = {"version": version, "sha256": hashlib.sha256(tarball).hexdigest(),
+                "tarball": f"/v1/releases/{version}.tar.gz",
+                "signature": f"/v1/releases/{version}.tar.gz.sigstore.json"}
+
+    class FakeHTTP:
+        def get(self, url, timeout):
+            return {f"/v1/releases/{version}/manifest": _ReleaseResponse(b"", manifest),
+                    manifest["tarball"]: _ReleaseResponse(tarball),
+                    manifest["signature"]: _ReleaseResponse(bundle)}[url]
+
+    class FakeAPI:
+        c = FakeHTTP()
+
+        def __init__(self):
+            self.calls = []
+
+        def call(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    api = FakeAPI()
+    commands = []
+    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(agent, "verify_release_signature", lambda *_: (True, ""))
+    monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
+                        or SimpleNamespace(returncode=0, stdout="started", stderr=""))
+    agent._update_tried.clear()
+
+    agent.self_update(api, version, "node-7")
+
+    assert not api.calls
+    assert commands[0][0:5] == ["systemd-run", "--unit", commands[0][2], "--no-block", "--collect"]
+    assert commands[0][5] == "/usr/local/sbin/aiflow4-node-install"
+    assert commands[0][7] == version
+    assert commands[0][9] == manifest["sha256"]
+
+
+def test_release_signature_verification_pins_the_tagged_workflow_identity(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
+                        or SimpleNamespace(returncode=0, stdout="verified", stderr=""))
+
+    assert agent.verify_release_signature(tmp_path / "release.tar.gz", tmp_path / "bundle.json", "v4.2.1") == (True, "")
+    assert commands[0][0:4] == ["cosign", "verify-blob", str(tmp_path / "release.tar.gz"), "--bundle"]
+    assert commands[0][4] == str(tmp_path / "bundle.json")
+    assert commands[0][5:7] == ["--certificate-identity", agent._RELEASE_WORKFLOW_IDENTITY.format("v4.2.1")]
+    assert commands[0][7:9] == ["--certificate-oidc-issuer", "https://token.actions.githubusercontent.com"]
+
+    commands.clear()
+    assert agent.verify_release_signature(tmp_path / "release.tar.gz", tmp_path / "bundle.json", "develop") == (
+        False, "release version is not a vX.Y.Z tag")
+    assert not commands

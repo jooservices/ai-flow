@@ -1,0 +1,78 @@
+# Versioned v4 releases
+
+AI Flow v4 is released from tags on `master`, so a node installs an immutable version rather than following a
+moving branch. Release tags must use `vX.Y.Z` (for example, `v4.1.0`) and point to a commit reachable from
+`origin/master`.
+
+## Build and publish
+
+Pushing a valid version tag starts `.github/workflows/release-v4.yml`. It runs `tests/v4` against Redis and
+PostgreSQL first and publishes only when those tests pass. The workflow then:
+
+1. Archives the project code, `prompts/`, `deploy/`, `pyproject.toml` and `uv.lock` into
+   `aiflow4-vX.Y.Z.tar.gz`.
+2. Builds and pushes `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z`.
+3. Writes `SHA256SUMS` for the tarball, signs the tarball as a Sigstore/cosign blob, and signs the GHCR image.
+   Both signatures use GitHub Actions OIDC; no long-lived signing key is stored in GitHub secrets.
+4. Creates or updates the matching GitHub Release with notes grouped from conventional commits since the
+   previous reachable version tag (or all reachable history for the first versioned release), then attaches the
+   tarball, its `.sigstore.json` bundle and `SHA256SUMS`.
+
+Conventional subjects such as `feat(api): add release manifest`, `fix(node): reject invalid signatures` and
+`feat!: change the node update protocol` appear under Features, Fixes and Breaking Changes. A commit with a
+`BREAKING CHANGE:` body is also listed under Breaking Changes. Other commit subjects are retained under Other.
+
+## Deploy a release
+
+The control host needs the `gh`, `docker`, `cosign`, `git`, `systemctl`, `uv` and `sha256sum` commands, access to
+the `jooservices/ai-flow` GitHub Release and GHCR package, and the existing AI Flow control networks. Configure
+Docker with GHCR `read:packages` access on the control host when the package is private. Install cosign on the
+control host and each node from the [official cosign installation instructions](https://docs.sigstore.dev/cosign/system_config/installation/).
+The node also needs Python 3.12 and uv as required by the installer.
+
+Run a specific published release on the control host:
+
+```sh
+aiflow4-deploy v4.1.0
+```
+
+The deploy script checks that the tag is on `master`, downloads the matching release assets, checks the SHA-256
+manifest and cosign identity, verifies the signed GHCR image, and then updates control-api, the control loops
+and the control host's node agent. It stores signed assets in
+`/srv/aiflow/control/releases/vX.Y.Z/` and atomically updates `CURRENT`. The timer-based auto-deployer selects
+the highest published SemVer tag reachable from `master`; it no longer deploys unversioned commits from
+`develop`. It rolls back to the previous version when its health checks fail.
+
+The image tag is also its version and includes OCI source, version and revision labels. Control containers set
+`AIFLOW4_VERSION` from the release tag, so `/healthz`, `/v1/state` and the API metadata report the built version.
+
+## Node download and verification
+
+Node heartbeats receive the control plane's `CURRENT` release version. The authenticated release API exposes:
+
+- `GET /v1/releases/{version}/manifest`: version, SHA-256 digest, and links to the archive, signature bundle and checksum
+  file.
+- `GET /v1/releases/{version}.tar.gz`: release archive.
+- `GET /v1/releases/{version}.tar.gz.sigstore.json`: cosign bundle containing the blob signature and
+  verification material.
+- `GET /v1/releases/{version}/SHA256SUMS`: release checksum manifest.
+
+The node agent compares the downloaded archive digest to the manifest and runs `cosign verify-blob` before it
+starts the installer. Verification requires both the GitHub Actions OIDC issuer and the exact identity
+`https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/vX.Y.Z`. The installer checks
+the checksum and signature again before extracting files or switching `/srv/aiflow/current`.
+Nodes need egress to Sigstore's public verification services so cosign can validate the certificate and
+transparency proof in the bundle against its trusted roots.
+
+If the checksum, signature, certificate identity or verifier is invalid or unavailable, installation stops.
+The agent sends `POST /v1/nodes/{name}/release-failures` with node authentication; the control API opens a
+critical `release_verification` incident for that node and version. A rejected release is not installed.
+
+The installer entry point is:
+
+```sh
+aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
+```
+
+Do not install a tarball from a branch or commit hash. To make a release, merge the change to `master`, create a
+`vX.Y.Z` tag on that commit, then use the corresponding published GitHub Release.

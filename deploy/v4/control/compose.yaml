@@ -3,11 +3,12 @@
 name: aiflow4-app
 
 x-app: &app
-  image: aiflow4/control:${AIFLOW4_IMAGE_TAG:-latest}
+  image: ${AIFLOW4_IMAGE_REPOSITORY:-aiflow4/control}:${AIFLOW4_IMAGE_TAG:-latest}
   restart: unless-stopped
   env_file: [/etc/aiflow/secrets/control/aiflow4.env]
   environment:
     AIFLOW4_ENV: lab
+    AIFLOW4_VERSION: ${AIFLOW4_VERSION:-4.0.0a1}
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
     AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2

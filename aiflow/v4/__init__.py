@@ -4,4 +4,6 @@ Runs side by side with the current flow (aiflow/*): own command (aiflow4), servi
 Redis prefix (aiflow4:) and registry database.
 """
 
-VERSION = "4.0.0a1"
+import os
+
+VERSION = os.environ.get("AIFLOW4_VERSION", "4.0.0a1")

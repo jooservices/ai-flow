@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from . import memory
 from ..core.toolchains import missing_tools
 from .incidents import close_incident, open_incident
-from .api import Ctx
+from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
 
@@ -42,15 +42,17 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             done_at = t["jira_updated"]
         ctx.db.run(
             "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-            " jira_created, jira_updated, done_at, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s, now())"
+            " jira_created, jira_updated, done_at, fields, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
+            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s,%(fields)s, now())"
             " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
             " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated,"
+            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, fields=EXCLUDED.fields,"
             " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
-            {**t, "done_at": done_at})
+            {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+        if old and old["status"] != "Human review" and t["status"] == "Human review":
+            notify_human_review(ctx, t["key"], t)
         ready = "aiflow-ready" in t["labels"]
         if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
             # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline

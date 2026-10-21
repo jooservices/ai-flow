@@ -1,0 +1,40 @@
+#!/bin/bash
+# DEVELOP CHANNEL (lab only, docs/v4/develop-channel.md): deploy origin/develop when it moved and its CI passed; roll back when the control plane is unhealthy after it.
+# Run by aiflow4-autodeploy.timer on the control-plane machine. Nodes follow by themselves (heartbeat release).
+set -uo pipefail
+R=/srv/aiflow/control/repos/ai-flow
+CUR=$(cat /srv/aiflow/control/releases/CURRENT 2>/dev/null || true)
+git -C $R fetch -q origin || exit 0
+TARGET=$(git -C $R rev-parse --short=10 origin/develop)
+[ "$TARGET" = "$CUR" ] && exit 0
+FULL=$(git -C $R rev-parse origin/develop)
+CI=$(aiflow4-gh api GET "/repos/jooservices/ai-flow/commits/$FULL/check-runs" | python3 -c '
+import json,sys; d=json.load(sys.stdin); b=d.get("body") or d; cs=b.get("check_runs",[])
+if any(c["status"]!="completed" for c in cs): print("pending")
+elif any(c["conclusion"] not in ("success","skipped","neutral") for c in cs): print("failed")
+else: print("ok" if cs else "none")' 2>/dev/null || echo error)
+AGE=$(( $(date +%s) - $(git -C $R log -1 --format=%ct origin/develop) ))
+case "$CI" in
+  ok) ;;
+  none) [ $AGE -gt 1200 ] || { echo "develop $TARGET has no CI yet"; exit 0; } ;;
+  *) echo "develop $TARGET CI: $CI; not deploying"; exit 0 ;;
+esac
+echo "deploying develop $TARGET (was $CUR)"
+alert() { python3 - "$1" "$2" <<'P' || true
+import smtplib, sys
+from email.message import EmailMessage
+m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow4.local"; m["Subject"] = sys.argv[1]; m.set_content(sys.argv[2])
+with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
+P
+}
+if aiflow4-deploy-develop "" develop; then
+  sleep 20
+  if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+     && curl -fsS -o /dev/null http://127.0.0.1/cc; then
+    echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed develop $TARGET" "Auto-deploy of $TARGET passed the health checks (previous $CUR)."; exit 0
+  fi
+fi
+echo "deploy of $TARGET unhealthy; rolling back to $CUR"
+[ -n "$CUR" ] && aiflow4-deploy-develop "" "$CUR"
+alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after deploying $TARGET; it runs $CUR again. Look at the merged PRs of develop."
+exit 1

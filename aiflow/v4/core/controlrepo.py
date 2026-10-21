@@ -79,6 +79,7 @@ class ControlRepo:
     versions: dict[str, Any]
     policy: dict[str, Any]
     profiles: dict[str, Any]
+    sa: dict[str, Any]
     accounts: list[Account]
     nodes: dict[str, Node]
     projects: dict[str, Project]
@@ -109,7 +110,8 @@ class ControlRepo:
         if head.is_file():
             ref = head.read_text().strip()
         return cls(root=r, versions=y("versions.lock", {}), policy=y("policy/default.yaml", {}),
-                   profiles=y("profiles.yaml", {}), accounts=accounts, nodes=nodes, projects=projects, ref=ref)
+                   profiles=y("profiles.yaml", {}), sa=y("sa.yaml", {}), accounts=accounts, nodes=nodes,
+                   projects=projects, ref=ref)
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
@@ -126,14 +128,13 @@ class ControlRepo:
         return out
 
     def projects_for_node(self, node: str, bound_projects: list[str], dynamic: bool = False) -> list[str]:
-        """Return a joined node's bound projects, constrained by node YAML when it is control-repo managed."""
-        allowed = set(bound_projects)
-        if not dynamic:
-            configured = self.nodes.get(node)
-            if not configured:
-                return []
-            allowed.intersection_update(configured.projects)
-        return [key for key in bound_projects if key in allowed and key in self.projects]
+        """Return the projects this node serves, using YAML as authority for configured nodes."""
+        configured = self.nodes.get(node)
+        if configured:
+            return [key for key in configured.projects if key in self.projects]
+        if dynamic:
+            return [key for key in bound_projects if key in self.projects]
+        return []
 
     def provider_tools_for_node(self, node: str) -> list[str]:
         return tools_for_providers(a.provider for a in self.accounts_on(node))

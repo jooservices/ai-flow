@@ -3,7 +3,7 @@
   aiflow4 migrate                       apply registry migrations
   aiflow4 control-api [--port 8080]     control API + dashboards
   aiflow4 control-loops                 Jira sync, watchdog
-  aiflow4 node join --name N --join-token-file F [--control URL]
+  aiflow4 node join --join-token-file F [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
   aiflow4 version
@@ -82,7 +82,6 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("control-loops")
     pn = sub.add_parser("node")
     pn.add_argument("action", choices=["join"])
-    pn.add_argument("--name", required=True)
     pn.add_argument("--join-token-file", required=True)
     pn.add_argument("--control", default="")
     pn.add_argument("--ip", default="")
@@ -123,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         import httpx
         control = a.control or s.control_url
         join_token = Path(a.join_token_file).read_text().strip()
-        r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json={"name": a.name, "join_token": join_token, "ip": a.ip},
+        r = httpx.post(f"{control.rstrip('/')}/v1/nodes/join", json={"join_token": join_token, "ip": a.ip},
                        timeout=30)
         r.raise_for_status()
         tok = Path(s.node_token_file)
@@ -131,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         old = os.umask(0o077)
         tok.write_text(r.json()["node_token"])
         os.umask(old)
-        print(f"joined {a.name}; token in {tok}")
+        print(f"joined {r.json()['node']}; token in {tok}")
         return 0
     if a.cmd == "node-agent":
         from .node.agent import run_agent

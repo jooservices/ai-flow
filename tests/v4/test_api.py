@@ -1,3 +1,6 @@
+import csv
+import io
+import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -32,6 +35,8 @@ def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(cl
     assert set(data) == {"token", "name", "role", "project", "expires_at"}
     assert data["name"] == "node-new" and data["role"] == "worker" and data["project"] == "TESTWP"
     assert len(data["token"]) >= 40 and "must-not-be-stored" not in data["token"]
+    expires_at = datetime.fromisoformat(data["expires_at"])
+    assert timedelta(0) < expires_at - datetime.now(timezone.utc) <= timedelta(minutes=5)
     preview = client.post("/v1/nodes/join-tokens/inspect", json={"join_token": data["token"]})
     assert preview.status_code == 200
     assert preview.json() == {"name": "node-new", "role": "worker", "project": "TESTWP", "stack": "",
@@ -65,8 +70,62 @@ def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_rel
     assert "SI_PHP_VERSION" in script and "--modules php --preflight" in script
     assert "useradd --system" in script and "aiflow-worker" in script
     assert "npm install --global @anthropic-ai/claude-code @openai/codex" in script
-    assert "aiflow4-node-install" in script and "node_token" in script
+    assert "node_token" in script
     assert "__AIFLOW4_CONTROL_URL__" not in script
+
+    syntax = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+
+    # Account for each external command invoked by the bootstrap and assert where it comes from.
+    package_block = script.split('BOOTSTRAP_PACKAGES="', 1)[1].split('"', 1)[0]
+    packages = set(package_block.split())
+    package_sources = {
+        "bash": "bash", "curl": "curl", "python3": "python3", "tar": "tar", "chmod": "coreutils", "rm": "coreutils",
+        "install": "coreutils", "cat": "coreutils", "ln": "coreutils", "readlink": "coreutils",
+        "dirname": "coreutils", "sha256sum": "coreutils", "uname": "coreutils", "mkdir": "coreutils",
+        "sed": "sed", "find": "findutils", "useradd": "passwd", "npm": "npm", "codex": "npm",
+    }
+    assert set(package_sources.values()) <= packages
+    for executable, package in package_sources.items():
+        assert executable in script
+        assert package in packages
+    assert all(marker in script for marker in ("#!/bin/sh", "id -u", "mktemp -d", "command -v apt-get",
+                                                "command -v dnf", "apt-get install", "dnf install"))
+    assert "server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer" in script
+    assert "UV_INSTALL_DIR=/usr/local/bin sh \"$WORK/uv-install.sh\"" in script
+    assert "npm install --global @anthropic-ai/claude-code @openai/codex @vibe-kit/grok-cli opencode-ai" in script
+    assert "SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli \"$SI_BIN\" apply --modules php" in script
+    assert "getcomposer.org/installer" in script and "--filename=composer" in script
+    assert "wp-cli/builds/gh-pages/phar/wp-cli.phar" in script
+    assert "codex-code-mode-host-${CODEX_HOST_ARCH}" in script
+    assert "install -m 0755 \"$WORK/cosign\" /usr/local/bin/cosign" in script
+    assert "SERVER_INSTALLER_TAG=v1.1.0" in script
+    verify_at = script.index('verify-blob "$WORK/release.tar.gz"')
+    extract_at = script.index('tar -xzf "$WORK/release.tar.gz" -C "$WORK/release-bootstrap"')
+    install_at = script.index('"$RELEASE_INSTALLER" "$WORK/release.tar.gz"')
+    assert verify_at < extract_at < install_at
+    assert 'RELEASE_INSTALLER=$WORK/release-bootstrap/deploy/v4/bin/aiflow4-node-install' in script
+    assert '"$RELEASE_INSTALLER" "$WORK/release.tar.gz" "$RELEASE_VERSION"' in script
+    assert '/usr/local/sbin/aiflow4-node-install' not in script
+
+
+def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_tokens(client, ctx):
+    # Model a node row created by the old registry migration before project binding was added.
+    ctx.db.run("UPDATE nodes SET projects='{}',token_hash='',dynamic=false WHERE name='node1'")
+    before = ctx.db.one("SELECT token_hash,projects FROM nodes WHERE name='node1'")
+    assert before == {"token_hash": "", "projects": []}
+
+    client.app.state.sync_accounts()
+    after = ctx.db.one("SELECT token_hash,projects FROM nodes WHERE name='node1'")
+    assert after == {"token_hash": "", "projects": ["TESTWP"]}
+    assert ctx.repo().projects_for_node("node1", before["projects"], dynamic=False) == ["TESTWP"]
+
+    # A later control repo project assignment also takes effect without joining again.
+    from aiflow.v4.core.controlrepo import Project
+
+    ctx.repo().projects["TESTFLOW"] = Project(key="TESTFLOW", repo="jooservices/testflow")
+    ctx.repo().nodes["node1"].projects = ["TESTFLOW"]
+    assert ctx.repo().projects_for_node("node1", after["projects"], dynamic=False) == ["TESTFLOW"]
 
 
 def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
@@ -108,6 +167,118 @@ def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     assert shipped[0]["slots_total"] == 4 and shipped[0]["metrics"] == {"cpu_pct": 12.5}
     assert isinstance(shipped[0]["_timestamp"], int)
     assert ctx.db.one("SELECT count(*) AS n FROM events WHERE type='node.heartbeat'")["n"] == 0
+
+
+def test_node_heartbeat_persists_only_its_accounts_credential_expiry(client, ctx):
+    cc = join(client, "cc")
+    expires_at = datetime.now(timezone.utc) + timedelta(days=3)
+    response = client.post("/v1/nodes/cc/heartbeat", json={
+        "credential_expiries": {"claude-01": expires_at.isoformat(), "codex-01": expires_at.isoformat()}
+    }, headers=cc)
+    assert response.status_code == 200
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='claude-01'")["credential_expires_at"] == expires_at
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='codex-01'")["credential_expires_at"] is None
+
+    client.post("/v1/nodes/cc/heartbeat", json={"credential_expiries": {"claude-01": None}}, headers=cc)
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='claude-01'")["credential_expires_at"] is None
+
+
+def test_sa_state_tracks_capacity_recommendations_and_control_repo_thresholds(client, ctx):
+    cc = join(client, "cc")
+    node1 = join(client, "node1")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 4, "slots_used": 4}, headers=cc)
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 4, "slots_used": 0}, headers=node1)
+    ctx.db.run("UPDATE sa_health SET slot_pressure_since=now() - interval '31 minutes' WHERE id=true")
+    ctx.db.run("UPDATE nodes SET idle_since=now() - interval '8 days' WHERE name='node1'")
+    ctx.db.run("UPDATE accounts SET status='cooldown', cooldown_since=now() - interval '16 minutes'")
+    ctx.db.run("UPDATE accounts SET status='idle', cooldown_since=NULL, idle_since=now() - interval '8 days'"
+               " WHERE id='opencode-01'")
+
+    state = client.get("/v1/state").json()
+    assert state["sa"]["thresholds"] == {"slots_used_percent": 80, "slots_duration_minutes": 30,
+                                         "role_cooldown_minutes": 15, "idle_days": 7,
+                                         "credential_expiry_days": 7}
+    assert {k: state["sa"]["slots"][k] for k in ("used", "total", "utilization_percent")} == {
+        "used": 4, "total": 8, "utilization_percent": 50.0}
+    assert state["sa"]["slots"]["pressure_since"]
+    suggestions = {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+    assert ("add_node", "fleet") not in suggestions  # fleet total is below the 80% threshold
+    assert ("add_account", "verify") in suggestions and ("add_account", "master") in suggestions
+    assert ("remove_node", "node1") in suggestions and ("remove_account", "opencode-01") in suggestions
+
+    ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='node1'")  # 4 / 5 slots = the default 80% threshold
+    state = client.get("/v1/state").json()
+    assert state["sa"]["slots"]["utilization_percent"] == 80.0
+    assert ("add_node", "fleet") in {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+
+    ctx.repo().sa = {"thresholds": {"slots_used_percent": 90, "slots_duration_minutes": 30,
+                                    "role_cooldown_minutes": 15, "idle_days": 7}}
+    state = client.get("/v1/state").json()
+    assert state["sa"]["thresholds"]["slots_used_percent"] == 90
+    assert ("add_node", "fleet") not in {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+
+
+def test_sa_surfaces_account_probe_failures_and_credential_expiry(client, ctx):
+    cc = join(client, "cc")
+    expiry = datetime.now(timezone.utc) + timedelta(days=5)
+    assert client.post("/v1/accounts/claude-01/probe", json={
+        "ok": False, "error_kind": "auth", "summary": "sign in required",
+        "credential_expires_at": expiry.isoformat()}, headers=cc).status_code == 200
+    assert client.post("/v1/accounts/opencode-01/probe", json={
+        "ok": False, "error_kind": "provider", "summary": "provider check failed"}, headers=cc).status_code == 200
+    client.post("/v1/nodes/cc/heartbeat", json={"workers": [
+        {"account": "claude-01", "state": "unavailable", "probe": {"ok": False, "error_kind": "auth"}},
+        {"account": "opencode-01", "state": "unavailable", "probe": {"ok": False, "error_kind": "provider"}},
+    ]}, headers=cc)
+
+    state = client.get("/v1/state").json()
+    accounts = {a["id"]: a for a in state["accounts"]}
+    assert accounts["claude-01"]["status"] == "signed_out"
+    assert accounts["claude-01"]["credential_expiry_warning"] is True
+    assert accounts["claude-01"]["credential_expires_at"].startswith(expiry.date().isoformat())
+    assert accounts["opencode-01"]["status"] == "error" and accounts["opencode-01"]["check_failed"] is True
+    assert accounts["codex-01"]["credential_expires_at"] == "unknown"
+    assert {a["id"] for a in state["sa"]["provider_blocks"]} == {"claude-01"}
+
+
+def test_sa_reports_both_policy_and_provider_blocks(client, ctx):
+    ctx.events.emit("policy.decision", ticket="TESTWP-50", account="claude-01", node="cc",
+                    run_id="run-50", outcome="deny", reason="policy refused command",
+                    command="git push origin main")
+    ctx.db.run("UPDATE accounts SET status='cooldown', cooldown_since=now() WHERE id='codex-01'")
+    sa = client.get("/v1/state").json()["sa"]
+    assert sa["policy_denials"][0]["ticket"] == "TESTWP-50"
+    assert sa["policy_denials"][0]["account"] == "claude-01"
+    assert sa["policy_denials"][0]["command"] == "git push origin main"
+    assert "codex-01" in {a["id"] for a in sa["provider_blocks"]}
+
+
+def test_sa_network_diagnostics_include_heartbeat_events_runs_and_retry(client, ctx):
+    import uuid
+
+    ctx.events.emit("node.heartbeat.error", node="cc", reason="node-agent could not reach control",
+                    error_kind="network", retry=True, attempts=2)
+    # two network failures of the same ticket and step, then a successful retry; no retry metadata is written
+    for minutes, error_kind, outcome in ((30, "network", "failed"), (20, "network", "failed"), (10, "", "done")):
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind,"
+                   "details,started_at) VALUES (%s,'TESTWP-51','TESTWP','dev','claude-01','cc',1,'finished',%s,%s,"
+                   "%s,now() - make_interval(mins => %s))",
+                   (uuid.uuid4(), outcome, error_kind, J({"error_message": "connection reset"}), minutes))
+    # a single network failure of another ticket that has not been retried yet
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind)"
+               " VALUES (%s,'TESTWP-52','TESTWP','dev','claude-01','cc',1,'finished','failed','network')",
+               (uuid.uuid4(),))
+    sa = client.get("/v1/state").json()["sa"]
+    sources = {issue["source"] for issue in sa["network_issues"]}
+    assert sources == {"event", "run"}
+    event = next(issue for issue in sa["network_issues"] if issue["source"] == "event")
+    assert event["data"]["error_kind"] == "network" and event["data"]["retry"] is True
+    runs = [issue for issue in sa["network_issues"] if issue["source"] == "run"]
+    retried = sorted((r for r in runs if r["ticket"] == "TESTWP-51"), key=lambda r: r["attempts"])
+    assert [(r["attempts"], r["retry"]) for r in retried] == [(1, True), (2, True)]
+    assert all(r["error_kind"] == "network" and r["detail"] == "connection reset" for r in retried)
+    pending = next(r for r in runs if r["ticket"] == "TESTWP-52")
+    assert pending["attempts"] == 1 and pending["retry"] is False
 
 
 def test_command_center_events_survive_many_heartbeats(client, ctx):
@@ -564,7 +735,8 @@ def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
     assert report["period"] == {
         "start": created.isoformat(), "end": (created + timedelta(days=7)).isoformat(), "days": 7.0,
     }
-    assert report["tickets"] == {"total": 6, "done": 6, "done_by_type": {"Story": 3, "Task": 3}}
+    assert report["tickets"] == {"total": 6, "done": 6, "in_progress": 0, "needs_owner": 0,
+                                  "done_by_type": {"Story": 3, "Task": 3}}
     assert report["lead_time"] == {"sample_size": 6, "median_seconds": 388800.0, "p90_seconds": 604800.0}
     assert report["ai_time"] == {"sample_size": 2, "median_seconds": 105.0, "p90_seconds": 170.0,
                                   "total_seconds": 210.0}
@@ -587,12 +759,90 @@ def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
     assert whole_project["tickets"]["done"] == 6
     markdown = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-100", "format": "md"})
     assert markdown.status_code == 200 and markdown.headers["content-type"].startswith("text/markdown")
-    assert "# Project report: TESTWP-100" in markdown.text
+    assert "# Progress report: TESTWP-100" in markdown.text
     assert "| Story | 3 |" in markdown.text and "median 4.5d, p90 7.0d (n=6)" in markdown.text
     assert "Tokens: 280 (200 in, 80 out)" in markdown.text and "TESTWP-102 · Summary of TESTWP-102" in markdown.text
     assert client.get("/v1/projects/UNKNOWN/report").status_code == 404
     assert client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-101"}).status_code == 404
-    assert client.get("/v1/projects/TESTWP/report", params={"format": "html"}).status_code == 400
+    printable = client.get("/v1/projects/TESTWP/report", params={"format": "html"})
+    assert printable.status_code == 200 and printable.headers["content-type"].startswith("text/html")
+
+
+def test_team_lead_epic_requirement_coverage_progress_and_exports(client, ctx):
+    created = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    done = created + timedelta(days=5)
+    add_ticket(ctx.db, "TESTWP-700", status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic', jira_created=%s WHERE key='TESTWP-700'", (created,))
+    children = [
+        ("TESTWP-701", "Done", "Acceptance criteria:\n- AC1: Create row\n- AC2: Render <script>alert(1)</script>\n"
+          "Technical notes:\n- AC3: This is outside the AC section", "TESTWP-700"),
+        ("TESTWP-702", "In Progress", "Acceptance criteria:\n- AC1: Show status", "TESTWP-700"),
+        ("TESTWP-703", "Needs owner", "No acceptance criteria section", "TESTWP-700"),
+        ("TESTWP-704", "Done", "Acceptance criteria:\n- AC1: Validate input", "TESTWP-700"),
+    ]
+    for key, status, description, parent in children:
+        add_ticket(ctx.db, key, status=status, labels=())
+        ctx.db.run("UPDATE tickets SET type='Story', parent_key=%s, description=%s, jira_created=%s, jira_updated=%s,"
+                   " done_at=%s WHERE key=%s", (parent, description, created, done, done if status == "Done" else None, key))
+    ctx.db.run("UPDATE tickets SET summary=%s WHERE key='TESTWP-702'", ('=HYPERLINK("https://example.invalid")',))
+
+    def run(key, step, outcome, tokens_in, tokens_out, cost, details=None):
+        ctx.db.run(
+            "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+            "started_at,ended_at,tokens_in,tokens_out,cost_usd,details)"
+            " VALUES (%s,%s,'TESTWP',%s,'codex-01','codex','gpt-6-luna','cc',1,'finished',%s,%s,%s,%s,%s,%s,%s)",
+            (str(uuid.uuid4()), key, step, outcome, created, created + timedelta(seconds=60), tokens_in, tokens_out,
+             cost, J(details or {})))
+
+    run("TESTWP-701", "verify", "merged", 100, 20, .10, {"verdict": "PASS"})
+    run("TESTWP-702", "dev", "done", 50, 25, .05)
+    # A PASS review followed by failed CI is recorded as rework; Jira Done must not make its AC look verified.
+    run("TESTWP-704", "verify", "rework", 30, 10, .02,
+        {"verdict": "PASS", "findings": "CI failed after the verifier passed"})
+
+    response = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700"})
+    assert response.status_code == 200
+    report = response.json()
+    assert report["tickets"] == {"total": 4, "done": 2, "in_progress": 1, "needs_owner": 1,
+                                  "done_by_type": {"Story": 2}}
+    coverage = report["requirement_coverage"]
+    assert coverage["insufficient_tasks"] is True
+    by_key = {t["key"]: t for t in coverage["tickets"]}
+    assert by_key["TESTWP-701"]["parent_key"] == "TESTWP-700"
+    assert [(ac["id"], ac["status"]) for ac in by_key["TESTWP-701"]["acceptance_criteria"]] == [
+        ("AC1", "verified"), ("AC2", "verified")]
+    assert "AC3" not in {ac["id"] for ac in by_key["TESTWP-701"]["acceptance_criteria"]}
+    assert by_key["TESTWP-704"]["acceptance_criteria"][0]["status"] == "not_confirmed"
+    assert {(g["ticket"], g["reason"]) for g in coverage["gaps"]} == {
+        ("TESTWP-703", "ticket_has_no_acceptance_criteria"),
+        ("TESTWP-704", "done_without_verified_acceptance_criteria"),
+    }
+    assert report["rework_rounds"]["count"] == 1
+    assert report["lead_time"]["sample_size"] == 2
+    assert report["usage"]["tokens_total"] == 235 and report["usage"]["cost_usd"] == .17
+
+    markdown = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "md"})
+    assert markdown.status_code == 200 and "attachment" in markdown.headers["content-disposition"]
+    assert "Done: 2 of 4" in markdown.text and "AC1 [verified]: Create row" in markdown.text
+    csv_report = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "csv"})
+    assert csv_report.status_code == 200 and csv_report.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(csv_report.text)))
+    assert len(rows) == 4 and rows[0]["epic"] == "TESTWP-700"
+    assert "AC1 [verified]: Create row" in rows[0]["acceptance_criteria"]
+    assert rows[1]["summary"].startswith("'=")
+    assert rows[-1]["coverage_gap"] == "done_without_verified_acceptance_criteria"
+
+    printable = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-700", "format": "html"})
+    assert printable.status_code == 200 and "@media print" in printable.text
+    assert "Insufficient tasks found" in printable.text and "&lt;script&gt;alert(1)&lt;/script&gt;" in printable.text
+    assert "<script>alert(1)</script>" not in printable.text
+
+    add_ticket(ctx.db, "TESTWP-710", status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-710'")
+    empty = client.get("/v1/projects/TESTWP/report", params={"epic": "TESTWP-710"}).json()
+    assert empty["requirement_coverage"]["insufficient_tasks"] is True
+    assert empty["requirement_coverage"]["gaps"] == [
+        {"ticket": "TESTWP-710", "reason": "epic_has_no_child_tickets"}]
 
 
 def test_jira_sync_uses_resolution_date_for_done_ticket_insert_and_keeps_it_on_edits(ctx):
@@ -707,3 +957,21 @@ def test_failing_verify_backs_off(client, ctx):
     client.post(f"/v1/runs/{v['run_id']}/release", json={"fence": v["fence"]}, headers=n1)
     cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
     assert all(c["key"] != "TESTWP-41" for c in cands)
+
+
+def test_worktree_sweep_names_finished_tickets_and_spent_run_checkouts(client, ctx):
+    from tests.v4.conftest import add_ticket
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-1", "Done")
+    add_ticket(ctx.db, "TESTWP-2", "In Progress")
+    add_ticket(ctx.db, "TESTWP-3", "Done")
+    ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, node, fence) VALUES"
+               " (gen_random_uuid(), 'TESTWP-3', 'TESTWP', 'verify', 'claude-01', 'cc', 1)")
+    dirs = ["TESTWP/TESTWP-1-feature", "TESTWP/TESTWP-1-feature--verify", "TESTWP/TESTWP-2-feature",
+            "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2--triage-abc", "TESTWP/TESTWP-3-feature", "TESTWP/probe",
+            "TESTWP/../etc"]
+    r = client.post("/v1/nodes/cc/worktrees/sweep", json={"dirs": dirs}, headers=cc)
+    assert r.status_code == 200
+    assert sorted(r.json()["remove"]) == ["TESTWP/TESTWP-1-feature", "TESTWP/TESTWP-1-feature--verify",
+                                          "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2--triage-abc"]
+    assert client.post("/v1/nodes/node1/worktrees/sweep", json={"dirs": []}, headers=cc).status_code == 403

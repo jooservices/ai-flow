@@ -27,6 +27,10 @@ QUOTA_PATTERN = re.compile(
     r"status 402|http 402|payment required|balance exhausted|usage balance", re.I)
 AUTH_PATTERN = re.compile(r"not signed in|not logged in|api key has expired|api_key_expired|invalid api key|"
                           r"please log ?in|authentication_error|please run /login|login expired", re.I)
+NETWORK_PATTERN = re.compile(r"network (unreachable|error)|could not resolve host|name or service not known|"
+                             r"connection (refused|reset|timed out)|econn(reset|refused|unreachable)|"
+                             r"enotfound|etimedout|socket hang up|network request failed|connection error|"
+                             r"unable to connect|fetch failed|failed to connect|temporary failure in name resolution", re.I)
 RESULT_LINE = re.compile(r"^(RESULT|VERDICT):\s*(DONE|PASS|FAIL|BLOCKED)\b[:\s-]*(.*)$", re.M)
 
 
@@ -56,9 +60,10 @@ class RunResult:
     tokens_out: int = 0
     cost_usd: float = 0.0
     permission_denials: int = 0
-    error_kind: str = ""       # "" | quota | auth | provider | timeout | idle | other
+    error_kind: str = ""       # "" | quota | auth | network | provider | timeout | idle | other
     error_message: str = ""    # the provider's own words, for people
     reset_at: datetime | None = None
+    credential_expires_at: datetime | None = None
     quota: dict = field(default_factory=dict)
     duration_s: float = 0.0
     log_path: str = ""
@@ -66,7 +71,41 @@ class RunResult:
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
         d["reset_at"] = self.reset_at.isoformat() if self.reset_at else None
+        d["credential_expires_at"] = self.credential_expires_at.isoformat() if self.credential_expires_at else None
         return d
+
+
+def _expiry_datetime(value) -> datetime | None:
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except ValueError:
+        return None
+
+
+def _credential_expiry(event: dict, res: RunResult, credential_context: bool = False) -> None:
+    """Capture only explicit expiry metadata emitted by a CLI's structured event stream."""
+    if res.credential_expires_at:
+        return
+    for key, value in event.items():
+        if key in ("credential_expires_at", "credentialExpiresAt") or (credential_context and key in ("expires_at", "expiresAt")):
+            parsed = _expiry_datetime(value)
+            if parsed:
+                res.credential_expires_at = parsed
+                return
+    for key in ("credential", "credentials", "auth"):
+        nested = event.get(key)
+        if isinstance(nested, dict):
+            _credential_expiry(nested, res, True)
+            if res.credential_expires_at:
+                return
 
 
 class Adapter:
@@ -141,6 +180,7 @@ class Adapter:
                     except ValueError:
                         continue
                     if isinstance(ev, dict):
+                        _credential_expiry(ev, res)
                         self.parse_event(ev, res)
                         if on_progress:
                             try:
@@ -178,6 +218,8 @@ class Adapter:
                 res.error_kind = "quota"
             elif AUTH_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
                 res.error_kind = "auth"
+            elif NETWORK_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
+                res.error_kind = "network"
             elif res.exit_code not in (0, None) and not res.final_text:
                 res.error_kind = "provider"
         m = None

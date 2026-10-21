@@ -106,6 +106,20 @@ def worker_states() -> list[dict]:
     return out
 
 
+def credential_expiries(states: list[dict]) -> dict[str, str | None]:
+    """Forward explicit provider CLI expiry metadata from worker probes; absent values stay unknown."""
+    out: dict[str, str | None] = {}
+    for state in states:
+        account = str(state.get("account") or "")
+        probe = state.get("probe") or {}
+        if account and "credential_expires_at" in probe:
+            value = probe.get("credential_expires_at")
+            current = out.get(account)
+            if account not in out or (value and (not current or value < current)):
+                out[account] = value
+    return out
+
+
 def systemctl(*args: str) -> int:
     return subprocess.run(["systemctl", *args], capture_output=True).returncode
 
@@ -129,10 +143,53 @@ def reconcile(accounts: list[str]) -> None:
 
 _update_tried: dict[str, float] = {}
 _last_clean = 0.0
+_last_sweep = 0.0
+_DEVELOP_BUILD = re.compile(r"[0-9a-f]{7,40}\Z")
 _RELEASE_VERSION = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 _RELEASE_WORKFLOW_IDENTITY = "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{}"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_INCOMING_DIR = Path("/srv/aiflow/releases/incoming")
+
+
+def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow", min_age_s: int = 600) -> int:
+    """Remove the worktrees of finished tickets (Done) and spent per-run checkouts: the control plane decides
+    which directories can go. Runs at most every ten minutes; returns how many were removed."""
+    global _last_sweep
+    if time.time() - _last_sweep < 600:
+        return 0
+    _last_sweep = time.time()
+    work = Path(srv_root) / "work"
+    found = {}
+    for project in work.iterdir() if work.is_dir() else []:
+        if not project.is_dir():
+            continue
+        for d in project.iterdir():
+            try:
+                if d.is_dir() and not d.is_symlink() and time.time() - d.stat().st_mtime > min_age_s:
+                    found[f"{project.name}/{d.name}"] = d
+            except OSError:
+                pass
+    if not found:
+        return 0
+    remove = api.call("POST", f"/v1/nodes/{node}/worktrees/sweep", {"dirs": sorted(found)}, retries=1).get("remove", [])
+    removed = 0
+    for entry in remove:
+        path = found.get(entry)
+        if path is None:
+            continue
+        try:
+            for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
+                os.chmod(root, 0o700)  # read-only triage checkouts
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            log.warning("could not remove worktree %s: %s", entry, exc)
+    if removed:
+        for mirror in (Path(srv_root) / "mirrors").glob("*"):
+            subprocess.run(["git", "-c", "safe.directory=*", "-C", str(mirror), "worktree", "prune", "--expire=now"],
+                           capture_output=True)
+        log.info("removed %d worktrees of finished tickets", removed)
+    return removed
 
 
 def clean_scratch(max_age_s: int = 6 * 3600) -> int:
@@ -199,8 +256,33 @@ def _report_release_rejection(api: ControlClient, node: str, version: str, detai
         log.error("could not report rejected release %s: %s", version, str(exc)[:200])
 
 
+def self_update_develop(api: ControlClient, sha: str) -> None:
+    """Develop channel (lab only, docs/v4/develop-channel.md): install the control plane's unsigned develop build,
+    named by its commit id, with the installer this node already has (never one taken from the new archive)."""
+    if sha == installed_release() or time.time() - _update_tried.get(sha, 0) < 600:
+        return
+    _update_tried[sha] = time.time()
+    RELEASE_INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    tar = RELEASE_INCOMING_DIR / f"aiflow4-{sha}.tar.gz"
+    response = api.c.get(f"/v1/releases/{sha}.tar.gz", timeout=120)
+    if response.status_code != 200:
+        log.warning("develop build %s not downloadable: %s", sha, response.status_code)
+        return
+    tmp = tar.with_suffix(tar.suffix + ".tmp")
+    tmp.write_bytes(response.content)
+    tmp.replace(tar)
+    result = subprocess.run(["systemd-run", "--unit", f"aiflow4-self-update-{sha[:10]}-{int(time.time())}",
+                             "--no-block", "--collect", "/usr/local/sbin/aiflow4-develop-install", str(tar), sha],
+                            capture_output=True, text=True)
+    log.info("develop self-update to %s started: %s %s", sha, result.returncode,
+             (result.stderr or result.stdout).strip()[:200])
+
+
 def self_update(api: ControlClient, version: str, node: str = "unknown") -> None:
     """Download, checksum and verify the control plane's tagged release before scheduling its installer."""
+    if version and _DEVELOP_BUILD.fullmatch(version) and os.environ.get("AIFLOW4_CHANNEL", "release") == "develop":
+        self_update_develop(api, version)
+        return
     if not version or not _RELEASE_VERSION.fullmatch(version):
         if version:
             log.warning("ignoring unversioned release identifier %s", version[:80])
@@ -297,6 +379,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
+    pending_network_events: list[dict] = []
     try:
         while not stop.is_set():
             try:
@@ -311,10 +394,28 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "tools": tools,
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws}, retries=2)["desired"]
+                    "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+            except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
+                if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
+                    pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
+                                                   "retry": True, "attempts": 2,
+                                                   "reason": "node-agent could not reach the control API",
+                                                   "occurred_at": time.time()})
+                    pending_network_events = pending_network_events[-100:]
+                log.warning("heartbeat failed: %s", e)
+                stop.wait(every_s)
+                continue
+            if pending_network_events:
+                try:
+                    api.call("POST", "/v1/events", {"events": list(pending_network_events)})
+                    pending_network_events = []
+                except Exception as e:  # noqa: BLE001 - retry the event delivery on the next heartbeat
+                    log.warning("heartbeat error report not recorded: %s", type(e).__name__)
+            try:
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()
+                    clean_worktrees(api, name)
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

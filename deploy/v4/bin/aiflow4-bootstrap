@@ -1,14 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Bootstrap a new v4 node using a five-minute, single-use token from Command Center.
-set -euo pipefail
+set -eu
 
 CONTROL_URL=__AIFLOW4_CONTROL_URL__
 SERVER_INSTALLER_TAG=v1.1.0
 COSIGN_VERSION=v3.1.4
 TOKEN=
-while [ $# -gt 0 ]; do
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    --token) [ $# -ge 2 ] || { echo "--token needs a value" >&2; exit 2; }; TOKEN=$2; shift 2 ;;
+    --token) [ "$#" -ge 2 ] || { echo "--token needs a value" >&2; exit 2; }; TOKEN=$2; shift 2 ;;
     *) echo "usage: curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T" >&2; exit 2 ;;
   esac
 done
@@ -17,7 +17,10 @@ done
 
 WORK=$(mktemp -d /tmp/aiflow4-node-join.XXXXXX)
 chmod 700 "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"' 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 TOKEN_BODY=$WORK/token.json
 umask 077
 printf '{"join_token":"%s"}' "$TOKEN" > "$TOKEN_BODY"
@@ -26,23 +29,43 @@ unset TOKEN
 # Read the project stack before consuming the token so an expired or invalid token changes no host state.
 curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$TOKEN_BODY" \
   "$CONTROL_URL/v1/nodes/join-tokens/inspect" -o "$WORK/grant.json"
-read -r NODE_NAME NODE_ROLE PROJECT_KEY STACK RELEASE_VERSION < <(python3 - "$WORK/grant.json" <<'PY'
+python3 - "$WORK/grant.json" > "$WORK/grant.fields" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-print(*(d[k] for k in ("name", "role", "project", "stack", "release")))
+for key in ("name", "role", "project", "stack", "release"):
+    value = d[key]
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        raise SystemExit("invalid node grant field: " + key)
+    print(value)
 PY
-)
+{
+  IFS= read -r NODE_NAME
+  IFS= read -r NODE_ROLE
+  IFS= read -r PROJECT_KEY
+  IFS= read -r STACK
+  IFS= read -r RELEASE_VERSION
+} < "$WORK/grant.fields"
+[ -n "$NODE_NAME" ] && [ -n "$NODE_ROLE" ] && [ -n "$PROJECT_KEY" ] && [ -n "$RELEASE_VERSION" ] || {
+  echo "node grant is incomplete" >&2; exit 1;
+}
 
 # Redeem immediately so a slow package install cannot run past the five-minute token expiry.
 curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$TOKEN_BODY" \
   "$CONTROL_URL/v1/nodes/join" -o "$WORK/join.json"
 rm -f "$TOKEN_BODY"
-read -r JOINED_NAME JOINED_RELEASE < <(python3 - "$WORK/join.json" <<'PY'
+python3 - "$WORK/join.json" > "$WORK/join.fields" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-print(d["node"], d["release"])
+for key in ("node", "release"):
+    value = d[key]
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        raise SystemExit("invalid join response field: " + key)
+    print(value)
 PY
-)
+{
+  IFS= read -r JOINED_NAME
+  IFS= read -r JOINED_RELEASE
+} < "$WORK/join.fields"
 [ "$JOINED_NAME" = "$NODE_NAME" ] && [ "$JOINED_RELEASE" = "$RELEASE_VERSION" ] || {
   echo "join response did not match the inspected node grant" >&2; exit 1;
 }
@@ -77,12 +100,14 @@ SI_BIN=$WORK/server-installer-${SERVER_INSTALLER_TAG#v}/bin/server-installer
 "$SI_BIN" apply --modules packages,timesync,docker,docker_group --preflight
 
 # AI Flow owns the userland runtimes, agent, worker, project tools and provider CLIs.
+# Keep this list in sync with tests/v4/test_api.py's bootstrap command-source check.
+BOOTSTRAP_PACKAGES="bash nodejs npm git python3 python3-venv ca-certificates curl tar coreutils passwd gawk sed findutils"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq nodejs npm git python3 python3-venv ca-certificates curl >/dev/null
+  apt-get install -y -qq $BOOTSTRAP_PACKAGES >/dev/null
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q nodejs npm git python3 ca-certificates curl
+  dnf install -y -q bash nodejs npm git python3 ca-certificates curl tar coreutils shadow-utils gawk sed findutils
 else
   echo "AI Flow node bootstrap currently supports Ubuntu/Debian and RHEL-family package managers" >&2
   exit 1
@@ -95,8 +120,14 @@ PY312=$(uv python find 3.12)
 ln -sfn "$PY312" /usr/local/bin/python3.12
 ln -sfn "$PY312" /usr/local/bin/python3
 
-if [[ "$STACK" =~ ^php-([0-9]+\.[0-9]+)$ ]]; then
-  SI_PHP_VERSION=${BASH_REMATCH[1]} SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight
+PHP_VERSION=$(python3 - "$STACK" <<'PY'
+import re, sys
+m = re.fullmatch(r"php-([0-9]+\.[0-9]+)", sys.argv[1])
+print(m.group(1) if m else "")
+PY
+)
+if [ -n "$PHP_VERSION" ]; then
+  SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight
   curl -fsSL --max-time 60 https://getcomposer.org/installer -o "$WORK/composer-setup.php"
   php "$WORK/composer-setup.php" --install-dir=/usr/local/bin --filename=composer >/dev/null
   curl -fsSL --max-time 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
@@ -139,6 +170,7 @@ CODEX_HOST=$(find "$WORK/codex-host" -type f -name codex-code-mode-host -print -
 [ -n "$CODEX_HOST" ] || { echo "Codex release did not contain codex-code-mode-host" >&2; exit 1; }
 CODEX_BIN=$(readlink -f "$(command -v codex)")
 install -m 0755 "$CODEX_HOST" "$(dirname "$CODEX_BIN")/codex-code-mode-host"
+
 case "$(uname -m)" in
   x86_64) COSIGN_ARCH=amd64; COSIGN_SHA256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
   aarch64) COSIGN_ARCH=arm64; COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
@@ -149,16 +181,47 @@ curl -fsSL --max-time 120 "https://github.com/sigstore/cosign/releases/download/
 echo "$COSIGN_SHA256  $WORK/cosign" | sha256sum --check --status || { echo "cosign checksum verification failed" >&2; exit 1; }
 install -m 0755 "$WORK/cosign" /usr/local/bin/cosign
 
-api_get() {
-  local api_token=$1; shift
+# The manifest is authenticated by the node token. Verify its checksum and release identity before extracting
+# any installer code, then let that signed helper repeat both checks while installing the release.
+api_get() (
+  api_token=$1
+  shift
   printf 'header = "Authorization: Bearer %s"\n' "$api_token" | curl -fsS -K - --max-time 120 "$@"
-}
+)
 api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL/v1/releases/$RELEASE_VERSION/manifest" -o "$WORK/manifest.json"
-TARBALL_PATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tarball"])' "$WORK/manifest.json")
-SIGNATURE_PATH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["signature"])' "$WORK/manifest.json")
-SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$WORK/manifest.json")
+python3 - "$WORK/manifest.json" "$RELEASE_VERSION" > "$WORK/manifest.fields" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+version = d["version"]
+checksum = d["sha256"]
+tarball = d["tarball"]
+signature = d["signature"]
+if version != sys.argv[2]:
+    raise SystemExit("release manifest version mismatch")
+if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+    raise SystemExit("invalid release checksum")
+for value in (tarball, signature):
+    if not isinstance(value, str) or not value.startswith("/v1/releases/") or "\n" in value or "\r" in value:
+        raise SystemExit("invalid release asset path")
+print(tarball)
+print(signature)
+print(checksum)
+PY
+{
+  IFS= read -r TARBALL_PATH
+  IFS= read -r SIGNATURE_PATH
+  IFS= read -r SHA256
+} < "$WORK/manifest.fields"
 api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL$TARBALL_PATH" -o "$WORK/release.tar.gz"
 api_get "$(cat "$NODE_TOKEN_FILE")" "$CONTROL_URL$SIGNATURE_PATH" -o "$WORK/release.sigstore.json"
-/usr/local/sbin/aiflow4-node-install "$WORK/release.tar.gz" "$RELEASE_VERSION" \
+echo "$SHA256  $WORK/release.tar.gz" | sha256sum --check --status || { echo "AI Flow release checksum verification failed" >&2; exit 1; }
+"$WORK/cosign" verify-blob "$WORK/release.tar.gz" --bundle "$WORK/release.sigstore.json" \
+  --certificate-identity "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$RELEASE_VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+mkdir -p "$WORK/release-bootstrap"
+tar -xzf "$WORK/release.tar.gz" -C "$WORK/release-bootstrap" deploy/v4/bin/aiflow4-node-install
+RELEASE_INSTALLER=$WORK/release-bootstrap/deploy/v4/bin/aiflow4-node-install
+[ -x "$RELEASE_INSTALLER" ] || { echo "signed AI Flow release is missing its node installer" >&2; exit 1; }
+"$RELEASE_INSTALLER" "$WORK/release.tar.gz" "$RELEASE_VERSION" \
   "$WORK/release.sigstore.json" "$SHA256"
 echo "Node $NODE_NAME joined AI Flow. Sign in to its AI CLI as aiflow-worker when ready."

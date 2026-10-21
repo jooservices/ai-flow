@@ -40,6 +40,9 @@ def snapshot(ctx) -> dict[str, Any]:
                       "projects": getattr(repo.nodes.get(n["name"]), "projects", []) or [],
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
+    runs_per_account: dict[str, int] = {}
+    for r in db.all("SELECT account_id FROM runs WHERE status='running'"):
+        runs_per_account[r["account_id"]] = runs_per_account.get(r["account_id"], 0) + 1
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
@@ -56,6 +59,7 @@ def snapshot(ctx) -> dict[str, Any]:
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
             "cooldown_until": a["cooldown_until"], "quota": a["quota"], "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
+            "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
                                         "step": r["step"], "elapsed_s": _age(r["started_at"]), "fence": r["fence"],
                                         "progress": r["progress"]},

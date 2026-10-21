@@ -274,19 +274,28 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
             from .incidents import close_incident
             close_incident(ctx, "node_down", node, "heartbeats are back")
+        merged: dict[str, dict] = {}
+        rank = {"working": 5, "probing": 4, "idle": 3, "unavailable": 2, "error": 1, "stopped": 0}
         for w in body.workers:
             acc = str(w.get("account", ""))
             if not acc:
                 continue
-            state = str(w.get("state", "unknown"))
-            if not w.get("alive", True):
-                state = "stopped"
+            st = str(w.get("state", "unknown")) if w.get("alive", True) else "stopped"
+            cur = merged.get(acc)
+            if cur is None or rank.get(st, 0) > rank.get(cur["_state"], 0):
+                merged[acc] = {**w, "_state": st, "instances": (cur or {}).get("instances", 0) + 1}
+            else:
+                cur["instances"] = cur.get("instances", 1) + 1
+        for acc, w in merged.items():
+            state = w.pop("_state")
             # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
             ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN cooldown_until > now() THEN 'cooldown'"
                        " WHEN %s = 'unavailable' THEN status WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
                        " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, state, state, acc, node))
         repo = ctx.repo()
-        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)],
+        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
+                     for i in range(1, max(1, int(a.parallel or 1)) + 1)]
+        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "versions": repo.versions}}
 

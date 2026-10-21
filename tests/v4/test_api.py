@@ -440,3 +440,15 @@ def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
     assert acc["status"] == "node_offline"
     client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1)
     assert ("critical", "node node1 is down") in sent and ("info", "resolved: node node1 is down") in sent
+
+
+def test_parallel_sessions_of_one_account(client, ctx, tmp_path):
+    from aiflow.v4.worker.loop import Worker
+    w = Worker("codex-01.2", "http://x", "t", "node1", str(tmp_path), run_as=[])
+    assert w.account == "codex-01" and w.instance == "codex-01.2" and w.probe_ok
+    n1 = join(client, "node1")
+    hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2, "workers": [
+        {"account": "codex-01", "state": "idle", "alive": True}, {"account": "codex-01", "state": "working", "alive": True}]},
+        headers=n1).json()
+    assert hb["desired"]["workers"] == ["codex-01"]
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='codex-01'")["status"] == "working"

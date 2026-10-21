@@ -21,6 +21,7 @@ class Account:
     tier: str = "middle"
     roles: list[str] = field(default_factory=list)
     explicit_only: bool = False
+    parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
 
 
 @dataclass

@@ -31,7 +31,9 @@ PROBE_PROMPT = "This is an availability check. Do not use any tools. Reply with 
 class Worker:
     def __init__(self, account: str, control_url: str, node_token: str, node_name: str, srv_root: str,
                  heartbeat_s: int = 30, poll_s: int = 20, run_as: list[str] | None = None) -> None:
-        self.account = account
+        self.instance = account                       # "codex-01" or "codex-01.2" (second session of the account)
+        base, _, n = account.rpartition(".")
+        self.account = base if base and n.isdigit() else account
         self.api = ControlClient(control_url, node_token)
         self.api.node_name = node_name  # type: ignore[attr-defined]
         self.control_url = control_url
@@ -41,10 +43,12 @@ class Worker:
         self.poll_s = poll_s
         self.run_as = RUN_AS if run_as is None else run_as
         self.stop = threading.Event()
-        self.state: dict = {"account": account, "state": "idle", "since": time.time()}
+        self.state: dict = {"account": self.account, "state": "idle", "since": time.time()}
         self.probe_every_s = int(os.environ.get("AIFLOW4_PROBE_EVERY_S", "1800"))
         self.next_probe = 0.0
         self.probe_ok = False
+        if self.instance != self.account:  # extra sessions rely on the first one's checks and on cooldowns
+            self.next_probe, self.probe_ok = float("inf"), True
 
     def publish(self, **kv) -> None:
         self.state.update(kv)
@@ -52,16 +56,16 @@ class Worker:
         self.state["updated"] = time.time()
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            tmp = STATE_DIR / f".{self.account}.json"
-            tmp.write_text(json.dumps(self.state))
-            tmp.replace(STATE_DIR / f"{self.account}.json")
+            tmp = STATE_DIR / f".{self.instance}.json"
+            tmp.write_text(json.dumps({**self.state, "instance": self.instance}))
+            tmp.replace(STATE_DIR / f"{self.instance}.json")
         except OSError as e:
             log.debug("state file: %s", e)
 
     def probe(self) -> bool:
         """Tiny prompt through the account's CLI: is it signed in, does it have quota (Claude reports both windows)."""
         spec_info = self.api.call("GET", f"/v1/accounts/{self.account}/spec")
-        work = Path(self.srv) / "work" / ".probe" / self.account
+        work = Path(self.srv) / "work" / ".probe" / self.instance
         work.mkdir(parents=True, exist_ok=True)
         if self.run_as:
             try:

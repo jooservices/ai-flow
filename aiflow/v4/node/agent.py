@@ -94,10 +94,10 @@ def systemctl(*args: str) -> int:
 
 
 def reconcile(accounts: list[str]) -> None:
-    """Start workers for desired accounts that have signed-in credentials; stop the others."""
+    """Start worker instances (account or account.N) whose account has signed-in credentials; stop the others."""
     for a in accounts:
         if systemctl("is-active", "--quiet", f"aiflow4-worker@{a}") != 0:
-            if Path(f"/srv/aiflow/accounts/{a}").is_dir():
+            if Path(f"/srv/aiflow/accounts/{a.split('.')[0]}").is_dir():
                 systemctl("enable", "--now", f"aiflow4-worker@{a}")
                 log.info("started worker %s", a)
     p = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend", "aiflow4-worker@*"],
@@ -126,7 +126,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 "slots_total": slots, "slots_used": used, "release_version": VERSION, "tools": tools,
                 "metrics": {**m, "hostname": socket.gethostname()}, "workers": ws}, retries=2)["desired"]
             if manage_workers:
-                reconcile(desired.get("accounts", []))
+                reconcile(desired.get("workers") or desired.get("accounts", []))
         except Exception as e:  # noqa: BLE001
             log.warning("heartbeat failed: %s", e)
         stop.wait(every_s)

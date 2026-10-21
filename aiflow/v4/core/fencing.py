@@ -105,6 +105,9 @@ class Leases:
         reason = self.r.get(k)
         return (reason, int(self.r.ttl(k))) if reason else None
 
+    def uncool(self, account: str) -> None:
+        self.r.delete(self._k("cooldown", account))
+
     # --- leader election for background loops ----------------------------------------------------------------
     def leader(self, loop: str, owner: str, ttl_ms: int) -> bool:
         return int(self._leader(keys=[self._k("leader", loop)], args=[owner, ttl_ms])) == 1

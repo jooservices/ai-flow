@@ -37,15 +37,21 @@ class DB:
         """Apply migrations/NNN_*.sql that are not yet recorded; returns the versions applied."""
         applied: list[str] = []
         with self.pool.connection() as c:
-            c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
-            done = {r["version"] for r in c.execute("SELECT version FROM schema_migrations").fetchall()}
-            for f in sorted(MIGRATIONS.glob("*.sql")):
-                if f.stem in done:
-                    continue
-                with c.transaction():
-                    c.execute(f.read_text(encoding="utf-8"))
-                    c.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (f.stem,))
-                applied.append(f.stem)
+            # control-api and control-loops start together; one migrates at a time (session advisory lock)
+            c.execute("SELECT pg_advisory_lock(424204)")
+            try:
+                c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY,"
+                          " applied_at timestamptz NOT NULL DEFAULT now())")
+                done = {r["version"] for r in c.execute("SELECT version FROM schema_migrations").fetchall()}
+                for f in sorted(MIGRATIONS.glob("*.sql")):
+                    if f.stem in done:
+                        continue
+                    with c.transaction():
+                        c.execute(f.read_text(encoding="utf-8"))
+                        c.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (f.stem,))
+                    applied.append(f.stem)
+            finally:
+                c.execute("SELECT pg_advisory_unlock(424204)")
         return applied
 
 

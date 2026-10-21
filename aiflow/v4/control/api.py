@@ -120,6 +120,18 @@ class PRBody(BaseModel):
     draft: bool = True
 
 
+class ProbeBody(BaseModel):
+    ok: bool
+    error_kind: str = ""
+    reset_at: datetime | None = None
+    quota: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    duration_ms: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+
+
 class EventsBody(BaseModel):
     events: list[dict[str, Any]]
 
@@ -228,8 +240,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             if not acc:
                 continue
             state = str(w.get("state", "unknown"))
-            ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN cooldown_until > now() THEN 'cooldown' ELSE %s END,"
-                       " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, acc, node))
+            if not w.get("alive", True):
+                state = "stopped"
+            # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
+            ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN cooldown_until > now() THEN 'cooldown'"
+                       " WHEN %s = 'unavailable' THEN status WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
+                       " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, state, state, acc, node))
         repo = ctx.repo()
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)],
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
@@ -435,6 +451,43 @@ def create_app(ctx: Ctx) -> FastAPI:
         return d.hook_output()
 
     # --- events from nodes ------------------------------------------------------------------------------------
+    # --- account probes: a tiny prompt tells whether an account can work and how much quota is left -------------
+    @app.get("/v1/accounts/{account_id}/spec")
+    def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
+        repo = ctx.repo()
+        acc = repo.account(account_id)
+        if not acc or acc.node != node:
+            raise HTTPException(403, f"account {account_id} does not run on {node}")
+        model, effort = repo.model_for(acc.provider, acc.tier)
+        return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
+
+    @app.post("/v1/accounts/{account_id}/probe")
+    def account_probe(account_id: str, body: ProbeBody, node: str = Depends(node_auth)) -> dict:
+        acc = ctx.repo().account(account_id)
+        if not acc or acc.node != node:
+            raise HTTPException(403, f"account {account_id} does not run on {node}")
+        if body.quota:
+            ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
+        ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
+        if body.error_kind in ("quota", "auth"):
+            until = body.reset_at or (utcnow() + timedelta(minutes=30))
+            seconds = max(60, int((until - utcnow()).total_seconds()))
+            ctx.leases.cooldown(account_id, seconds, body.error_kind)
+            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s WHERE id=%s AND status<>'working'",
+                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300], account_id))
+        elif body.ok:
+            ctx.leases.uncool(account_id)
+            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'idle' END,"
+                       " cooldown_until=NULL, last_error='' WHERE id=%s", (account_id,))
+        else:
+            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s"
+                       " WHERE id=%s", (body.summary[:300] or body.error_kind, account_id))
+        ctx.events.emit("account.probe", account=account_id, provider=acc.provider, node=node,
+                        outcome="ok" if body.ok else (body.error_kind or "error"), reason=body.summary[:200],
+                        duration_ms=body.duration_ms, tokens_in=body.tokens_in, tokens_out=body.tokens_out,
+                        cost_usd=body.cost_usd)
+        return {"ok": True}
+
     @app.post("/v1/events")
     def events_in(body: EventsBody, node: str = Depends(node_auth)) -> dict:
         n = 0

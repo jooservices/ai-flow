@@ -9,17 +9,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
+import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
 
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
 RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
+PROBE_PROMPT = "This is an availability check. Do not use any tools. Reply with the single word OK."
 
 
 class Worker:
@@ -36,6 +41,9 @@ class Worker:
         self.run_as = RUN_AS if run_as is None else run_as
         self.stop = threading.Event()
         self.state: dict = {"account": account, "state": "idle", "since": time.time()}
+        self.probe_every_s = int(os.environ.get("AIFLOW4_PROBE_EVERY_S", "1800"))
+        self.next_probe = 0.0
+        self.probe_ok = False
 
     def publish(self, **kv) -> None:
         self.state.update(kv)
@@ -49,8 +57,52 @@ class Worker:
         except OSError as e:
             log.debug("state file: %s", e)
 
+    def probe(self) -> bool:
+        """Tiny prompt through the account's CLI: is it signed in, does it have quota (Claude reports both windows)."""
+        spec_info = self.api.call("GET", f"/v1/accounts/{self.account}/spec")
+        work = Path(self.srv) / "work" / ".probe" / self.account
+        work.mkdir(parents=True, exist_ok=True)
+        if self.run_as:
+            try:
+                shutil.chown(work, "aiflow-worker", "aiflow-worker")
+            except (LookupError, PermissionError):
+                pass
+        if not (work / ".git").exists():  # codex refuses to run outside a git repository
+            subprocess.run(self.run_as + ["git", "init", "-q", str(work)], capture_output=True, timeout=30)
+        spec = RunSpec(prompt=PROBE_PROMPT, cwd=str(work), account_home=str(Path(self.srv) / "accounts" / self.account),
+                       model=spec_info.get("model", ""), effort="", timeout_s=180, idle_s=150, control_url=self.control_url)
+        adapter = get_adapter(spec_info["provider"])
+        base_argv = adapter.argv
+        adapter.argv = lambda sp: self.run_as + base_argv(sp)
+        self.publish(state="probing")
+        res = adapter.run(spec)
+        ok = not res.error_kind and bool((res.final_text or "").strip())
+        summary = (res.final_text or "").strip()[:300] if ok else f"{res.error_kind or 'no answer'}: {(res.final_text or '').strip()[:250]}"
+        try:
+            self.api.call("POST", f"/v1/accounts/{self.account}/probe", {
+                "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
+                "quota": res.quota, "summary": summary, "duration_ms": int(res.duration_s * 1000),
+                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd})
+        except Exception as e:  # noqa: BLE001
+            log.warning("probe result not recorded: %s", e)
+        now = time.time()
+        if ok:
+            self.next_probe = now + self.probe_every_s
+        else:  # retry at the provider's reset time when known, else in 30 minutes (5 minutes at the earliest)
+            wait = (res.reset_at - datetime.now(timezone.utc)).total_seconds() + 30 if res.reset_at else 1800
+            self.next_probe = now + max(300, min(wait, 6 * 3600))
+        self.probe_ok = ok
+        self.publish(state="idle" if ok else "unavailable", probe={"ok": ok, "error_kind": res.error_kind, "at": now,
+                                                                   "next": self.next_probe})
+        log.info("probe %s: %s", self.account, "ok" if ok else summary)
+        return ok
+
     def once(self) -> bool:
         """One poll: claim the best candidate and run it. True when a run happened."""
+        if time.time() >= self.next_probe:
+            self.probe()
+        if not self.probe_ok:
+            return False
         cands = self.api.call("GET", "/v1/work/candidates", params={"account": self.account})["tickets"]
         if not cands:
             return False
@@ -76,6 +128,16 @@ class Worker:
             except Exception as e:  # noqa: BLE001
                 log.warning("release failed: %s", e)
             log.info("%s finished: %s", c.ticket["key"], res.get("outcome"))
+            if res.get("outcome") == "quota":
+                self.probe_ok = False
+                reset = res.get("reset_at")
+                wait = 1800.0
+                if reset:
+                    try:
+                        wait = (datetime.fromisoformat(reset) - datetime.now(timezone.utc)).total_seconds() + 30
+                    except ValueError:
+                        pass
+                self.next_probe = time.time() + max(300, min(wait, 6 * 3600))
             self.publish(state="idle", ticket=None, run_id=None, last_outcome=res.get("outcome"), since=time.time())
             return True
         return False

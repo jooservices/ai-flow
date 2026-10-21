@@ -117,9 +117,34 @@ def watchdog(ctx: Ctx) -> None:
         if not ctx.leases.cooling(a["id"]):
             ctx.db.run("UPDATE accounts SET status='idle', updated_at=now() WHERE id=%s", (a["id"],))
             close_incident(ctx, "account_quota", a["id"], "cooldown ended")
-    for a in ctx.db.all("SELECT id, provider, cooldown_until, last_error FROM accounts WHERE status IN ('cooldown','signed_out')"):
-        open_incident(ctx, "account_quota", a["id"], "warning", f"account {a['id']} cannot work",
-                      f"{a['provider']}: {a['last_error'][:300]} (until {a['cooldown_until']})")
+    for a in ctx.db.all("SELECT id, provider, status, cooldown_until, last_error FROM accounts"
+                        " WHERE status IN ('cooldown','signed_out','error')"):
+        what = {"cooldown": "is out of quota", "signed_out": "is signed out", "error": "fails its check"}[a["status"]]
+        until = f" until {a['cooldown_until']:%Y-%m-%d %H:%M} UTC" if a["cooldown_until"] else ""
+        open_incident(ctx, "account_quota", a["id"], "warning", f"account {a['id']} {what}",
+                      f"{a['provider']}: {a['last_error'][:300]}{until}. Its tickets go to the other accounts.")
+    for a in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working')"):
+        close_incident(ctx, "account_quota", a["id"], "account works again")
+    # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
+    for a in ctx.db.all("SELECT id, provider, quota FROM accounts WHERE quota ? 'windows'"):
+        for wname, w in (a["quota"].get("windows") or {}).items():
+            u = w.get("utilization")
+            if u is None:
+                continue
+            u = float(u)
+            reset = w.get("resets_at")
+            reset_txt = datetime.fromtimestamp(float(reset), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if reset else "unknown"
+            label = {"five_hour": "5-hour", "seven_day": "weekly"}.get(wname, wname)
+            subject = f"{a['id']}:{wname}"
+            if u >= 0.9:
+                sev = "critical" if u >= 1.0 else "warning"
+                tip = (" If the account has a limit reset offer, Settings > Usage > Reset for free restores it now."
+                       if a["provider"] == "claude" and wname == "seven_day" else "")
+                open_incident(ctx, "quota_high", subject, sev, f"{a['id']} {label} limit at {round(u * 100)}%",
+                              f"Resets at {reset_txt}. At 100% the account pauses until then and other accounts take"
+                              f" its tickets.{tip}")
+            elif u < 0.85:
+                close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
 
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:

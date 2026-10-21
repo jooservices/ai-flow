@@ -112,3 +112,28 @@ def test_state_snapshot_and_watchdog(client, ctx):
     # heartbeat comes back: node online, incident closed
     client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_down' AND closed_at IS NULL")["n"] == 0
+
+
+def test_probe_sets_account_state_and_quota_alerts(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    cc = join(client, "cc")
+    assert client.get("/v1/accounts/claude-01/spec", headers=cc).json()["provider"] == "claude"
+    assert client.get("/v1/accounts/codex-01/spec", headers=cc).status_code == 403
+    q = {"windows": {"five_hour": {"utilization": 0.2, "resets_at": 1792561800},
+                     "seven_day": {"utilization": 0.93, "resets_at": 1792638000}}}
+    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True, "quota": q, "summary": "OK"}, headers=cc).status_code == 200
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='claude-01'")["status"] == "idle"
+    watchdog(ctx)
+    inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='quota_high' AND closed_at IS NULL")
+    assert inc["severity"] == "warning" and "weekly limit at 93%" in inc["title"]
+    # a failed probe (balance exhausted) cools the account down and opens an incident; a good one clears both
+    client.post("/v1/accounts/opencode-01/probe", json={"ok": False, "error_kind": "quota", "summary": "quota: 402"}, headers=cc)
+    assert ctx.leases.cooling("opencode-01")[0] == "quota"
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='opencode-01'"
+                      " AND closed_at IS NULL")["n"] == 1
+    client.post("/v1/accounts/opencode-01/probe", json={"ok": True, "summary": "OK"}, headers=cc)
+    assert ctx.leases.cooling("opencode-01") is None
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='opencode-01'"
+                      " AND closed_at IS NULL")["n"] == 0

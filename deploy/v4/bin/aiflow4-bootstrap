@@ -56,6 +56,25 @@ PY
 [ -n "$NODE_NAME" ] && [ -n "$NODE_ROLE" ] && [ -n "$PROJECT_KEY" ] && [ -n "$RELEASE_VERSION" ] || {
   echo "node grant is incomplete" >&2; exit 1;
 }
+PHP_VERSION=$(python3 - "$STACK" <<'PY'
+import re, sys
+m = re.fullmatch(r"php-([0-9]+\.[0-9]+)", sys.argv[1])
+print(m.group(1) if m else "")
+PY
+)
+# A fleet wrapper that already ran server-installer must have installed the project's PHP. Check that before
+# redeeming the token, so a missing or different SI_PHP_VERSION leaves the token unused and the host unchanged.
+if [ -n "$PHP_VERSION" ] && [ "${AIFLOW4_SERVER_INSTALLER_PREPARED:-0}" = "1" ]; then
+  command -v php >/dev/null 2>&1 || {
+    echo "project $PROJECT_KEY needs PHP $PHP_VERSION, but php is not installed; run server-installer with SI_PHP_VERSION=$PHP_VERSION" >&2
+    exit 1
+  }
+  INSTALLED_PHP=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null || true)
+  [ "$INSTALLED_PHP" = "$PHP_VERSION" ] || {
+    echo "project $PROJECT_KEY needs PHP $PHP_VERSION, but php is ${INSTALLED_PHP:-unknown}; run server-installer with SI_PHP_VERSION=$PHP_VERSION" >&2
+    exit 1
+  }
+fi
 
 # Redeem immediately so a slow package install cannot run past the five-minute token expiry.
 curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$TOKEN_BODY" \
@@ -140,12 +159,6 @@ UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python install 3.12 >/dev/null
 PY312=$(UV_PYTHON_INSTALL_DIR=/opt/aiflow/python uv python find 3.12)
 ln -sfn "$PY312" /usr/local/bin/python3.12
 
-PHP_VERSION=$(python3 - "$STACK" <<'PY'
-import re, sys
-m = re.fullmatch(r"php-([0-9]+\.[0-9]+)", sys.argv[1])
-print(m.group(1) if m else "")
-PY
-)
 if [ -n "$PHP_VERSION" ]; then
   if [ "${AIFLOW4_SERVER_INSTALLER_PREPARED:-0}" != "1" ]; then
     SI_PHP_VERSION=$PHP_VERSION SI_PHP_MODE=cli "$SI_BIN" apply --modules php --preflight

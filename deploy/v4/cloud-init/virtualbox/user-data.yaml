@@ -1,9 +1,20 @@
 #cloud-config
-# VirtualBox NoCloud seed user-data: inject /run/secrets/aiflow4/join-token at first boot using a
-# protected seed artifact, and discard that artifact after the VM has joined.
-hostname: aiflow-node-01
+# VirtualBox NoCloud template. Render one copy per VM just before boot with
+#   deploy/v4/bin/aiflow4-cloud-init-user-data --provider virtualbox --name NODE ... --out seed/user-data
+# which mints the five-minute, one-use join token and writes it below; then build the seed ISO, attach it,
+# start the VM, and delete the seed directory and ISO after the node has joined.
+hostname: __AIFLOW4_NODE_NAME__
 manage_etc_hosts: true
+write_files:
+  - path: /run/aiflow4/join-token
+    owner: root:root
+    permissions: '0600'
+    content: '__AIFLOW4_JOIN_TOKEN__'
 runcmd:
-  - [test, -r, /run/secrets/aiflow4/join-token]
-  - [curl, -fsSL, https://aiflow-control.example.net/v1/install.sh, -o, /run/aiflow4-install.sh]
-  - [sh, /run/aiflow4-install.sh, --token-file, /run/secrets/aiflow4/join-token]
+  # One entry, so a missing token or failed download stops before anything else runs.
+  - - sh
+    - -ec
+    - |
+      [ -s /run/aiflow4/join-token ] || { echo "aiflow4: join token missing; render per-VM user-data" >&2; exit 1; }
+      curl -fsSL --max-time 60 '__AIFLOW4_CONTROL_URL__/v1/install.sh' -o /run/aiflow4/install.sh
+      sh /run/aiflow4/install.sh --token-file /run/aiflow4/join-token

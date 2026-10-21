@@ -16,6 +16,7 @@ dependencies = [
     "jinja2>=3.1",
     "opentelemetry-sdk>=1.28",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "fastembed>=0.7.1",
 ]
 
 [project.scripts]

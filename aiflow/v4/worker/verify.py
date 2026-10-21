@@ -21,7 +21,7 @@ from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost
 from .dev import api_node
 from .gitops import Git
-from .notes import note
+from .notes import note, project_env
 
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.M)
@@ -84,7 +84,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c, pr), cwd=str(wt), account_home=str(Path(srv_root) / "accounts" / c.account),
                        model=c.model, effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
-                       control_url=control_url, run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
+                       control_url=control_url, run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
+                       extra_env=project_env(project["key"]))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)

@@ -19,7 +19,7 @@ from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
 from .client import Conflict, ControlClient
 from .gitops import Git
-from .notes import note
+from .notes import note, project_env
 
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -132,7 +132,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
+                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
+                       extra_env=project_env(project["key"]))
         adapter = get_adapter(c.provider)
         adapter_argv = adapter.argv
         adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user

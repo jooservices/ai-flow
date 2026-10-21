@@ -15,3 +15,10 @@ def note(c, headline: str, what: str = "", why: str = "", result: str = "", next
     model = f"/{c.model}" if c.model else ""
     lines.append(f"Run: {c.account} ({c.provider}{model}){' on ' + node if node else ''}{took} · run {c.run_id[:8]} · fence {c.fence}")
     return "\n".join(lines)
+
+
+def project_env(project_key: str) -> dict[str, str]:
+    """Node-local environment for a project's AI runs (test service URLs and the like), from
+    /etc/aiflow/projects/<KEY>.env (root-only on the node, never in the control repo)."""
+    from ..core.settings import read_env_file
+    return read_env_file(f"/etc/aiflow/projects/{project_key}.env")

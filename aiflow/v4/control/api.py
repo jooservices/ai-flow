@@ -423,8 +423,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now() WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
-        if ctx.jira and body.outcome not in ("lost",):
-            try:  # every working run is logged on the ticket: who, which step, how long, what came out
+        if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
+            try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
                 ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
                                      f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
                                      f"{'/' + run['model'] if run['model'] else ''}) on {node}: {body.outcome}."

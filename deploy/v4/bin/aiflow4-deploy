@@ -3,6 +3,7 @@
 # restart control-api/control-loops -> node release tarball -> install on this node.
 #   aiflow4-deploy [bundle-file] [ref]
 set -euo pipefail
+exec 9>/run/aiflow4-deploy.lock; flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }   # one deploy at a time
 BUNDLE=${1:-}; REF=${2:-TESTFLOW-30-v4-core}
 R=/srv/aiflow/control/repos/ai-flow
 cd $R
@@ -18,7 +19,17 @@ else
 fi
 SHA=$(git rev-parse --short=10 "$REF")
 B=/srv/aiflow/build/$SHA; rm -rf "$B"; mkdir -p "$B"; git archive "$REF" | tar -x -C "$B"
-docker build -q -f "$B/deploy/v4/control/Dockerfile" -t "aiflow4/control:$SHA" -t aiflow4/control:latest "$B" >/dev/null
+# reuse the image of a release built before (a rollback is then immediate); a build that hangs on the registry
+# (base image metadata) is cut after 5 minutes and tried again
+if ! docker image inspect "aiflow4/control:$SHA" >/dev/null 2>&1; then
+  ok=0
+  for attempt in 1 2 3; do
+    if timeout 300 docker build -q -f "$B/deploy/v4/control/Dockerfile" -t "aiflow4/control:$SHA" "$B" >/dev/null; then ok=1; break; fi
+    echo "image build attempt $attempt failed" >&2; sleep 10
+  done
+  [ $ok = 1 ] || { echo "could not build aiflow4/control:$SHA" >&2; exit 7; }
+fi
+docker tag "aiflow4/control:$SHA" aiflow4/control:latest
 CF="$B/deploy/v4/control/compose.yaml"
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
 for svc in control-api-a control-api-b; do               # one at a time: the other keeps serving

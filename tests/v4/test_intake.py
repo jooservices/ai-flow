@@ -103,12 +103,12 @@ def test_description_endpoint_is_fenced_and_for_intake_runs_only(iclient, ctx):
                         json={"run_id": d["run_id"], "fence": d["fence"], "body": REWRITE}).status_code == 403
 
 
-def test_intake_run_may_not_edit_files(iclient, ctx):
+def test_intake_run_may_not_edit_files(iclient, ctx, tmp_path):
     add_ticket(ctx.db, "TESTWP-26", status="Intake", labels=())
     r = claim(iclient, "TESTWP-26")
 
-    def decision(tool, **tool_input):
-        hook = {"tool_name": tool, "tool_input": tool_input, "cwd": "/srv/aiflow/work/x"}
+    def decision(tool, cwd="/srv/aiflow/work/x", **tool_input):
+        hook = {"tool_name": tool, "tool_input": tool_input, "cwd": cwd}
         out = iclient.post("/v1/policy/decide", json=hook, headers={"Authorization": f"Bearer {r['run_token']}"})
         return out.json()["hookSpecificOutput"]["permissionDecision"]
 
@@ -122,7 +122,24 @@ def test_intake_run_may_not_edit_files(iclient, ctx):
     for command in ("ls -la", "cat docs/SPEC.md", "grep -rn 'Business requirement' docs | head -5",
                     "git log --oneline -5", "find . -name '*.php'"):
         assert decision("Bash", command=command) == "allow", command
+    # Quoting must not hide find's destructive option, and the shell cannot start another command in the background.
+    for command in ("find . '-delete'", "ls & rm -rf /tmp/intake-policy-test", "cat /etc/passwd",
+                    "grep -f /etc/passwd docs/SPEC.md", "find /tmp -name '*.txt'", "cat ../outside.txt",
+                    "rg --follow .", "grep -R 'private' .", "find -L . -name '*.txt'",
+                    "date -f/etc/passwd"):
+        assert decision("Bash", command=command) == "deny", command
     assert decision("Read", file_path="/srv/aiflow/work/x/docs/SPEC.md") == "allow"
+    assert decision("Read", file_path="/etc/passwd") == "deny"
+    assert decision("Glob", pattern="/etc/**") == "deny"
+    assert decision("Grep", path="../../etc") == "deny"
+    worktree, outside = tmp_path / "checkout", tmp_path / "outside"
+    worktree.mkdir()
+    outside.write_text("outside the checkout")
+    (worktree / "link.txt").symlink_to(outside)
+    assert decision("Read", cwd=str(worktree), file_path="link.txt") == "deny"
+    assert decision("Glob", cwd=str(worktree), pattern="**/*") == "deny"
+    assert decision("WebFetch", url="https://example.com") == "deny"
+    assert decision("WebSearch", query="project docs") == "deny"
     # a dev run keeps the project's command allowlist
     add_ticket(ctx.db, "TESTWP-30")
     d = claim(iclient, "TESTWP-30", account="claude-01", step="dev")

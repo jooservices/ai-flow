@@ -130,6 +130,7 @@ def reconcile(accounts: list[str]) -> None:
 _update_tried: dict[str, float] = {}
 _last_clean = 0.0
 _last_sweep = 0.0
+_DEVELOP_BUILD = re.compile(r"[0-9a-f]{7,40}\Z")
 _RELEASE_VERSION = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 _RELEASE_WORKFLOW_IDENTITY = "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{}"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -241,8 +242,33 @@ def _report_release_rejection(api: ControlClient, node: str, version: str, detai
         log.error("could not report rejected release %s: %s", version, str(exc)[:200])
 
 
+def self_update_develop(api: ControlClient, sha: str) -> None:
+    """Develop channel (lab only, docs/v4/develop-channel.md): install the control plane's unsigned develop build,
+    named by its commit id, with the installer this node already has (never one taken from the new archive)."""
+    if sha == installed_release() or time.time() - _update_tried.get(sha, 0) < 600:
+        return
+    _update_tried[sha] = time.time()
+    RELEASE_INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    tar = RELEASE_INCOMING_DIR / f"aiflow4-{sha}.tar.gz"
+    response = api.c.get(f"/v1/releases/{sha}.tar.gz", timeout=120)
+    if response.status_code != 200:
+        log.warning("develop build %s not downloadable: %s", sha, response.status_code)
+        return
+    tmp = tar.with_suffix(tar.suffix + ".tmp")
+    tmp.write_bytes(response.content)
+    tmp.replace(tar)
+    result = subprocess.run(["systemd-run", "--unit", f"aiflow4-self-update-{sha[:10]}-{int(time.time())}",
+                             "--no-block", "--collect", "/usr/local/sbin/aiflow4-develop-install", str(tar), sha],
+                            capture_output=True, text=True)
+    log.info("develop self-update to %s started: %s %s", sha, result.returncode,
+             (result.stderr or result.stdout).strip()[:200])
+
+
 def self_update(api: ControlClient, version: str, node: str = "unknown") -> None:
     """Download, checksum and verify the control plane's tagged release before scheduling its installer."""
+    if version and _DEVELOP_BUILD.fullmatch(version) and os.environ.get("AIFLOW4_CHANNEL", "release") == "develop":
+        self_update_develop(api, version)
+        return
     if not version or not _RELEASE_VERSION.fullmatch(version):
         if version:
             log.warning("ignoring unversioned release identifier %s", version[:80])

@@ -368,3 +368,33 @@ def test_node_removes_the_worktrees_the_control_plane_marks_finished(tmp_path, m
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 2
     assert [p.name for p in work.iterdir()] == ["TESTWP-2-open"]
     assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0  # at most every ten minutes
+
+
+def test_develop_channel_installs_a_commit_build_only_when_the_node_opted_in(tmp_path, monkeypatch):
+    sha = "0123456789"
+
+    class FakeHTTP:
+        def get(self, url, timeout):
+            assert url == f"/v1/releases/{sha}.tar.gz"
+            return _ReleaseResponse(b"develop archive")
+
+    class FakeAPI:
+        c = FakeHTTP()
+
+    commands = []
+    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
+                        or SimpleNamespace(returncode=0, stdout="started", stderr=""))
+
+    monkeypatch.delenv("AIFLOW4_CHANNEL", raising=False)
+    agent._update_tried.clear()
+    agent.self_update(FakeAPI(), sha, "node-7")
+    assert not commands  # a release-channel node ignores unversioned builds
+
+    monkeypatch.setenv("AIFLOW4_CHANNEL", "develop")
+    agent._update_tried.clear()
+    agent.self_update(FakeAPI(), sha, "node-7")
+    assert commands[0][0] == "systemd-run" and commands[0][5] == "/usr/local/sbin/aiflow4-develop-install"
+    assert commands[0][6] == str(tmp_path / f"aiflow4-{sha}.tar.gz") and commands[0][7] == sha
+    assert (tmp_path / f"aiflow4-{sha}.tar.gz").read_bytes() == b"develop archive"

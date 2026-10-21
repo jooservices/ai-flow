@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .projects import reopen_for_new_ticket
+
 LABEL = "change-request"
 ACTOR = "business-console"
 
@@ -64,4 +66,5 @@ def create(ctx, project: str, title: str, description: str, epic: str) -> dict[s
                " jira_updated) VALUES (%s,%s,%s,'Story',%s,%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
                " status=EXCLUDED.status, labels=EXCLUDED.labels, parent_key=EXCLUDED.parent_key, synced_at=now()",
                (key, project, status, [LABEL], title, description, epic or None))
+    reopen_for_new_ticket(ctx, project, key)
     return {"key": key, "status": status, "epic": epic or None, "url": f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}"}

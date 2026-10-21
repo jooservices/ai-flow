@@ -13,6 +13,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): version-to-version releases are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
+- [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 
 ## Tools on a node
 

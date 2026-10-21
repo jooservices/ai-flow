@@ -35,6 +35,8 @@ def test_tag_release_workflow_builds_signs_and_publishes_assets():
         "aiflow4-$VERSION.tar.gz.sigstore.json",
     ):
         assert required in workflow
+    # the image reference is passed to the signing step through the environment under the name that step reads
+    assert 'echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"' in workflow and 'cosign sign --yes "$IMAGE"' in workflow
 
 
 def test_conventional_release_notes_group_commits_and_mark_breaking_changes():

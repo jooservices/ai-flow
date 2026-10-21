@@ -528,6 +528,17 @@ def create_app(ctx: Ctx) -> FastAPI:
                         reason=res.get("message", "")[:200])
         return res
 
+    @app.post("/v1/github/update-branch")
+    def github_update_branch(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "github", "update-branch", {"number": body.number})
+        if run["step"] != "verify":
+            raise HTTPException(403, "only a verify run updates a PR branch")
+        project = ctx.repo().projects[run["project"]]
+        res = ctx.github.update_branch(project.repo_name, body.number)
+        audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], res["ok"],
+              res["message"][:200], {"number": body.number})
+        return res
+
     @app.get("/v1/github/checks")
     def github_checks(run_id: str, fence: int, sha: str, node: str = Depends(node_auth)) -> dict:
         run = run_row(run_id)

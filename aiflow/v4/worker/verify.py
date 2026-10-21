@@ -137,8 +137,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             result["outcome"] = "human"
             return result
         title = pr_title(c.ticket)
-        m = api.call("POST", "/v1/github/merge", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
-                                                  "title": title, "method": project.get("merge", {}).get("method", "squash")})
+        m = merge_with_retries(api, c, pr, title, project.get("merge", {}).get("method", "squash"), hb)
         if not m.get("merged"):
             result.update(outcome="failed", summary=f"verify passed but the merge was refused: {m.get('message')}"[:500])
             jira("comment", body=note(c, "merge refused", what="Verify passed but GitHub refused the merge",
@@ -198,3 +197,30 @@ def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wai
             return ci
         hb.progress = {"phase": "waiting for CI", "pending": [x["name"] for x in ci if x["state"] == "pending"]}
         time.sleep(30)
+
+
+def merge_with_retries(api: ControlClient, c: Claimed, pr: dict, title: str, method: str, hb: Heartbeat,
+                       attempts: int = 6) -> dict:
+    """Merge; when the base requires an up-to-date branch or checks are still expected, update the branch on
+    GitHub, wait for CI on the new head and try again. A failing check stops the merge."""
+    m: dict = {}
+    for _ in range(attempts):
+        m = api.call("POST", "/v1/github/merge", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
+                                                  "title": title, "method": method})
+        if m.get("merged"):
+            return m
+        msg = (m.get("message") or "").lower()
+        if m.get("mergeable_state") == "behind" or "not up to date" in msg or "behind" in msg:
+            api.call("POST", "/v1/github/update-branch", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
+                                                          "body": ""})
+            time.sleep(20)
+        elif "expected" in msg or "status check" in msg or m.get("mergeable_state") in ("blocked", "unstable", "unknown"):
+            time.sleep(30)
+        else:
+            return m
+        head = m.get("head_sha") or pr.get("head_sha", "")
+        ci = wait_for_ci(api, c, head, hb) if head else []
+        if any(x["state"] == "failure" for x in ci):
+            failed = ", ".join(x["name"] for x in ci if x["state"] == "failure")
+            return {"merged": False, "message": f"CI failed after updating the branch: {failed}"}
+    return m

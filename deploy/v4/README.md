@@ -14,6 +14,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Canary auto-deploy](../../docs/v4/canary-autodeploy.md): signed releases and develop commits are measured on one node before fleet promotion, with automatic rollback on elevated infrastructure failures
 - [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
+- [Automatic epic completion](../../docs/v4/epic-auto-close.md): close an epic when every child is Done, reopen it when work returns, and suggest project closure in the report
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
@@ -22,6 +23,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
+- [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 

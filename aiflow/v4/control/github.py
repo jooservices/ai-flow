@@ -6,11 +6,13 @@ narrowed to one repository (contents and pull requests), and only while their fe
 from __future__ import annotations
 
 import json
+import base64
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -87,6 +89,38 @@ class GitHubApp:
 
     def comment(self, repo: str, number: int, body: str) -> None:
         self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
+
+    # --- control repo knowledge and policy files -----------------------------------------------------------
+    def default_branch(self, repo: str) -> str:
+        data = self.api("GET", f"/repos/{self.org}/{repo}", repo=repo)
+        return str(data["default_branch"])
+
+    def create_branch(self, repo: str, branch: str, base: str) -> None:
+        ref = quote(f"heads/{base}", safe="/")
+        data = self.api("GET", f"/repos/{self.org}/{repo}/git/ref/{ref}", repo=repo)
+        self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
+                 {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
+
+    def commit_file(self, repo: str, branch: str, path: str, content: str, message: str) -> str:
+        """Write one UTF-8 file through the GitHub App; GitHub records the installation bot as committer."""
+        encoded_path = quote(path, safe="/")
+        branch_q = quote(branch, safe="")
+        sha = ""
+        try:
+            current = self.api("GET", f"/repos/{self.org}/{repo}/contents/{encoded_path}?ref={branch_q}", repo=repo)
+            sha = str(current.get("sha") or "")
+        except GitHubError as e:
+            if "-> 404:" not in str(e):
+                raise
+        body: dict[str, Any] = {"message": message[:200], "content": base64.b64encode(content.encode()).decode(),
+                                "branch": branch}
+        if sha:
+            body["sha"] = sha
+        result = self.api("PUT", f"/repos/{self.org}/{repo}/contents/{encoded_path}", body, repo=repo)
+        return str((result.get("commit") or {}).get("sha") or "")
+
+    def create_control_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:
+        return self.create_pr(repo, head, base, title, body, draft=True)
 
     def ready_for_review(self, repo: str, number: int) -> None:
         """Draft PRs cannot be merged; REST has no un-draft call, GraphQL does."""

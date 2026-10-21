@@ -221,6 +221,16 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .crform .err{color:var(--crit); font-size:13px}
 .cr-item{border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--surface-2); display:flex; flex-direction:column; gap:6px}
 .cr-item ul{margin:0; padding-left:18px; font-size:13px}
+.stakeholder-links{display:flex; flex-wrap:wrap; gap:10px}
+.stakeholder-change{display:flex; flex-direction:column; gap:14px; padding:14px; border:1px solid var(--line); border-radius:12px; background:var(--surface)}
+.stakeholder-change h3{margin:0; font-size:16px}
+.stakeholder-form{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px}
+.stakeholder-form label{min-width:0}
+.stakeholder-form .wide{grid-column:1/-1}
+.stakeholder-actions{display:flex; gap:8px; flex-wrap:wrap}
+.stakeholder-result{font-size:13px; color:var(--good)}
+.stakeholder-error{font-size:13px; color:var(--crit)}
+@media (max-width:640px){.stakeholder-form{grid-template-columns:minmax(0,1fr)}}
 .bd{display:flex; flex-direction:column; gap:8px}
 .bd-row{display:grid; grid-template-columns:96px minmax(0,1fr) 64px; gap:10px; align-items:center; font-size:12.5px}
 .bd-bar{display:flex; height:16px; border-radius:6px; overflow:hidden; background:var(--track)}
@@ -363,6 +373,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Command Center</button>
       <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-view="delivery">Delivery</button>
       <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
+      <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -383,6 +394,10 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div id="bbody" class="view"></div>
     <div id="bform"></div>
     <div id="bcr"></div>
+  </section>
+  <section class="view" id="view-stakeholder" role="tabpanel" aria-labelledby="tab-stakeholder" hidden>
+    <div class="dhead" id="shead"></div>
+    <div id="sbody" class="view"></div>
   </section>
 </main>
 <footer class="footer" id="footer">
@@ -450,9 +465,10 @@ var S = {
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   biz: null, bizError: '', bizLoading: null,
-  cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' }
+  cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
+  sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
 };
-function viewOf(path) { return path.indexOf('/delivery') === 0 ? 'delivery' : path.indexOf('/business') === 0 ? 'business' : 'cc'; }
+function viewOf(path) { return path.indexOf('/delivery') === 0 ? 'delivery' : path.indexOf('/business') === 0 ? 'business' : path.indexOf('/stakeholder') === 0 ? 'stakeholder' : 'cc'; }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
@@ -991,6 +1007,110 @@ function renderBusiness() {
   if ((!S.biz || S.biz.project !== S.project) && S.bizLoading !== S.project) loadBiz();
 }
 
+/* ---------- Stakeholder review and Jira verdicts ---------- */
+function stakeholderEnvLink(name, label, url) {
+  return url ? '<a class="btn" href="' + esc(url) + '" target="_blank" rel="noopener">' + label + ' ' + ICON.ext + '</a>' :
+    '<span class="btn" aria-label="' + label + ': chưa deploy">' + label + ': chưa deploy</span>';
+}
+function renderStakeholderHead() {
+  var d = D(), h = '<div class="projtabs" role="group" aria-label="Project">';
+  d.projects.forEach(function (p) { h += '<button class="projtab" data-act="project" data-p="' + esc(p.key) + '" aria-pressed="' + (S.project === p.key) + '">' + esc(p.key) + '<span class="sub">' + esc(p.repo) + '</span></button>'; });
+  if (!d.projects.length) h += '<span class="muted">No project in aiflow-control/projects</span>';
+  h += '</div><span class="spacer"></span><button class="btn sm" data-act="stakeholder-refresh">Refresh</button>';
+  var urls = S.sh.data && S.sh.project === S.project ? S.sh.data.urls || {} : {};
+  h += '<div class="stakeholder-links" aria-label="Deployment environments">' +
+    stakeholderEnvLink('develop', 'Develop (UAT)', urls.develop) + stakeholderEnvLink('production', 'Production', urls.production) + '</div>';
+  $('#shead').innerHTML = h;
+}
+function loadStakeholder(project, refresh) {
+  if (!project || (S.sh.loading === project)) return;
+  if (!refresh && S.sh.project === project && S.sh.data) return;
+  S.sh.loading = project; S.sh.error = '';
+  fetch('/v1/stakeholder/' + encodeURIComponent(project), { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'HTTP ' + r.status); return d; });
+  }).then(function (d) {
+    S.sh.project = project; S.sh.data = d; S.sh.error = '';
+    (d.changes || []).forEach(function (c) {
+      if (!S.sh.forms[c.key]) S.sh.forms[c.key] = { environment: 'develop', target_key: c.key, sender: '',
+        release_commit: c.release_commit || '', expected: '', actual: '' };
+    });
+  }).catch(function (e) { S.sh.project = project; S.sh.data = null; S.sh.error = String(e.message || e); })
+    .then(function () { S.sh.loading = null; S.sh.renderKey = ''; if (S.view === 'stakeholder') renderStakeholder(); });
+}
+function renderStakeholderBody() {
+  var host = $('#sbody'), d = S.sh.data && S.sh.project === S.project ? S.sh.data : null;
+  if (S.sh.error) { host.innerHTML = '<section class="panel"><div class="empty">Không tải được danh sách thay đổi: ' + esc(S.sh.error) + '</div></section>'; return; }
+  if (!d) { host.innerHTML = '<section class="panel"><div class="empty">Đang tải thay đổi mới nhất…</div></section>'; return; }
+  if (!d.changes.length) { host.innerHTML = '<section class="panel"><div class="panel-h"><h2>Thay đổi mới nhất</h2></div><div class="empty">Chưa có thay đổi đã hoàn tất để nghiệm thu.</div></section>'; return; }
+  var h = '<section class="panel"><div class="panel-h"><h2>Thay đổi mới nhất</h2><span class="hint">Chọn môi trường, xem ticket và release hoặc commit, rồi ghi nhận kết quả.</span></div><div class="view">';
+  d.changes.forEach(function (c) {
+    var f = S.sh.forms[c.key] || { environment: 'develop', target_key: c.key, sender: '', release_commit: c.release_commit || '', expected: '', actual: '' };
+    S.sh.forms[c.key] = f;
+    var result = S.sh.results[c.key], jira = jiraUrl(c.key), busy = Boolean(S.sh.sending[c.key]);
+    h += '<article class="stakeholder-change"><div><h3><a class="mono" href="' + esc(jira) + '" target="_blank" rel="noopener">' + esc(c.key) + '</a> · ' + esc(c.summary) + '</h3>';
+    h += '<div class="small">' + esc(c.type) + ' · ' + esc(c.status) + (c.epic ? ' · Epic ' + esc(c.epic) : '') + ' · ' + esc(c.changed_at) + '</div>';
+    if (c.change_summary) h += '<div style="margin-top:6px">' + esc(c.change_summary) + '</div>';
+    h += '</div><form class="stakeholder-form" data-sh-form="' + esc(c.key) + '">';
+    h += '<label>Môi trường<select data-sh-key="' + esc(c.key) + '" data-sh-field="environment"><option value="develop"' + (f.environment === 'develop' ? ' selected' : '') + '>develop (UAT)</option><option value="production"' + (f.environment === 'production' ? ' selected' : '') + '>production</option></select></label>';
+    h += '<label>Ghi nhận nghiệm thu trên<select data-sh-key="' + esc(c.key) + '" data-sh-field="target_key"><option value="' + esc(c.key) + '"' + (f.target_key === c.key ? ' selected' : '') + '>' + esc(c.key) + ' (ticket)</option>';
+    if (c.epic && c.epic !== c.key) h += '<option value="' + esc(c.epic) + '"' + (f.target_key === c.epic ? ' selected' : '') + '>' + esc(c.epic) + ' (epic)</option>';
+    h += '</select></label>';
+    h += '<label>Release hoặc commit<input type="text" data-sh-key="' + esc(c.key) + '" data-sh-field="release_commit" value="' + esc(f.release_commit || '') + '"></label>';
+    h += '<label>Người gửi<input type="text" data-sh-key="' + esc(c.key) + '" data-sh-field="sender" value="' + esc(f.sender || '') + '" maxlength="200"></label>';
+    h += '<label class="wide">Mong đợi<textarea rows="3" data-sh-key="' + esc(c.key) + '" data-sh-field="expected">' + esc(f.expected || '') + '</textarea></label>';
+    h += '<label class="wide">Thực tế<textarea rows="3" data-sh-key="' + esc(c.key) + '" data-sh-field="actual">' + esc(f.actual || '') + '</textarea></label>';
+    h += '<label class="wide">Ảnh chụp (tuỳ chọn)<input type="file" accept="image/png,image/jpeg,image/webp" data-sh-key="' + esc(c.key) + '" data-sh-field="screenshot">' +
+      (S.sh.files[c.key] ? '<span class="small">Đã chọn: ' + esc(S.sh.files[c.key].name) + '</span>' : '') + '</label>';
+    h += '<div class="stakeholder-actions wide"><button class="btn primary" type="button" data-act="stakeholder-submit" data-key="' + esc(c.key) + '" data-verdict="expected"' + (busy ? ' disabled' : '') + '>Đúng mong đợi</button>';
+    h += '<button class="btn" type="button" data-act="stakeholder-submit" data-key="' + esc(c.key) + '" data-verdict="not_expected"' + (busy ? ' disabled' : '') + '>Chưa đúng mong đợi</button>';
+    h += busy ? '<span class="muted">Đang ghi nhận…</span>' : '';
+    if (result && result.ok) h += '<span class="stakeholder-result" role="status">' + (result.key ? 'Đã tạo ticket <a class="mono" href="' + esc(jiraUrl(result.key)) + '" target="_blank" rel="noopener">' + esc(result.key) + '</a> ở Intake.' : 'Đã ghi nhận comment nghiệm thu trên ' + esc(result.ticket) + '.') + '</span>';
+    if (result && result.error) h += '<span class="stakeholder-error" role="alert">' + esc(result.error) + '</span>';
+    h += '</div></form></article>';
+  });
+  host.innerHTML = h + '</div></section>';
+}
+function renderStakeholder() {
+  renderStakeholderHead();
+  if (!S.project) { $('#sbody').innerHTML = '<section class="panel"><div class="empty">Chưa có project được cấu hình.</div></section>'; return; }
+  if (S.sh.project !== S.project && S.sh.loading !== S.project) loadStakeholder(S.project);
+  if (S.sh.renderKey !== S.project || (!S.sh.data && S.sh.loading !== S.project)) {
+    renderStakeholderBody(); S.sh.renderKey = S.project;
+  }
+}
+function readStakeholderFile(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader(); reader.onload = function () { resolve(String(reader.result || '')); };
+    reader.onerror = function () { reject(new Error('Could not read screenshot')); }; reader.readAsDataURL(file);
+  });
+}
+function submitStakeholder(changeKey, verdict) {
+  var f = S.sh.forms[changeKey] || {}, errors = [];
+  if (!String(f.sender || '').trim()) errors.push('Nhập người gửi.');
+  if (verdict === 'not_expected' && !String(f.expected || '').trim()) errors.push('Nhập mong đợi.');
+  if (verdict === 'not_expected' && !String(f.actual || '').trim()) errors.push('Nhập điều thực tế đã xảy ra.');
+  if (errors.length) { S.sh.results[changeKey] = { error: errors.join(' ') }; S.sh.renderKey = ''; renderStakeholder(); return; }
+  if (S.sh.sending[changeKey]) return;
+  S.sh.sending[changeKey] = true; delete S.sh.results[changeKey]; S.sh.renderKey = ''; renderStakeholder();
+  var screenshot = S.sh.files[changeKey];
+  var data = Promise.resolve('');
+  if (verdict === 'not_expected' && screenshot) data = readStakeholderFile(screenshot);
+  data.then(function (screenshotData) {
+    var body = { change_key: changeKey, target_key: f.target_key || changeKey, environment: f.environment || 'develop',
+      verdict: verdict, sender: f.sender, release_commit: f.release_commit || '', expected: f.expected || '', actual: f.actual || '',
+      screenshot_data: screenshotData, screenshot_filename: screenshot ? screenshot.name : 'screenshot.png' };
+    return fetch('/v1/stakeholder/' + encodeURIComponent(S.project) + '/verdict', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'Jira could not record the verdict (' + r.status + ')'); return d; });
+    });
+  }).then(function (d) {
+    S.sh.results[changeKey] = { ok: true, key: d.key, ticket: d.ticket };
+    if (verdict === 'not_expected') { f.expected = ''; f.actual = ''; delete S.sh.files[changeKey]; }
+  }).catch(function (e) { S.sh.results[changeKey] = { error: 'Không ghi nhận được: ' + String(e.message || e) }; })
+    .then(function () { delete S.sh.sending[changeKey]; S.sh.renderKey = ''; renderStakeholder(); });
+}
+
 /* ---------- Analytics (/v1/analytics/daily, per UTC day, project and account) ---------- */
 function utcDays(n) {
   var out = [], t = Date.now();
@@ -1263,7 +1383,7 @@ function renderFooter() {
 function render() {
   renderLive();
   renderFooter();
-  if (S.view === 'cc') renderCC(); else if (S.view === 'business') renderBusiness(); else { renderDHead(); renderDBody(); }
+  if (S.view === 'cc') renderCC(); else if (S.view === 'business') renderBusiness(); else if (S.view === 'stakeholder') renderStakeholder(); else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
 }
@@ -1282,7 +1402,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'business'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'business', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -1301,6 +1421,8 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
+  else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
   else if (act === 'jump') flash(el.getAttribute('data-target'));
   else if (act === 'open-node') openDrawer('node', el.getAttribute('data-id'), el);
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
@@ -1310,7 +1432,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'copy-report') copyReport();
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
-  else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; savePrefs(); render(); }
+  else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; S.sh.renderKey = ''; savePrefs(); render(); }
   else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); savePrefs(); renderDHead(); renderDBody(); tick(); }
   else if (act === 'epic') { S.epic = el.getAttribute('data-key'); savePrefs(); renderDHead(); renderDBody(); tick(); flash('d-board'); }
   else if (act === 'theme') {
@@ -1328,10 +1450,20 @@ var CR_FIELDS = { 'cr-title': 'title', 'cr-desc': 'description', 'cr-epic': 'epi
 document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
+  if (e.target.getAttribute && e.target.getAttribute('data-sh-key') && e.target.getAttribute('data-sh-field') !== 'screenshot') {
+    var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
+    S.sh.forms[key] = S.sh.forms[key] || {}; S.sh.forms[key][field] = e.target.value;
+  }
 });
 document.addEventListener('change', function (e) {
   if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
+  if (e.target.getAttribute && e.target.getAttribute('data-sh-key')) {
+    var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
+    S.sh.forms[key] = S.sh.forms[key] || {};
+    if (field === 'screenshot') S.sh.files[key] = e.target.files && e.target.files[0] || null;
+    else S.sh.forms[key][field] = e.target.value;
+  }
 });
 document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }

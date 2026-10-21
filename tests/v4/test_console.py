@@ -264,6 +264,36 @@ console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4
     assert "S.epic = e.target.value; savePrefs();" in page
 
 
+def test_stakeholder_deployment_links_and_missing_url_fallback():
+    links = run_script("console.log(stakeholderEnvLink('develop', 'Develop (UAT)', 'https://uat.example.test')); "
+                       "console.log(stakeholderEnvLink('production', 'Production', ''));")
+    assert '<a class="btn" href="https://uat.example.test" target="_blank" rel="noopener">Develop (UAT)' in links
+    assert "Production: chưa deploy" in links
+    page = html()
+    assert 'data-view="stakeholder">Stakeholder</button>' in page
+    assert "Đúng mong đợi" in page and "Chưa đúng mong đợi" in page
+    assert "release_commit" in page and "expected" in page and "actual" in page
+    assert "result.key" in page
+
+
+def test_stakeholder_changes_render_ticket_epic_release_and_verdict_choices():
+    driver = """
+var body = {innerHTML: ''};
+document.querySelector = function (s) { return s === '#sbody' ? body : null; };
+S.project = 'TESTWP';
+S.sh.project = 'TESTWP';
+S.sh.data = {changes: [{key: 'TESTWP-20', summary: 'Stakeholder flow', type: 'Feature', status: 'Human review',
+  epic: 'TESTWP-2', changed_at: '2026-10-21T12:00:00+00:00', release_commit: 'v4.2.0',
+  change_summary: 'Review these changes'}]};
+renderStakeholderBody();
+console.log(body.innerHTML);
+"""
+    rendered = run_script(driver)
+    for value in ("TESTWP-20", "Stakeholder flow", "TESTWP-2", "v4.2.0", "Review these changes",
+                  "Đúng mong đợi", "Chưa đúng mong đợi", "Ảnh chụp"):
+        assert value in rendered
+
+
 def poll_console(prefs: dict, state: dict) -> dict:
     prelude = STUBS + f"""
 var store = {{'aiflow4-delivery': JSON.stringify({json.dumps(prefs)})}};

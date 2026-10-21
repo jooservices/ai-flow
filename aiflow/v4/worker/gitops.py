@@ -73,6 +73,32 @@ class Git:
             self.run("worktree", "add", "-q", "-B", branch, str(path), start, cwd=mirror)
         return start
 
+    def detached(self, mirror: Path, path: Path, ref: str) -> str:
+        """Worktree at a commit without a branch (verify reads the PR head; the dev worktree may hold the branch)."""
+        self.run("worktree", "prune", cwd=mirror, check=False)
+        if path.exists() and (path / ".git").exists():
+            self.run("checkout", "-q", "--detach", ref, cwd=path)
+            self.run("reset", "-q", "--hard", ref, cwd=path)
+            self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.run("worktree", "add", "-q", "--detach", str(path), ref, cwd=mirror)
+        return self.run("rev-parse", "HEAD", cwd=path).strip()
+
+    def merge_base_in(self, path: Path, base: str, identity: tuple[str, str], commit: bool = True) -> list[str]:
+        """Merge origin/<base> into the checked-out branch. Returns the conflicted files ([] when clean). With
+        conflicts the merge stays in progress so the AI can resolve the markers and the worker commits it."""
+        behind = self.run("rev-list", "--count", f"HEAD..origin/{base}", cwd=path, check=False).strip()
+        if behind in ("", "0"):
+            return []
+        args = ["merge", "--no-edit", "-q"] + ([] if commit else ["--no-commit", "--no-ff"]) + [f"origin/{base}"]
+        self.run(*args, cwd=path, check=False, identity=identity)
+        out = self.run("diff", "--name-only", "--diff-filter=U", cwd=path, check=False)
+        return [x for x in out.splitlines() if x.strip()]
+
+    def abort_merge(self, path: Path) -> None:
+        self.run("merge", "--abort", cwd=path, check=False)
+
     def changed(self, path: Path) -> list[str]:
         out = self.run("status", "--porcelain", "--untracked-files=all", cwd=path)
         return [line[3:] for line in out.splitlines() if line.strip()]

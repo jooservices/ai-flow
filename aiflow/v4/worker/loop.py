@@ -20,6 +20,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
+from .verify import run_verify
 
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
@@ -108,18 +109,23 @@ class Worker:
         if not cands:
             return False
         for cand in cands:
+            step = cand.get("step", "dev")
             try:
-                r = self.api.call("POST", "/v1/work/claim", {"ticket": cand["key"], "account": self.account, "step": "dev"})
+                r = self.api.call("POST", "/v1/work/claim", {"ticket": cand["key"], "account": self.account, "step": step})
             except Conflict:
                 continue
             if not r.get("claimed"):
                 continue
             c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=self.account,
                         provider=r["provider"], model=r.get("model", ""), effort=r.get("effort", ""),
-                        ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]))
-            self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, since=time.time())
-            log.info("claimed %s (fence %s)", c.ticket["key"], c.fence)
-            res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
+                        ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]), step=step,
+                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"))
+            self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
+            log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
+            if step == "verify":
+                res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            else:
+                res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             try:
                 self.api.call("POST", f"/v1/runs/{c.run_id}/result", res)
             except Exception as e:  # noqa: BLE001

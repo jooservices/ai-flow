@@ -25,7 +25,7 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp
 from .jira import Jira
-from .policy import decide
+from .policy import Decision, decide
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
@@ -130,6 +130,21 @@ class ProbeBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+
+
+class MergeBody(BaseModel):
+    run_id: str
+    fence: int
+    number: int
+    title: str = ""
+    method: str = "squash"
+
+
+class PRCommentBody(BaseModel):
+    run_id: str
+    fence: int
+    number: int
+    body: str
 
 
 class EventsBody(BaseModel):
@@ -252,7 +267,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "versions": repo.versions}}
 
     # --- work -----------------------------------------------------------------------------------------------
+    def last_dev(key: str) -> dict | None:
+        return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
+                          " ORDER BY started_at DESC LIMIT 1", (key,))
+
     def eligible(account_id: str, node: str) -> list[dict]:
+        """Tickets this account may take now: verification of finished work first, then development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
         if not acc or acc.node != node:
@@ -262,33 +282,49 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in (repo.nodes[node].projects if node in repo.nodes else []) if p in repo.projects]
         if not projects:
             return []
-        rows = ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
-                          " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,))
+        roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
-        done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
-        out = []
-        for t in rows:
-            if t["key"] in held or any(b not in done for b in t["blocked_by"]):
-                continue
-            labels = set(t["labels"])
-            if "tier-senior" in labels and acc.tier != "senior":
-                continue
-            if acc.explicit_only and f"ai-{acc.provider}" not in labels:
-                continue
-            out.append(t)
-        out.sort(key=lambda t: ("rework" not in t["labels"], PRIORITY.get(t["priority"], 2),
-                                t["jira_created"] or utcnow()))
+        out: list[dict] = []
+        if "verify" in roles:
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
+                                " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
+                if t["key"] in held:
+                    continue
+                dev = last_dev(t["key"])
+                if not dev or dev["outcome"] != "done" or not dev["pr_url"]:
+                    continue
+                if dev["account_id"] == acc.id:  # never grade your own work
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                out.append({**t, "step": "verify"})
+        if "dev" in roles:
+            done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
+            dev_rows = []
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
+                                " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
+                if t["key"] in held or any(b not in done for b in t["blocked_by"]):
+                    continue
+                labels = set(t["labels"])
+                if "tier-senior" in labels and acc.tier != "senior":
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in labels:
+                    continue
+                dev_rows.append({**t, "step": "dev"})
+            dev_rows.sort(key=lambda t: ("rework" not in t["labels"], PRIORITY.get(t["priority"], 2),
+                                         t["jira_created"] or utcnow()))
+            out += dev_rows
         return out
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
-        return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"]}
-                            for t in eligible(account, node)[:20]]}
+        return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
+                             "step": t["step"]} for t in eligible(account, node)[:20]]}
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
-        tickets = {t["key"]: t for t in eligible(body.account, node)}
-        t = tickets.get(body.ticket)
+        tickets = {(t["key"], t["step"]): t for t in eligible(body.account, node)}
+        t = tickets.get((body.ticket, body.step))
         if not t:
             return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
         repo = ctx.repo()
@@ -306,12 +342,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
         p = repo.projects[t["project"]]
-        return {"claimed": True, "run_id": run_id, "fence": c.fence, "run_token": run_token,
+        extra: dict[str, Any] = {}
+        dev = last_dev(t["key"])
+        if body.step == "verify" and dev:
+            extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
+                           "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
+                           "dev_summary": dev["summary"]}
+        if body.step == "dev":
+            v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='verify'"
+                           " AND outcome='rework' ORDER BY started_at DESC LIMIT 1", (t["key"],))
+            if v and (not dev or v["started_at"] > dev["started_at"]):
+                extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
+            if dev and dev["branch"]:
+                extra["branch"] = dev["branch"]
+        return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
                 "ticket": {k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
                 "project": {"key": p.key, "repo": p.repo, "base": p.base, "hotfix_base": p.hotfix_base,
-                            "checks": p.checks, "stack": p.stack, "work_minutes": p.work_minutes()}}
+                            "checks": p.checks, "stack": p.stack, "work_minutes": p.work_minutes(),
+                            "merge": {"method": (p.merge or {}).get("method", "squash"),
+                                      "auto": bool((p.merge or {}).get("auto", True)),
+                                      "require_human": bool((p.merge or {}).get("require_human", False))}}}
 
     # --- runs -----------------------------------------------------------------------------------------------
     @app.post("/v1/runs/{run_id}/heartbeat")
@@ -349,7 +401,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now() WHERE id=%s",
                        ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300], run["account_id"]))
         else:
-            ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('done','') THEN '' ELSE %s END,"
+            ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now() WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
@@ -433,6 +485,30 @@ def create_app(ctx: Ctx) -> FastAPI:
                         account=run["account_id"], node=node, outcome="opened", pr_url=pr["html_url"])
         return {"url": pr["html_url"], "number": pr.get("number")}
 
+    @app.post("/v1/github/merge")
+    def github_merge(body: MergeBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "github", "merge", {"number": body.number})
+        if run["step"] != "verify":
+            raise HTTPException(403, "only a verify run merges")
+        project = ctx.repo().projects[run["project"]]
+        res = ctx.github.merge_pr(project.repo_name, body.number, body.title, body.method)
+        ok = bool(res.get("merged"))
+        audit("github", "merge", run["ticket_key"], body.run_id, body.fence, run["account_id"], ok,
+              res.get("sha") or res.get("message", ""), {"number": body.number, "method": body.method})
+        ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
+                        account=run["account_id"], node=node, outcome="merged" if ok else "refused",
+                        reason=res.get("message", "")[:200])
+        return res
+
+    @app.post("/v1/github/comment")
+    def github_comment(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "github", "comment", {"number": body.number})
+        project = ctx.repo().projects[run["project"]]
+        ctx.github.comment(project.repo_name, body.number, body.body)
+        audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
+              {"number": body.number})
+        return {"ok": True}
+
     # --- policy hook ------------------------------------------------------------------------------------------
     @app.post("/v1/policy/decide")
     async def policy_decide(request: Request, authorization: str = Header(default="")) -> dict:
@@ -443,8 +519,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not run:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
-        d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                   str(payload.get("cwd") or ""))
+        if run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            d = Decision("deny", "a verify run reviews and tests; it does not edit code")
+        else:
+            d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
+                       str(payload.get("cwd") or ""))
         ctx.events.emit("policy.decision", ticket=run["ticket_key"], run_id=str(run["id"]), account=run["account_id"],
                         node=run["node"], outcome=d.decision, reason=d.reason[:200], tool=tool,
                         command=str((payload.get("tool_input") or {}).get("command", ""))[:300])

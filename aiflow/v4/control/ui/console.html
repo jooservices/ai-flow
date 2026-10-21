@@ -426,7 +426,7 @@ function doing(a) {
   if (a.status === 'stopped') return 'worker stopped';
   return 'waiting for a ready ticket';
 }
-function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
+function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
 function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
 
 /* ---------- fetch ---------- */

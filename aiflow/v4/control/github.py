@@ -82,6 +82,36 @@ class GitHubApp:
         return self.api("POST", f"/repos/{self.org}/{repo}/pulls",
                         {"title": title, "head": head, "base": base, "body": body, "draft": draft}, repo=repo)
 
+    def pr(self, repo: str, number: int) -> dict:
+        return self.api("GET", f"/repos/{self.org}/{repo}/pulls/{number}", repo=repo)
+
+    def comment(self, repo: str, number: int, body: str) -> None:
+        self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
+
+    def ready_for_review(self, repo: str, number: int) -> None:
+        """Draft PRs cannot be merged; REST has no un-draft call, GraphQL does."""
+        pr = self.pr(repo, number)
+        if not pr.get("draft"):
+            return
+        tok, _ = self.token(repo, {"contents": "write", "pull_requests": "write", "metadata": "read"})
+        q = "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}"
+        data = self._req("POST", "/graphql", tok, {"query": q, "variables": {"id": pr["node_id"]}})
+        if data and data.get("errors"):
+            raise GitHubError(f"ready for review: {data['errors']}")
+
+    def merge_pr(self, repo: str, number: int, title: str = "", method: str = "squash") -> dict:
+        """Mark ready and merge; returns {merged, sha, message}. A refused merge (conflict, stale head) is not raised."""
+        self.ready_for_review(repo, number)
+        body: dict[str, Any] = {"merge_method": method}
+        if title:
+            body["commit_title"] = f"{title} (#{number})"[:250]
+        r = self.c.request("PUT", f"/repos/{self.org}/{repo}/pulls/{number}/merge", json=body, headers={
+            "Authorization": f"Bearer {self.token(repo, {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'})[0]}"})
+        data = r.json() if r.content else {}
+        if r.status_code == 200:
+            return {"merged": True, "sha": data.get("sha", ""), "message": data.get("message", "")}
+        return {"merged": False, "sha": "", "message": f"{r.status_code}: {data.get('message', r.text[:200])}"}
+
     def bot_identity(self) -> tuple[str, str]:
         slug = self.meta["slug"]
         user = self._req("GET", f"/users/{slug}%5Bbot%5D", self.token()[0])

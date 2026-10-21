@@ -137,3 +137,50 @@ def test_probe_sets_account_state_and_quota_alerts(client, ctx):
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='opencode-01'"
                       " AND closed_at IS NULL")["n"] == 0
+
+
+def test_verify_goes_to_another_account_and_merges(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-20")
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-20", "account": "claude-01"}, headers=cc).json()
+    pr = client.post("/v1/github/pr", json={"run_id": r["run_id"], "fence": r["fence"], "repo": "test-aiflow-wp",
+                                            "head": "TESTWP-20-x", "base": "develop", "title": "TESTWP-20: x"}, headers=cc).json()
+    client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "pr_url": pr["url"],
+                                                        "branch": "TESTWP-20-x", "summary": "built it"}, headers=cc)
+    client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-20'")
+    # the developer's own account is not offered the verification; another account is
+    assert [t["step"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]] == []
+    cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert cands == [{"key": "TESTWP-20", "summary": "TESTWP-20", "priority": "Medium", "labels": ["aiflow-ready"], "step": "verify"}] or \
+        (cands[0]["key"], cands[0]["step"]) == ("TESTWP-20", "verify")
+    v = client.post("/v1/work/claim", json={"ticket": "TESTWP-20", "account": "codex-01", "step": "verify"}, headers=n1).json()
+    assert v["claimed"] and v["pr"]["number"] == 1 and v["pr"]["branch"] == "TESTWP-20-x" and v["pr"]["dev_account"] == "claude-01"
+    # a verify run cannot edit files through the hook
+    hook = {"tool_name": "Write", "tool_input": {"file_path": "/srv/aiflow/work/x/a.php"}, "cwd": "/srv/aiflow/work/x"}
+    assert client.post("/v1/policy/decide", json=hook, headers={"Authorization": f"Bearer {v['run_token']}"}).json()[
+        "hookSpecificOutput"]["permissionDecision"] == "deny"
+    m = client.post("/v1/github/merge", json={"run_id": v["run_id"], "fence": v["fence"], "number": 1, "title": "TESTWP-20: x"},
+                    headers=n1).json()
+    assert m["merged"] and ctx.github.merged[0][1] == 1
+    # a dev run may not merge
+    assert client.post("/v1/github/merge", json={"run_id": r["run_id"], "fence": r["fence"], "number": 1}, headers=cc).status_code in (403, 409)
+
+
+def test_rework_findings_reach_the_next_dev_run(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-21")
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
+    client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "branch": "TESTWP-21-y",
+                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/7"}, headers=cc)
+    client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-21'")
+    v = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "codex-01", "step": "verify"}, headers=n1).json()
+    client.post(f"/v1/runs/{v['run_id']}/result", json={"fence": v["fence"], "outcome": "rework", "summary": "verify failed",
+                                                        "details": {"findings": "- core/x.php: missing nonce check"}}, headers=n1)
+    client.post(f"/v1/runs/{v['run_id']}/release", json={"fence": v["fence"]}, headers=n1)
+    ctx.db.run("UPDATE tickets SET status='To Do', labels=array['aiflow-ready','rework'] WHERE key='TESTWP-21'")
+    d = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
+    assert d["claimed"] and d["findings"] == "- core/x.php: missing nonce check" and d["branch"] == "TESTWP-21-y"

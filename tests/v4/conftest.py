@@ -52,8 +52,8 @@ def control_repo(tmp_path: Path) -> Path:
     (r / "profiles.yaml").write_text(
         "providers:\n  claude: {models: {senior: opus, middle: sonnet}}\n  codex: {models: {middle: gpt-6-luna}, effort: {middle: high}}\n")
     (r / "accounts.yaml").write_text(
-        "accounts:\n  - {id: claude-01, provider: claude, node: cc, tier: senior, roles: [dev]}\n"
-        "  - {id: codex-01, provider: codex, node: node1, tier: middle, roles: [dev]}\n"
+        "accounts:\n  - {id: claude-01, provider: claude, node: cc, tier: senior, roles: [dev, verify]}\n"
+        "  - {id: codex-01, provider: codex, node: node1, tier: middle, roles: [dev, verify]}\n"
         "  - {id: opencode-01, provider: opencode, node: cc, tier: middle, roles: [dev], explicit_only: true}\n")
     (r / "nodes" / "cc.yaml").write_text("name: cc\nip: 10.44.0.10\nslots: 2\nprojects: [TESTWP]\n")
     (r / "nodes" / "node1.yaml").write_text("name: node1\nip: 10.44.0.11\nslots: 2\nprojects: [TESTWP]\n")
@@ -106,6 +106,13 @@ class FakeGitHub:
 
     def bot_identity(self):
         return ("jooservices-aiflow-bot[bot]", "1+jooservices-aiflow-bot[bot]@users.noreply.github.com")
+
+    def merge_pr(self, repo, number, title="", method="squash"):
+        self.merged = getattr(self, "merged", []) + [(repo, number, title, method)]
+        return {"merged": True, "sha": "abc123", "message": "Pull Request successfully merged"}
+
+    def comment(self, repo, number, body):
+        self.comments = getattr(self, "comments", []) + [(number, body)]
 
 
 @pytest.fixture

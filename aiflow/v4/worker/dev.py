@@ -39,6 +39,10 @@ class Claimed:
     ticket: dict
     project: dict
     identity: tuple[str, str]
+    step: str = "dev"
+    findings: str = ""
+    branch: str = ""
+    pr: dict | None = None
 
 
 class LeaseLost(Exception):
@@ -65,12 +69,21 @@ class Heartbeat(threading.Thread):
                 log.warning("heartbeat failed: %s", e)
 
 
-def build_prompt(c: Claimed, branch: str) -> str:
+def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "dev.md").read_text(encoding="utf-8")
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     t = c.ticket
+    rework = ""
+    if c.findings:
+        rework += ("\nThis is a rework: the branch already holds your earlier work and a reviewer sent it back. Fix every"
+                   " finding below, keep what was right, and run the checks again.\nFindings:\n" + c.findings.strip() + "\n")
+    if conflicts:
+        rework += ("\nThe latest " + c.project["base"] + " was merged into the branch and these files have conflict"
+                   " markers (<<<<<<<, =======, >>>>>>>): " + ", ".join(conflicts) + ". Resolve them so both sides'"
+                   " intent is kept; AI Flow commits the merge with your work.\n")
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
-                      base=c.project["base"], checks=checks, description=t["description"] or "(no description)")
+                      base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
+                      rework=rework)
 
 
 def commit_message(c: Claimed, summary: str) -> str:
@@ -86,7 +99,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
     repo = project["repo"]
-    branch = f"{key}-{slug(c.ticket['summary'])}"
+    branch = c.branch or f"{key}-{slug(c.ticket['summary'])}"
     git = Git(srv_root, run_as=run_as)
     hb = Heartbeat(api, c, heartbeat_s)
     hb.start()
@@ -101,7 +114,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         mirror = git.mirror(repo, token)
         wt = Path(srv_root) / "work" / project["key"] / branch
         start = git.worktree(mirror, wt, branch, project["base"])
-        hb.progress = {"phase": "worktree", "start": start}
+        conflicts: list[str] = []
+        if start != f"origin/{project['base']}":  # continuing the branch: bring in the latest base first
+            conflicts = git.merge_base_in(wt, project["base"], c.identity)
+        hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
         jira("transition", to="In Progress")
         jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
@@ -109,7 +125,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                              f"{branch} from {start}. Run {c.run_id}, fencing token {c.fence}.")
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, branch), cwd=str(wt),
+        spec = RunSpec(prompt=build_prompt(c, branch, conflicts), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
@@ -148,6 +164,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="Needs owner")
             return result
         changed = git.changed(wt)
+        if conflicts and any("<<<<<<<" in (wt / f).read_text(errors="ignore") for f in conflicts if (wt / f).is_file()):
+            res.error_kind = res.error_kind or "unresolved conflicts"
         if res.error_kind or not changed:
             reason = res.error_kind or ("no changes" if not changed else "")
             result["outcome"] = "failed"

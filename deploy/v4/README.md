@@ -22,6 +22,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
+- [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 
 ## Tools on a node
 

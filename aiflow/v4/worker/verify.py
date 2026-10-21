@@ -19,7 +19,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
-from .dev import api_node
+from .dev import api_node, related_block
 from .gitops import Git
 from .notes import note, project_env
 
@@ -39,7 +39,8 @@ def build_prompt(c: Claimed, pr: dict) -> str:
     t = c.ticket
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
-                      dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)")
+                      dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)",
+                      related=related_block(c.related))
 
 
 def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_url: str, heartbeat_s: int,

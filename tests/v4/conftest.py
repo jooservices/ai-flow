@@ -84,6 +84,9 @@ class FakeJira:
     def set_fields(self, key: str, values: dict) -> None:
         self.fields.append((key, values))
 
+    def set_description(self, key: str, text: str) -> None:
+        self.descriptions = getattr(self, "descriptions", []) + [(key, text)]
+
     def add_label(self, key: str, label: str) -> None:
         self.labels.append(("add", key, label))
 

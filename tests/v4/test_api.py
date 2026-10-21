@@ -65,6 +65,7 @@ def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_rel
     assert response.status_code == 200
     script = response.text
     assert "CONTROL_URL=http://testserver" in script
+    assert 'python3 - "$CONTROL_URL" "$NODE_NAME" "$NODE_TOKEN_FILE" > /etc/aiflow/node.env' in script
     assert "SERVER_INSTALLER_TAG=v1.1.0" in script
     assert "apply --modules packages,timesync,docker,docker_group --preflight" in script
     assert "SI_PHP_VERSION" in script and "--modules php --preflight" in script
@@ -107,6 +108,44 @@ def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_rel
     assert 'RELEASE_INSTALLER=$WORK/release-bootstrap/deploy/v4/bin/aiflow4-node-install' in script
     assert '"$RELEASE_INSTALLER" "$WORK/release.tar.gz" "$RELEASE_VERSION"' in script
     assert '/usr/local/sbin/aiflow4-node-install' not in script
+
+    writer_marker = 'python3 - "$CONTROL_URL" "$NODE_NAME" "$NODE_TOKEN_FILE" > /etc/aiflow/node.env <<\'PY\'\n'
+    writer = script.split(writer_marker, 1)[1].split("\nPY\n", 1)[0]
+    env_file = subprocess.run(
+        ["python3", "-c", writer, "https://control.example", "node-new", "/srv/aiflow/state/node.token"],
+        capture_output=True, text=True,
+    )
+    assert env_file.returncode == 0, env_file.stderr
+    assert env_file.stdout.splitlines() == [
+        'AIFLOW4_CONTROL_URL="https://control.example"',
+        'AIFLOW4_NODE_NAME="node-new"',
+        'AIFLOW4_NODE_TOKEN_FILE="/srv/aiflow/state/node.token"',
+        'AIFLOW4_SLOTS="2"',
+        'AIFLOW4_POLICY_RELAY="1"',
+        'AIFLOW4_SELF_UPDATE="1"',
+    ]
+    unsafe_env_file = subprocess.run(
+        ["python3", "-c", writer, "https://control.example$(touch${IFS}/tmp/pwned)", "node-new",
+         "/srv/aiflow/state/node.token"], capture_output=True, text=True,
+    )
+    assert unsafe_env_file.returncode != 0
+
+
+def test_install_script_rejects_shell_syntax_in_host_headers(client):
+    hostile_host = "control.example$(touch${IFS}/tmp/aiflow-host-injection)"
+    for headers in ({"host": hostile_host}, {"x-forwarded-host": hostile_host}):
+        response = client.get("/v1/install.sh", headers=headers)
+        assert response.status_code == 400
+
+
+def test_install_script_accepts_dns_and_ip_hosts_with_optional_ports(client):
+    dns = client.get("/v1/install.sh", headers={"host": "control.example:8443", "x-forwarded-proto": "https"})
+    assert dns.status_code == 200
+    assert "CONTROL_URL=https://control.example:8443" in dns.text
+
+    ipv6 = client.get("/v1/install.sh", headers={"host": "[2001:db8::1]:8080"})
+    assert ipv6.status_code == 200
+    assert "CONTROL_URL='http://[2001:db8::1]:8080'" in ipv6.text
 
 
 def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_tokens(client, ctx):

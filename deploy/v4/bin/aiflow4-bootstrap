@@ -80,14 +80,24 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(d["node_token"] + "\n")
 PY
 install -d -m 0755 /etc/aiflow
-cat > /etc/aiflow/node.env <<EOF
-AIFLOW4_CONTROL_URL=$CONTROL_URL
-AIFLOW4_NODE_NAME=$NODE_NAME
-AIFLOW4_NODE_TOKEN_FILE=$NODE_TOKEN_FILE
-AIFLOW4_SLOTS=2
-AIFLOW4_POLICY_RELAY=1
-AIFLOW4_SELF_UPDATE=1
-EOF
+python3 - "$CONTROL_URL" "$NODE_NAME" "$NODE_TOKEN_FILE" > /etc/aiflow/node.env <<'PY'
+import re, sys
+
+values = (
+    ("AIFLOW4_CONTROL_URL", sys.argv[1]),
+    ("AIFLOW4_NODE_NAME", sys.argv[2]),
+    ("AIFLOW4_NODE_TOKEN_FILE", sys.argv[3]),
+    ("AIFLOW4_SLOTS", "2"),
+    ("AIFLOW4_POLICY_RELAY", "1"),
+    ("AIFLOW4_SELF_UPDATE", "1"),
+)
+for key, value in values:
+    # These values are intentionally limited to shell- and systemd-safe URL/path/id characters.
+    # Quoting every value keeps this file safe both as an EnvironmentFile and when sourced by the updater.
+    if not re.fullmatch(r"[A-Za-z0-9_./:@\[\]-]+", value):
+        raise SystemExit("unsafe value for " + key)
+    print(f'{key}="{value}"')
+PY
 chmod 0600 /etc/aiflow/node.env
 
 # OS setup and preflight stay in server-installer. v1.1.0 is pinned; the node profile proposal is documented

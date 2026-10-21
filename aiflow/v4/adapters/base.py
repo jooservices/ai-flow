@@ -55,6 +55,7 @@ class RunResult:
     cost_usd: float = 0.0
     permission_denials: int = 0
     error_kind: str = ""       # "" | quota | auth | provider | timeout | idle | other
+    error_message: str = ""    # the provider's own words, for people
     reset_at: datetime | None = None
     quota: dict = field(default_factory=dict)
     duration_s: float = 0.0
@@ -155,6 +156,20 @@ class Adapter:
             if log:
                 log.close()
         text_tail = "\n".join(tail[-60:])
+        if not res.error_message and (res.error_kind or res.exit_code):
+            for line in reversed(tail[-60:]):  # last non-JSON line or an error field from the stream
+                try:
+                    ev = json.loads(line)
+                    msg = ev.get("message") or ev.get("error") if isinstance(ev, dict) else None
+                    if isinstance(msg, dict):
+                        msg = msg.get("message")
+                    if msg:
+                        res.error_message = str(msg)[:400]
+                        break
+                except ValueError:
+                    if line.strip():
+                        res.error_message = line.strip()[:400]
+                        break
         if not res.error_kind:
             if QUOTA_PATTERN.search(text_tail) and (res.exit_code or not res.final_text):
                 res.error_kind = "quota"

@@ -77,7 +77,8 @@ class Worker:
         self.publish(state="probing")
         res = adapter.run(spec)
         ok = not res.error_kind and bool((res.final_text or "").strip())
-        summary = (res.final_text or "").strip()[:300] if ok else f"{res.error_kind or 'no answer'}: {(res.final_text or '').strip()[:250]}"
+        detail = (res.error_message or res.final_text or "").strip()
+        summary = (res.final_text or "").strip()[:300] if ok else f"{res.error_kind or 'no answer'}: {detail[:250]}"
         try:
             self.api.call("POST", f"/v1/accounts/{self.account}/probe", {
                 "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,

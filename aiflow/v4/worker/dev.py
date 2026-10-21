@@ -132,7 +132,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         if hb.lost.is_set():
             raise LeaseLost()
         summary_m, tests_m = SUMMARY.search(res.final_text or ""), TESTS.search(res.final_text or "")
-        summary = summary_m.group(1).strip() if summary_m else (res.final_text or "").strip()[-600:]
+        summary = summary_m.group(1).strip() if summary_m else ((res.final_text or "").strip()[-600:] or res.error_message)
         tests = tests_m.group(1).strip() if tests_m else ""
         result["summary"] = summary
 

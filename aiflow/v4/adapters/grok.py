@@ -17,6 +17,7 @@ class GrokAdapter(Adapter):
         t = ev.get("type")
         if t == "error":
             msg = str(ev.get("message") or "")
+            res.error_message = msg[:400]
             res.error_kind = "quota" if QUOTA_PATTERN.search(msg) else ("auth" if AUTH_PATTERN.search(msg) else "provider")
         elif t in ("result", "final", "message") and ev.get("text"):
             res.final_text = ev.get("text") or res.final_text

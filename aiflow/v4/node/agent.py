@@ -61,9 +61,11 @@ def metrics(prev: tuple[int, int] | None) -> tuple[dict, tuple[int, int]]:
         except OSError:
             pass
     used = None
-    try:
+    try:  # working set, like kubectl/cAdvisor: page cache the kernel can drop is not "used"
         used = int(Path("/sys/fs/cgroup/memory.current").read_text().strip())
-    except OSError:
+        stat = dict(line.split() for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines())
+        used = max(0, used - int(stat.get("inactive_file", 0)))
+    except (OSError, ValueError):
         pass
     du = shutil.disk_usage("/srv/aiflow" if os.path.isdir("/srv/aiflow") else "/")
     load = os.getloadavg()

@@ -34,6 +34,7 @@ class CodexAdapter(Adapter):
         elif t in ("error", "turn.failed"):
             msg = str(ev.get("message") or (ev.get("error") or {}).get("message") or "")
             res.final_text = res.final_text or ""
+            res.error_message = msg[:400]
             from .base import AUTH_PATTERN, QUOTA_PATTERN
             if QUOTA_PATTERN.search(msg):
                 res.error_kind = "quota"

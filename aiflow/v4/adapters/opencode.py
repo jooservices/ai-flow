@@ -20,4 +20,5 @@ class OpenCodeAdapter(Adapter):
             res.final_text = part["text"]
         elif t == "error":
             msg = str(ev.get("error") or ev.get("message") or "")
+            res.error_message = msg[:400]
             res.error_kind = "quota" if QUOTA_PATTERN.search(msg) else ("auth" if AUTH_PATTERN.search(msg) else "provider")

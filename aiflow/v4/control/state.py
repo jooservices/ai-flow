@@ -79,6 +79,8 @@ def snapshot(ctx) -> dict[str, Any]:
                    " FROM runs WHERE started_at > now() - interval '24 hours'")
     incidents = db.all("SELECT id, opened_at, severity, kind, subject, title, detail FROM incidents"
                        " WHERE closed_at IS NULL ORDER BY opened_at DESC")
+    incidents_recent = db.all("SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
+                              " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20")
     events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events ORDER BY id DESC LIMIT 60")
     projects = [{"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
                  "work_minutes": p.work_minutes(), "counts": by_status.get(p.key, {})} for p in repo.projects.values()]
@@ -86,7 +88,8 @@ def snapshot(ctx) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions,
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
-        "projects": projects, "tickets": tickets, "incidents": incidents, "events": events,
+        "projects": projects, "tickets": tickets, "incidents": incidents, "incidents_recent": incidents_recent,
+        "events": events,
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),
                    "tokens_out_24h": int(today["tout"]), "done_24h": today["done"], "failed_24h": today["failed"]},
     }

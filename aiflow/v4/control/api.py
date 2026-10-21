@@ -192,8 +192,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
                 " roles=EXCLUDED.roles, updated_at=now()", (a.id, a.provider, a.node, a.tier, a.roles))
         for n in repo.nodes.values():
+            # Keep the IP a node reported at join: a restart must not replace where it was last seen with
+            # the control repo value. Only a first insert (no join yet) takes the configured address.
             ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total) VALUES (%s,%s,%s,%s)"
-                       " ON CONFLICT (name) DO UPDATE SET ip=EXCLUDED.ip, role=EXCLUDED.role, slots_total=EXCLUDED.slots_total",
+                       " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total",
                        (n.name, n.ip, n.role, n.slots))
 
     app.state.sync_accounts = sync_accounts

@@ -1,7 +1,9 @@
 # AI Flow v4 Command Center: node registration and last seen
 
 A node is registered by `/v1/nodes/join`; the IP it reports at join is stored with the node and is not
-overwritten by a later join that leaves the IP empty. Each heartbeat updates `last_heartbeat`.
+overwritten by a later join that leaves the IP empty. The startup sync of the control repo does not replace
+that reported IP either, so an API restart keeps the address where the node was last seen. Each heartbeat
+updates `last_heartbeat`.
 
 `GET /v1/state` returns every registered node, including nodes that stopped reporting. The node fields
 operators need are:

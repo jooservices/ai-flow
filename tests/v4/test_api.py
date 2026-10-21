@@ -257,6 +257,25 @@ def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ct
     assert n["heartbeat_age_s"] >= NODE_OFFLINE_S
 
 
+def test_restart_sync_keeps_join_reported_ip_and_last_heartbeat(client, ctx):
+    from fastapi.testclient import TestClient
+
+    from aiflow.v4.control.api import create_app
+
+    assert ctx.repo().nodes["cc"].ip == "10.44.0.10"
+    node = join(client, "cc", ip="192.0.2.77")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "metrics": {"hostname": "cc-worker"}}, headers=node)
+    before = next(x for x in client.get("/v1/state").json()["nodes"] if x["name"] == "cc")
+    assert before["ip"] == "192.0.2.77" and before["status"] == "online"
+
+    # an API restart runs the startup sync again; the join-reported address and last heartbeat must survive
+    with TestClient(create_app(ctx)) as restarted:
+        after = next(x for x in restarted.get("/v1/state").json()["nodes"] if x["name"] == "cc")
+    assert after["ip"] == "192.0.2.77"
+    assert after["last_heartbeat"] == before["last_heartbeat"]
+    assert after["metrics"]["hostname"] == "cc-worker"
+
+
 def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
     from aiflow.v4.control import notify
     from aiflow.v4.control.loops import watchdog

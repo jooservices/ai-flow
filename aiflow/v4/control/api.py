@@ -8,14 +8,18 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import ipaddress
 import re
 import logging
 import secrets
+import shlex
+import socket
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
@@ -25,7 +29,10 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from . import business, memory, projects as project_lifecycle
+from ..core.toolchains import missing_tools, pinned_version
+from . import business, memory
+from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
+from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
@@ -40,6 +47,9 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 RELEASES = Path("/srv/aiflow/control/releases")
+_NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
+))
 # A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
 # failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
 BACKOFF_SQL = """
@@ -73,6 +83,69 @@ def h(token: str) -> str:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def validated_join_control_url(value: str) -> str:
+    """Validate the operator-configured API address advertised to a new machine."""
+    control = str(value or "").strip()
+    if not control or "\\" in control or any(ord(char) < 32 or char.isspace() for char in control):
+        raise ValueError("join control URL is not configured")
+    try:
+        parsed = urlsplit(control)
+        host = parsed.hostname or ""
+        # Accessing .port validates malformed ports as well.
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("join control URL is invalid") from exc
+    if (parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or "?" in control or "#" in control):
+        raise ValueError("join control URL must be an HTTP(S) URL without credentials, query, or fragment")
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise ValueError("join control URL must not point to localhost")
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        try:
+            # Some URL stacks accept abbreviated or integer-form IPv4 literals; normalize those before checking.
+            address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+        except (OSError, ValueError):
+            address = None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if address and (address.is_loopback or address.is_unspecified or address.is_link_local or address.is_multicast
+                    or address.is_reserved or any(address.version == net.version and address in net
+                                                  for net in _NON_ROUTABLE_JOIN_NETWORKS)):
+        raise ValueError("join control URL must use an address reachable from joining nodes")
+    return control.rstrip("/")
+
+
+def join_bootstrap_command(token: str, name: str, control: str, version: str, checksum: str) -> str:
+    """One line for a machine without AI Flow: fetch the signed release with the join token, check its SHA-256 and
+    cosign signature, install it with the release's own aiflow4-node-install, then join with the full binary path.
+    The script travels to `sudo bash -s` on stdin, so the token never appears in a process argument list."""
+    identity = f"https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{version}"
+    steps = [
+        "set -euo pipefail",
+        f"T={shlex.quote(token)}", f"C={shlex.quote(control)}", f"V={shlex.quote(version)}",
+        f"S={shlex.quote(checksum)}", f"N={shlex.quote(name)}",
+        'D=$(mktemp -d)', "trap 'rm -rf \"$D\"' EXIT", 'A="$D/aiflow4-$V.tar.gz"',
+        "get() { curl -fsS --max-time 600 -K <(printf 'header = \"Authorization: Bearer %s\"\\n' \"$T\")"
+        ' -o "$2" "$C$1"; }',
+        'get "/v1/releases/$V.tar.gz" "$A"', 'get "/v1/releases/$V.tar.gz.sigstore.json" "$A.sigstore.json"',
+        'echo "$S  $A" | sha256sum -c --quiet -',
+        'command -v cosign >/dev/null || { echo "install cosign to verify the AI Flow release" >&2; exit 3; }',
+        f'cosign verify-blob "$A" --bundle "$A.sigstore.json" --certificate-identity {shlex.quote(identity)}'
+        " --certificate-oidc-issuer https://token.actions.githubusercontent.com",
+        'mkdir "$D/src"', 'tar -xzf "$A" -C "$D/src"',
+        "install -d -m 0755 /etc/aiflow",
+        "[ -e /etc/aiflow/node.env ] || printf 'AIFLOW4_CONTROL_URL=%s\\nAIFLOW4_NODE_NAME=%s\\nAIFLOW4_SLOTS=1\\n'"
+        ' "$C" "$N" > /etc/aiflow/node.env',
+        'bash "$D/src/deploy/v4/bin/aiflow4-node-install" "$A" "$V" "$A.sigstore.json" "$S"',
+        '/srv/aiflow/current/.venv/bin/aiflow4 node join --name "$N" --join-token-stdin --control "$C" <<<"$T"',
+        "systemctl restart aiflow4-node-agent",
+    ]
+    return f"printf '%s\\n' {shlex.quote('; '.join(steps))} | sudo bash -s"
 
 
 @dataclass
@@ -280,6 +353,22 @@ class ReleaseFailureBody(BaseModel):
     detail: str = ""
 
 
+class NodeOperationBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    action: Literal["install", "repair"]
+    component: str = ""
+
+
+class NodeOperationResultBody(BaseModel):
+    status: Literal["completed", "failed"]
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class JoinCommandBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    name: str
+
+
 # --- app --------------------------------------------------------------------------------------------------
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
@@ -325,6 +414,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(401, "unknown node token")
         return row["name"]
 
+    def release_reader(authorization: str = Header(default="")) -> str:
+        """A node token, or an unexpired, unconsumed join token so a new machine can fetch the signed release."""
+        token = authorization.removeprefix("Bearer ").strip()
+        if token:
+            row = ctx.db.one("SELECT node FROM node_join_tokens WHERE token_hash=%s AND consumed_at IS NULL"
+                             " AND expires_at > now()", (h(token),))
+            if row:
+                return row["node"]
+        return node_auth(authorization)
+
     def reviewer_auth(authorization: str = Header(default="")) -> str:
         configured = ctx.settings.reviewer_token
         if not configured:
@@ -338,9 +437,34 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
-        ctx.db.run("INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
-                   " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
+        with ctx.db.pool.connection() as connection:
+            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
+
+    def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
+                  accepted: bool, result: str, payload: dict | None = None) -> None:
+        connection.execute(
+            "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
+
+    def console_user(request: Request, roles: set[str], target: str = "console", action: str = "read",
+                     node: str = "") -> ConsoleUser:
+        """Require a signed, unexpired console session. Role and subject headers are deliberately ignored."""
+        secret = ctx.settings.console_session_secret
+        if len(secret.encode()) < 32:
+            if action != "read":
+                audit(target, action, node, "", None, "", False, "console session signing key is not configured")
+            raise HTTPException(503, "console session authentication is not configured")
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
+        if not user:
+            if action != "read":
+                audit(target, action, node, "", None, "", False, "authenticated console session required")
+            raise HTTPException(401, "authenticated console session required")
+        if user.role not in roles:
+            if action != "read":
+                audit(target, action, node, "", None, user.subject, False, "owner role required")
+            raise HTTPException(403, "owner role required")
+        return user
 
     def run_row(run_id: str) -> dict:
         try:
@@ -584,6 +708,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "Intake"
 
     # --- health ---------------------------------------------------------------------------------------------
+    @app.get("/v1/console/session")
+    def console_session(request: Request) -> dict:
+        user = console_user(request, {"owner", "lead"})
+        return {"authenticated": True, "user": user.subject, "role": user.role}
+
     @app.get("/healthz")
     def healthz() -> dict:
         ctx.db.one("SELECT 1 AS ok")
@@ -593,12 +722,27 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- nodes ----------------------------------------------------------------------------------------------
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
-        if not ctx.settings.join_token or not secrets.compare_digest(body.join_token, ctx.settings.join_token):
-            raise HTTPException(403, "invalid join token")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", body.name):
+            raise HTTPException(400, "invalid node name")
+        shared_token_ok = bool(ctx.settings.join_token) and secrets.compare_digest(body.join_token,
+                                                                                   ctx.settings.join_token)
         token = secrets.token_urlsafe(32)
-        ctx.db.run("INSERT INTO nodes (name, ip, token_hash, status) VALUES (%s,%s,%s,'joined')"
-                   " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash, ip=coalesce(nullif(EXCLUDED.ip,''), nodes.ip),"
-                   " status='joined'", (body.name, body.ip, h(token)))
+        with ctx.db.pool.connection() as connection:
+            one_time = None
+            if not shared_token_ok and body.join_token:
+                one_time = connection.execute(
+                    "UPDATE node_join_tokens SET consumed_at=now() WHERE token_hash=%s AND node=%s"
+                    " AND consumed_at IS NULL AND expires_at > now() RETURNING node",
+                    (h(body.join_token), body.name)).fetchone()
+            if not shared_token_ok and not one_time:
+                raise HTTPException(403, "invalid join token")
+            connection.execute(
+                "INSERT INTO nodes (name, ip, token_hash, status) VALUES (%s,%s,%s,'joined')"
+                " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash,"
+                " ip=coalesce(nullif(EXCLUDED.ip,''), nodes.ip), status='joined'",
+                (body.name, body.ip, h(token)))
+            audit_in(connection, "node", "join", body.name, "", None, "node-agent", True, "node joined",
+                     {"ip_present": bool(body.ip)})
         ctx.events.emit("node.joined", node=body.name)
         return {"node": body.name, "node_token": token}
 
@@ -656,6 +800,178 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "tools": repo.tools_for_node(node), "versions": repo.versions}}
 
+    # --- owner-operated node installation and repair ---------------------------------------------------------
+    def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:
+        repo = ctx.repo()
+        configured = repo.nodes.get(name)
+        packages = (configured.packages or []) if configured else []
+        services = (configured.services or []) if configured else []
+        if not isinstance(packages, list) or any(
+                not isinstance(p, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+:_-]{0,127}", p)
+                for p in packages):
+            raise HTTPException(400, "node packages must be a list of safe package names")
+        if not isinstance(services, list) or any(not isinstance(s, dict) for s in services):
+            raise HTTPException(400, "node services must be a list of service definitions")
+        for service in services:
+            unit = service.get("unit")
+            if not isinstance(unit, str) or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,180}\.service", unit):
+                raise HTTPException(400, "node service unit is invalid")
+            healthcheck = service.get("healthcheck", "")
+            if not isinstance(healthcheck, str):
+                raise HTTPException(400, "service health check must be an HTTP URL")
+            if healthcheck:
+                parsed = urlsplit(healthcheck)
+                if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username
+                        or parsed.password or parsed.fragment):
+                    raise HTTPException(400, "service health check must be an HTTP URL without embedded credentials")
+        required = repo.tools_for_node(name)
+        missing = set(missing_tools(node_row.get("tools") or {}, required))
+        stacks = [repo.projects[p].stack for p in (configured.projects if configured else [])
+                  if p in repo.projects and repo.projects[p].stack]
+        selected: list[str]
+        if body.action == "repair":
+            if body.component:
+                raise HTTPException(400, "repair reconciles the full desired state; omit component")
+            selected = list(required)
+            if packages:
+                selected.append("packages")
+        else:
+            component = body.component.strip()
+            if component == "packages":
+                if not packages:
+                    raise HTTPException(400, "no OS packages are declared for this node")
+                selected = [component]
+            elif component:
+                if component not in required:
+                    raise HTTPException(400, "component is not required by this node's control repo state")
+                if component not in missing:
+                    raise HTTPException(409, "component is already present on this node")
+                selected = [component]
+            else:
+                selected = sorted(missing)
+            if not selected:
+                raise HTTPException(409, "node has no missing required components")
+
+        # AI CLIs are installed with npm. Include Node.js in the server-authored plan so a clean node
+        # receives the prerequisite before any CLI installation; the agent skips it when already healthy.
+        if any(tool in {"claude", "codex", "grok", "opencode"} for tool in selected) and "node" not in selected:
+            selected.append("node")
+
+        tools = []
+        for tool in selected:
+            tools.append({"name": tool, "version": pinned_version(repo.versions, tool, stacks),
+                          "packages": list(packages) if tool == "packages" else []})
+        desired_services = list(services) if body.action == "repair" else []
+        return {"action": body.action, "tools": tools, "services": desired_services}
+
+    @app.post("/v1/nodes/{name}/join-command")
+    def create_join_command(name: str, body: JoinCommandBody, request: Request) -> dict:
+        user = console_user(request, {"owner"}, target="node", action="join_command", node=name)
+        if name != body.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
+            audit("node", "join_command", name, "", None, user.subject, False, "invalid node name")
+            raise HTTPException(400, "invalid node name")
+        try:
+            control = validated_join_control_url(ctx.settings.join_control_url)
+        except ValueError as exc:
+            audit("node", "join_command", name, "", None, user.subject, False, str(exc))
+            raise HTTPException(503, "configure AIFLOW4_JOIN_CONTROL_URL to an address reachable from joining nodes") from exc
+        version = current_release()
+        try:
+            _, _, _, checksum = release_assets(version)
+        except HTTPException as exc:
+            audit("node", "join_command", name, "", None, user.subject, False, "no signed release is published")
+            raise HTTPException(409, "no signed release is published; run aiflow4-deploy first") from exc
+        token = secrets.token_urlsafe(32)
+        expires_at = utcnow() + timedelta(minutes=10)
+        audit_payload = {"expires_at": expires_at.isoformat(), "ssh_password_saved": False}
+        with ctx.db.pool.connection() as connection:
+            connection.execute("INSERT INTO node_join_tokens (token_hash, node, expires_at) VALUES (%s,%s,%s)",
+                               (h(token), name, expires_at))
+            connection.execute("INSERT INTO nodes (name, status) VALUES (%s,'joined')"
+                               " ON CONFLICT (name) DO NOTHING", (name,))
+            audit_in(connection, "node", "join_command", name, "", None, user.subject, True,
+                     "one-time join command created", audit_payload)
+        command = join_bootstrap_command(token, name, control, version, checksum)
+        ctx.events.emit("node.join_command.created", node=name, outcome="created",
+                        reason="one-time token expires in 10 minutes", data={"actor": user.subject})
+        return {"node": name, "command": command, "expires_at": expires_at.isoformat(), "expires_in_s": 600}
+
+    @app.post("/v1/nodes/{name}/operations", status_code=202)
+    def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
+        user = console_user(request, {"owner"}, target="node", action=body.action, node=name)
+        node_row = ctx.db.one("SELECT name, status, token_hash, tools, last_heartbeat"
+                              " FROM nodes WHERE name=%s", (name,))
+        if not node_row:
+            audit("node", body.action, name, "", None, user.subject, False, "node is not registered")
+            raise HTTPException(404, "node is not registered")
+        heartbeat = node_row["last_heartbeat"]
+        if (node_row["status"] != "online" or not node_row["token_hash"] or not heartbeat
+                or (utcnow() - heartbeat).total_seconds() > 75):
+            audit("node", body.action, name, "", None, user.subject, False, "node agent is not online")
+            raise HTTPException(409, "node agent must be online to install or repair")
+        try:
+            payload = operation_plan(name, body, node_row)
+        except HTTPException as exc:
+            audit("node", body.action, name, "", None, user.subject, False, str(exc.detail))
+            raise
+        operation_id = str(uuid.uuid4())
+        components = [str(t["name"]) for t in payload["tools"]]
+        with ctx.db.pool.connection() as connection:
+            connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
+                               (operation_id, name, body.action, user.subject, J(payload)))
+            audit_in(connection, "node", body.action, name, operation_id, None, user.subject, True, "queued",
+                     {"operation_id": operation_id, "components": components,
+                      "service_count": len(payload["services"])})
+        ctx.events.emit("node.operation.queued", node=name, outcome="queued",
+                        reason=f"{body.action}: {', '.join(components) or 'services'}",
+                        data={"operation_id": operation_id, "action": body.action, "actor": user.subject})
+        return {"id": operation_id, "node": name, "action": body.action, "status": "queued",
+                "components": components}
+
+    @app.get("/v1/nodes/{name}/operations")
+    def node_operations(name: str, request: Request) -> dict:
+        console_user(request, {"owner", "lead"})
+        rows = ctx.db.all("SELECT id, node, action, actor, status, result, created_at, started_at, completed_at"
+                          " FROM node_operations WHERE node=%s ORDER BY created_at DESC LIMIT 50", (name,))
+        for row in rows:
+            row["id"] = str(row["id"])
+        return {"node": name, "operations": rows}
+
+    @app.get("/v1/nodes/{name}/operations/next")
+    def next_node_operation(name: str, node: str = Depends(node_auth)) -> dict:
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        row = ctx.db.one(
+            "WITH next AS (SELECT id FROM node_operations WHERE node=%s AND (status='queued' OR"
+            " (status='running' AND started_at < now() - interval '30 minutes'))"
+            " ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)"
+            " UPDATE node_operations AS op SET status='running', started_at=now() FROM next"
+            " WHERE op.id=next.id RETURNING op.id, op.action, op.payload", (node,))
+        if not row:
+            return {"operation": None}
+        return {"operation": {"id": str(row["id"]), "action": row["action"], "payload": row["payload"]}}
+
+    @app.post("/v1/nodes/{name}/operations/{operation_id}/result")
+    def finish_node_operation(name: str, operation_id: str, body: NodeOperationResultBody,
+                              node: str = Depends(node_auth)) -> dict:
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        try:
+            parsed_id = str(uuid.UUID(operation_id))
+        except ValueError as exc:
+            raise HTTPException(404, "unknown node operation") from exc
+        status = body.status
+        updated = ctx.db.one(
+            "UPDATE node_operations SET status=%s, result=%s, completed_at=now()"
+            " WHERE id=%s AND node=%s AND status='running' RETURNING id, action",
+            (status, J(body.result), parsed_id, node))
+        if not updated:
+            raise HTTPException(404, "unknown or completed node operation")
+        ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
+                        reason=f"{updated['action']} finished", data={"operation_id": parsed_id,
+                                                                     "healthy": body.result.get("healthy")})
+        return {"id": parsed_id, "status": status}
+
     # --- releases: nodes follow a tagged, signed release written by aiflow4-deploy ---------------------------
     def current_release(node: str = "") -> str:
         # During a canary, only the selected node sees the candidate. The file is written by the host updater
@@ -706,12 +1022,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         return FileResponse(sums, media_type="text/plain", filename="SHA256SUMS")
 
     @app.get("/v1/releases/{version}.tar.gz.sigstore.json")
-    def release_signature(version: str, _node: str = Depends(node_auth)) -> FileResponse:
+    def release_signature(version: str, _node: str = Depends(release_reader)) -> FileResponse:
         _, bundle, _, _ = release_assets(version)
         return FileResponse(bundle, media_type="application/json", filename=f"aiflow4-{version}.tar.gz.sigstore.json")
 
     @app.get("/v1/releases/{sha}.tar.gz")
-    def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
+    def release_file(sha: str, node: str = Depends(release_reader)) -> FileResponse:
         if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", sha):
             f, _, _, _ = release_assets(sha)
         elif re.fullmatch(r"[0-9a-f]{7,40}", sha):  # old, already-installed releases remain downloadable

@@ -15,7 +15,7 @@ from ..core.text import adf_to_text, text_to_adf
 
 ORDER = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Human review", "Done"]
 FIELDS = ["summary", "status", "issuetype", "priority", "labels", "description", "parent", "issuelinks",
-          "created", "updated"]
+          "created", "updated", "resolutiondate"]
 
 
 class JiraError(RuntimeError):
@@ -85,6 +85,7 @@ class Jira:
             "description": adf_to_text(f.get("description")) if isinstance(f.get("description"), dict) else (f.get("description") or ""),
             "parent_key": (f.get("parent") or {}).get("key"), "blocked_by": blocked_by,
             "jira_created": _ts(f.get("created")), "jira_updated": _ts(f.get("updated")),
+            "done_at": _ts(f.get("resolutiondate")),
         }
 
     def status(self, key: str) -> str:
@@ -124,6 +125,9 @@ class Jira:
                 fields[fid] = v
         if fields:
             self.call("PUT", f"/rest/api/3/issue/{key}", {"fields": fields})
+
+    def set_description(self, key: str, text: str) -> None:
+        self.call("PUT", f"/rest/api/3/issue/{key}", {"fields": {"description": text_to_adf(text)}})
 
     def add_label(self, key: str, label: str) -> None:
         self.call("PUT", f"/rest/api/3/issue/{key}", {"update": {"labels": [{"add": label}]}})

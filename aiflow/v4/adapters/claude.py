@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .base import Adapter, RunResult, RunSpec, ts
 
-HOOK_TOOLS = "Bash|Edit|Write|MultiEdit|NotebookEdit"
+HOOK_TOOLS = "Bash|Read|Glob|Grep|WebFetch|WebSearch|Edit|Write|MultiEdit|NotebookEdit"
 
 
 class ClaudeAdapter(Adapter):
@@ -24,10 +24,12 @@ class ClaudeAdapter(Adapter):
     def prepare(self, spec: RunSpec) -> None:
         p = self.settings_path(spec)
         p.parent.mkdir(parents=True, exist_ok=True)
+        policy_base = ("http://127.0.0.1:8471" if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1"
+                       else spec.control_url.rstrip("/"))
         settings = {
             "env": {"DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1"},
             "hooks": {"PreToolUse": [{"matcher": HOOK_TOOLS, "hooks": [{
-                "type": "http", "url": f"{spec.control_url.rstrip('/')}/v1/policy/decide", "timeout": 15,
+                "type": "http", "url": f"{policy_base}/v1/policy/decide", "timeout": 65,
                 "onFailure": "block", "headers": {"Authorization": "Bearer $AIFLOW4_RUN_TOKEN"},
                 "allowedEnvVars": ["AIFLOW4_RUN_TOKEN"]}]}]},
         }

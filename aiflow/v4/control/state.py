@@ -4,11 +4,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .. import VERSION
+from ..core.toolchains import missing_tools
+
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
 
 def _age(ts: datetime | None) -> int | None:
     return None if ts is None else int((datetime.now(timezone.utc) - ts).total_seconds())
+
+
+def _iso(ts: datetime | None) -> str | None:
+    return None if ts is None else ts.isoformat()
 
 
 def snapshot(ctx) -> dict[str, Any]:
@@ -23,16 +30,22 @@ def snapshot(ctx) -> dict[str, Any]:
         status = n["status"]
         if status == "online" and (age is None or age > NODE_OFFLINE_S):
             status = "offline"
+        required = repo.tools_for_node(n["name"])
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
-                      "metrics": n["metrics"], "tools": n["tools"], "heartbeat_age_s": age,
+                      "metrics": n["metrics"], "tools": n["tools"],
+                      "missing_tools": missing_tools(n["tools"], required), "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "last_heartbeat": _iso(n["last_heartbeat"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
                       "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
                       "projects": getattr(repo.nodes.get(n["name"]), "projects", []) or [],
                       "joined_at": n["created_at"]})
     node_status = {n["name"]: n["status"] for n in nodes}
+    runs_per_account: dict[str, int] = {}
+    for r in db.all("SELECT account_id FROM runs WHERE status='running'"):
+        runs_per_account[r["account_id"]] = runs_per_account.get(r["account_id"], 0) + 1
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
@@ -49,6 +62,7 @@ def snapshot(ctx) -> dict[str, Any]:
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
             "cooldown_until": a["cooldown_until"], "quota": a["quota"], "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
+            "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
                                         "step": r["step"], "elapsed_s": _age(r["started_at"]), "fence": r["fence"],
                                         "progress": r["progress"]},
@@ -92,12 +106,14 @@ def snapshot(ctx) -> dict[str, Any]:
                        " WHERE closed_at IS NULL ORDER BY opened_at DESC")
     incidents_recent = db.all("SELECT id, opened_at, closed_at, severity, kind, subject, title, detail FROM incidents"
                               " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20")
-    events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events ORDER BY id DESC LIMIT 60")
+    events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
+                    " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60")
     projects = [{"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
                  "work_minutes": p.work_minutes(), "counts": by_status.get(p.key, {})} for p in repo.projects.values()]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
-        "control_repo": repo.ref, "versions": repo.versions,
+        "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
+        "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets, "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events,

@@ -15,6 +15,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from ..core.toolchains import missing_tools
 from .incidents import close_incident, open_incident
 from .api import Ctx
 from .db import J
@@ -34,14 +35,20 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
         old = ctx.db.one("SELECT status, labels FROM tickets WHERE key=%s", (t["key"],))
+        done_at = t.get("done_at")
+        if t["status"] == "Done" and done_at is None:
+            done_at = t["jira_updated"]
         ctx.db.run(
             "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
-            " jira_created, jira_updated, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
-            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s, now())"
+            " jira_created, jira_updated, done_at, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
+            " %(summary)s,%(description)s,%(parent_key)s,%(blocked_by)s,%(jira_created)s,%(jira_updated)s,%(done_at)s, now())"
             " ON CONFLICT (key) DO UPDATE SET status=EXCLUDED.status, type=EXCLUDED.type, priority=EXCLUDED.priority,"
             " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
-            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, synced_at=now()",
-            t)
+            " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated,"
+            " done_at=CASE WHEN tickets.status <> 'Done' AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
+            " ELSE tickets.done_at END, synced_at=now()",
+            {**t, "done_at": done_at})
         ready = "aiflow-ready" in t["labels"]
         if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
             # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
@@ -64,8 +71,43 @@ def watchdog(ctx: Ctx) -> None:
                           f"No heartbeat for {int(age or 0)} seconds. Its runs lose their lease after 90 s and go back to To Do.")
         elif n["status"] == "online":
             close_incident(ctx, "node_down", n["name"], "heartbeat is back")
-    # nodes that joined but have no AI account: they add slots, never work
+    # project stacks: an online node must have every tool its projects need, or a person installs it
     repo = ctx.repo()
+    tool_issues: set[str] = set()
+    for n in ctx.db.all("SELECT name, status, tools FROM nodes"):
+        node = repo.nodes.get(n["name"])
+        if not node:
+            continue
+        for key in node.projects:
+            project = repo.projects.get(key)
+            if not project:
+                continue
+            subject = f"{n['name']}:{key}"
+            if n["status"] != "online":
+                # an offline node sends no heartbeat, so keep its incident: nobody confirmed the tools either way
+                tool_issues.add(subject)
+                continue
+            missing = missing_tools(n["tools"], project.tools)
+            if not missing:
+                continue
+            tool_issues.add(subject)
+            open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses tools for {key}",
+                          f"Missing on {n['name']} for {key} ({project.stack or 'no stack'}): {', '.join(missing)}."
+                          " Install them on the node; the incident closes when a later heartbeat reports them.")
+        # the CLIs of the AI providers whose accounts run on the node
+        subject = f"{n['name']}:ai"
+        ai_missing = missing_tools(n["tools"], repo.provider_tools_for_node(n["name"])) if n["status"] == "online" else []
+        if n["status"] != "online" and repo.provider_tools_for_node(n["name"]):
+            tool_issues.add(subject)
+        elif ai_missing:
+            tool_issues.add(subject)
+            open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses AI tools",
+                          f"Missing on {n['name']} for its accounts: {', '.join(ai_missing)}. Install them on the node; the"
+                          " incident closes when a later heartbeat reports them.")
+    for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_tools' AND closed_at IS NULL"):
+        if i["subject"] not in tool_issues:
+            close_incident(ctx, "node_tools", i["subject"], "tools are installed or the node no longer serves the project")
+    # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {a.node for a in repo.accounts}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
@@ -75,14 +117,39 @@ def watchdog(ctx: Ctx) -> None:
                           " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
         elif n["name"] in with_accounts or n["status"] != "online":
             close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
+    # orphans: Jira says In Progress but no run is working on it (a worker died between writes, a deploy, a manual
+    # move). After 10 quiet minutes the ticket goes back to To Do so it is never abandoned.
+    if ctx.jira:
+        for t in ctx.db.all(
+                "SELECT t.key FROM tickets t WHERE t.status = 'In Progress'"
+                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.status = 'running')"
+                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = t.key AND r.started_at > now() - interval '10 minutes')"
+                " AND t.synced_at > now() - interval '5 minutes'"):
+            if ctx.leases.holder(t["key"]):
+                continue
+            try:
+                if ctx.jira.status(t["key"]) != "In Progress":
+                    continue
+                ctx.jira.transition_to(t["key"], "To Do")
+                ctx.jira.comment(t["key"], "AI Flow · watchdog · requeued\nWhat: The ticket was In Progress but no run had worked on it"
+                                 " for 10 minutes.\nWhy: A worker stopped between two updates, so nobody owned the ticket.\n"
+                                 "Next: Back to To Do; the next worker continues its branch.")
+                ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (t["key"],))
+                ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result) VALUES"
+                           " ('jira','transition',%s,'control',true,'To Do (orphan)')", (t["key"],))
+                ctx.events.emit("ticket.requeued", ticket=t["key"], reason="In Progress without a run for 10 minutes")
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not requeue orphan %s: %s", t["key"], e)
     # tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look)
     from .api import BACKOFF_SQL
     streak_sql = BACKOFF_SQL.split("SELECT ticket_key, fails FROM streak")[0] + "SELECT ticket_key, fails FROM streak"
-    stuck = {r["ticket_key"]: r["fails"] for r in ctx.db.all(streak_sql)}
+    stuck: dict[str, int] = {}
+    for step in ("dev", "verify"):
+        for r in ctx.db.all(streak_sql, {"step": step}):
+            stuck[r["ticket_key"]] = max(stuck.get(r["ticket_key"], 0), r["fails"])
     for key, fails in stuck.items():
         if fails >= 3:
-            last = ctx.db.one("SELECT account_id, summary FROM runs WHERE ticket_key=%s AND step='dev' ORDER BY started_at DESC"
-                              " LIMIT 1", (key,))
+            last = ctx.db.one("SELECT account_id, summary FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1", (key,))
             open_incident(ctx, "ticket_stuck", key, "warning", f"{key} failed {fails} runs in a row",
                           f"Last error ({last['account_id'] if last else '?'}): {(last['summary'] if last else '')[:300]}."
                           " Retries wait up to 30 minutes; fix the cause or put the ticket on hold.")

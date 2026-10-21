@@ -19,6 +19,11 @@ The node drawer shows the IP, joined time, hostname and last heartbeat. An offli
 `last seen <time> (<age>)`, so operators can tell when and where it was last alive. The watchdog opens a
 `node_down` incident while the node is offline and closes it on the next heartbeat.
 
+The node drawer also lists the tools the node's project stacks need. A tool whose heartbeat value is
+`missing` (or is absent from an older heartbeat) is shown in red. The watchdog opens a warning incident
+`node <name> misses tools for <PROJECT>` for each affected project and closes it when a heartbeat reports
+the tool. Stacks map to tools in `aiflow/v4/core/toolchains.py`.
+
 ## Project closing report
 
 Delivery's **Report** button opens the current project's Markdown closing report. If an epic is selected, the
@@ -36,3 +41,14 @@ that needed the owner are taken from audited transitions to Needs owner, the cur
 `needs-owner` label.
 Incidents are included when their subject is a ticket in scope, so account-wide and node-wide incidents are not
 assigned to an individual project.
+
+## Delivery sorting and remembered filters
+
+Delivery sorts epics by the numeric part of their key, so `TESTFLOW-2` comes before `TESTFLOW-10` instead of
+after it. The same order is used in the epic picker and the Epics panel.
+
+The selected project tab, type filter and epic are kept in `localStorage` under `aiflow4-delivery` and restored
+on the next visit. Storage access is wrapped in `try`/`catch`, so a browser with storage disabled keeps working
+with the defaults (first project, all types and all epics). A remembered project that no longer exists falls
+back to the first project, and a remembered epic or type that the current project does not contain is reset to
+`all`; the corrected selection is saved so the board never stays filtered to zero tickets.

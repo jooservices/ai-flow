@@ -20,6 +20,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
+from .intake import run_intake
 from .verify import run_verify
 
 log = logging.getLogger("aiflow4.worker")
@@ -129,6 +130,8 @@ class Worker:
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "intake":
+                res = run_intake(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:
                 res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             try:

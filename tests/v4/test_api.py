@@ -17,6 +17,35 @@ def test_join_requires_the_join_token(client):
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}).status_code == 401
 
 
+def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
+    ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
+    cc = join(client, "cc")
+    response = client.post("/v1/nodes/cc/heartbeat", json={
+        "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
+    }, headers=cc)
+
+    assert response.status_code == 200
+    shipped = [e for e in list(ctx.events.q.queue) if e["type"] == "node.heartbeat"]
+    assert len(shipped) == 1
+    assert shipped[0]["node"] == "cc" and shipped[0]["outcome"] == "online"
+    assert shipped[0]["slots_total"] == 4 and shipped[0]["metrics"] == {"cpu_pct": 12.5}
+    assert isinstance(shipped[0]["_timestamp"], int)
+    assert ctx.db.one("SELECT count(*) AS n FROM events WHERE type='node.heartbeat'")["n"] == 0
+
+
+def test_command_center_events_survive_many_heartbeats(client, ctx):
+    cc = join(client, "cc")
+    ctx.events.emit("policy.denied", ticket="TESTWP-1", account="claude-01", reason="force push")
+    for _ in range(80):
+        assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
+    # a stray heartbeat row (e.g. from older data) is still kept out of the list
+    ctx.events.emit("node.heartbeat", node="cc")
+
+    types = [e["type"] for e in client.get("/v1/state").json()["events"]]
+    assert "node.heartbeat" not in types
+    assert "policy.denied" in types and "node.joined" in types
+
+
 def test_full_claim_flow_with_fencing(client, ctx):
     cc = join(client, "cc")
     assert client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "workers": [{"account": "claude-01", "state": "idle"}]},
@@ -423,3 +452,38 @@ def test_parallel_sessions_of_one_account(client, ctx, tmp_path):
         headers=n1).json()
     assert hb["desired"]["workers"] == ["codex-01"]
     assert ctx.db.one("SELECT status FROM accounts WHERE id='codex-01'")["status"] == "working"
+
+
+def test_in_progress_ticket_without_a_run_is_requeued(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    add_ticket(ctx.db, "TESTWP-40")
+    ctx.db.run("UPDATE tickets SET status='In Progress', synced_at=now() WHERE key='TESTWP-40'")
+    ctx.jira.status_of["TESTWP-40"] = "In Progress"
+    watchdog(ctx)
+    assert ctx.jira.status_of["TESTWP-40"] == "To Do"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "To Do"
+
+
+def test_nodes_follow_the_current_release(client, ctx, tmp_path, monkeypatch):
+    n1 = join(client, "node1")
+    hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1).json()
+    assert "release" in hb["desired"]
+    assert client.get("/v1/releases/zzz.tar.gz", headers=n1).status_code in (400, 404)
+    assert client.get("/v1/releases/abc1234.tar.gz", headers=n1).status_code == 404
+    assert client.get("/v1/releases/abc1234.tar.gz").status_code == 401
+
+
+def test_failing_verify_backs_off(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-41")
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "claude-01"}, headers=cc).json()
+    client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "branch": "TESTWP-41-z",
+                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/9"}, headers=cc)
+    client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-41'")
+    v = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "codex-01", "step": "verify"}, headers=n1).json()
+    client.post(f"/v1/runs/{v['run_id']}/result", json={"fence": v["fence"], "outcome": "failed", "summary": "verify worker error: x"}, headers=n1)
+    client.post(f"/v1/runs/{v['run_id']}/release", json={"fence": v["fence"]}, headers=n1)
+    cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert all(c["key"] != "TESTWP-41" for c in cands)

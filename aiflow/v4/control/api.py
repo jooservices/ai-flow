@@ -6,15 +6,17 @@ fencing is enforced in exactly one place; every accepted or refused write is rec
 from __future__ import annotations
 
 import hashlib
+import re
 import logging
 import secrets
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -26,7 +28,7 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp
 from .jira import Jira
-from .policy import Decision, decide
+from .policy import Decision, decide, decide_read_only
 from .report import ReportNotFound, build_report, render_markdown
 
 log = logging.getLogger("aiflow4.api")
@@ -37,7 +39,7 @@ BACKOFF_SQL = """
 WITH last AS (
   SELECT ticket_key, outcome, ended_at,
          row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
-  FROM runs WHERE step = 'dev' AND status <> 'running' AND started_at > now() - interval '1 day'
+  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
@@ -48,6 +50,12 @@ WITH last AS (
 )
 SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
+"""
+# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try.
+INTAKE_BACKOFF_SQL = """
+SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
+WHERE step = 'intake' AND status <> 'running' AND started_at > now() - interval '1 day'
+ORDER BY ticket_key, started_at DESC
 """
 
 
@@ -269,6 +277,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, last_heartbeat=now() WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics), node))
+        ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
+                        slots_used=body.slots_used, release_version=body.release_version, metrics=body.metrics)
         if prev and prev["status"] != "online":
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
             from .incidents import close_incident
@@ -295,8 +305,27 @@ def create_app(ctx: Ctx) -> FastAPI:
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+                            "release": current_release(),
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
-                            "versions": repo.versions}}
+                            "tools": repo.tools_for_node(node), "versions": repo.versions}}
+
+    # --- releases: nodes follow the release the control plane runs (written by aiflow4-deploy) ---------------
+    RELEASES = Path("/srv/aiflow/control/releases")
+
+    def current_release() -> str:
+        try:
+            return (RELEASES / "CURRENT").read_text().strip()
+        except OSError:
+            return ""
+
+    @app.get("/v1/releases/{sha}.tar.gz")
+    def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            raise HTTPException(400, "bad release id")
+        f = RELEASES / f"aiflow4-{sha}.tar.gz"
+        if not f.is_file():
+            raise HTTPException(404, "no such release")
+        return FileResponse(f, media_type="application/gzip")
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str) -> dict | None:
@@ -318,9 +347,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
         if "verify" in roles:
+            verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if t["key"] in held:
+                if t["key"] in held or t["key"] in verify_cooling:
                     continue
                 dev = last_dev(t["key"])
                 if not dev or dev["outcome"] != "done" or not dev["pr_url"]:
@@ -330,9 +360,23 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "verify"})
+        if "intake_refiner" in roles:
+            waiting = {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL)
+                       if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
+                       and r["ended_at"] > utcnow() - timedelta(minutes=10)}
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
+                                " AND NOT ('aiflow-hold' = ANY(labels))"
+                                " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                if t["key"] in held or t["key"] in waiting:
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                out.append({**t, "step": "intake"})
+        prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
+        out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
-            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
+            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
             dev_rows = []
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
@@ -344,8 +388,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in labels:
                     continue
                 dev_rows.append({**t, "step": "dev"})
-            dev_rows.sort(key=lambda t: ("rework" not in t["labels"], PRIORITY.get(t["priority"], 2),
-                                         t["jira_created"] or utcnow()))
+            dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
+                                         PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
         return out
 
@@ -510,6 +554,23 @@ def create_app(ctx: Ctx) -> FastAPI:
               {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
         return {"ok": True}
 
+    @app.post("/v1/jira/{key}/description")
+    def jira_description(key: str, body: JiraWrite, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "jira", "description", {"chars": len(body.body)})
+        if run["ticket_key"] != key:
+            raise HTTPException(403, "run is for another ticket")
+        if run["step"] != "intake":
+            raise HTTPException(403, "only an intake run replaces the description")
+        if not body.body.strip():
+            raise HTTPException(400, "the new description is empty")
+        ctx.jira.set_description(key, body.body)
+        ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (body.body, key))
+        audit("jira", "description", key, body.run_id, body.fence, run["account_id"], True, "replaced",
+              {"chars": len(body.body)})
+        ctx.events.emit("jira.description", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
+                        node=node, outcome="replaced")
+        return {"ok": True}
+
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")
     def github_token(body: GitHubTokenBody, node: str = Depends(node_auth)) -> dict:
@@ -591,6 +652,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
         if run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             d = Decision("deny", "a verify run reviews and tests; it does not edit code")
+        elif run["step"] == "intake":
+            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
+                                 str(payload.get("cwd") or ""), "an intake run rewrites the ticket text; it does not change files")
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""))

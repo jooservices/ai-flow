@@ -533,6 +533,41 @@ def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(
     assert len(ctx.jira.created) == 1 and len(ctx.jira.comments) == 1
 
 
+def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_second_issue(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    for key in ("TESTFLOW-115", "TESTFLOW-116", "TESTFLOW-115"):
+        failed_flow_run(ctx, key, f"Git checkout refused for branch {key}: reference is unavailable", step="triage")
+    real_transition = ctx.jira.transition_to
+    calls = []
+
+    def flaky_transition(key, target):
+        calls.append((key, target))
+        if len(calls) == 1:
+            raise RuntimeError("Jira unavailable")
+        return real_transition(key, target)
+
+    ctx.jira.transition_to = flaky_transition
+    first = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert first[0]["action"] == "created" and not first[0]["in_intake"]
+    flow_bug = first[0]["ticket"]
+    assert len(ctx.jira.created) == 1 and ctx.jira.status_of[flow_bug] == "Backlog"
+    tracked = ctx.db.one("SELECT ticket_key, in_intake FROM flow_bug_tracker")
+    assert tracked["ticket_key"] == flow_bug and not tracked["in_intake"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (flow_bug,))["status"] != "Intake"
+
+    second = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert second == [{"action": "moved_to_intake", "ticket": flow_bug, "signature": first[0]["signature"]}]
+    assert len(ctx.jira.created) == 1 and ctx.jira.status_of[flow_bug] == "Intake"
+    assert ctx.db.one("SELECT in_intake FROM flow_bug_tracker")["in_intake"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (flow_bug,))["status"] == "Intake"
+
+    # Once in Intake the flow may move the Bug on; the master never pulls it back to Intake.
+    ctx.jira.status_of[flow_bug] = "In Progress"
+    master_context(client, cc, master)
+    assert len(ctx.jira.created) == 1 and len(calls) == 2
+
+
 def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()

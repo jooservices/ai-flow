@@ -379,8 +379,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         reports: list[dict] = []
         terminal = {"done", "closed", "resolved", "cancelled", "canceled"}
         for candidate in flow_bug_candidates(ctx):
-            tracker = ctx.db.one("SELECT ticket_key, run_ids, repeat_count FROM flow_bug_tracker WHERE signature=%s",
-                                 (candidate["signature"],))
+            tracker = ctx.db.one("SELECT ticket_key, run_ids, repeat_count, in_intake FROM flow_bug_tracker"
+                                 " WHERE signature=%s", (candidate["signature"],))
             if tracker:
                 ticket_key = tracker["ticket_key"]
                 try:
@@ -390,6 +390,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, ticket_key))
                 if status.casefold() not in terminal:
+                    if not tracker["in_intake"]:  # created earlier, but the move to Intake failed: retry only that
+                        if status == "Intake":
+                            ctx.db.run("UPDATE flow_bug_tracker SET in_intake=true, updated_at=now()"
+                                       " WHERE signature=%s", (candidate["signature"],))
+                        elif move_flow_bug_to_intake(run, ticket_key, candidate["signature"]):
+                            reports.append({"action": "moved_to_intake", "ticket": ticket_key,
+                                            "signature": candidate["signature"]})
                     known = set(tracker["run_ids"] or [])
                     new_runs = [r for r in candidate["runs"] if r["id"] not in known]
                     if new_runs:
@@ -437,36 +444,53 @@ def create_app(ctx: Ctx) -> FastAPI:
             try:
                 ticket_key = ctx.jira.create_issue("TESTFLOW", summary, description, issuetype="Bug",
                                                    labels=["flow-bug"])
-                status = ctx.jira.transition_to(ticket_key, "Intake")
-                if status != "Intake":
-                    raise RuntimeError("new flow-bug did not reach Intake")
             except Exception as exc:  # Keep the monitoring snapshot available and retry detection next cycle.
                 audit("jira", "flow_bug_create", "", str(run["id"]), run["fence"], run["account_id"], False,
-                      "Jira issue creation or Intake transition failed",
-                      {"signature": candidate["signature"], "error": type(exc).__name__})
+                      "Jira issue creation failed", {"signature": candidate["signature"], "error": type(exc).__name__})
                 log.warning("could not create flow-bug for signature %s: %s",
                             candidate["signature"], type(exc).__name__)
                 continue
+            # Record the new Bug before any further Jira call, so a failure below never leads to a second Bug for
+            # this signature. The status is refreshed from Jira on the next cycle; it is not Intake until moved.
+            run_ids = sorted(item["id"] for item in candidate["runs"])
+            ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, run_ids, repeat_count, in_intake)"
+                       " VALUES (%s,%s,%s,0,false) ON CONFLICT (signature) DO UPDATE SET ticket_key=EXCLUDED.ticket_key,"
+                       " run_ids=EXCLUDED.run_ids, repeat_count=0, in_intake=false, updated_at=now()",
+                       (candidate["signature"], ticket_key, run_ids))
             ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
-                       " VALUES (%s,'TESTFLOW','Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
-                       " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
+                       " VALUES (%s,'TESTFLOW','Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                       " type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
                        " description=EXCLUDED.description, synced_at=now()",
                        (ticket_key, ["flow-bug"], summary, description))
-            run_ids = sorted(item["id"] for item in candidate["runs"])
-            ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, run_ids, repeat_count)"
-                       " VALUES (%s,%s,%s,0) ON CONFLICT (signature) DO UPDATE SET ticket_key=EXCLUDED.ticket_key,"
-                       " run_ids=EXCLUDED.run_ids, repeat_count=0, updated_at=now()",
-                       (candidate["signature"], ticket_key, run_ids))
             audit("jira", "flow_bug_create", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
-                  status, {"signature": candidate["signature"], "run_ids": run_ids,
-                           "tickets": candidate["tickets"], "labels": ["flow-bug"]})
+                  "created", {"signature": candidate["signature"], "run_ids": run_ids,
+                              "tickets": candidate["tickets"], "labels": ["flow-bug"]})
+            status = move_flow_bug_to_intake(run, ticket_key, candidate["signature"])
             ctx.events.emit("flow_bug.created", ticket=ticket_key, project="TESTFLOW", run_id=str(run["id"]),
-                            fence=run["fence"], account=run["account_id"], node=run["node"], outcome="Intake",
-                            reason=candidate["pattern"], data={"signature": candidate["signature"],
-                                                               "run_ids": run_ids, "tickets": candidate["tickets"]})
+                            fence=run["fence"], account=run["account_id"], node=run["node"],
+                            outcome=status or "created", reason=candidate["pattern"],
+                            data={"signature": candidate["signature"], "run_ids": run_ids,
+                                  "tickets": candidate["tickets"]})
             reports.append({"action": "created", "ticket": ticket_key, "signature": candidate["signature"],
-                            "run_ids": run_ids})
+                            "run_ids": run_ids, "in_intake": status == "Intake"})
         return reports
+
+    def move_flow_bug_to_intake(run: dict, ticket_key: str, signature: str) -> str | None:
+        """Move a tracked flow-bug to Intake once; returns "Intake", or None when the move failed (retried later)."""
+        try:
+            status = ctx.jira.transition_to(ticket_key, "Intake")
+            if status != "Intake":
+                raise RuntimeError("flow-bug did not reach Intake")
+        except Exception as exc:  # The tracker row keeps the key; the next master cycle retries only the move.
+            audit("jira", "flow_bug_intake", ticket_key, str(run["id"]), run["fence"], run["account_id"], False,
+                  "Intake transition failed", {"signature": signature, "error": type(exc).__name__})
+            log.warning("could not move flow-bug %s to Intake: %s", ticket_key, type(exc).__name__)
+            return None
+        ctx.db.run("UPDATE flow_bug_tracker SET in_intake=true, updated_at=now() WHERE signature=%s", (signature,))
+        ctx.db.run("UPDATE tickets SET status='Intake', synced_at=now() WHERE key=%s", (ticket_key,))
+        audit("jira", "flow_bug_intake", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
+              "Intake", {"signature": signature})
+        return "Intake"
 
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/healthz")

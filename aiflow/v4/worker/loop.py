@@ -142,10 +142,20 @@ class Worker:
             return True
         return False
 
+    def release(self) -> str:
+        try:
+            return str((Path(self.srv) / "current").resolve())
+        except OSError:
+            return ""
+
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.stop.set())
         self.publish(state="idle")
+        started_on = self.release()
         while not self.stop.is_set():
+            if started_on and self.release() != started_on:  # a new release is installed: exit between runs,
+                log.info("new release installed; restarting")  # systemd starts the worker on the new code
+                break
             try:
                 if not self.once():
                     self.stop.wait(self.poll_s)

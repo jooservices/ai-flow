@@ -29,6 +29,24 @@ from .policy import Decision, decide
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
+# A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
+# failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
+BACKOFF_SQL = """
+WITH last AS (
+  SELECT ticket_key, outcome, ended_at,
+         row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
+  FROM runs WHERE step = 'dev' AND status <> 'running' AND started_at > now() - interval '1 day'
+), streak AS (
+  SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
+  FROM last l
+  WHERE l.outcome IN ('failed', 'timeout', 'lost')
+    AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
+                    AND g.outcome NOT IN ('failed', 'timeout', 'lost'))
+  GROUP BY l.ticket_key
+)
+SELECT ticket_key, fails FROM streak
+WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
+"""
 
 
 def h(token: str) -> str:
@@ -300,10 +318,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "verify"})
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
+            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
             dev_rows = []
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if t["key"] in held or any(b not in done for b in t["blocked_by"]):
+                if t["key"] in held or t["key"] in cooling or any(b not in done for b in t["blocked_by"]):
                     continue
                 labels = set(t["labels"])
                 if "tier-senior" in labels and acc.tier != "senior":
@@ -404,6 +423,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now() WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
+        if ctx.jira and body.outcome not in ("lost",):
+            try:  # every working run is logged on the ticket: who, which step, how long, what came out
+                ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
+                                     f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
+                                     f"{'/' + run['model'] if run['model'] else ''}) on {node}: {body.outcome}."
+                                     f" Run {run_id}, fence {body.fence}.")
+            except Exception as e:  # noqa: BLE001
+                log.warning("worklog for %s failed: %s", run["ticket_key"], e)
         ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
                         fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"],
                         node=node, duration_ms=dur, outcome=body.outcome, reason=body.error_kind or body.summary[:200],

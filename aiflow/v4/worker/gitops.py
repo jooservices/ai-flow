@@ -6,6 +6,7 @@ GIT_ASKPASS and the environment of that one process; it is never written to disk
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,21 @@ class Git:
         self.root = Path(srv_root)
         self.run_as = run_as or []
         self.askpass = Path(askpass_dir or (self.root / "cache")) / "aiflow4-askpass.sh"
+
+    def mkdirs(self, path: Path) -> None:
+        """Create path and its missing parents owned by the AI user (the worker runs as root, git does not)."""
+        missing = []
+        cur = path
+        while not cur.exists():
+            missing.append(cur)
+            cur = cur.parent
+        for d in reversed(missing):
+            d.mkdir(exist_ok=True)
+            if self.run_as:
+                try:
+                    shutil.chown(d, "aiflow-worker", "aiflow-worker")
+                except (LookupError, PermissionError):
+                    pass
 
     def _ensure_askpass(self) -> None:
         if not self.askpass.exists():
@@ -50,7 +66,7 @@ class Git:
         path = self.root / "mirrors" / f"{repo.replace('/', '__')}.git"
         url = f"https://github.com/{repo}.git"
         if not (path / "HEAD").exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
+            self.mkdirs(path.parent)
             self.run("clone", "--bare", "--quiet", url, str(path), token=token)
             self.run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=path)
         self.run("fetch", "--prune", "--quiet", "origin", cwd=path, token=token)
@@ -69,7 +85,7 @@ class Git:
             self.run("reset", "-q", "--hard", start, cwd=path)
             self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            self.mkdirs(path.parent)
             self.run("worktree", "add", "-q", "-B", branch, str(path), start, cwd=mirror)
         return start
 
@@ -81,7 +97,7 @@ class Git:
             self.run("reset", "-q", "--hard", ref, cwd=path)
             self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            self.mkdirs(path.parent)
             self.run("worktree", "add", "-q", "--detach", str(path), ref, cwd=mirror)
         return self.run("rev-parse", "HEAD", cwd=path).strip()
 

@@ -19,6 +19,7 @@ from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
 from .client import Conflict, ControlClient
 from .gitops import Git
+from .notes import note
 
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -121,8 +122,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         jira("transition", to="In Progress")
         jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
-        jira("comment", body=f"AI Flow: {c.account} ({c.provider}{'/' + c.model if c.model else ''}) started on branch "
-                             f"{branch} from {start}. Run {c.run_id}, fencing token {c.fence}.")
+        jira("comment", body=note(c, "started", what=f"Develop the ticket on branch {branch} from {start}"
+                                  + (f", with the latest {project['base']} merged in ({len(conflicts)} conflicted files to resolve)" if conflicts else ""),
+                                  why=("Rework after verify findings" if c.findings else "The ticket is ready and its blockers are done"),
+                                  next_="The AI implements the acceptance criteria and runs the checks; AI Flow commits and opens a draft PR",
+                                  node=api_node(api)))
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts), cwd=str(wt),
@@ -154,13 +158,17 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
 
         if res.error_kind in ("quota", "auth"):
             result["outcome"] = "quota"
-            jira("comment", body=f"AI Flow: {c.account} cannot work now ({res.error_kind}). The ticket goes back to To Do"
-                                 f" for another account.")
+            jira("comment", body=note(c, "paused", what="The run stopped before finishing",
+                                      why=f"{c.account} cannot work now ({res.error_kind}): {res.error_message[:200]}",
+                                      result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
         if res.verdict == "BLOCKED":
             result["outcome"] = "blocked"
-            jira("comment", body=f"AI Flow: the developer stopped with a question.\n\n{res.verdict_reason}")
+            jira("comment", body=note(c, "question for the owner", what="The developer AI stopped before changing code",
+                                      why=res.verdict_reason, next_="Answer in a comment and move the ticket back to To Do",
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="Needs owner")
             return result
         changed = git.changed(wt)
@@ -170,8 +178,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             reason = res.error_kind or ("no changes" if not changed else "")
             result["outcome"] = "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
-            jira("comment", body=f"AI Flow: the run ended without a usable change ({reason}). Back to To Do."
-                                 + (f"\n\nLast output:\n{summary[:800]}" if summary else ""))
+            jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
+                                      why=reason, result=(summary[:600] if summary else "no output"),
+                                      next_="Back to To Do; the next run retries after a short wait", t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}
@@ -185,8 +194,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         pr = api.call("POST", "/v1/github/pr", {"run_id": c.run_id, "fence": c.fence, "repo": repo, "head": branch,
                                                 "base": project["base"], "title": f"{key}: {c.ticket['summary']}"[:120],
                                                 "body": body, "draft": True})
-        jira("comment", body=f"AI Flow: work pushed ({sha[:10]}, {len(changed)} files) and draft PR opened: {pr['url']}\n\n"
-                             f"{summary}\n\nTests: {tests or 'not reported'}")
+        jira("comment", body=note(c, "draft PR opened", what=summary[:700],
+                                  result=f"{len(changed)} files committed as {sha[:10]} on {branch}; draft PR {pr['url']}. Tests: {tests or 'not reported'}",
+                                  next_="Another account verifies the PR against the acceptance criteria and merges it",
+                                  t0=t0, node=api_node(api)))
         jira("transition", to="In Verify")
         result.update(outcome="done", pr_url=pr["url"], head_sha=sha)
         return result
@@ -200,7 +211,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         log.exception("dev step failed")
         result.update(outcome="failed", summary=f"worker error: {e}"[:1000])
         try:
-            jira("comment", body=f"AI Flow: the worker hit an error and put the ticket back in To Do: {str(e)[:500]}")
+            jira("comment", body=note(c, "worker error", what="The worker failed before the AI could finish",
+                                      why=str(e)[:400], next_="Back to To Do; the next run retries after a short wait",
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
         except Exception:  # noqa: BLE001
             pass

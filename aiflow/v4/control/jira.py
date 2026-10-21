@@ -110,6 +110,11 @@ class Jira:
     def comment(self, key: str, text: str) -> str:
         return self.call("POST", f"/rest/api/3/issue/{key}/comment", {"body": text_to_adf(text)})["id"]
 
+    def add_worklog(self, key: str, seconds: int, started, comment: str) -> None:
+        started_txt = started.strftime("%Y-%m-%dT%H:%M:%S.000%z")
+        self.call("POST", f"/rest/api/3/issue/{key}/worklog?notifyUsers=false&adjustEstimate=leave",
+                  {"timeSpentSeconds": int(seconds), "started": started_txt, "comment": text_to_adf(comment)})
+
     def set_fields(self, key: str, values: dict[str, Any]) -> None:
         """values by field NAME (custom fields resolved) or by id."""
         fields: dict[str, Any] = {}

@@ -90,6 +90,8 @@ class FakeJira:
     def remove_label(self, key: str, label: str) -> None:
         self.labels.append(("remove", key, label))
 
+    def add_worklog(self, key, seconds, started, comment):
+        self.worklogs = getattr(self, "worklogs", []) + [(key, seconds, comment)]
 
 class FakeGitHub:
     def __init__(self) -> None:

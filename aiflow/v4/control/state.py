@@ -26,7 +26,12 @@ def snapshot(ctx) -> dict[str, Any]:
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"], "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes})
+                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
+                      "notes": getattr(repo.nodes.get(n["name"]), "notes", "") or "",
+                      "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
+                      "projects": getattr(repo.nodes.get(n["name"]), "projects", []) or [],
+                      "joined_at": n["created_at"]})
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []

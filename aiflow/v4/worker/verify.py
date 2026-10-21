@@ -19,7 +19,9 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost
+from .dev import api_node
 from .gitops import Git
+from .notes import note
 
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.M)
@@ -73,9 +75,11 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             git.abort_merge(wt)
             findings = "- merge: the branch conflicts with the latest " + project["base"] + " in " + ", ".join(conflicts[:12]) + \
                        ". Merge " + project["base"] + " into the branch and resolve the conflicts."
-            return _rework(jira, pr_comment, result, findings, "conflicts with " + project["base"])
-        jira("comment", body=f"AI Flow: {c.account} ({c.provider}{'/' + c.model if c.model else ''}) is verifying PR "
-                             f"#{pr['number']} at {head[:10]} merged with the latest {project['base']}.")
+            return _rework(c, api, jira, pr_comment, result, findings, "conflicts with " + project["base"], t0=t0)
+        jira("comment", body=note(c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
+                                  why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
+                                  next_="Check every acceptance criterion, run the checks, then merge or send findings back",
+                                  node=api_node(api)))
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
         spec = RunSpec(prompt=build_prompt(c, pr), cwd=str(wt), account_home=str(Path(srv_root) / "accounts" / c.account),
@@ -108,7 +112,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result
         if verdict == "FAIL":
-            return _rework(jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks)
+            return _rework(c, api, jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks, t0=t0)
         if verdict != "PASS":
             result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
                                                     f"{(res.error_message or text.strip())[-400:]}")
@@ -118,8 +122,9 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         needs_human = "require-human" in c.ticket.get("labels", []) or project.get("merge", {}).get("require_human")
         if needs_human or not project.get("merge", {}).get("auto", True):
             pr_comment(f"AI Flow verify: PASS by {c.account}.\n\nChecks: {checks}\n\nWaiting for a human review before merge.")
-            jira("comment", body=f"AI Flow: verify passed ({c.account}). Checks: {checks}. The ticket requires a human"
-                                 f" review before merge: {pr['url']}")
+            jira("comment", body=note(c, "passed, waiting for a person", what=f"PR {pr['url']} meets the acceptance criteria",
+                                      why="The ticket or project requires a human review before merge", result=f"Checks: {checks}",
+                                      next_="Approve and merge the PR, or comment what to change", t0=t0, node=api_node(api)))
             jira("transition", to="Human review")
             result["outcome"] = "human"
             return result
@@ -128,11 +133,13 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                                                   "title": title, "method": project.get("merge", {}).get("method", "squash")})
         if not m.get("merged"):
             result.update(outcome="failed", summary=f"verify passed but the merge was refused: {m.get('message')}"[:500])
-            jira("comment", body=f"AI Flow: verify passed but GitHub refused the merge ({m.get('message')}). The next"
-                                 " verify run merges the latest base again.")
+            jira("comment", body=note(c, "merge refused", what="Verify passed but GitHub refused the merge",
+                                      why=str(m.get("message")), next_="The next verify run merges the latest base and tries again",
+                                      t0=t0, node=api_node(api)))
             return result
-        jira("comment", body=f"AI Flow: verify passed ({c.account}) and PR #{pr['number']} is merged into "
-                             f"{project['base']} as {m.get('sha', '')[:10]}.\n\nChecks: {checks}")
+        jira("comment", body=note(c, "merged", what=f"PR #{pr['number']} merged into {project['base']} as {m.get('sha', '')[:10]}",
+                                  why="Every acceptance criterion is met and the checks pass", result=f"Checks: {checks}",
+                                  next_="Ticket Done; tickets blocked by it can start", t0=t0, node=api_node(api)))
         jira("transition", to="Done")
         try:
             jira("fields", remove_labels=["rework"])
@@ -154,10 +161,13 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         hb.stop.set()
 
 
-def _rework(jira, pr_comment, result: dict, findings: str, why: str, checks: str = "") -> dict:
+def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, checks: str = "", t0: float | None = None) -> dict:
     body = f"AI Flow verify: FAIL ({why}).\n\nFindings:\n{findings}" + (f"\n\nChecks: {checks}" if checks else "")
     pr_comment(body)
-    jira("comment", body=body + "\n\nThe ticket goes back to To Do; the next dev run continues the branch with these findings.")
+    jira("comment", body=note(c, "sent back for rework", what=f"Verify did not pass ({why})", result="Findings:\n" + findings
+                              + (f"\nChecks: {checks}" if checks else ""),
+                              next_="Back to To Do with the rework label; the next dev run continues the branch with these findings",
+                              t0=t0, node=api_node(api)))
     jira("fields", add_labels=["rework"])
     jira("transition", to="To Do")
     result.update(outcome="rework", summary=f"{why}: {findings}"[:1500])

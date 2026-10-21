@@ -196,3 +196,26 @@ def test_node_without_ai_accounts_is_flagged(client, ctx):
     s = client.get("/v1/state").json()
     n = next(x for x in s["nodes"] if x["name"] == "node3")
     assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False
+
+
+def test_failing_ticket_backs_off_and_is_reported(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-30")
+    for i in range(3):
+        ctx.db.run("UPDATE tickets SET status='To Do' WHERE key='TESTWP-30'")
+        cands = [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]]
+        if i == 0:
+            assert cands == ["TESTWP-30"]
+        r = client.post("/v1/work/claim", json={"ticket": "TESTWP-30", "account": "claude-01"}, headers=cc)
+        if i > 0:
+            assert r.status_code == 409  # backing off after a failure
+            ctx.db.run("UPDATE runs SET ended_at = now() - interval '40 minutes' WHERE ticket_key='TESTWP-30'")
+            r = client.post("/v1/work/claim", json={"ticket": "TESTWP-30", "account": "claude-01"}, headers=cc)
+        r = r.json()
+        client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "failed", "summary": "worker error: x"}, headers=cc)
+        client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+    assert ctx.jira.worklogs and ctx.jira.worklogs[0][0] == "TESTWP-30" and ctx.jira.worklogs[0][1] >= 60
+    ctx.db.run("UPDATE runs SET ended_at = now() WHERE ticket_key='TESTWP-30'")
+    watchdog(ctx)
+    assert ctx.db.one("SELECT title FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL")["title"] == "TESTWP-30 failed 3 runs in a row"

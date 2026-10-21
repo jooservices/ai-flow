@@ -54,6 +54,9 @@ class Node:
     slots: int = 1
     capabilities: list[str] = field(default_factory=list)
     projects: list[str] = field(default_factory=list)
+    purpose: str = ""
+    notes: str = ""
+    location: str = ""
 
 
 @dataclass

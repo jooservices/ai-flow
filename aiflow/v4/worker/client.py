@@ -27,7 +27,7 @@ class ControlClient:
                 continue
             if r.status_code == 409:
                 raise Conflict(r.text[:300])
-            if r.status_code >= 500:
+            if r.status_code >= 500 or (r.status_code == 404 and r.text.strip() == "404 page not found"):
                 last = RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:200]}")
                 time.sleep(min(20, 2 ** attempt))
                 continue

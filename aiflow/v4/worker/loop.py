@@ -164,7 +164,10 @@ class Worker:
                 log.info("new release installed; restarting")  # systemd starts the worker on the new code
                 break
             try:
-                if not self.once():
+                ran = self.once()
+                if self.state.get("state") == "error":
+                    self.publish(state="idle" if self.probe_ok else "unavailable", error=None)
+                if not ran:
                     self.stop.wait(self.poll_s)
             except Exception as e:  # noqa: BLE001
                 log.warning("poll failed: %s", e)

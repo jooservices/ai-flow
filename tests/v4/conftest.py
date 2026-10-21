@@ -38,8 +38,13 @@ def test_database_url():
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
-    name = f"aiflow4_t_{uuid.uuid4().hex[:12]}"
+    from aiflow.v4.core import testdb
+    name = testdb.new_name()
     try:
+        try:  # leftovers of killed sessions: keep at most a handful of idle databases around
+            testdb.sweep(DATABASE_URL)
+        except Exception:  # noqa: BLE001 - a missing right to list or drop must not stop the tests
+            pass
         admin = psycopg.connect(DATABASE_URL, autocommit=True)
         template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
         admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))

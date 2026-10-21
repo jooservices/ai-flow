@@ -1,0 +1,48 @@
+# AI Flow v4 control processes; joins the networks of aiflow4-control (registry, OpenObserve, Traefik)
+# and aiflow4-services (Mailpit for alerts). Secrets come from env files on the control-plane machine.
+name: aiflow4-app
+
+x-app: &app
+  image: aiflow4/control:${AIFLOW4_IMAGE_TAG:-latest}
+  restart: unless-stopped
+  env_file: [/etc/aiflow/secrets/control/aiflow4.env]
+  environment:
+    AIFLOW4_ENV: lab
+    AIFLOW4_JIRA_PROJECTS: TESTWP
+    AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
+    AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
+    AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
+    AIFLOW4_PUBLIC_URL: http://127.0.0.1:18480
+    AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
+    AIFLOW4_SMTP_PORT: "1025"
+    OTEL_SERVICE_NAME: aiflow4-control
+  volumes:
+    - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github:ro
+    - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
+  logging: { driver: journald, options: { tag: "{{.Name}}" } }
+  networks: [control, services, edge]
+
+services:
+  control-api:
+    <<: *app
+    container_name: aiflow4-control-api
+    command: ["control-api", "--port", "8080"]
+    mem_limit: 512m
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"], interval: 15s, timeout: 5s, retries: 5 }
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: aiflow4-edge
+      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || Path(`/`) || Path(`/healthz`)"
+      traefik.http.routers.api.entrypoints: web
+      traefik.http.services.api.loadbalancer.server.port: "8080"
+
+  control-loops:
+    <<: *app
+    container_name: aiflow4-control-loops
+    command: ["control-loops"]
+    mem_limit: 384m
+
+networks:
+  control: { name: aiflow4-control, external: true }
+  services: { name: aiflow4-services, external: true }
+  edge: { name: aiflow4-edge, external: true }

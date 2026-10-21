@@ -29,3 +29,36 @@ jobs:
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+
+  v4:
+    name: Test (v4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+
+      - name: Tests (real Redis and PostgreSQL)
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+        run: uv run pytest tests/v4 -p no:warnings

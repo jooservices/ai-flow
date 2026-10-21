@@ -437,7 +437,7 @@ var S = {
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true
 };
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
@@ -941,9 +941,13 @@ function drawerNode(name) {
     '<div class="facts">' + fact('IP', '<span class="mono">' + esc(n.ip || '—') + '</span>') + fact('Joined', when(n.joined_at)) + fact('Projects', esc((n.projects || []).join(', ') || '—')) + fact('Capabilities', esc((n.capabilities || []).join(', ') || '—')) + fact('Status', nodeLabel(n)) + fact('Release', '<span class="mono">' + esc(n.release || '—') + '</span>') + fact('Slots', d.active_runs.filter(function (r) { return r.node === n.name; }).length + ' / ' + n.slots_total) + fact('Last heartbeat', nodeLastSeen(n)) + fact('CPUs', String(m.cpus || '—')) + fact('Hostname', '<span class="mono">' + esc(m.hostname || '—') + '</span>') + '</div>';
   if (n.status === 'offline') b += '<div class="offnote">The node stopped sending heartbeats. The watchdog opened an incident and emailed it; runs on this node lose their lease after 90 s and their tickets return to To Do.</div>';
   b += '<div class="dsec"><h4>Resources</h4>' + nodeMetrics(n) + '</div>';
+  var missingTools = n.missing_tools || Object.keys(n.tools || {}).filter(function (k) { return n.tools[k] === 'missing'; });
   b += '<div class="dsec"><h4>Tools on this node</h4><div class="ver">';
-  Object.keys(n.tools || {}).sort().forEach(function (k) { b += '<span class="vk">' + esc(k) + '</span><span class="vv' + (n.tools[k] === 'missing' ? ' bad' : '') + '">' + esc(n.tools[k]) + '</span>'; });
-  b += '</div></div><div class="dsec"><h4>Workers</h4>';
+  Object.keys(n.tools || {}).sort().forEach(function (k) { b += '<span class="vk">' + esc(k) + '</span><span class="vv' + (missingTools.indexOf(k) >= 0 ? ' bad' : '') + '">' + esc(n.tools[k]) + '</span>'; });
+  missingTools.forEach(function (k) { if (!(n.tools || {})[k]) b += '<span class="vk">' + esc(k) + '</span><span class="vv bad">missing</span>'; });
+  b += '</div>';
+  if (missingTools.length) b += '<div class="small" style="color:var(--crit);margin-top:6px">Missing for this node\'s project stacks: ' + esc(missingTools.join(', ')) + '. Install them on the node; the watchdog warns until a heartbeat reports them.</div>';
+  b += '</div><div class="dsec"><h4>Workers</h4>';
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
   b += '</div>';
@@ -971,6 +975,7 @@ function drawerInc(id) {
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
+    node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';

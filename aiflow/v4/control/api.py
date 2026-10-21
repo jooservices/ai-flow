@@ -297,7 +297,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
-                            "versions": repo.versions}}
+                            "tools": repo.tools_for_node(node), "versions": repo.versions}}
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str) -> dict | None:

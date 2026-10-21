@@ -21,7 +21,8 @@ from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 
 log = logging.getLogger("aiflow4.node")
-TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"], "grok": ["grok", "--version"],
+TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
+         "codex-code-mode-host": ["codex-code-mode-host", "--version"], "grok": ["grok", "--version"],
          "opencode": ["opencode", "--version"], "docker": ["docker", "--version"], "git": ["git", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"]}
 

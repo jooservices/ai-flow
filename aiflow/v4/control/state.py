@@ -37,6 +37,7 @@ def snapshot(ctx) -> dict[str, Any]:
                       "capabilities": getattr(repo.nodes.get(n["name"]), "capabilities", []) or [],
                       "projects": getattr(repo.nodes.get(n["name"]), "projects", []) or [],
                       "joined_at": n["created_at"]})
+    node_status = {n["name"]: n["status"] for n in nodes}
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
@@ -48,7 +49,8 @@ def snapshot(ctx) -> dict[str, Any]:
         accounts.append({
             "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": a["roles"],
             "explicit_only": bool(acc and acc.explicit_only),
-            "status": "cooldown" if cool else ("working" if r else a["status"]),
+            "status": "cooldown" if cool else ("working" if r else (
+                "node_offline" if node_status.get(a["node"], "offline") != "online" else a["status"])),
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
             "cooldown_until": a["cooldown_until"], "quota": a["quota"], "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,

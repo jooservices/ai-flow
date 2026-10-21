@@ -267,7 +267,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics), node))
         if prev and prev["status"] != "online":
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
-            ctx.db.run("UPDATE incidents SET closed_at=now() WHERE kind='node_down' AND subject=%s AND closed_at IS NULL", (node,))
+            from .incidents import close_incident
+            close_incident(ctx, "node_down", node, "heartbeats are back")
         for w in body.workers:
             acc = str(w.get("account", ""))
             if not acc:
@@ -525,6 +526,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
                         account=run["account_id"], node=node, outcome="merged" if ok else "refused",
                         reason=res.get("message", "")[:200])
+        return res
+
+    @app.post("/v1/github/update-branch")
+    def github_update_branch(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "github", "update-branch", {"number": body.number})
+        if run["step"] != "verify":
+            raise HTTPException(403, "only a verify run updates a PR branch")
+        project = ctx.repo().projects[run["project"]]
+        res = ctx.github.update_branch(project.repo_name, body.number)
+        audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], res["ok"],
+              res["message"][:200], {"number": body.number})
         return res
 
     @app.get("/v1/github/checks")

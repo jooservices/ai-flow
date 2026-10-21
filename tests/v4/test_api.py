@@ -223,7 +223,8 @@ def test_failing_ticket_backs_off_and_is_reported(client, ctx):
 
 def test_role_with_one_ready_account_is_reported(client, ctx):
     from aiflow.v4.control.loops import watchdog
-    join(client, "cc")
+    for name in ("cc", "node1"):
+        client.post(f"/v1/nodes/{name}/heartbeat", json={"slots_total": 2}, headers=join(client, name))
     ctx.db.run("UPDATE accounts SET status='idle'")
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")["n"] == 0
@@ -231,3 +232,18 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+
+
+def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
+    from aiflow.v4.control import notify
+    from aiflow.v4.control.loops import watchdog
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda sev, title, detail="", link="": sent.append((sev, title)) or ["test"])
+    n1 = join(client, "node1")
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1)
+    ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='node1'")
+    watchdog(ctx)
+    acc = next(a for a in client.get("/v1/state").json()["accounts"] if a["id"] == "codex-01")
+    assert acc["status"] == "node_offline"
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1)
+    assert ("critical", "node node1 is down") in sent and ("info", "resolved: node node1 is down") in sent

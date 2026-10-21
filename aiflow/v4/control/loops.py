@@ -14,34 +14,13 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from . import notify
+from .incidents import close_incident, open_incident
 from .api import Ctx
 from .db import J
 from .state import NODE_OFFLINE_S
 
 log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
-
-
-def open_incident(ctx: Ctx, kind: str, subject: str, severity: str, title: str, detail: str = "") -> bool:
-    """True when a new incident was opened (so callers alert once, not every pass)."""
-    row = ctx.db.one("INSERT INTO incidents (kind, subject, severity, title, detail) VALUES (%s,%s,%s,%s,%s)"
-                     " ON CONFLICT (kind, subject) WHERE closed_at IS NULL DO NOTHING RETURNING id",
-                     (kind, subject, severity, title, detail))
-    if row:
-        ctx.events.emit("incident.opened", reason=title, outcome=severity, kind=kind, subject=subject, detail=detail)
-        if severity in ("critical", "warning"):
-            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc")
-            ctx.db.run("UPDATE incidents SET notified=%s WHERE id=%s", (bool(channels), row["id"]))
-    return bool(row)
-
-
-def close_incident(ctx: Ctx, kind: str, subject: str, note: str = "") -> None:
-    row = ctx.db.one("UPDATE incidents SET closed_at=now() WHERE kind=%s AND subject=%s AND closed_at IS NULL RETURNING title",
-                     (kind, subject))
-    if row:
-        ctx.events.emit("incident.closed", reason=note or row["title"], kind=kind, subject=subject)
-        notify.send("info", f"resolved: {row['title']}", note)
 
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
@@ -152,7 +131,8 @@ def watchdog(ctx: Ctx) -> None:
     for a in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working')"):
         close_incident(ctx, "account_quota", a["id"], "account works again")
     # every role the flow needs must have at least two ready accounts (no single AI the flow depends on)
-    ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
+    ready = {r["id"] for r in ctx.db.all("SELECT a.id FROM accounts a JOIN nodes n ON n.name = a.node"
+                                         " WHERE a.status IN ('idle','working','probing') AND n.status = 'online'")}
     for role in ("master", "intake_refiner", "verify", "dev"):
         holders = [a for a in repo.accounts if role in (a.roles or [])]
         ok = [a.id for a in holders if a.id in ready]

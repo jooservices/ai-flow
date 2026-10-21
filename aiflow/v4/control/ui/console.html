@@ -326,6 +326,9 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .epic .e-s{font-size:12px; color:var(--muted)}
 .ebar{display:flex; height:10px; border-radius:6px; overflow:hidden; background:var(--track)}
 .ebar span{height:100%}
+.an-chart{width:100%; max-width:640px; height:auto; display:block}
+.an-chart text{fill:var(--muted); font-family:var(--f-mono); font-size:10px}
+.an-ok{background:var(--good); fill:var(--good)} .an-rework{background:var(--warn); fill:var(--warn)} .an-failed{background:var(--crit); fill:var(--crit)} .an-other{background:var(--faint); fill:var(--faint)}
 .st-done{background:var(--good)} .st-verify{background:var(--accent)} .st-progress{background:#7b6cff} .st-todo{background:var(--faint)} .st-wait{background:var(--warn)}
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
 .empty{font-size:13px; color:var(--muted); padding:8px 0}
@@ -392,7 +395,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
 
-var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20;
+var POLL_MS = 5000, SVC_MS = 15000, STALE_S = 20, ANALYTICS_MS = 60000, ANALYTICS_DAYS = 14;
 var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 function $(s, r) { return (r || document).querySelector(s); }
 function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
@@ -428,7 +431,7 @@ var ICON = {
 
 /* ---------- state ---------- */
 var S = {
-  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '',
+  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   view: location.pathname.indexOf('/delivery') === 0 ? 'delivery' : 'cc',
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true
@@ -481,6 +484,16 @@ function pollServices() {
     if (S.view === 'cc' && S.data) renderCC();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
+}
+function pollAnalytics() {
+  fetch('/v1/analytics/daily?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.analytics = d.rows || []; S.anError = '';
+    if (S.view === 'delivery' && S.data) renderDBody();
+  }).catch(function (e) { S.anError = String(e.message || e); })
+    .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
 function notify(prevInc, prevRuns) {
   var d = D();
@@ -803,7 +816,49 @@ function renderDBody() {
   });
   h += '</div></section>';
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
+  h += analyticsPanel();
   $('#dbody').innerHTML = h;
+}
+
+/* ---------- Analytics (/v1/analytics/daily, per UTC day, project and account) ---------- */
+function utcDays(n) {
+  var out = [], t = Date.now();
+  for (var i = n - 1; i >= 0; i--) out.push(new Date(t - i * 86400000).toISOString().slice(0, 10));
+  return out;
+}
+function analyticsChart(rows) {
+  var days = utcDays(ANALYTICS_DAYS), by = {};
+  days.forEach(function (d) { by[d] = { ok: 0, rework: 0, failed: 0, other: 0 }; });
+  rows.forEach(function (r) {
+    var b = by[r.day]; if (!b) return;
+    b.ok += r.done + r.merged; b.rework += r.rework; b.failed += r.failed;
+    b.other += Math.max(0, r.runs - r.done - r.merged - r.rework - r.failed);
+  });
+  var max = 1; days.forEach(function (d) { var b = by[d]; max = Math.max(max, b.ok + b.rework + b.failed + b.other); });
+  var W = 28, G = 8, H = 120, LB = 16, svg = '<svg class="an-chart" viewBox="0 0 ' + (days.length * (W + G)) + ' ' + (H + LB) + '" role="img" aria-label="Runs per day by outcome, last ' + days.length + ' days">';
+  days.forEach(function (d, i) {
+    var b = by[d], x = i * (W + G) + G / 2, y = H;
+    [['ok', 'Done or merged'], ['rework', 'Rework'], ['failed', 'Failed'], ['other', 'Other']].forEach(function (k) {
+      if (!b[k[0]]) return;
+      var hh = H * b[k[0]] / max; y -= hh;
+      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + d + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
+    });
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + d.slice(8) + '</text>';
+  });
+  return svg + '</svg>';
+}
+function analyticsPanel() {
+  var rows = S.analytics.filter(function (r) { return r.project === S.project; });
+  var h = '<section class="panel" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
+  if (S.anError) h += '<div class="empty">Analytics unavailable: ' + esc(S.anError) + '</div>';
+  h += analyticsChart(rows);
+  if (!rows.length) return h + '<div class="empty">No runs for this project in the last ' + ANALYTICS_DAYS + ' days.</div></section>';
+  h += '<div class="tablebox"><table class="an-table" style="min-width:880px"><thead><tr><th>Day</th><th>Account</th><th>Runs</th><th>Done</th><th>Merged</th><th>Rework</th><th>Failed</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th><th>Median run</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    h += '<tr><td class="mono">' + esc(r.day) + '</td><td class="mono">' + esc(r.account) + '</td><td class="mono">' + r.runs + '</td><td class="mono">' + r.done + '</td><td class="mono">' + r.merged + '</td><td class="mono">' + r.rework + '</td><td class="mono">' + r.failed + '</td>';
+    h += '<td class="mono">' + tok(r.tokens_in) + '</td><td class="mono">' + tok(r.tokens_out) + '</td><td class="mono">' + usd(r.cost_usd) + '</td><td class="mono">' + mmss(r.median_run_s) + '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>';
 }
 function card(t, p) {
   var flags = '';
@@ -1085,7 +1140,7 @@ try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentE
 $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
 $('#view-cc').hidden = S.view !== 'cc'; $('#view-delivery').hidden = S.view !== 'delivery';
 render();
-poll(); pollServices();
+poll(); pollServices(); pollAnalytics();
 setInterval(tick, 1000);
 })();
 </script>

@@ -33,6 +33,9 @@ def test_dashboard_json_defines_the_expected_panels():
         assert '"aiflow4_events"' in query["query"]
         assert f"type = '{event_type}'" in query["query"]
         assert query["fields"]["x"] and query["fields"]["y"]
+        # OpenObserve reads the snake_case key; a camelCase one is silently ignored
+        assert isinstance(panel["config"]["show_legends"], bool)
+        assert "showLegends" not in panel["config"]
 
 
 class FakeResponse:

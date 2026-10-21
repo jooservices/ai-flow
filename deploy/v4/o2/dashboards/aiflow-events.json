@@ -16,7 +16,7 @@
           "type": "bar",
           "title": "Runs per hour by outcome",
           "description": "Finished runs grouped by hour and outcome.",
-          "config": {"showLegends": true},
+          "config": {"show_legends": true},
           "queryType": "sql",
           "queries": [
             {
@@ -42,7 +42,7 @@
           "type": "bar",
           "title": "AI time per account",
           "description": "Total finished-run duration in minutes for each AI account.",
-          "config": {"showLegends": false},
+          "config": {"show_legends": false},
           "queryType": "sql",
           "queries": [
             {
@@ -67,7 +67,7 @@
           "type": "line",
           "title": "Policy denials",
           "description": "Denied policy decisions per hour, grouped by account.",
-          "config": {"showLegends": true},
+          "config": {"show_legends": true},
           "queryType": "sql",
           "queries": [
             {
@@ -93,7 +93,7 @@
           "type": "bar",
           "title": "Incidents opened",
           "description": "Incidents opened per hour, grouped by severity.",
-          "config": {"showLegends": true},
+          "config": {"show_legends": true},
           "queryType": "sql",
           "queries": [
             {
@@ -119,7 +119,7 @@
           "type": "line",
           "title": "Node heartbeats",
           "description": "Successful node heartbeats per minute, grouped by node.",
-          "config": {"showLegends": true},
+          "config": {"show_legends": true},
           "queryType": "sql",
           "queries": [
             {

@@ -94,9 +94,46 @@ def test_master_failover_uses_other_provider_after_quota_or_node_lease_loss(clie
 
     candidate = master_candidate(client, node1, "codex-01")
     assert candidate and candidate["step"] == "master"
+    # Codex is ready, so for this cycle the other provider is preferred over another Claude account.
     assert master_candidate(client, node1, "claude-02") is None
+    # The preference is time-boxed: one cycle later any ready master account may take over again.
+    ctx.db.run("UPDATE runs SET ended_at=now()-interval '2 minutes' WHERE id=%s", (first["run_id"],))
+    assert master_candidate(client, node1, "claude-02")["step"] == "master"
     second = claim_master(client, node1, "codex-01").json()
     assert second["claimed"] and second["provider"] == "codex"
+    assert second["fence"] > first["fence"]
+
+
+@pytest.mark.parametrize("failure", ["cooldown", "offline"])
+@pytest.mark.parametrize("codex_down", ["cooldown", "offline"])
+def test_master_failover_uses_same_provider_when_other_provider_is_unavailable(client, ctx, failure, codex_down):
+    cc = ready(client, "cc", "claude-01")
+    node1 = ready(client, "node1", "codex-01")
+    from aiflow.v4.core.controlrepo import Account
+    ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="node2", roles=["master"]))
+    ctx.db.run("INSERT INTO accounts (id,provider,node,roles,status) VALUES ('claude-02','claude','node2',%s,'idle')",
+               (["master"],))
+    node2 = ready(client, "node2", "claude-02")
+    first = claim_master(client, cc, "claude-01").json()
+    assert first["claimed"]
+    if failure == "cooldown":
+        finish(client, cc, first, outcome="quota", error_kind="quota")
+    else:
+        ctx.leases.r.delete(f"{ctx.leases.p}lease:{MASTER_SCOPE}")
+        ctx.db.run("UPDATE nodes SET status='offline' WHERE name='cc'")
+        ctx.db.run("UPDATE runs SET status='lost', outcome='lost', ended_at=now() WHERE id=%s", (first["run_id"],))
+    if codex_down == "cooldown":
+        ctx.leases.cooldown("codex-01", 1200, "quota")
+    else:
+        ctx.db.run("UPDATE nodes SET status='offline' WHERE name='node1'")
+    assert master_candidate(client, node1, "codex-01") is None
+    assert master_candidate(client, cc, "claude-01") is None
+
+    candidate = master_candidate(client, node2, "claude-02")
+    assert candidate and candidate["step"] == "master"
+    second = claim_master(client, node2, "claude-02").json()
+    assert second["claimed"] and second["provider"] == "claude"
+    assert ctx.db.one("SELECT account_id FROM runs WHERE id=%s", (second["run_id"],))["account_id"] == "claude-02"
     assert second["fence"] > first["fence"]
 
 
@@ -257,6 +294,51 @@ def test_protected_master_actions_escalate_and_never_execute(client, ctx, monkey
     event = ctx.db.one("SELECT outcome, reason FROM events WHERE type='master.action' AND run_id=%s",
                        (master["run_id"],))
     assert event["outcome"] == "escalated" and category in event["reason"]
+
+
+@pytest.mark.parametrize("category", ["infrastructure", "secret", "production_release"])
+def test_explicit_protected_category_escalates_even_with_harmless_intent(category):
+    from aiflow.v4.control.policy import decide_master_action
+    decision = decide_master_action({}, "jira_comment", "post a follow-up", category)
+    assert decision.decision == "escalate" and category in decision.reason
+
+
+@pytest.mark.parametrize(("action_name", "intent"), [
+    ("incident_open", "open an incident for the offline node"),
+    ("requeue", "requeue the ticket after the hard limit so another worker continues"),
+    ("jira_comment", "ask the team to restart the node agent on node1"),
+    ("notify_owner", "tell the owner the database node has been down for 20 minutes"),
+    ("dev_reply", "answer the developer that the server restart is tracked in the node_down incident"),
+])
+def test_monitoring_follow_ups_about_nodes_servers_and_restarts_are_allowed(action_name, intent):
+    from aiflow.v4.control.policy import decide_master_action
+    assert decide_master_action({}, action_name, intent).decision == "allow"
+
+
+def test_incident_for_offline_node_and_requeue_after_hard_limit_are_not_escalated(client, ctx, monkeypatch):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    add_ticket(ctx.db, "TESTWP-230", status="In Progress")
+    sent = []
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+
+    opened = action(client, cc, master, action="incident_open", intent="open an incident for the offline node",
+                    kind="node_down", subject="node1", severity="critical", title="node1 is offline",
+                    detail="node1 server stopped sending heartbeats; restart the node agent or check the database"
+                           " and network configuration")
+    assert opened.status_code == 200 and not opened.json()["escalated"]
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_down' AND subject='node1'"
+                      " AND closed_at IS NULL")["n"] == 1
+
+    requeued = action(client, cc, master, action="requeue", ticket="TESTWP-230",
+                      intent="requeue the ticket after the hard limit", target_status="To Do",
+                      what="The run on node1 passed the 60 minute hard limit",
+                      why="The node server went offline and the database shows no heartbeat; restart lost the run",
+                      result="Returned to To Do", next="Another ready worker continues")
+    assert requeued.status_code == 200 and not requeued.json()["escalated"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-230'")["status"] == "To Do"
+    assert not ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE run_id=%s AND action='master-escalation'",
+                          (master["run_id"],))["n"]
 
 
 def test_master_policy_hook_denies_tool_execution_and_master_plan_parser_is_strict(client, ctx):

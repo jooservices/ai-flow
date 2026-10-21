@@ -192,6 +192,7 @@ class MasterActionBody(BaseModel):
     action: str
     ticket: str = ""
     intent: str = ""
+    category: str = ""  # infrastructure | secret | production_release: always escalated to the owner
     headline: str = "follow up"
     what: str = ""
     why: str = ""
@@ -550,32 +551,43 @@ def create_app(ctx: Ctx) -> FastAPI:
             out += dev_rows
         return out
 
+    def master_ready(account_id: str, node: str) -> bool:
+        if ctx.leases.cooling(account_id):
+            return False
+        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a JOIN nodes n ON n.name=a.node"
+                           " WHERE a.id=%s AND a.node=%s", (account_id, node))
+        return bool(ready) and ready["status"] in ("idle", "working", "probing") and ready["node_status"] == "online"
+
     def master_candidate(account_id: str, node: str) -> dict | None:
         repo = ctx.repo()
         account = repo.account(account_id)
         if not account or account.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if "master" not in (account.roles or []) or ctx.leases.cooling(account_id):
-            return None
-        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a JOIN nodes n ON n.name=a.node"
-                           " WHERE a.id=%s AND a.node=%s", (account_id, node))
-        if not ready or ready["status"] not in ("idle", "working", "probing") or ready["node_status"] != "online":
+        if "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
         held = set(ctx.leases.held_keys())
         if MASTER_SCOPE in held:
             return None
         recent = ctx.db.one("SELECT id, fence, ticket_key, provider, status, outcome, ended_at FROM runs"
                             " WHERE step='master' ORDER BY started_at DESC LIMIT 1")
-        provider_failover = False
+        failover = False
         if recent:
             lease_lost = (recent["status"] == "running" and
                           ctx.leases.master_holder() != f"{recent['id']}:{recent['fence']}")
             failed_over = recent["outcome"] in ("quota", "lost") or lease_lost
-            if failed_over and recent["provider"] == account.provider:
+            # Prefer the other provider for one cycle after a failure, and only while it has a ready master
+            # account. Otherwise any ready master account may take over: cooldown and node checks above
+            # already exclude the account that failed, so the flow never waits on an unavailable provider.
+            failed_at = recent["ended_at"] or utcnow()
+            if (failed_over and recent["provider"] == account.provider
+                    and failed_at > utcnow() - timedelta(seconds=MASTER_CYCLE_S)
+                    and any(a.provider != account.provider and "master" in (a.roles or [])
+                            and master_ready(a.id, a.node) for a in repo.accounts)):
                 return None
-            provider_failover = failed_over and recent["provider"] != account.provider
+            # A lost or quota-stopped holder is an account failure, not a failing cycle: no scope backoff.
+            failover = failed_over
         backoff = ctx.db.all(BACKOFF_SQL, {"step": "master"})
-        if not provider_failover and any(row["ticket_key"] == MASTER_SCOPE for row in backoff):
+        if not failover and any(row["ticket_key"] == MASTER_SCOPE for row in backoff):
             return None
         if recent and recent["ended_at"] and recent["ended_at"] > utcnow() - timedelta(seconds=MASTER_CYCLE_S):
             if recent["outcome"] == "done":
@@ -768,9 +780,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                             fence=body.fence, account=run["account_id"], node=node, outcome="denied", reason=reason,
                             action=body.action)
             raise HTTPException(400, reason)
-        action_context = "\n".join((body.action, body.intent, body.what, body.why, body.result, body.next,
-                                    str(body.fields), body.title, body.detail))
-        decision = decide_master_action(policy, body.action, action_context)
+        # Only the request is matched: what/why/result/detail describe observations (an offline node, a run
+        # past its hard limit) and must not turn an allowed follow-up into an owner escalation.
+        decision = decide_master_action(policy, body.action, body.intent, body.category)
         ctx.events.emit("policy.decision", ticket=ticket or run["ticket_key"], step="master", run_id=body.run_id,
                         fence=body.fence, account=run["account_id"], node=node, outcome=decision.decision,
                         reason=decision.reason[:200], action=body.action)

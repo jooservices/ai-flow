@@ -1,0 +1,36 @@
+[project]
+name = "ai-flow"
+version = "4.0.0a1"
+description = "Jira-driven multi-AI delivery flow. aiflow/ is the current flow (stdlib only); aiflow/v4 is the multi-node rewrite."
+requires-python = ">=3.12"
+# Dependencies are for aiflow.v4 only; the current flow keeps running on the standard library.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "pydantic>=2.9",
+    "psycopg[binary,pool]>=3.2",
+    "httpx>=0.27",
+    "redis>=5.2",
+    "pyyaml>=6.0",
+    "pyjwt[crypto]>=2.10",
+    "jinja2>=3.1",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.28",
+]
+
+[project.scripts]
+aiflow4 = "aiflow.v4.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aiflow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/v4"]
+addopts = "-q"

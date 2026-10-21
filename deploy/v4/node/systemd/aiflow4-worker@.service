@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Flow v4 worker for account %i
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/aiflow/node.env
+ExecStart=/srv/aiflow/current/.venv/bin/aiflow4 worker --account %i
+Restart=always
+RestartSec=10
+# SIGTERM: the worker stops polling; a running AI step keeps its lease until it ends or the stop timeout hits
+KillMode=mixed
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

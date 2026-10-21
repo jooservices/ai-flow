@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from . import memory
+from . import projects as project_lifecycle
 from ..core.toolchains import missing_tools
 from .incidents import close_incident, open_incident
 from .api import Ctx, notify_human_review
@@ -114,7 +115,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels FROM tickets WHERE key=%s", (t["key"],))
+        old = ctx.db.one("SELECT status, labels, type FROM tickets WHERE key=%s", (t["key"],))
         done_at = t.get("done_at")
         if t["status"] == "Done" and done_at is None:
             done_at = t["jira_updated"]
@@ -129,6 +130,13 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
             {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+        if not old:
+            project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
+        if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):
+            try:
+                project_lifecycle.report_done_epic(ctx, t["project"], t["key"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not generate completion report for epic %s: %s", t["key"], e)
         if old and old["status"] != "Human review" and t["status"] == "Human review":
             notify_human_review(ctx, t["key"], t)
         ready = "aiflow-ready" in t["labels"]

@@ -121,8 +121,20 @@ def snapshot(ctx) -> dict[str, Any]:
                               " WHERE closed_at > now() - interval '24 hours' ORDER BY closed_at DESC LIMIT 20")
     events = db.all("SELECT ts, type, ticket, account, node, outcome, reason FROM events"
                     " WHERE type <> 'node.heartbeat' ORDER BY id DESC LIMIT 60")
-    projects = [{"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
-                 "work_minutes": p.work_minutes(), "counts": by_status.get(p.key, {})} for p in repo.projects.values()]
+    lifecycle = {row["project"]: row for row in db.all(
+        "SELECT project, status, closed_at, closed_by, version FROM project_lifecycle")}
+    projects = []
+    for p in repo.projects.values():
+        counts = by_status.get(p.key, {})
+        total = sum(counts.values())
+        current = lifecycle.get(p.key, {})
+        closed = current.get("status") == "closed"
+        projects.append({"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
+                         "work_minutes": p.work_minutes(), "counts": counts,
+                         "status": "closed" if closed else "open", "closed": closed,
+                         "closed_at": _iso(current.get("closed_at")), "closed_by": current.get("closed_by", ""),
+                         "report_version": int(current.get("version", 0)),
+                         "close_suggested": bool(total and counts.get("Done", 0) == total and not closed)})
     sa = dashboard_data(ctx, nodes, accounts)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,

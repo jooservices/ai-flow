@@ -29,7 +29,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from ..core.toolchains import missing_tools, pinned_version
+from ..core.toolchains import pinned_version, toolchain_gaps
 from . import business, memory
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
 from . import projects as project_lifecycle
@@ -795,9 +795,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
         release = current_release(node) if body.release_protocol >= 1 else ""
+        configured = repo.nodes.get(node)
+        project_stacks = {key: repo.projects[key].stack for key in (configured.projects if configured else [])
+                          if key in repo.projects}
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": release,
-                            "projects": repo.nodes[node].projects if node in repo.nodes else [],
+                            "projects": configured.projects if configured else [],
+                            "project_stacks": project_stacks,
                             "tools": repo.tools_for_node(node), "versions": repo.versions}}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
@@ -825,9 +829,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                         or parsed.password or parsed.fragment):
                     raise HTTPException(400, "service health check must be an HTTP URL without embedded credentials")
         required = repo.tools_for_node(name)
-        missing = set(missing_tools(node_row.get("tools") or {}, required))
-        stacks = [repo.projects[p].stack for p in (configured.projects if configured else [])
-                  if p in repo.projects and repo.projects[p].stack]
+        stacks = [stack for p in (configured.projects if configured else [])
+                  if p in repo.projects for stack in repo.projects[p].stacks]
+        missing = set(toolchain_gaps(node_row.get("tools") or {}, required, repo.versions, stacks,
+                                     require_pins=bool(stacks)))
         selected: list[str]
         if body.action == "repair":
             if body.component:
@@ -1088,7 +1093,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if ctx.leases.cooling(account_id):
             return []
+        node_row = ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {"tools": {}}
         projects = [p for p in (repo.nodes[node].projects if node in repo.nodes else []) if p in repo.projects]
+        # A project with a declared stack is offered only after this node reports every pinned tool healthy.
+        # Filtering here keeps another project on the same node available while a stack install is pending.
+        projects = [p for p in projects if not repo.projects[p].stacks or not toolchain_gaps(
+            node_row.get("tools") or {}, repo.projects[p].tools, repo.versions, repo.projects[p].stacks,
+            require_pins=True)]
         roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
         out: list[dict] = []

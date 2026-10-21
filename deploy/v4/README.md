@@ -23,6 +23,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
+- [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
 
 ## Tools on a node
 
@@ -47,6 +48,8 @@ A project's `stack` in `aiflow-control/projects/<KEY>.yaml` selects the extra to
 |---|---|
 | `php-8.3` | `php`, `composer`, `wp` |
 | `python-3.12` | `python3`, `uv` |
+| `node-24` | `node` |
+| `playwright` | `node`, `playwright`, Chromium browser |
 
 Every node reports the node-wide tools above plus these stack tools, with each tool's version or `missing`,
 in its heartbeat. The Command Center node drawer shows a missing required tool in red. While a tool is

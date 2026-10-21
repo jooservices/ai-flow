@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
-                         tools_for_stacks)
+                         tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
 
 __all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
            "tools_for_stack", "tools_for_stacks"]
@@ -36,7 +36,7 @@ class Project:
     repo: str
     base: str = "develop"
     hotfix_base: str = "master"
-    stack: str = ""
+    stack: str | list[str] = ""
     databases: list[str] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
     environments: dict[str, Any] = field(default_factory=dict)
@@ -56,8 +56,13 @@ class Project:
 
     @property
     def tools(self) -> list[str]:
-        """Node tools plus the extra tools this project's stack needs."""
-        return tools_for_stack(self.stack)
+        """The base worker tools plus the extra tools this project's stack needs."""
+        return tools_for_stacks_in_project(self.stack)
+
+    @property
+    def stacks(self) -> list[str]:
+        """Normalized stack names, preserving support for the original single-string form."""
+        return normalize_stacks(self.stack)
 
 
 @dataclass
@@ -129,7 +134,7 @@ class ControlRepo:
                 out.append(tool)
         for p in (n.projects if n else []):
             if p in self.projects:
-                for tool in tools_for_stack(self.projects[p].stack):
+                for tool in self.projects[p].tools:
                     if tool not in out:
                         out.append(tool)
         return out

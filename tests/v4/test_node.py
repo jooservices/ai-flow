@@ -67,6 +67,32 @@ def test_node_tool_versions_report_stack_tools(monkeypatch):
     assert versions["wp"] == "missing"
 
 
+def test_node_tool_versions_require_current_playwright_chromium_and_report_its_package_pin(monkeypatch, tmp_path):
+    browser = tmp_path / "chromium-1234" / "chrome-linux64" / "chrome"
+    browser.parent.mkdir(parents=True)
+    browser.write_text("browser")
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["playwright", "--version"]:
+            return SimpleNamespace(returncode=0, stdout="Version 1.56.2\n", stderr="")
+        if cmd == ["playwright", "install", "--dry-run", "chromium"]:
+            return SimpleNamespace(returncode=0, stdout=f"Install location: {browser.parent.parent}\n", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    assert agent.tool_versions(["playwright", "playwright-browser"]) == {
+        "playwright": "Version 1.56.2", "playwright-browser": "Playwright Chromium 1.56.2"}
+
+    def stale_browser(cmd, **kwargs):
+        if cmd == ["playwright", "--version"]:
+            return SimpleNamespace(returncode=0, stdout="Version 1.56.2\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"Install location: {tmp_path / 'chromium-stale'}\n", stderr="")
+
+    monkeypatch.setattr(agent.subprocess, "run", stale_browser)
+    assert agent.tool_versions(["playwright", "playwright-browser"]) == {
+        "playwright": "Version 1.56.2", "playwright-browser": "missing"}
+
+
 def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypatch):
     heartbeats = []
     stop = threading.Event()

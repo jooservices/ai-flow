@@ -33,8 +33,23 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "opencode": ["opencode", "--version"], "docker": ["docker", "--version"], "git": ["git", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],
-         "python3": ["python3", "--version"]}
+         "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
+         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
+
+
+def _playwright_browser_version(dry_run: str, playwright_version: str) -> str:
+    """Report the browser only when this Playwright release's expected Chromium build is installed."""
+    package = re.search(r"\d+(?:\.\d+){1,2}", playwright_version)
+    location = re.search(r"^\s*Install location:\s*(.+?)\s*$", dry_run, re.MULTILINE | re.IGNORECASE)
+    if not package or not location:
+        return "missing"
+    root = Path(location.group(1))
+    binaries = (root / "chrome-linux" / "chrome", root / "chrome-linux64" / "chrome",
+                root / "chrome-headless-shell-linux64" / "chrome-headless-shell")
+    if not any(path.is_file() for path in binaries):
+        return "missing"
+    return f"Playwright Chromium {package.group(0)}"
 
 
 def tool_versions(names: list[str] | None = None) -> dict[str, str]:
@@ -49,7 +64,12 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             output = (p.stdout or p.stderr).strip()
             version = output.splitlines()[0][:80] if output else ""
-            out[name] = version if p.returncode == 0 and version else "missing"
+            if name == "playwright-browser":
+                # A dry run returns the expected directory for this package release; this rejects stale browsers.
+                out[name] = (_playwright_browser_version(output, out.get("playwright", ""))
+                             if p.returncode == 0 else "missing")
+            else:
+                out[name] = version if p.returncode == 0 and version else "missing"
         except subprocess.TimeoutExpired:  # a busy node answers slowly; that says nothing about the tool
             out[name] = "timeout"
         except OSError:
@@ -410,6 +430,10 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     tools, tools_at, prev = tool_versions(), time.time(), None
     pending_network_events: list[dict] = []
     operation_thread: threading.Thread | None = None
+    toolchain_thread: threading.Thread | None = None
+    toolchain_signature = ""
+    toolchain_result: dict[str, object] = {}
+    toolchain_lock = threading.Lock()
     try:
         while not stop.is_set():
             try:
@@ -435,6 +459,33 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            stack_request = {"release": desired.get("release", ""),
+                             "project_stacks": desired.get("project_stacks", {}),
+                             "versions": desired.get("versions", {})}
+            signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
+            if signature != toolchain_signature and (toolchain_thread is None or not toolchain_thread.is_alive()):
+                from .operations import prepare_project_toolchains
+                with toolchain_lock:
+                    toolchain_result.clear()
+
+                def prepare(request=stack_request):
+                    try:
+                        result = prepare_project_toolchains(request["project_stacks"], request["versions"])
+                        with toolchain_lock:
+                            toolchain_result.clear()
+                            toolchain_result.update(result)
+                    except Exception as exc:  # noqa: BLE001 - failed preflight is reported as a project warning
+                        log.warning("project toolchain preparation failed: %s", type(exc).__name__)
+
+                toolchain_signature = signature
+                toolchain_thread = threading.Thread(target=prepare, name=f"aiflow4-toolchain-{name}", daemon=True)
+                toolchain_thread.start()
+            if toolchain_thread is not None and not toolchain_thread.is_alive():
+                with toolchain_lock:
+                    prepared_tools = toolchain_result.get("tools")
+                if isinstance(prepared_tools, dict):
+                    tools.update({str(k): str(v) for k, v in prepared_tools.items()})
+                    tools_at = time.time()
             if pending_network_events:
                 try:
                     api.call("POST", "/v1/events", {"events": list(pending_network_events)})

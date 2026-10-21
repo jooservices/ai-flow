@@ -40,7 +40,9 @@ def test_database_url():
     name = f"aiflow4_t_{uuid.uuid4().hex[:12]}"
     try:
         admin = psycopg.connect(DATABASE_URL, autocommit=True)
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
+        admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))
+                      .format(sql.Identifier(name), *([sql.Identifier(template)] if template else [])))
     except psycopg.Error:
         yield DATABASE_URL
         return

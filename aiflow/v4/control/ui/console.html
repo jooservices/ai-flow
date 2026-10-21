@@ -412,6 +412,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -442,6 +443,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
   </section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -508,6 +510,7 @@ var S = {
   consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
+  integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
@@ -520,6 +523,7 @@ var S = {
 };
 function viewOf(path) {
   if (path.indexOf('/projects') === 0) return 'projects';
+  if (path.indexOf('/integrations') === 0) return 'integrations';
   if (path.indexOf('/sa') === 0) return 'sa';
   if (path.indexOf('/delivery') === 0) return 'delivery';
   if (path.indexOf('/lead') === 0) return 'lead';
@@ -623,6 +627,7 @@ function pollConsoleSession() {
     S.consoleUser = d.authenticated ? d : null;
     render();
     if (S.drawer && S.drawer.kind === 'node' && consoleReader()) loadNodeOperations(S.drawer.id);
+    if (S.view === 'integrations' && consoleOwner() && !S.integrations.data && !S.integrations.busy) loadIntegrations();
   }).catch(function () { S.consoleUser = null; render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
 }
@@ -642,7 +647,8 @@ function loadProjectList() {
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
 }
-function loadProjectCatalog() {
+function loadProjectCatalog(refresh) {
+  if (refresh) S.projectAdmin.catalog = null;
   if (S.projectAdmin.catalog || S.projectAdmin.busy) return;
   S.projectAdmin.busy = true; S.projectAdmin.error = ''; renderProjects();
   fetch('/v1/projects/catalog', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
@@ -654,6 +660,105 @@ function loadProjectCatalog() {
       S.projectAdmin.error = '';
     }).catch(function (e) { S.projectAdmin.error = String(e.message || e); })
     .then(function () { S.projectAdmin.busy = false; renderProjects(); });
+}
+function githubResponseError(response) {
+  return response.json().then(function (data) {
+    if (response.ok) return data;
+    var detail = data.detail || ('HTTP ' + response.status);
+    return Promise.reject(new Error(typeof detail === 'string' ? detail : 'GitHub connection could not be completed'));
+  });
+}
+function loadIntegrations() {
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  fetch('/v1/integrations/github', { cache: 'no-store' }).then(function (r) { return githubResponseError(r); })
+    .then(function (d) { S.integrations.data = d; S.integrations.error = ''; })
+    .catch(function (e) { S.integrations.error = String(e.message || e); })
+    .then(function () { S.integrations.busy = false; renderIntegrations(); });
+}
+function loadImportedInstallations() {
+  var pending = S.integrations.pending; if (!pending) return;
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  fetch('/v1/integrations/github/imports/' + encodeURIComponent(pending.pending_id) + '/installations', { cache: 'no-store' })
+    .then(function (r) { return githubResponseError(r); })
+    .then(function (d) {
+      S.integrations.pending.app = d.app; S.integrations.pending.install_url = d.install_url;
+      S.integrations.installations = d.installations || [];
+      if (!S.integrations.installations.some(function (i) { return String(i.id) === String(S.integrations.selected); })) {
+        S.integrations.selected = S.integrations.installations.length ? String(S.integrations.installations[0].id) : '';
+      }
+    }).catch(function (e) { S.integrations.error = String(e.message || e); })
+    .then(function () { S.integrations.busy = false; renderIntegrations(); });
+}
+function importGitHubApp() {
+  var idInput = $('[data-github-app-id]'), keyInput = $('[data-github-key-file]');
+  var keyFile = keyInput && keyInput.files && keyInput.files[0], appId = Number(idInput && idInput.value);
+  if (!appId || !keyFile) { S.integrations.error = 'Enter the App ID and select its private key file.'; renderIntegrations(); return; }
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  keyFile.text().then(function (privateKey) {
+    return fetch('/v1/integrations/github/imports', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: appId, private_key: privateKey }) });
+  }).then(function (r) { return githubResponseError(r); })
+    .then(function (d) {
+      S.integrations.pending = { pending_id: d.pending_id, app: d.app, install_url: d.install_url };
+      S.integrations.installations = []; S.integrations.selected = '';
+      if (keyInput) keyInput.value = '';
+      loadImportedInstallations();
+    }).catch(function (e) { S.integrations.error = String(e.message || e); if (keyInput) keyInput.value = ''; })
+    .then(function () { S.integrations.busy = false; renderIntegrations(); });
+}
+function connectImportedGitHubApp() {
+  var pending = S.integrations.pending;
+  if (!pending || !S.integrations.selected) return;
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  fetch('/v1/integrations/github/imports/' + encodeURIComponent(pending.pending_id) + '/connect', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ installation_id: Number(S.integrations.selected) })
+  }).then(function (r) { return githubResponseError(r); })
+    .then(function () { S.integrations.pending = null; S.integrations.notice = 'GitHub is connected.'; loadIntegrations(); })
+    .catch(function (e) { S.integrations.error = String(e.message || e); })
+    .then(function () { S.integrations.busy = false; renderIntegrations(); });
+}
+function renderIntegrations() {
+  var root = $('#view-integrations'); if (!root) return;
+  var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
+  h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
+  if (consoleOwner()) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
+  h += '</div>';
+  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can manage integrations.</div>';
+  else {
+    if (state.notice) h += '<div class="good" role="status">' + esc(state.notice) + '</div>';
+    if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
+    if (state.busy) h += '<div class="muted">Loading GitHub connection…</div>';
+    if (data.connected) {
+      h += '<div class="project-checks"><strong>GitHub App connected</strong>';
+      h += '<div>' + esc(data.app && data.app.name || 'GitHub App') + ' · ' + esc(data.account && data.account.login || '') + '</div>';
+      h += '<div class="muted">Installation ' + esc(data.installation_id || '—') + ' · ' + esc(data.repository_count || 0) + ' repositories available</div></div>';
+      h += '<div class="project-actions"><a class="btn primary" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repositories on GitHub</a>';
+      h += '<button class="btn" data-act="github-refresh">Refresh connection</button></div>';
+    } else if (!state.pending) {
+      h += '<h3>Create a GitHub App</h3><p class="muted">GitHub will create an App in the organization you choose, then let you select the installation and repositories.</p>';
+      h += '<label>GitHub organization<input data-github-org value="" placeholder="organization-name" autocomplete="off"></label>';
+      h += '<div class="project-actions"><button class="btn primary" data-act="github-manifest"' + (state.busy ? ' disabled' : '') + '>Connect GitHub</button></div>';
+      h += '<details><summary>Use an existing GitHub App</summary><p class="muted">Choose its PEM private key file. The file content is sent directly to the control plane secret store and is not displayed here.</p>';
+      h += '<label>GitHub App ID<input data-github-app-id inputmode="numeric" autocomplete="off"></label>';
+      h += '<label>Private key file<input type="file" accept=".pem,.key,application/x-pem-file" data-github-key-file></label>';
+      h += '<div class="project-actions"><button class="btn primary" data-act="github-import"' + (state.busy ? ' disabled' : '') + '>Verify existing App</button></div></details>';
+    } else {
+      var pending = state.pending;
+      h += '<h3>Choose the App installation</h3><p class="muted">' + esc(pending.app && pending.app.name || 'GitHub App') + ' has been verified. Install it on GitHub and select the repositories AI Flow can access, then refresh this list.</p>';
+      h += '<div class="project-actions"><a class="btn" href="/v1/integrations/github/imports/' + encodeURIComponent(pending.pending_id) + '/install" target="_blank" rel="noopener">Install or configure on GitHub</a>';
+      h += '<button class="btn" data-act="github-import-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh installations</button></div>';
+      if (state.installations.length) {
+        h += '<label>Account or organization<select data-github-installation>' + state.installations.map(function (item) {
+          var selected = String(item.id) === String(state.selected) ? ' selected' : '';
+          return '<option value="' + esc(item.id) + '"' + selected + '>' + esc(item.login) + ' (' + esc(item.type || 'account') + ') · ' + esc(item.repository_selection) + '</option>';
+        }).join('') + '</select></label>';
+        h += '<div class="project-actions"><button class="btn primary" data-act="github-import-connect"' + (state.busy ? ' disabled' : '') + '>Connect selected installation</button></div>';
+      } else h += '<div class="muted">No installation found yet. Install the App on GitHub, choose repositories, return here and refresh.</div>';
+    }
+    h += '<p class="small">Private keys and short lived access tokens are never shown in this page. GitHub connection changes are audited.</p>';
+  }
+  h += '</section>'; root.innerHTML = h;
 }
 function projectRequestBody() {
   var f = S.projectAdmin.form;
@@ -2111,6 +2216,8 @@ function renderProjects() {
       h += '<label>Connected Jira site<select data-project-field="site">' + catalog.jira_sites.map(function (site) { return '<option value="' + esc(site) + '"' + (form.site === site ? ' selected' : '') + '>' + esc(site) + '</option>'; }).join('') + '</select></label>';
       h += '<label>Jira project key or URL<input data-project-field="project" list="jira-project-options" value="' + esc(form.project) + '" placeholder="ABC or Jira project URL"><datalist id="jira-project-options">' + jiraProjects.map(function (p) { return '<option value="' + esc(p.key) + '" label="' + esc(p.name) + '"></option>'; }).join('') + '</datalist></label>';
       h += '<label>GitHub repository<select data-project-field="repo">' + repos.map(function (r) { return '<option value="' + esc(r.full_name) + '"' + (form.repo === r.full_name ? ' selected' : '') + '>' + esc(r.full_name) + '</option>'; }).join('') + '</select></label>';
+      h += '<div class="wide project-actions"><button class="btn sm" data-act="project-catalog-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh repositories</button>';
+      h += '<a class="btn sm" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repository on GitHub</a></div>';
       h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
       h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
       h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
@@ -2148,6 +2255,7 @@ function render() {
   else if (S.view === 'stakeholder') renderStakeholder();
   else if (S.view === 'knowledge') renderKnowledge();
   else if (S.view === 'projects') renderProjects();
+  else if (S.view === 'integrations') renderIntegrations();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2167,7 +2275,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects', 'integrations'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -2179,6 +2287,7 @@ function setView(v) {
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'projects') loadProjectList();
+  if (v === 'integrations') loadIntegrations();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -2190,8 +2299,18 @@ document.addEventListener('click', function (e) {
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'project-add-open') {
-    S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog();
+    S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }
+  else if (act === 'project-catalog-refresh') loadProjectCatalog(true);
+  else if (act === 'github-refresh') loadIntegrations();
+  else if (act === 'github-manifest') {
+    var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
+    if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); }
+    else window.open('/v1/integrations/github/manifest/start?organization=' + encodeURIComponent(org), '_blank', 'noopener');
+  }
+  else if (act === 'github-import') importGitHubApp();
+  else if (act === 'github-import-refresh') loadImportedInstallations();
+  else if (act === 'github-import-connect') connectImportedGitHubApp();
   else if (act === 'project-add-cancel') { S.projectAdmin.showForm = false; S.projectAdmin.preflight = null; S.projectAdmin.error = ''; renderProjects(); }
   else if (act === 'project-preflight') runProjectPreflight();
   else if (act === 'project-save') saveProject();
@@ -2288,6 +2407,7 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && e.target.matches('[data-github-installation]')) S.integrations.selected = e.target.value;
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
     S.projectAdmin.form[field] = e.target.value;
@@ -2347,6 +2467,12 @@ showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);
 if (S.view === 'projects') loadProjectList();
+if (S.view === 'integrations') {
+  var githubResult = new URLSearchParams(location.search).get('github');
+  if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';
+  if (githubResult === 'error') S.integrations.error = 'GitHub could not complete the connection. Return to Integrations and try again.';
+  loadIntegrations();
+}
 poll(); pollServices(); pollAnalytics(); pollConsoleSession(); pollReviews();
 setInterval(tick, 1000);
 })();

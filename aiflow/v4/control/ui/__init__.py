@@ -34,6 +34,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/stakeholder", include_in_schema=False)
     @app.get("/knowledge", include_in_schema=False)
     @app.get("/projects", include_in_schema=False)
+    @app.get("/integrations", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

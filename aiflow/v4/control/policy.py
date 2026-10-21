@@ -16,6 +16,15 @@ READ_ONLY = ("ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "ec
              "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "which", "env", "date",
              "sort", "uniq", "cut", "jq", "diff", "true")
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+# Read-only runs (intake) may run only these commands, whatever the project's allowlist says; arguments that
+# make one of them write or run another program are refused.
+INSPECT_ONLY = ("ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "stat", "file", "tree", "cut",
+                "jq", "diff", "true", "date", "which", "sort", "git status", "git diff", "git log", "git show",
+                "git rev-parse")
+WRITING_ARGS = {"find": ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"),
+                "sort": ("-o", "--output"), "git diff": ("--output",), "git log": ("--output",),
+                "git show": ("--output",), "rg": ("--pre",), "tree": ("-o",)}
+SHELL_TRICKS = (">", "`", "$(", "<(")
 
 
 @dataclass
@@ -100,3 +109,29 @@ def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktr
     if tool in ("WebFetch", "WebSearch"):
         return Decision("allow", "documentation lookup")
     return Decision("deny", f"tool {tool} is not used by AI Flow runs")
+
+
+def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
+                     why: str) -> Decision:
+    """The policy of a run that only reads: no file tools that write, and only INSPECT_ONLY shell commands.
+
+    The project's command allowlist is ignored (it holds installs and builds that change the worktree); its deny
+    rules and deny_read globs still apply through decide().
+    """
+    if tool in WRITE_TOOLS:
+        return Decision("deny", why)
+    if tool == "Bash":
+        command = str(tool_input.get("command", "")).strip()
+        trick = next((t for t in SHELL_TRICKS if t in command), None)
+        if trick:
+            return Decision("deny", f"{why} (redirects and substitutions are not allowed: '{trick}')")
+        for seg in _segments(command):
+            ro = next((r for r in INSPECT_ONLY if seg == r or seg.startswith(r + " ")), None)
+            if not ro:
+                return Decision("deny", f"{why} (not a read-only command: {seg[:120]})")
+            bad = WRITING_ARGS.get(ro, ())
+            if any(a == b or a.startswith(b + "=") or (b.startswith("-") and len(b) == 2 and a.startswith(b))
+                   for a in seg.split()[1:] for b in bad):
+                return Decision("deny", f"{why} (this use of {ro} writes or runs a program: {seg[:120]})")
+        policy = {**policy, "commands": {**(policy.get("commands") or {}), "allow": []}}
+    return decide(policy, tool, tool_input, worktree)

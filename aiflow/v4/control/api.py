@@ -27,7 +27,7 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp
 from .jira import Jira
-from .policy import Decision, decide
+from .policy import Decision, decide, decide_read_only
 from .report import ReportNotFound, build_report, render_markdown
 
 log = logging.getLogger("aiflow4.api")
@@ -38,7 +38,7 @@ BACKOFF_SQL = """
 WITH last AS (
   SELECT ticket_key, outcome, ended_at,
          row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
-  FROM runs WHERE step = 'dev' AND status <> 'running' AND started_at > now() - interval '1 day'
+  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
@@ -346,9 +346,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
         if "verify" in roles:
+            verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if t["key"] in held:
+                if t["key"] in held or t["key"] in verify_cooling:
                     continue
                 dev = last_dev(t["key"])
                 if not dev or dev["outcome"] != "done" or not dev["pr_url"]:
@@ -370,9 +371,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "intake"})
+        prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
+        out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
-            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
+            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
             dev_rows = []
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
@@ -384,8 +387,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in labels:
                     continue
                 dev_rows.append({**t, "step": "dev"})
-            dev_rows.sort(key=lambda t: ("rework" not in t["labels"], PRIORITY.get(t["priority"], 2),
-                                         t["jira_created"] or utcnow()))
+            dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
+                                         PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
         return out
 
@@ -639,8 +642,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
         if run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             d = Decision("deny", "a verify run reviews and tests; it does not edit code")
-        elif run["step"] == "intake" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-            d = Decision("deny", "an intake run rewrites the ticket text; it does not edit code")
+        elif run["step"] == "intake":
+            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
+                                 str(payload.get("cwd") or ""), "an intake run rewrites the ticket text; it does not change files")
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""))

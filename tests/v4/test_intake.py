@@ -106,9 +106,29 @@ def test_description_endpoint_is_fenced_and_for_intake_runs_only(iclient, ctx):
 def test_intake_run_may_not_edit_files(iclient, ctx):
     add_ticket(ctx.db, "TESTWP-26", status="Intake", labels=())
     r = claim(iclient, "TESTWP-26")
-    hook = {"tool_name": "Write", "tool_input": {"file_path": "/srv/aiflow/work/x/a.txt"}, "cwd": "/srv/aiflow/work/x"}
-    out = iclient.post("/v1/policy/decide", json=hook, headers={"Authorization": f"Bearer {r['run_token']}"}).json()
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def decision(tool, **tool_input):
+        hook = {"tool_name": tool, "tool_input": tool_input, "cwd": "/srv/aiflow/work/x"}
+        out = iclient.post("/v1/policy/decide", json=hook, headers={"Authorization": f"Bearer {r['run_token']}"})
+        return out.json()["hookSpecificOutput"]["permissionDecision"]
+
+    assert decision("Write", file_path="/srv/aiflow/work/x/a.txt") == "deny"
+    assert decision("Edit", file_path="/srv/aiflow/work/x/a.txt") == "deny"
+    # the project's allowlist holds installs and builds; an intake run may not use them
+    for command in ("composer install", "npm install", "git checkout -b x", "echo hi > a.txt", "cat a | tee b",
+                    "find . -name '*.php' -delete", "find . -exec rm {} ;", "sort -o out.txt in.txt",
+                    "git diff --output=patch.txt", "ls $(rm -rf .)", "env rm a.txt", "rm a.txt"):
+        assert decision("Bash", command=command) == "deny", command
+    for command in ("ls -la", "cat docs/SPEC.md", "grep -rn 'Business requirement' docs | head -5",
+                    "git log --oneline -5", "find . -name '*.php'"):
+        assert decision("Bash", command=command) == "allow", command
+    assert decision("Read", file_path="/srv/aiflow/work/x/docs/SPEC.md") == "allow"
+    # a dev run keeps the project's command allowlist
+    add_ticket(ctx.db, "TESTWP-30")
+    d = claim(iclient, "TESTWP-30", account="claude-01", step="dev")
+    hook = {"tool_name": "Bash", "tool_input": {"command": "composer install"}, "cwd": "/srv/aiflow/work/x"}
+    out = iclient.post("/v1/policy/decide", json=hook, headers={"Authorization": f"Bearer {d['run_token']}"}).json()
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 # --- AC2/AC3: the worker ------------------------------------------------------------------------------------
@@ -153,6 +173,7 @@ class FakeAdapter:
 
     def run(self, spec, on_progress=None, stop=None):
         self.prompts.append(spec.prompt)
+        self.extra_env = spec.extra_env
         return RunResult(exit_code=0, final_text=self.answer, tokens_in=10, tokens_out=20)
 
 
@@ -179,6 +200,7 @@ def test_rewrite_keeps_the_original_and_queues_the_ticket(iclient, ctx, tmp_path
     assert res["outcome"] == "refined"
     prompt = adapter.prompts[0]
     assert "make a portfolio page pls" in prompt and "Every AC needs a PHPUnit test." in prompt  # AC2
+    assert adapter.extra_env == {}  # the project's node-local secrets never reach an intake run
     comments = [t for k, t in ctx.jira.comments if k == "TESTWP-27"]
     assert len(comments) == 1 and "Original description:" in comments[0] and "make a portfolio page pls" in comments[0]
     assert ctx.jira.descriptions == [("TESTWP-27", REWRITE)]
@@ -210,8 +232,31 @@ def test_unusable_answer_leaves_the_ticket_in_intake(iclient, ctx, tmp_path, mon
     assert "TESTWP-29" not in ctx.jira.status_of and not ctx.jira.comments
 
 
+def test_malformed_rewrite_is_rejected(iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-31", status="Intake", labels=())
+    answer = "DESCRIPTION:\n<<<\nMake a portfolio page.\nAcceptance criteria:\n- it works\n>>>\nINTAKE: REWRITE\n"
+    res, _ = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-31", answer)
+    assert res["outcome"] == "failed" and "does not follow the template" in res["summary"]
+    assert "Business requirement:" in res["summary"] and "AC1" in res["summary"]
+    assert not getattr(ctx.jira, "descriptions", []) and not ctx.jira.comments
+    assert "TESTWP-31" not in ctx.jira.status_of and ("add", "TESTWP-31", "aiflow-ready") not in ctx.jira.labels
+
+
 def test_parse():
     assert intake.parse(f"DESCRIPTION:\n<<<\n{REWRITE}\n>>>\nINTAKE: REWRITE") == ("rewrite", REWRITE)
     assert intake.parse("QUESTIONS:\n- why?\nINTAKE: QUESTIONS") == ("questions", "- why?")
     assert intake.parse("DESCRIPTION:\n<<<\n\n>>>\nINTAKE: REWRITE") == ("", "")
     assert intake.parse("QUESTIONS:\n- why?\nINTAKE: REWRITE") == ("", "")
+
+
+@pytest.mark.parametrize("broken, lacks", [
+    (REWRITE.replace("Technical notes: WordPress theme template.\n", ""), "Technical notes:"),
+    (REWRITE.replace("Business requirement:", "Goal:"), "Business requirement:"),
+    (REWRITE.replace("- AC1: /portfolio lists the projects", "- /portfolio lists the projects"), "AC1"),
+    (REWRITE.replace("Definition of done:\n- tests cover AC1", ""), "Definition of done:"),
+    ("Definition of done:\n- x\n" + REWRITE.replace("Definition of done:\n- tests cover AC1", ""), "Definition of done:"),
+    ("just some text", "Acceptance criteria:"),
+])
+def test_parse_rejects_rewrites_that_miss_the_template(broken, lacks):
+    kind, why = intake.parse(f"DESCRIPTION:\n<<<\n{broken}\n>>>\nINTAKE: REWRITE")
+    assert kind == "invalid" and lacks in why

@@ -20,22 +20,45 @@ from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node
 from .gitops import Git
-from .notes import note, project_env
+from .notes import note
 
 log = logging.getLogger("aiflow4.intake")
 KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS)\b", re.M)
 DESCRIPTION = re.compile(r"^DESCRIPTION:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
 QUESTIONS = re.compile(r"^QUESTIONS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 SPEC_CHARS = 20_000
+# The template a rewrite must follow: these headings at the start of a line, in this order, and AC1 onwards.
+SECTIONS = ("Business requirement:", "Acceptance criteria:", "Technical notes:", "Definition of done:")
+CRITERIA = re.compile(r"^[ \t]*Acceptance criteria:(.*?)(?=^[ \t]*Technical notes:|\Z)", re.M | re.S | re.I)
+AC1 = re.compile(r"^[ \t]*(?:[-*][ \t]*)?AC1\s*[:.)-]", re.M)
+
+
+def template_gaps(description: str) -> list[str]:
+    """What a rewrite lacks of the template (empty when it follows it)."""
+    gaps, pos = [], 0
+    for heading in SECTIONS:
+        m = re.search(r"^[ \t]*" + re.escape(heading), description[pos:], re.M | re.I)
+        if not m:
+            gaps.append(f"'{heading}' (missing or out of order)")
+            continue
+        pos += m.end()
+    criteria = CRITERIA.search(description)
+    if not criteria or not AC1.search(criteria.group(1)):
+        gaps.append("acceptance criteria starting at AC1")
+    return gaps
 
 
 def parse(text: str) -> tuple[str, str]:
-    """AI answer -> ("rewrite", description) | ("questions", bullet list) | ("", "") when neither is usable."""
+    """AI answer -> ("rewrite", description) | ("questions", bullet list) | ("invalid", what the rewrite lacks)
+    | ("", "") when neither is usable."""
     text = text or ""
     kinds = KIND.findall(text)
     kind = kinds[-1] if kinds else ""
     d, q = DESCRIPTION.search(text), QUESTIONS.search(text)
     if kind == "REWRITE" and d and d.group(1).strip():
+        gaps = template_gaps(d.group(1).strip())
+        if gaps:
+            return "invalid", "the rewrite does not follow the template; it lacks " + ", ".join(gaps)
         return "rewrite", d.group(1).strip()
     if kind == "QUESTIONS" and q:
         return "questions", q.group(1).strip()
@@ -80,8 +103,7 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         spec = RunSpec(prompt=build_prompt(c, read_spec(wt)), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("target", 30)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
-                       extra_env=project_env(project["key"]))
+                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)
@@ -105,6 +127,9 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             return refined(c, jira, result, text, t0, api_node(api))
         if kind == "questions":
             return questions(c, jira, result, text, t0, api_node(api))
+        if kind == "invalid":
+            result["summary"] = text[:1000]
+            return result
         result["summary"] = (f"no usable answer ({res.error_kind or 'missing INTAKE line'}): "
                              f"{(res.error_message or (res.final_text or '').strip())[-400:]}")[:1000]
         return result

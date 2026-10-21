@@ -5,7 +5,8 @@ a reviewer AI can work on it without guessing. Rewrite the ticket into the templ
 intent: do not add scope, do not drop anything the author asked for, keep their names, numbers, links and
 examples. Do not change code or files; you only produce text.
 
-Template (plain text, one section per heading, in this order):
+Template (plain text, one section per heading, in this order; a rewrite without all four headings or without
+an AC1 line is rejected):
 Business requirement: <why the change is needed and for whom, in the author's words where possible>
 Acceptance criteria:
 - AC1: <one observable, testable behaviour>

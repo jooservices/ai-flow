@@ -19,6 +19,17 @@ them with the vendor's installer, then sign each account in with that account's 
 Supporting tools reported by the node agent are `git`, `gh`, `node`, `uv` and `docker`; install the ones the
 projects and release commands on the node need.
 
+### Claude policy relay
+
+The node agent listens on `127.0.0.1:8471` for Claude's policy hook and forwards decisions to the control API.
+It retries connection errors and 5xx responses for up to 60 seconds, and writes each decision to the node
+agent journal (`journalctl -u aiflow4-node-agent`). The node heartbeat includes `metrics.policy_relay.enabled`
+and `metrics.policy_relay.healthy`.
+
+The relay is enabled by default. Set `AIFLOW4_POLICY_RELAY=0` in `/etc/aiflow/node.env` to have Claude call
+the control URL directly; the node agent and worker units both read that file. Set it to `1` to enable the
+relay explicitly.
+
 ### Codex code-mode host
 
 Codex 0.163 and later cannot run shell commands without the `codex-code-mode-host` binary. The node agent
@@ -35,7 +46,10 @@ Tickets written by people go to the **Intake** status first. Accounts with the `
 `aiflow-control/accounts.yaml` see them as step `intake` (after verify work, before development); `aiflow-hold`
 and `explicit_only` work as for the other steps. The worker checks out the project's base branch and runs
 `prompts/v4/intake.md` with the ticket text and the repository's `docs/SPEC.md` (when present). An intake run
-may read files but never edit them. The AI answers with one of two results:
+may read files but never change them: the policy hook denies the editor tools and allows only inspection
+commands in the shell (`ls`, `cat`, `grep`, `find` without `-exec`/`-delete`, `git log/show/diff/status`, ...;
+no redirects or command substitution), ignoring the project's command allowlist. The run gets no project
+environment (`/etc/aiflow/projects/<KEY>.env` is not passed to it). The AI answers with one of two results:
 
 - **Rewrite**: the original description is kept as a Jira comment ("original description kept"), the
   description is replaced with the template (business requirement, acceptance criteria AC1.., technical notes,
@@ -46,7 +60,9 @@ may read files but never edit them. The AI answers with one of two results:
 
 `POST /v1/jira/{key}/description` takes `{"run_id", "fence", "body"}` like the other Jira writes: a stale fence
 gets 409 (audited as refused), a run of another ticket or of a step other than `intake` gets 403 and an empty
-body gets 400. An intake run that ends without a usable answer (outcome `failed`) leaves the ticket in Intake;
+body gets 400. A rewrite that lacks one of the four template headings (in order) or an `AC1` line under the
+acceptance criteria is not saved. An intake run that ends without a usable answer (outcome `failed`, the summary
+names what was missing) leaves the ticket in Intake;
 it is offered again 10 minutes after the failure.
 
 ## Console (Command Center and Delivery)

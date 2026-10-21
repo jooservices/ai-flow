@@ -217,6 +217,10 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .att-item:hover{border-color:var(--accent)}
 .att-item .t{font-weight:500}
 .att-item .d{color:var(--muted); font-size:12.5px}
+.crform{display:grid; gap:12px}
+.crform .err{color:var(--crit); font-size:13px}
+.cr-item{border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:var(--surface-2); display:flex; flex-direction:column; gap:6px}
+.cr-item ul{margin:0; padding-left:18px; font-size:13px}
 .bd{display:flex; flex-direction:column; gap:8px}
 .bd-row{display:grid; grid-template-columns:96px minmax(0,1fr) 64px; gap:10px; align-items:center; font-size:12.5px}
 .bd-bar{display:flex; height:16px; border-radius:6px; overflow:hidden; background:var(--track)}
@@ -358,6 +362,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div class="tabs" role="tablist" aria-label="Views">
       <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Command Center</button>
       <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-view="delivery">Delivery</button>
+      <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -372,6 +377,12 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
   <section class="view" id="view-delivery" role="tabpanel" aria-labelledby="tab-delivery" hidden>
     <div class="dhead" id="dhead"></div>
     <div id="dbody" class="view"></div>
+  </section>
+  <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
+    <div class="dhead" id="bhead"></div>
+    <div id="bbody" class="view"></div>
+    <div id="bform"></div>
+    <div id="bcr"></div>
   </section>
 </main>
 <footer class="footer" id="footer">
@@ -435,10 +446,13 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  view: location.pathname.indexOf('/delivery') === 0 ? 'delivery' : 'cc',
+  view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
-  seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true
+  seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
+  biz: null, bizError: '', bizLoading: null,
+  cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' }
 };
+function viewOf(path) { return path.indexOf('/delivery') === 0 ? 'delivery' : path.indexOf('/business') === 0 ? 'business' : 'cc'; }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
@@ -515,6 +529,7 @@ function poll() {
     if (prefsChanged) savePrefs();
     notify(prevInc, prevRuns);
     render();
+    if (S.view === 'business' && !S.bizLoading) loadBiz();  // assessments arrive while the page is open
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })
     .then(function () { setTimeout(poll, POLL_MS); });
 }
@@ -790,6 +805,28 @@ function epicOf(t, byKey) {
   while (cur && cur.parent_key && guard++ < 4) { var p = byKey[cur.parent_key]; if (!p) return cur.parent_key; if (p.type === 'Epic') return p.key; cur = p; }
   return null;
 }
+/* Progress under each epic of a project's tickets; Delivery and Business show the same numbers from this one place. */
+function epicProgress(all) {
+  var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
+  var work = all.filter(function (t) { return t.type !== 'Epic'; });
+  return sortEpics(all.filter(function (t) { return t.type === 'Epic'; })).map(function (e) {
+    var kids = work.filter(function (t) { return epicOf(t, byKey) === e.key; });
+    var c = { done: 0, verify: 0, progress: 0, wait: 0, todo: 0 };
+    kids.forEach(function (t) { var s = t.status; c[s === 'Done' ? 'done' : (s === 'In Verify' || s === 'Human review') ? 'verify' : s === 'In Progress' ? 'progress' : s === 'Needs owner' ? 'wait' : 'todo']++; });
+    return { epic: e, items: kids.length, counts: c, pct: kids.length ? Math.round(100 * c.done / kids.length) : 0 };
+  });
+}
+function epicsPanel(all, act, id) {
+  var rows = epicProgress(all);
+  if (!rows.length) return '';
+  var h = '<section class="panel" id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">Epics</h2><span class="hint">Progress of the work under each epic</span><span class="spacer"></span><div class="legend"><span><i class="st-done"></i>Done</span><span><i class="st-verify"></i>In verify or review</span><span><i class="st-progress"></i>In progress</span><span><i class="st-wait"></i>Needs owner</span><span><i class="st-todo"></i>Not started</span></div></div><div class="epics">';
+  rows.forEach(function (r) {
+    var e = r.epic, c = r.counts;
+    var n = r.items || 1, seg = function (k) { return c[k] ? '<span class="st-' + k + '" style="width:' + (100 * c[k] / n).toFixed(2) + '%" title="' + c[k] + '"></span>' : ''; };
+    h += '<button class="epic" data-act="' + act + '" data-key="' + esc(e.key) + '"><span><div class="e-t"><span class="mono muted">' + esc(e.key) + '</span> ' + esc(e.summary) + '</div><div class="e-s">' + r.items + ' items · ' + c.done + ' done · ' + esc(e.status) + '</div></span><span class="ebar" role="img" aria-label="' + c.done + ' of ' + r.items + ' done">' + seg('done') + seg('verify') + seg('progress') + seg('wait') + seg('todo') + '</span><span class="mono" style="text-align:right">' + r.pct + '%</span></button>';
+  });
+  return h + '</div></section>';
+}
 function renderDBody() {
   var all = projTickets();
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
@@ -817,18 +854,7 @@ function renderDBody() {
   h += kpi('Median dev run', med == null ? '—' : mmss(med), 'target ' + wm.target + ' min · hard ' + wm.hard, med != null && med > wm.warn * 60 ? 'warn' : '', 'd-runs');
   h += '</section>';
 
-  var epics = sortEpics(all.filter(function (t) { return t.type === 'Epic'; }));
-  if (epics.length) {
-    h += '<section class="panel" id="d-epics" aria-labelledby="h-ep"><div class="panel-h"><h2 id="h-ep">Epics</h2><span class="hint">Progress of the work under each epic</span><span class="spacer"></span><div class="legend"><span><i class="st-done"></i>Done</span><span><i class="st-verify"></i>In verify or review</span><span><i class="st-progress"></i>In progress</span><span><i class="st-wait"></i>Needs owner</span><span><i class="st-todo"></i>Not started</span></div></div><div class="epics">';
-    epics.forEach(function (e) {
-      var kids = work.filter(function (t) { return epicOf(t, byKey) === e.key; });
-      var c = { done: 0, verify: 0, progress: 0, wait: 0, todo: 0 };
-      kids.forEach(function (t) { var s = t.status; c[s === 'Done' ? 'done' : (s === 'In Verify' || s === 'Human review') ? 'verify' : s === 'In Progress' ? 'progress' : s === 'Needs owner' ? 'wait' : 'todo']++; });
-      var n = kids.length || 1, seg = function (k) { return c[k] ? '<span class="st-' + k + '" style="width:' + (100 * c[k] / n).toFixed(2) + '%" title="' + c[k] + '"></span>' : ''; };
-      h += '<button class="epic" data-act="epic" data-key="' + esc(e.key) + '"><span><div class="e-t"><span class="mono muted">' + esc(e.key) + '</span> ' + esc(e.summary) + '</div><div class="e-s">' + kids.length + ' items · ' + c.done + ' done · ' + esc(e.status) + '</div></span><span class="ebar" role="img" aria-label="' + c.done + ' of ' + kids.length + ' done">' + seg('done') + seg('verify') + seg('progress') + seg('wait') + seg('todo') + '</span><span class="mono" style="text-align:right">' + (kids.length ? Math.round(100 * c.done / kids.length) : 0) + '%</span></button>';
-    });
-    h += '</div></section>';
-  }
+  h += epicsPanel(all, 'epic', 'd-epics');
 
   h += '<section class="panel" id="d-board" aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
   STATUS_COLS.forEach(function (c) {
@@ -859,6 +885,110 @@ function renderDBody() {
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   $('#dbody').innerHTML = h;
+}
+
+/* ---------- Business: progress by epic, tickets waiting on the owner, change requests ----------
+   Read-only on tickets: the only write is the change request form (a new Story in Backlog). The owner moves an
+   assessed change request to Intake in Jira; nothing here changes a ticket's status. */
+function jiraUrl(key) { return String((S.biz && S.biz.jira_site) || 'https://jooservices.atlassian.net').replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key); }
+function needsOwner(all) {
+  var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
+  return all.filter(function (t) { return t.status === 'Needs owner'; }).map(function (t) {
+    return { key: t.key, summary: t.summary, epic: t.type === 'Epic' ? t.key : epicOf(t, byKey), escalated: (t.labels || []).indexOf('owner-escalated') >= 0 };
+  });
+}
+function projTabs() {
+  var d = D(), h = '<div class="projtabs" role="group" aria-label="Project">';
+  d.projects.forEach(function (p) { h += '<button class="projtab" data-act="project" data-p="' + esc(p.key) + '" aria-pressed="' + (S.project === p.key) + '">' + esc(p.key) + '<span class="sub">' + esc(p.repo) + '</span></button>'; });
+  if (!d.projects.length) h += '<span class="muted">No project in aiflow-control/projects</span>';
+  return h + '</div>';
+}
+function renderBHead() { $('#bhead').innerHTML = projTabs(); }
+function renderBBody() {
+  var all = projTickets();
+  var h = epicsPanel(all, 'open-ticket', 'b-epics') || '<section class="panel" id="b-epics"><div class="panel-h"><h2>Epics</h2></div><div class="empty">Project này chưa có epic.</div></section>';
+  var wait = needsOwner(all);
+  h += '<section class="panel" id="b-answer" aria-labelledby="h-b-answer"><div class="panel-h"><h2 id="h-b-answer">Cần bạn trả lời</h2><span class="hint">Ticket ở Needs owner: câu hỏi của intake và việc triage chuyển lên owner. Trả lời trong Jira.</span></div><div class="att">';
+  if (!wait.length) h += '<div class="col-empty">Không có ticket nào chờ bạn trả lời</div>';
+  wait.forEach(function (w) {
+    h += '<div class="att-item" data-wait="' + esc(w.key) + '"><span class="flag" data-tone="crit">' + (w.escalated ? 'Triage escalate' : 'Câu hỏi') + '</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(w.key) + '</span> ' + esc(w.summary) + '</div><div class="d">Epic: ' + esc(w.epic || '—') + '</div></span><a class="btn sm" href="' + esc(jiraUrl(w.key)) + '" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a></div>';
+  });
+  $('#bbody').innerHTML = h + '</div></section>';
+}
+function crErrors(v) {
+  var out = [];
+  if (!String(v.title || '').trim()) out.push('Thiếu tiêu đề');
+  if (!String(v.description || '').trim()) out.push('Thiếu mô tả');
+  return out;
+}
+function renderBForm(force) {
+  var epics = sortEpics(projTickets().filter(function (t) { return t.type === 'Epic'; }));
+  if (S.cr.project !== S.project) { S.cr.project = S.project; S.cr.v = { title: '', description: '', epic: '' }; S.cr.errors = []; S.cr.created = null; }
+  if (S.cr.v.epic && !epics.some(function (e) { return e.key === S.cr.v.epic; })) S.cr.v.epic = '';
+  var sig = [S.project, epics.map(function (e) { return e.key; }).join(','), S.cr.sending, S.cr.errors.join(';'), S.cr.created ? S.cr.created.key : ''].join('|');
+  if (!force && sig === S.cr.sig) return;  // keep what the user is typing: redraw only when something else changed
+  S.cr.sig = sig;
+  var v = S.cr.v;
+  var h = '<section class="panel" id="b-cr-form" aria-labelledby="h-b-cr-form"><div class="panel-h"><h2 id="h-b-cr-form">Gửi change request</h2><span class="hint">Tạo một Story trong ' + esc(S.project || '') + ' (label change-request, trạng thái Backlog). AI đánh giá tác động; owner quyết định chuyển sang Intake.</span></div>';
+  h += '<form class="crform" id="cr-form" novalidate><label for="cr-title">Tiêu đề<input id="cr-title" type="text" required value="' + esc(v.title) + '"></label>';
+  h += '<label for="cr-desc">Mô tả<textarea id="cr-desc" rows="5" required>' + esc(v.description) + '</textarea></label>';
+  h += '<label for="cr-epic">Epic<select id="cr-epic"><option value="">Không gắn epic</option>';
+  epics.forEach(function (e) { h += '<option value="' + esc(e.key) + '"' + (v.epic === e.key ? ' selected' : '') + '>' + esc(e.key + ' ' + e.summary.slice(0, 60)) + '</option>'; });
+  h += '</select></label>';
+  if (S.cr.errors.length) h += '<div class="err" role="alert">' + S.cr.errors.map(esc).join('<br>') + '</div>';
+  if (S.cr.created) h += '<div role="status">Đã tạo <a class="mono" href="' + esc(S.cr.created.url) + '" target="_blank" rel="noopener">' + esc(S.cr.created.key) + ' ' + ICON.ext + '</a> ở Backlog; AI đang đánh giá tác động.</div>';
+  h += '<div><button class="btn primary" type="submit"' + (S.cr.sending ? ' disabled' : '') + '>' + (S.cr.sending ? 'Đang gửi…' : 'Gửi change request') + '</button></div></form></section>';
+  $('#bform').innerHTML = h;
+}
+function submitCR() {
+  var v = S.cr.v, project = S.project;
+  S.cr.errors = crErrors(v); S.cr.created = null;
+  if (S.cr.errors.length || S.cr.sending || !project) { renderBForm(); return false; }
+  S.cr.sending = true; renderBForm();
+  fetch('/v1/business/' + encodeURIComponent(project) + '/change-requests', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: v.title, description: v.description, epic: v.epic })
+  }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'Gửi không được (' + r.status + ')'); return d; });
+  }).then(function (d) {
+    S.cr.created = d; S.cr.v = { title: '', description: '', epic: v.epic }; loadBiz();
+  }).catch(function (e) { S.cr.errors = [String(e.message || e)]; })
+    .then(function () { S.cr.sending = false; renderBForm(true); });
+  return true;
+}
+function list(items) { return items && items.length ? '<ul>' + items.map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul>' : '<span class="muted">không có</span>'; }
+function crCard(cr) {
+  var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(cr.url || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
+  h += '<div class="small">Epic: ' + esc(cr.epic || '—') + ' · Trạng thái: ' + esc(cr.status) + '</div>';
+  var i = cr.impact;
+  if (!i) return h + '<div><span class="flag" data-tone="info">Đang đánh giá</span></div></div>';
+  h += '<div><span class="flag" data-tone="' + ({ S: 'ok', M: 'warn', L: 'crit' }[i.size] || 'muted') + '">Độ lớn ' + esc(i.size) + '</span></div>';
+  h += '<div class="small">Epic bị ảnh hưởng: ' + esc((i.epics || []).join(', ') || 'không có') + ' · Ticket bị ảnh hưởng: ' + esc((i.tickets || []).join(', ') || 'không có') + '</div>';
+  h += '<div><b>Rủi ro</b>' + list(i.risks) + '</div><div><b>Xung đột với việc đang làm</b>' + list(i.conflicts) + '</div>';
+  return h + '</div>';
+}
+function renderBCR() {
+  var b = S.biz && S.biz.project === S.project ? S.biz : null;
+  var h = '<section class="panel" id="b-crs" aria-labelledby="h-b-crs"><div class="panel-h"><h2 id="h-b-crs">Change request</h2><span class="hint">Ticket có label change-request và kết quả đánh giá tác động; chờ owner duyệt ở Backlog</span></div>';
+  if (S.bizError) h += '<div class="empty">Không tải được change request: ' + esc(S.bizError) + '</div>';
+  if (!b) h += '<div class="empty">Đang tải…</div>';
+  else if (!b.change_requests.length) h += '<div class="empty">Chưa có change request.</div>';
+  else b.change_requests.forEach(function (cr) { h += crCard(cr); });
+  $('#bcr').innerHTML = h + '</section>';
+}
+function loadBiz() {
+  var project = S.project; if (!project) return;
+  S.bizLoading = project;
+  fetch('/v1/business/' + encodeURIComponent(project) + '/change-requests', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) { S.biz = d; S.bizError = ''; })
+    .catch(function (e) { S.bizError = String(e.message || e); })
+    .then(function () { S.bizLoading = null; if (S.view === 'business' && S.project === project) renderBCR(); });
+}
+function renderBusiness() {
+  renderBHead(); renderBBody(); renderBForm(); renderBCR();
+  if ((!S.biz || S.biz.project !== S.project) && S.bizLoading !== S.project) loadBiz();
 }
 
 /* ---------- Analytics (/v1/analytics/daily, per UTC day, project and account) ---------- */
@@ -1133,7 +1263,7 @@ function renderFooter() {
 function render() {
   renderLive();
   renderFooter();
-  if (S.view === 'cc') renderCC(); else { renderDHead(); renderDBody(); }
+  if (S.view === 'cc') renderCC(); else if (S.view === 'business') renderBusiness(); else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
 }
@@ -1150,12 +1280,16 @@ function tick() {
   });
   renderLive();
 }
+function showView() {
+  $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
+  ['cc', 'delivery', 'business'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+}
 function setView(v) {
   if (S.view === v) return;
   S.view = v;
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
-  $('#view-cc').hidden = v !== 'cc'; $('#view-delivery').hidden = v !== 'delivery';
-  try { history.pushState(null, '', v === 'cc' ? '/cc' : '/delivery'); } catch (e) { /* file preview */ }
+  showView();
+  try { history.pushState(null, '', '/' + v); } catch (e) { /* file preview */ }
   render();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
@@ -1190,19 +1324,24 @@ document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && S.drawer) closeAll();
   if (e.key === 'Enter' && e.target.matches && e.target.matches('tr[data-act]')) e.target.click();
 });
+var CR_FIELDS = { 'cr-title': 'title', 'cr-desc': 'description', 'cr-epic': 'epic' };
 document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
+  if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
 });
 document.addEventListener('change', function (e) {
   if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
+  if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
 });
-window.addEventListener('popstate', function () { setView(location.pathname.indexOf('/delivery') === 0 ? 'delivery' : 'cc'); });
+document.addEventListener('submit', function (e) {
+  if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
+});
+window.addEventListener('popstate', function () { setView(viewOf(location.pathname)); });
 
 /* ---------- boot ---------- */
 try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }
 loadPrefs();
-$$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-$('#view-cc').hidden = S.view !== 'cc'; $('#view-delivery').hidden = S.view !== 'delivery';
+showView();
 render();
 poll(); pollServices(); pollAnalytics();
 setInterval(tick, 1000);

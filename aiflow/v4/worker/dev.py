@@ -52,6 +52,7 @@ class Claimed:
     triage_answer: str = ""
     triage_question: str = ""
     related: list[dict] = field(default_factory=list)
+    project_tickets: list[dict] = field(default_factory=list)
 
 
 class LeaseLost(Exception):

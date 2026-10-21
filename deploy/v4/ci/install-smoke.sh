@@ -156,9 +156,6 @@ for _ in $(seq 1 120); do
 done
 curl --silent --show-error --fail http://127.0.0.1:18080/healthz >/dev/null \
   || { echo "control API from the release artifact did not become healthy" >&2; exit 1; }
-# The API has applied the migrations; start the loops on the same schema.
-docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service
-
 docker exec "$CONTROL" bash -se <<'SEED_TICKET'
 set -euo pipefail
 /srv/aiflow/control/releases/"$(cat /srv/aiflow/control/releases/CURRENT)"/.venv/bin/python - <<'PY'
@@ -287,6 +284,10 @@ set_current() {
 
 wait_for_release smoke-node-a "$PREVIOUS_VERSION"
 wait_for_release smoke-node-b "$PREVIOUS_VERSION"
+# Start fleet rollout processing only after both joined nodes have reported the previous release.
+# This gives the rollout a real baseline to canary from and lets node B's failed candidate halt it.
+docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service
+
 docker exec "$NODE_A" bash -se <<'CLAIM_SMOKE'
 set -euo pipefail
 /tmp/aiflow4-bootstrap/.venv/bin/python - <<'PY'

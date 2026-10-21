@@ -76,7 +76,11 @@ def test_install_smoke_asserts_the_failure_report_halts_the_rollout_and_the_flee
     script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
     # control-loops drives canary, waves and halt; without it a tagged previous release would never be upgraded
     assert 'unit control-loops "control loops" "control-loops"' in script
-    assert "systemctl enable --now aiflow4-control-loops.service" in script
+    loops_start = script.index('docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service')
+    assert script.count('docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service') == 1
+    assert script.index('bootstrap_nodes "$NODE_B" smoke-node-b smoke-b') < loops_start
+    assert script.index('wait_for_release smoke-node-a "$PREVIOUS_VERSION"') < loops_start
+    assert script.index('wait_for_release smoke-node-b "$PREVIOUS_VERSION"') < loops_start
     assert "AIFLOW4_ROLLOUT_CANARY_NODE=smoke-node-a" in script
     assert '[[ $BASELINE -eq 1 ]] || publish "$PREVIOUS_VERSION"' in script
     assert 'set_current "$PREVIOUS_VERSION"' in script

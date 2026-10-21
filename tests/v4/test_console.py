@@ -98,6 +98,29 @@ console.log(knowledgeView.innerHTML);
     return result.stdout
 
 
+def render_projects(projects: list[dict], catalog: dict, preflight: dict | None = None) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Projects screen")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var projectsView = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
+S.projectAdmin.projects = {json.dumps(projects)};
+S.projectAdmin.catalog = {json.dumps(catalog)};
+S.projectAdmin.showForm = true;
+S.projectAdmin.preflight = {json.dumps(preflight)};
+S.consoleUser = {{authenticated: true, user: 'owner', role: 'owner'}};
+renderProjects();
+console.log(projectsView.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def html() -> str:
     return PAGE.read_text()
 
@@ -391,9 +414,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations']"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations"
+    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page
@@ -401,7 +424,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -677,3 +700,27 @@ console.log(JSON.stringify({project: S.project, typeFilter: S.typeFilter, epic: 
 """
     out = json.loads(run_script(driver, prelude))
     assert out == {"project": None, "typeFilter": "all", "epic": "all"}
+
+
+def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
+    rendered = render_projects(
+        [{"key": "NEWAPP", "repo": "jooservices/new-app", "status": "paused", "priority": 3,
+          "ticket_count": 12}],
+        {"jira_sites": ["https://jira.example"], "jira_projects": [{"key": "NEWAPP", "name": "New App"}],
+         "github_repos": [{"full_name": "jooservices/new-app"}], "stacks": ["python-3.12"]},
+        {"ok": False, "missing_statuses": ["Intake", "Needs owner"], "branch_exists": True,
+         "nodes": [{"name": "node1", "ready": False, "missing_tools": ["python3"]}]})
+    for text in ("Projects", "NEWAPP", "jooservices/new-app", "paused", "Priority", "Tickets", "Resume", "Remove",
+                 "Jira project key or URL", "Connected Jira site", "GitHub repository", "develop", "python-3.12",
+                 "Merge method", "Checks, one command per line", "Missing Jira workflow statuses:", "Intake",
+                 "Needs owner", "node1: missing python3", "Run preflight", "Save project"):
+        assert text in rendered
+    assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
+
+
+def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints():
+    page = html()
+    assert 'data-view="projects">Projects</button>' in page
+    assert 'id="view-projects"' in page and "/v1/projects/catalog" in page
+    assert "/v1/projects/preflight" in page and "method: 'DELETE'" in page
+    assert "parallel_limit" in page and "merge_method" in page

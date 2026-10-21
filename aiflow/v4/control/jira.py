@@ -124,6 +124,25 @@ class Jira:
     def status(self, key: str) -> str:
         return self.call("GET", f"/rest/api/3/issue/{key}?fields=status")["fields"]["status"]["name"]
 
+    def projects(self) -> list[dict[str, str]]:
+        """List projects visible to the connected Jira account, following Jira's pagination."""
+        out: list[dict[str, str]] = []
+        start = 0
+        while True:
+            data = self.call("GET", f"/rest/api/3/project/search?startAt={start}&maxResults=100")
+            values = data.get("values", [])
+            out.extend({"key": str(item.get("key") or ""), "name": str(item.get("name") or "")}
+                       for item in values if item.get("key"))
+            if data.get("isLast", True) or not values:
+                return out
+            start += len(values)
+
+    def project_statuses(self, key: str) -> list[str]:
+        """Return distinct workflow status names used by the issue types in a Jira project."""
+        data = self.call("GET", f"/rest/api/3/project/{key}/statuses")
+        return sorted({str(status.get("name") or "") for issue_type in data
+                       for status in issue_type.get("statuses", []) if status.get("name")})
+
     def recent_comments(self, key: str, limit: int = 10) -> list[dict[str, str]]:
         """Return the newest Jira comments in a compact, prompt-safe form."""
         data = self.call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={limit}")

@@ -120,8 +120,13 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
 
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
-    keys = ctx.settings.jira_projects or sorted(ctx.repo().projects)
-    # without a usable credential (disconnected, refresh rejected) the jira_auth incident says why
+    configured = ctx.repo().projects
+    # The control repo is authoritative when it contains project definitions: added projects join sync
+    # automatically and paused or removed projects stop being queried on the next pass. Keep the old
+    # JIRA_PROJECTS setting as a fallback for installations without project definitions in the repo.
+    keys = (sorted(key for key, project in configured.items() if not project.paused)
+            if configured else list(ctx.settings.jira_projects))
+    # Without a usable credential (disconnected, refresh rejected), the jira_auth incident says why.
     if not keys or not jira_connect.sync_gate(ctx):
         return 0
     projects = ",".join(keys)

@@ -366,9 +366,15 @@ class JiraAuth:
             raise OAuthFailed(f"code exchange refused: {_oauth_error(r)}")
         try:
             tokens = r.json()
-            access, refresh = str(tokens["access_token"]), str(tokens.get("refresh_token") or "")
-        except (ValueError, KeyError, TypeError):
+            if not isinstance(tokens, dict):
+                raise TypeError
+            access, refresh = str(tokens.get("access_token") or ""), str(tokens.get("refresh_token") or "")
+        except (ValueError, TypeError):
             raise OAuthFailed("malformed token answer") from None
+        if not access:
+            raise OAuthFailed("token answer is missing access_token")
+        if not refresh:
+            raise OAuthFailed("token answer is missing refresh_token")
         bearer = {"Authorization": f"Bearer {access}"}
         try:
             resources = self.http.get(self.settings.jira_oauth_resources_url, headers=bearer)

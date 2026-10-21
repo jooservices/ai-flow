@@ -9,10 +9,12 @@ import logging
 import stat
 import time
 import uuid
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from aiflow.v4.control.api import create_app
@@ -38,6 +40,7 @@ class FakeAtlassian:
         self.issued: list[str] = []  # every secret handed out, to search for leaks
         self.grants: list[str] = []
         self.requests: list[httpx.Request] = []
+        self.omit_refresh_for_authorization = False
         self.basic = {("bot@acme.test", f"API-TOKEN-{uuid.uuid4().hex}")}
         self.tickets = [{"key": "TESTWP-1", "fields": {
             "summary": "Synced over the new credential", "status": {"name": "To Do"}, "issuetype": {"name": "Task"},
@@ -47,13 +50,17 @@ class FakeAtlassian:
         self.comments: list[tuple[str, str]] = []
         self.client = httpx.Client(transport=httpx.MockTransport(self.handle), follow_redirects=False)
 
-    def _tokens(self) -> dict:
-        access, refresh = f"ACCESS-{uuid.uuid4().hex}", f"REFRESH-{uuid.uuid4().hex}"
+    def _tokens(self, include_refresh: bool = True) -> dict:
+        access = f"ACCESS-{uuid.uuid4().hex}"
         self.access[access] = time.time() + 3600
-        self.refresh.add(refresh)
-        self.issued += [access, refresh]
-        return {"access_token": access, "refresh_token": refresh, "expires_in": 3600, "token_type": "Bearer",
-                "scope": " ".join(SCOPES)}
+        self.issued.append(access)
+        tokens = {"access_token": access, "expires_in": 3600, "token_type": "Bearer", "scope": " ".join(SCOPES)}
+        if include_refresh:
+            refresh = f"REFRESH-{uuid.uuid4().hex}"
+            self.refresh.add(refresh)
+            self.issued.append(refresh)
+            tokens["refresh_token"] = refresh
+        return tokens
 
     def _bearer_ok(self, request: httpx.Request) -> bool:
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
@@ -82,7 +89,9 @@ class FakeAtlassian:
             if body["grant_type"] == "authorization_code":
                 if self.codes.pop(body.get("code"), None) != body.get("redirect_uri"):
                     return httpx.Response(403, json={"error": "invalid_grant"})
-                return httpx.Response(200, json=self._tokens())
+                include_refresh = not self.omit_refresh_for_authorization
+                self.omit_refresh_for_authorization = False
+                return httpx.Response(200, json=self._tokens(include_refresh=include_refresh))
             if body.get("refresh_token") not in self.refresh:
                 return httpx.Response(403, json={"error": "unauthorized_client",
                                                  "error_description": "refresh_token is invalid"})
@@ -184,6 +193,17 @@ def registry_text(ctx) -> str:
     return "\n".join(str(r["row"]) for t in tables for r in ctx.db.all(f'SELECT t::text AS row FROM "{t}" t'))
 
 
+def test_deployment_uses_control_environment_file_for_callback_public_url():
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
+    app = compose["x-app"]
+
+    assert app["env_file"] == ["/etc/aiflow/secrets/control/aiflow4.env"]
+    assert "AIFLOW4_PUBLIC_URL" not in app["environment"]
+    assert "Set `AIFLOW4_PUBLIC_URL` in `/etc/aiflow/secrets/control/aiflow4.env`" in (
+        root / "docs/v4/jira-connect.md").read_text(encoding="utf-8")
+
+
 # --- AC1 ---------------------------------------------------------------------------------------------------
 def test_connect_redirects_to_consent_with_minimal_scopes_and_state(web, jira_env):
     sign_in(web)
@@ -252,6 +272,24 @@ def test_oauth_callback_stores_tokens_and_sync_and_writes_use_bearer_via_cloud_i
     for secret in atlassian.issued + [CLIENT_SECRET]:
         assert secret not in status.text and secret not in done.text
     assert [r["accepted"] for r in audit_rows(jira_env, "connect")] == [True]
+
+
+def test_oauth_callback_rejects_grant_without_refresh_token(web, jira_env, atlassian, caplog):
+    atlassian.omit_refresh_for_authorization = True
+    sign_in(web)
+
+    response = connect_oauth(web, atlassian)
+
+    assert response.status_code == 303 and response.headers["location"] == "/integrations?jira=failed"
+    assert jira_env.jira_auth.store.credential() is None
+    status = web.get("/v1/integrations/jira")
+    assert status.status_code == 200 and not status.json()["connected"]
+    assert not any(request.url.path == "/oauth/token/accessible-resources" for request in atlassian.requests)
+    failed = [row for row in audit_rows(jira_env, "connect") if not row["accepted"]]
+    assert len(failed) == 1 and "missing refresh_token" in failed[0]["result"]
+    for secret in atlassian.issued + [CLIENT_SECRET]:
+        assert secret not in response.text and secret not in status.text
+        assert secret not in caplog.text and secret not in registry_text(jira_env)
 
 
 def test_integrations_page_has_connect_disconnect_and_hidden_secret_fields(jira_env):

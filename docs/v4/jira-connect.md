@@ -30,7 +30,9 @@ role) and the credential stays as it was. Refused attempts are audited too.
    returns a refresh token.
 3. **Authorization → OAuth 2.0 (3LO) → Callback URL**:
    `<AIFLOW4_PUBLIC_URL>/v1/integrations/jira/oauth/callback`. The Integrations screen shows the exact URL.
-   The owner's browser must be able to open it; it does not have to be on the internet.
+   Set `AIFLOW4_PUBLIC_URL` in `/etc/aiflow/secrets/control/aiflow4.env`, which Compose loads into the control
+   API and loop containers. Use the control plane's browser-accessible base URL so the owner's browser can return
+   to the callback.
 4. **Settings**: copy the client id and secret.
 
 On the Integrations screen, type the client id and client secret, then press **Connect Jira**. The secret goes to

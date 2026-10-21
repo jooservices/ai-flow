@@ -16,7 +16,6 @@ x-app: &app
     AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR: /var/cache/aiflow4-memory/fastembed
     HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
-    AIFLOW4_PUBLIC_URL: http://127.0.0.1:18480
     AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
     AIFLOW4_SMTP_PORT: "1025"
     OTEL_SERVICE_NAME: aiflow4-control

@@ -23,7 +23,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from . import business, memory
+from . import business, memory, projects as project_lifecycle
 from .db import DB, J
 from .events import Events
 from .github import GitHubApp
@@ -214,6 +214,10 @@ class ChangeRequestBody(BaseModel):
     title: str = ""
     description: str = ""
     epic: str = ""
+
+
+class CloseProjectBody(BaseModel):
+    actor: str = "owner"
 
 
 class EventsBody(BaseModel):
@@ -933,12 +937,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
                   "an impact run only comments", {"to": body.to})
             raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
+        ticket_before = ctx.db.one("SELECT project, type, status FROM tickets WHERE key=%s", (key,))
         status = ctx.jira.transition_to(key, body.to)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
                    " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
+        if ticket_before and ticket_before["type"] == "Epic" and ticket_before["status"] != "Done" and status == "Done":
+            try:
+                project_lifecycle.report_done_epic(ctx, ticket_before["project"], key)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not generate completion report for epic %s: %s", key, e)
         return {"status": status}
 
     @app.post("/v1/jira/{key}/comment")
@@ -1169,6 +1179,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             return PlainTextResponse(render_markdown(report), media_type="text/markdown")
         return report
 
+    @app.post("/v1/projects/{key}/close")
+    def close_project(key: str, body: CloseProjectBody | None = None) -> dict:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        result = project_lifecycle.close_project(ctx, key, body.actor if body else "owner")
+        return {"project": key, "status": result["status"], "version": result["version"],
+                "report": result.get("report"), "markdown": result.get("markdown"),
+                "study_case_ref": result["study_case_ref"], "created": result["created"],
+                "sent_channels": result["sent_channels"]}
+
+    @app.get("/v1/projects/{key}/study-cases")
+    def project_study_cases(key: str, limit: int = Query(50, ge=1, le=100)) -> dict:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        cases = project_lifecycle.study_cases(ctx.db, key, limit)
+        return {"project": key, "study_cases": cases}
+
     # --- Business view: change requests (same access as the console, no node token) -----------------------------
     def business_project(key: str) -> str:
         if key not in ctx.repo().projects:
@@ -1220,5 +1247,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/memory/search")
     def memory_search(q: str = "", project: str = "", limit: int = 10) -> dict:
         return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
+
+    @app.get("/v1/memory/study-cases")
+    def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+        return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
 
     return app

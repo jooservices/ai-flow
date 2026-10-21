@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 
 from . import memory
+from . import projects as project_lifecycle
 from ..core.toolchains import missing_tools
 from .incidents import close_incident, open_incident
 from .api import Ctx
@@ -36,7 +37,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels FROM tickets WHERE key=%s", (t["key"],))
+        old = ctx.db.one("SELECT status, labels, type FROM tickets WHERE key=%s", (t["key"],))
         done_at = t.get("done_at")
         if t["status"] == "Done" and done_at is None:
             done_at = t["jira_updated"]
@@ -51,6 +52,13 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
             {**t, "done_at": done_at})
+        if not old:
+            project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
+        if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):
+            try:
+                project_lifecycle.report_done_epic(ctx, t["project"], t["key"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not generate completion report for epic %s: %s", t["key"], e)
         ready = "aiflow-ready" in t["labels"]
         if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
             # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline

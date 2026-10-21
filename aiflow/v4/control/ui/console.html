@@ -779,6 +779,13 @@ function runsTable(rows, limit) {
 
 /* ---------- Delivery ---------- */
 function projTickets() { return D().tickets.filter(function (t) { return t.project === S.project; }); }
+function projectCloseControl(project) {
+  if (!project) return '';
+  if (project.closed) return '<span class="pill" data-tone="ok"><span class="dot"></span>Closed · study case v' +
+    Number(project.report_version || 0) + '</span>';
+  return (project.close_suggested ? '<span class="hint">All project tickets are Done. Ready to close.</span>' : '') +
+    '<button class="btn sm" data-act="close-project" data-p="' + esc(project.key) + '">Close project</button>';
+}
 function renderDHead() {
   var d = D();
   var h = '<div class="projtabs" role="group" aria-label="Project">';
@@ -797,7 +804,7 @@ function renderDHead() {
   }
   h += '<span class="spacer"></span>';
   var p = d.projects.filter(function (x) { return x.key === S.project; })[0];
-  if (p) h += '<button class="btn sm" data-act="open-report">Report</button><a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
+  if (p) h += '<button class="btn sm" data-act="open-report">Report</button>' + projectCloseControl(p) + '<a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
   $('#dhead').innerHTML = h;
 }
 function epicOf(t, byKey) {
@@ -1210,6 +1217,21 @@ function loadProjectReport(project, epic) {
     }
   });
 }
+function closeProject(key, button) {
+  if (button) button.disabled = true;
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/close', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actor: 'owner' })
+  }).then(function (r) {
+    return r.json().then(function (data) { if (!r.ok) throw new Error(data.detail || 'Project could not be closed'); return data; });
+  }).then(function (data) {
+    var delivery = (data.sent_channels || []).indexOf('email') >= 0 ? ' and emailed to the owner' : '';
+    toast('Project closed', 'Study case v' + data.version + ' saved' + delivery, 'ok');
+    poll();
+  }).catch(function (e) {
+    toast('Project could not be closed', String(e.message || e), 'warn');
+    if (button) button.disabled = false;
+  });
+}
 function openProjectReport(opener) {
   lastFocus = opener || document.activeElement;
   var epic = S.epic === 'all' ? null : S.epic;
@@ -1307,6 +1329,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'open-inc') openDrawer('inc', el.getAttribute('data-id'), el);
   else if (act === 'open-ticket') openDrawer('ticket', el.getAttribute('data-key'), el);
   else if (act === 'open-report') openProjectReport(el);
+  else if (act === 'close-project') closeProject(el.getAttribute('data-p'), el);
   else if (act === 'copy-report') copyReport();
   else if (act === 'close') closeAll();
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }

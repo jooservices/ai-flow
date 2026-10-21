@@ -66,7 +66,7 @@ def watchdog(ctx: Ctx) -> None:
     # project stacks: an online node must have every tool its projects need, or a person installs it
     repo = ctx.repo()
     tool_issues: set[str] = set()
-    for n in ctx.db.all("SELECT name, status, tools FROM nodes WHERE status='online'"):
+    for n in ctx.db.all("SELECT name, status, tools FROM nodes"):
         node = repo.nodes.get(n["name"])
         if not node:
             continue
@@ -74,10 +74,14 @@ def watchdog(ctx: Ctx) -> None:
             project = repo.projects.get(key)
             if not project:
                 continue
+            subject = f"{n['name']}:{key}"
+            if n["status"] != "online":
+                # an offline node sends no heartbeat, so keep its incident: nobody confirmed the tools either way
+                tool_issues.add(subject)
+                continue
             missing = missing_tools(n["tools"], project.tools)
             if not missing:
                 continue
-            subject = f"{n['name']}:{key}"
             tool_issues.add(subject)
             open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses tools for {key}",
                           f"Missing on {n['name']} for {key} ({project.stack or 'no stack'}): {', '.join(missing)}."

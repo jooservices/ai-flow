@@ -59,3 +59,67 @@ def test_watchdog_warns_when_a_node_misses_tools_for_a_project(client, ctx):
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents"
                       " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 0
+
+
+def test_watchdog_keeps_tool_incident_while_the_node_is_offline(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+
+    ctx.repo().projects["TESTWP"].stack = "php-8.3"
+    cc = join(client, "cc")
+    tools = {name: f"{name} 1.0" for name in NODE_TOOLS}
+    tools.update({"php": "PHP 8.3.0", "composer": "missing", "wp": "WP-CLI 2.10"})
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "tools": tools}, headers=cc)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 1
+
+    # No heartbeat means the tools are unknown: going offline must not close the incident.
+    ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='cc'")
+    watchdog(ctx)
+    assert ctx.db.one("SELECT status FROM nodes WHERE name='cc'")["status"] == "offline"
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 1
+
+    # A later heartbeat that confirms the tool closes it.
+    tools["composer"] = "Composer 2.8.0"
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "tools": tools}, headers=cc)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 0
+
+
+def test_watchdog_closes_tool_incident_when_the_node_or_project_is_removed(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+
+    repo = ctx.repo()
+    repo.projects["TESTWP"].stack = "php-8.3"
+    cc = join(client, "cc")
+    tools = {name: f"{name} 1.0" for name in NODE_TOOLS}
+    tools.update({"php": "PHP 8.3.0", "composer": "missing", "wp": "WP-CLI 2.10"})
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "tools": tools}, headers=cc)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 1
+
+    # The node no longer serves the project: the incident goes away.
+    repo.nodes["cc"].projects = []
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 0
+
+    # Serving it again with the tool still missing opens it again.
+    repo.nodes["cc"].projects = ["TESTWP"]
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2, "tools": tools}, headers=cc)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 1
+
+    # Removing the node from the control repo closes it even when no heartbeat arrives.
+    ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='cc'")
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 1
+    del repo.nodes["cc"]
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents"
+                      " WHERE kind='node_tools' AND subject='cc:TESTWP' AND closed_at IS NULL")["n"] == 0

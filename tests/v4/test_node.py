@@ -88,6 +88,7 @@ def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypa
     monkeypatch.setattr(agent, "metrics", lambda prev: ({"hostname": "node1"}, (1, 1)))
     monkeypatch.setattr(agent, "worker_states", lambda: [])
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
 
     agent.run_agent("http://control", "node1", "token", every_s=0, stop=stop, manage_workers=False)
 
@@ -95,3 +96,66 @@ def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypa
     assert tools["php"] == "php version"
     assert tools["composer"] == "composer version"
     assert tools["wp"] == "missing"
+
+
+def test_node_heartbeat_reports_policy_relay_health(monkeypatch):
+    class FakeRelay:
+        def __init__(self, control_url):
+            assert control_url == "http://control.test"
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+            return True
+
+        def health(self):
+            return {"enabled": True, "healthy": self.started and not self.stopped}
+
+        def stop(self):
+            self.stopped = True
+
+    class FakeControlClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = []
+
+        def call(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"desired": {"workers": [], "release": ""}}
+
+    class StopAfterHeartbeat:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, _seconds):
+            self.stopped = True
+
+    relays = []
+    clients = []
+
+    def fake_relay(control_url):
+        relay = FakeRelay(control_url)
+        relays.append(relay)
+        return relay
+
+    def fake_client(*args, **kwargs):
+        client = FakeControlClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "1")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+    monkeypatch.setattr(agent, "PolicyRelay", fake_relay)
+    monkeypatch.setattr(agent, "ControlClient", fake_client)
+    monkeypatch.setattr(agent, "tool_versions", lambda: {})
+    monkeypatch.setattr(agent, "metrics", lambda _previous: ({"cpu_pct": 0}, (1, 1)))
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+
+    agent.run_agent("http://control.test", "node1", "token", manage_workers=False, stop=StopAfterHeartbeat())
+
+    heartbeat = clients[0].calls[0][0][2]
+    assert heartbeat["metrics"]["policy_relay"] == {"enabled": True, "healthy": True}
+    assert relays[0].started and relays[0].stopped

@@ -129,6 +129,8 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
     assert result["outcome"] == outcome
     assert checkout.ref == "origin/develop" and checkout.removed
     assert adapter.spec.cwd.endswith("TESTWP-70--triage-" + claim["run_id"])
+    assert adapter.spec.extra_env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert adapter.spec.extra_env["GIT_CONFIG_VALUE_0"] == adapter.spec.cwd
     assert "Keep old clients working" in adapter.spec.prompt
     assert "How should the API handle clients" in adapter.spec.prompt
     assert "Read-only checkout: branch develop" in adapter.spec.prompt

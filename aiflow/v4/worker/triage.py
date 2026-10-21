@@ -52,6 +52,11 @@ def parse_decision(text: str) -> dict[str, str] | None:
     return {"decision": "ESCALATE", "answer": "", "why": why.group(1).strip()}
 
 
+def safe_directory_env(path: Path) -> dict[str, str]:
+    """Git config for the AI's git commands in the root-owned checkout (command-line scope, like `git -c`)."""
+    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": str(path)}
+
+
 def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
     key, project = c.ticket["key"], c.project
@@ -78,7 +83,7 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
                        effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
                        control_url=control_url, run_token=c.run_token,
-                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"))
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=safe_directory_env(wt))
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)

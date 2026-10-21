@@ -63,24 +63,59 @@ def test_migration_applies_when_memory_already_exists(db):
 
 
 def test_local_embedder_uses_model_and_cache_without_embedding_endpoint_or_key(monkeypatch):
+    import sys
+    import types
+
     captured = {}
 
     class FakeModel:
-        def embed(self, texts):
-            return [[0.0] * 384 for _ in texts]
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
 
-    def create(model_name, cache_dir):
-        captured.update(model_name=model_name, cache_dir=cache_dir)
-        return FakeModel()
+        def embed(self, texts, batch_size):
+            captured["batch_size"] = batch_size
+            return [[0.0] * 384 for _ in texts]
 
     monkeypatch.setenv("AIFLOW4_MEMORY_EMBEDDING_MODEL", "local-test-model")
     monkeypatch.setenv("AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR", "/tmp/aiflow-memory-models")
-    monkeypatch.setattr(memory, "_create_embedder", create)
+    monkeypatch.setitem(sys.modules, "fastembed", types.SimpleNamespace(TextEmbedding=FakeModel))
     monkeypatch.setattr(memory, "_EMBEDDER", None)
     monkeypatch.setattr(memory, "_EMBEDDER_KEY", None)
     assert memory.embed_texts(["test"])[0] == [0.0] * 384
-    assert captured == {"model_name": "local-test-model", "cache_dir": "/tmp/aiflow-memory-models"}
+    assert captured == {"model_name": "local-test-model", "cache_dir": "/tmp/aiflow-memory-models",
+                        "threads": 2, "batch_size": 16}
     assert "endpoint" not in captured and "api_key" not in captured
+
+
+def test_failed_embedder_load_is_retried_after_cooldown(monkeypatch):
+    import pytest
+
+    attempts = []
+    clock = [100.0]
+
+    def create(model_name, cache_dir):
+        attempts.append((model_name, cache_dir))
+        raise RuntimeError("model download unavailable")
+
+    monkeypatch.setenv("AIFLOW4_MEMORY_EMBEDDING_MODEL", "failing-test-model")
+    monkeypatch.setenv("AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR", "/tmp/failing-model-cache")
+    monkeypatch.setattr(memory, "_create_embedder", create)
+    monkeypatch.setattr(memory.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(memory, "_EMBEDDER", None)
+    monkeypatch.setattr(memory, "_EMBEDDER_KEY", None)
+    monkeypatch.setattr(memory, "_EMBEDDER_FAILURE_KEY", None)
+    monkeypatch.setattr(memory, "_EMBEDDER_RETRY_AT", 0.0)
+
+    with pytest.raises(RuntimeError, match="download unavailable"):
+        memory.embed_texts(["first claim"])
+    with pytest.raises(RuntimeError, match="cooldown"):
+        memory.embed_texts(["second claim"])
+    assert len(attempts) == 1
+
+    clock[0] += memory.EMBEDDER_RETRY_SECONDS + 1
+    with pytest.raises(RuntimeError, match="download unavailable"):
+        memory.embed_texts(["claim after cooldown"])
+    assert len(attempts) == 2
 
 
 def test_index_is_idempotent_by_kind_and_ref(db, monkeypatch):

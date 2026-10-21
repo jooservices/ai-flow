@@ -13,14 +13,21 @@ the control-loops indexer fills embeddings for existing rows on its next pass.
 
 The default model is `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, a multilingual 384-dimension
 model supported by [FastEmbed](https://qdrant.github.io/fastembed/examples/Supported_Models/). FastEmbed runs
-the ONNX model on the control host. It downloads model files when first needed and reuses its local cache.
+the ONNX model on the control host. It downloads model files when first needed and reuses its local cache. In
+the Compose deployment, create `/srv/aiflow/control/cache/aiflow4-memory` on the control host and make it
+writable by the control containers. All three control containers mount this same directory, so recreating a
+container keeps the downloaded model files and avoids downloading a separate copy in each container.
 
 Configure the model and writable cache directory in the control service environment:
 
 | Setting | Default | Purpose |
 |---|---|---|
 | `AIFLOW4_MEMORY_EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | FastEmbed model name; use a compatible 384-dimension model |
-| `AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR` | `~/.cache/fastembed` | Local directory for downloaded model files |
+| `AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR` | `/var/cache/aiflow4-memory/fastembed` in Compose; `~/.cache/fastembed` otherwise | FastEmbed model files |
+| `HF_HOME` | `/var/cache/aiflow4-memory/huggingface` in Compose | Hugging Face download cache, on the same persistent mount |
+
+Compose gives each control container a 2 GiB memory limit. Embedding uses batches of 16 texts and two ONNX
+threads to bound peak memory while indexing.
 
 The model name and cache directory are settings, not credentials. No embedding endpoint or API key is used.
 Ticket and memory text is embedded inside the control host. Related snippets are included in dev and verify

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from .db import DB
@@ -19,6 +20,9 @@ MAX_LIMIT = 50
 VECTOR_DIMENSIONS = 384
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_CACHE_DIR = "~/.cache/fastembed"
+EMBED_BATCH_SIZE = 16
+EMBEDDING_THREADS = 2
+EMBEDDER_RETRY_SECONDS = 600
 HEADLINE = 'StartSel=**, StopSel=**, MaxWords=35, MinWords=12, MaxFragments=2, FragmentDelimiter=" ... "'
 RRF_K = 60
 CANDIDATE_LIMIT = 100
@@ -123,6 +127,8 @@ HYBRID_RELATED = HYBRID_TEMPLATE.format(
 
 _EMBEDDER: object | None = None
 _EMBEDDER_KEY: tuple[str, str] | None = None
+_EMBEDDER_FAILURE_KEY: tuple[str, str] | None = None
+_EMBEDDER_RETRY_AT = 0.0
 _EMBEDDER_LOCK = threading.RLock()
 
 
@@ -130,17 +136,29 @@ def _create_embedder(model_name: str, cache_dir: str):
     """Create FastEmbed without an API URL, key, or remote embedding client."""
     from fastembed import TextEmbedding
 
-    return TextEmbedding(model_name=model_name, cache_dir=cache_dir)
+    return TextEmbedding(model_name=model_name, cache_dir=cache_dir, threads=EMBEDDING_THREADS)
 
 
 def _get_embedder():
-    global _EMBEDDER, _EMBEDDER_KEY
+    global _EMBEDDER, _EMBEDDER_KEY, _EMBEDDER_FAILURE_KEY, _EMBEDDER_RETRY_AT
     model_name = os.getenv("AIFLOW4_MEMORY_EMBEDDING_MODEL", DEFAULT_MODEL)
     cache_dir = str(Path(os.getenv("AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR", DEFAULT_CACHE_DIR)).expanduser())
     key = (model_name, cache_dir)
     with _EMBEDDER_LOCK:
-        if _EMBEDDER is None or _EMBEDDER_KEY != key:
-            _EMBEDDER = _create_embedder(model_name, cache_dir)
+        if _EMBEDDER is not None and _EMBEDDER_KEY == key:
+            return _EMBEDDER
+        if _EMBEDDER_FAILURE_KEY == key and time.monotonic() < _EMBEDDER_RETRY_AT:
+            raise RuntimeError("local memory embedding model load is in cooldown") from None
+        try:
+            embedder = _create_embedder(model_name, cache_dir)
+        except Exception:
+            _EMBEDDER_FAILURE_KEY = key
+            _EMBEDDER_RETRY_AT = time.monotonic() + EMBEDDER_RETRY_SECONDS
+            raise
+        _EMBEDDER = embedder
+        _EMBEDDER_FAILURE_KEY = None
+        _EMBEDDER_RETRY_AT = 0.0
+        if _EMBEDDER_KEY != key:
             _EMBEDDER_KEY = key
         return _EMBEDDER
 
@@ -151,7 +169,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         return []
     with _EMBEDDER_LOCK:
         model = _get_embedder()
-        vectors = list(model.embed(texts))
+        vectors = list(model.embed(texts, batch_size=EMBED_BATCH_SIZE))
     return [[float(value) for value in vector] for vector in vectors]
 
 

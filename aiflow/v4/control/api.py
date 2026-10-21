@@ -353,6 +353,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "verify"})
+        prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
+        out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
@@ -367,8 +369,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in labels:
                     continue
                 dev_rows.append({**t, "step": "dev"})
-            dev_rows.sort(key=lambda t: ("rework" not in t["labels"], PRIORITY.get(t["priority"], 2),
-                                         t["jira_created"] or utcnow()))
+            dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
+                                         PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
         return out
 

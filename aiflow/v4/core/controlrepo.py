@@ -37,6 +37,7 @@ class Project:
     merge: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
+    priority: int = 5          # lower first: workers serve the projects in this order
 
     @property
     def repo_name(self) -> str:

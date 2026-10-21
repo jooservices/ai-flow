@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .base import Adapter, RunResult, RunSpec, ts
 
-HOOK_TOOLS = "Bash|Edit|Write|MultiEdit|NotebookEdit"
+HOOK_TOOLS = "Bash|Read|Glob|Grep|WebFetch|WebSearch|Edit|Write|MultiEdit|NotebookEdit"
 
 
 class ClaudeAdapter(Adapter):

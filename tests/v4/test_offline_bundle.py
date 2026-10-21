@@ -463,8 +463,9 @@ def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_
     def run(args, **kwargs):
         calls.append((args, kwargs))
         if args[0] == "curl":
-            assert args[args.index("--config") + 1] == "-"
-            assert kwargs["input"].startswith('header = "Authorization: Bearer ')
+            assert "--config" not in args
+            assert kwargs.get("input") is None
+            assert all("Authorization" not in arg and "offline-test-node-token" not in arg for arg in args)
             target = Path(args[args.index("--output") + 1])
             target.write_text(json.dumps(state))
             return SimpleNamespace(returncode=0, stdout="", stderr="")

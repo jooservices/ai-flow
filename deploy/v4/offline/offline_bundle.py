@@ -528,10 +528,9 @@ def _parse_node_env(path: Path, root: Path) -> dict[str, str]:
 
 def _api_state(config: dict[str, str], runner: Callable, work: Path) -> dict[str, Any]:
     state_file = work / "state.json"
-    authorization = f'header = "Authorization: Bearer {config["token"]}"\n'
-    result = runner(["curl", "--fail", "--silent", "--show-error", "--max-time", "10", "--config", "-",
+    result = runner(["curl", "--fail", "--silent", "--show-error", "--max-time", "10",
                      f'{config["control_url"]}/v1/state', "--output", str(state_file)],
-                    input=authorization, capture_output=True, text=True)
+                    capture_output=True, text=True)
     if result.returncode:
         raise BundleError("could not verify node heartbeat with the private control API")
     try:

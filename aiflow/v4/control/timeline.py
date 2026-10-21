@@ -7,8 +7,9 @@ Segments (ordered by start, never overlapping):
   verify   one verify run
   ai       a run of another step (intake, master, qa)
   waiting  the ticket waits on a person: Needs owner or Human review
-Status changes come from `jira.transition` events (moves made through the control API) and `ticket.status`
-events (moves and label changes made by people, seen by jira_sync, at most one sync late).
+Status changes come from `jira.transition` events (moves made through the control API or watchdog) and `ticket.status`
+events (moves and label changes made by people, seen by jira_sync, at most one sync late). Completed tickets use Jira's
+stored resolution time when available, so a delayed sync does not extend lead time.
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ def _run_segments(runs: list[dict], now: datetime) -> list[dict]:
 
 
 def timeline(db, key: str, now: datetime | None = None) -> dict[str, Any] | None:
-    t = db.one("SELECT key, status, labels FROM tickets WHERE key=%s", (key,))
+    t = db.one("SELECT key, status, labels, done_at FROM tickets WHERE key=%s", (key,))
     if not t:
         return None
     now = now or datetime.now(timezone.utc)
@@ -86,8 +87,8 @@ def timeline(db, key: str, now: datetime | None = None) -> dict[str, Any] | None
     changes = _status_changes(db, key, READY in (t["labels"] or []))
     run_segs = _run_segments(runs, now)
 
-    done_at = None
-    if t["status"] == "Done":
+    done_at = t["done_at"] if t["status"] == "Done" else None
+    if t["status"] == "Done" and done_at is None:
         done = [c["ts"] for c in changes if c["status"] == "Done"]
         done_at = done[-1] if done else max([s["end"] for s in run_segs] + [c["ts"] for c in changes], default=None)
     end = done_at or now

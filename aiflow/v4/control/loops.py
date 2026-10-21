@@ -137,6 +137,8 @@ def watchdog(ctx: Ctx) -> None:
                 ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (t["key"],))
                 ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result) VALUES"
                            " ('jira','transition',%s,'control',true,'To Do (orphan)')", (t["key"],))
+                ctx.events.emit("jira.transition", ticket=t["key"], account="control", outcome="To Do",
+                                reason="In Progress without a run for 10 minutes")
                 ctx.events.emit("ticket.requeued", ticket=t["key"], reason="In Progress without a run for 10 minutes")
             except Exception as e:  # noqa: BLE001
                 log.warning("could not requeue orphan %s: %s", t["key"], e)

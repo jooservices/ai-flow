@@ -8,7 +8,7 @@ from conftest import add_ticket
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.db import J
 from aiflow.v4.control.jira import Jira
-from aiflow.v4.control.loops import jira_sync
+from aiflow.v4.control.loops import jira_sync, watchdog
 from aiflow.v4.control.timeline import timeline
 from aiflow.v4.control.ui import mount_ui
 
@@ -93,6 +93,53 @@ def test_open_ticket_runs_until_now_and_needs_owner_waits(db):
     assert tt["lead_time_s"] == 1500 and not tt["done"] and tt["done_at"] is None
     assert tt["ai_s"] == 600 and tt["queue_s"] == 300 and tt["waiting_s"] == 600 and tt["rework_rounds"] == 0
     assert tt["runs_by_outcome"] == {"blocked": 1, "running": 1}
+
+
+def test_orphan_requeue_is_recorded_in_timeline(ctx):
+    key = "TESTWP-43"
+    add_ticket(ctx.db, key)
+    ctx.events.emit("ticket.status", ticket=key, outcome="To Do", ready=True)
+    ctx.events.emit("jira.transition", ticket=key, outcome="In Progress")
+    ctx.db.run("UPDATE tickets SET status='In Progress', synced_at=now() WHERE key=%s", (key,))
+    ctx.jira.status_of[key] = "In Progress"
+
+    watchdog(ctx)
+
+    requeue = ctx.db.one("SELECT ts FROM events WHERE ticket=%s AND type='jira.transition' AND outcome='To Do'",
+                         (key,))
+    assert requeue is not None
+    tl = timeline(ctx.db, key, now=requeue["ts"] + timedelta(seconds=120))
+    assert tl["segments"][-1]["kind"] == "queued"
+    assert tl["segments"][-1]["start"] == requeue["ts"].isoformat()
+    assert tl["segments"][-1]["seconds"] == 120
+
+
+def test_delayed_done_sync_uses_jira_resolution_time_for_lead_time(ctx):
+    key = "TESTWP-44"
+    observed = datetime.now(timezone.utc)
+    ready_at = observed - timedelta(hours=1)
+    completed = observed - timedelta(minutes=20)
+    add_ticket(ctx.db, key)
+    ctx.db.run("INSERT INTO events (ts, type, ticket, outcome, data) VALUES (%s,'ticket.status',%s,'To Do',%s)",
+               (ready_at, key, J({"ready": True, "from_status": ""})))
+    issue = {"key": key, "fields": {
+        "status": {"name": "Done"}, "labels": ["aiflow-ready"], "updated": observed.isoformat(),
+        "resolutiondate": completed.isoformat(),
+    }}
+    ctx.jira.search = lambda _jql: [issue]
+    ctx.jira.normalize = Jira.normalize
+
+    assert jira_sync(ctx, full=True) == 1
+
+    done_event = ctx.db.one("SELECT ts FROM events WHERE ticket=%s AND type='ticket.status' AND outcome='Done'", (key,))
+    assert done_event["ts"] > completed  # Jira sync observed completion after Jira resolved the ticket.
+    tl = timeline(ctx.db, key)
+    assert tl["totals"]["done_at"] == completed.isoformat()
+    assert tl["totals"]["lead_time_s"] == int((completed - ready_at).total_seconds())
+    assert tl["segments"] == [{
+        "kind": "queued", "start": ready_at.isoformat(), "end": completed.isoformat(),
+        "status": "To Do", "seconds": int((completed - ready_at).total_seconds()),
+    }]
 
 
 def test_timeline_endpoint_and_ticket_drawer(ctx):

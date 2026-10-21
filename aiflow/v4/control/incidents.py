@@ -62,6 +62,7 @@ def flow_error_pattern(error_kind: str, summary: str) -> tuple[str, str] | None:
 
 def flow_bug_candidates(ctx) -> list[dict]:
     """Find repeated TESTFLOW failures and eligible ticket_stuck incidents older than 30 minutes."""
+    tracked_signatures = {row["signature"] for row in ctx.db.all("SELECT signature FROM flow_bug_tracker")}
     runs = ctx.db.all(
         "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
         " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
@@ -97,8 +98,9 @@ def flow_bug_candidates(ctx) -> list[dict]:
             "SELECT r.id, r.ticket_key, r.project, r.step, r.error_kind, r.outcome, r.summary, r.node, r.started_at,"
             " coalesce(n.release_version, '') AS release_version FROM runs r LEFT JOIN nodes n ON n.name=r.node"
             " WHERE r.project='TESTFLOW' AND r.ticket_key=%s AND r.status<>'running'"
-            " AND r.outcome IN ('failed','timeout') AND r.started_at > %s - interval '1 day'"
-            " ORDER BY r.started_at DESC LIMIT 1", (incident["subject"], incident["opened_at"]))
+            " AND r.outcome IN ('failed','timeout') AND r.started_at > %s - interval '1 day' AND r.started_at <= %s"
+            " ORDER BY r.started_at DESC LIMIT 1",
+            (incident["subject"], incident["opened_at"], incident["opened_at"]))
         if run:
             add_run(run, incident["id"])
 
@@ -107,9 +109,11 @@ def flow_bug_candidates(ctx) -> list[dict]:
         candidate_runs = list(candidate["runs"].values())
         tickets = sorted({run["ticket"] for run in candidate_runs})
         is_repeated = len(candidate_runs) >= 3 and len(tickets) >= 2
-        if not is_repeated and not candidate["incident_ids"]:
+        creation_eligible = is_repeated or bool(candidate["incident_ids"])
+        if not creation_eligible and candidate["signature"] not in tracked_signatures:
             continue
         candidate["runs"] = sorted(candidate_runs, key=lambda run: run["id"])
+        candidate["creation_eligible"] = creation_eligible
         candidate["tickets"] = tickets
         candidate["steps"] = sorted({run["step"] for run in candidate["runs"]})
         candidate["nodes"] = sorted({run["node"] for run in candidate["runs"]})

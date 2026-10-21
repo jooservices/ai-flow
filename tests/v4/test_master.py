@@ -533,6 +533,31 @@ def test_repeated_signature_reuses_open_flow_bug_and_comments_only_for_new_runs(
     assert len(ctx.jira.created) == 1 and len(ctx.jira.comments) == 1
 
 
+def test_open_flow_bug_comments_on_one_recurrence_after_original_runs_age_out(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    original_ids = [
+        failed_flow_run(ctx, "TESTFLOW-117", f"Git checkout refused for branch TESTFLOW-117: ref unavailable"),
+        failed_flow_run(ctx, "TESTFLOW-118", f"Git checkout refused for branch TESTFLOW-118: ref unavailable"),
+        failed_flow_run(ctx, "TESTFLOW-117", f"Git checkout refused for branch TESTFLOW-117: ref unavailable"),
+    ]
+    created = master_context(client, cc, master).json()["flow_bug_reports"]
+    assert created[0]["action"] == "created"
+    flow_bug = created[0]["ticket"]
+
+    ctx.db.run("UPDATE runs SET started_at=now()-interval '31 minutes', ended_at=now()-interval '31 minutes'"
+               " WHERE id=ANY(%s::uuid[])", (original_ids,))
+    recurring_id = failed_flow_run(
+        ctx, "TESTFLOW-119", "Git checkout refused for branch TESTFLOW-119: ref unavailable")
+    repeated = master_context(client, cc, master).json()["flow_bug_reports"]
+
+    assert repeated == [{"action": "repeated", "ticket": flow_bug, "repeat_count": 1,
+                         "new_run_ids": [recurring_id]}]
+    assert len(ctx.jira.created) == 1
+    assert len(ctx.jira.comments) == 1 and ctx.jira.comments[0][0] == flow_bug
+    assert "Repeat count: 1" in ctx.jira.comments[0][1] and recurring_id in ctx.jira.comments[0][1]
+
+
 def test_failed_intake_move_keeps_the_created_flow_bug_and_is_retried_without_a_second_issue(client, ctx):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
@@ -586,6 +611,23 @@ def test_ticket_stuck_incident_open_over_30_minutes_creates_flow_bug(client, ctx
     assert issue["labels"] == ["flow-bug"] and ctx.jira.status_of[issue["key"]] == "Intake"
     assert run_id in issue["description"]
     assert "incident" in issue["description"] and "open over 30 minutes" in issue["description"]
+
+
+def test_old_ticket_stuck_incident_does_not_claim_a_failure_started_after_it_opened(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    from aiflow.v4.control.incidents import open_incident
+    open_incident(ctx, "ticket_stuck", "TESTFLOW-121", "warning", "TESTFLOW-121 failed repeatedly",
+                  "checkout is stuck")
+    ctx.db.run("UPDATE incidents SET opened_at=now()-interval '31 minutes'"
+               " WHERE kind='ticket_stuck' AND subject='TESTFLOW-121' AND closed_at IS NULL")
+    failed_flow_run(ctx, "TESTFLOW-121", "Git checkout refused for branch TESTFLOW-121: ref unavailable",
+                    minutes_ago=10)
+
+    response = master_context(client, cc, master)
+
+    assert response.status_code == 200 and response.json()["flow_bug_reports"] == []
+    assert not getattr(ctx.jira, "created", [])
 
 
 @pytest.mark.parametrize("kind,subject,outcome,error_kind,summary", [

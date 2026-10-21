@@ -506,6 +506,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                                         "repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
                     continue
 
+            if not candidate["creation_eligible"]:
+                # The tracker keeps low-volume recurrences visible for open Bugs, but a closed Bug only
+                # gets replaced after the normal repetition threshold or an aged ticket_stuck incident.
+                continue
+
             run_lines = [f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
                          for item in candidate["runs"]]
             reason = ("at least three matching failed runs across at least two TESTFLOW tickets in 30 minutes"

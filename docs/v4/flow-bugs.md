@@ -7,11 +7,13 @@ Bug in Intake with the `flow-bug` label. The description records the pattern, af
 node release versions, and a suggested v4 code location.
 
 The control plane tracks each signature and its reported run IDs. Further runs for an open Bug add a comment with the
-new run IDs and the repeat count; an unchanged snapshot does not add another comment. The tracker row is written as
+new run IDs and the repeat count, even after the original failures age out of the 30-minute detection window; an
+unchanged snapshot does not add another comment. The tracker row is written as
 soon as Jira returns the new key, before the move to Intake. If that move fails, later master cycles retry only the
 move (the tracker's `in_intake` flag stays false until it succeeds) and never create a second Bug. Once the Bug is resolved, a
-later recurrence can create a new Bug. Separately, a `ticket_stuck` incident on a TESTFLOW ticket can trigger a Bug
-when the incident has remained open for more than 30 minutes and its latest failure has an eligible signature.
+later recurrence can create a new Bug after the regular threshold is met. Separately, a `ticket_stuck` incident on a
+TESTFLOW ticket can trigger a Bug when the incident has remained open for more than 30 minutes and a failure that
+started no later than the incident opening has an eligible signature.
 
 Quota and authentication failures, lost runs, offline-node failures, and missing-tool symptoms do not become
 `flow-bug` tickets. Their existing incidents remain the source of follow-up. Jira creation, transitions, and repeat

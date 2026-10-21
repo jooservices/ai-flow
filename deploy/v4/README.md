@@ -19,6 +19,17 @@ them with the vendor's installer, then sign each account in with that account's 
 Supporting tools reported by the node agent are `git`, `gh`, `node`, `uv` and `docker`; install the ones the
 projects and release commands on the node need.
 
+### Claude policy relay
+
+The node agent listens on `127.0.0.1:8471` for Claude's policy hook and forwards decisions to the control API.
+It retries connection errors and 5xx responses for up to 60 seconds, and writes each decision to the node
+agent journal (`journalctl -u aiflow4-node-agent`). The node heartbeat includes `metrics.policy_relay.enabled`
+and `metrics.policy_relay.healthy`.
+
+The relay is enabled by default. Set `AIFLOW4_POLICY_RELAY=0` in `/etc/aiflow/node.env` to have Claude call
+the control URL directly; the node agent and worker units both read that file. Set it to `1` to enable the
+relay explicitly.
+
 ### Codex code-mode host
 
 Codex 0.163 and later cannot run shell commands without the `codex-code-mode-host` binary. The node agent

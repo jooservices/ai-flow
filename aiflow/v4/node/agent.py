@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from .. import VERSION
+from .policy_relay import PolicyRelay
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 
@@ -147,21 +148,31 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
               stop: threading.Event | None = None) -> None:
     api = ControlClient(control_url, token, timeout=15)
     stop = stop or threading.Event()
+    relay = PolicyRelay(control_url) if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1" else None
+    if relay:
+        relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
-    while not stop.is_set():
-        try:
-            m, prev = metrics(prev)
-            if time.time() - tools_at > 600:
-                tools, tools_at = tool_versions(), time.time()
-            ws = worker_states()
-            used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
-            desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
-                "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION, "tools": tools,
-                "metrics": {**m, "hostname": socket.gethostname()}, "workers": ws}, retries=2)["desired"]
-            if manage_workers:
-                reconcile(desired.get("workers") or desired.get("accounts", []))
-            if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
-                self_update(api, desired.get("release", ""))
-        except Exception as e:  # noqa: BLE001
-            log.warning("heartbeat failed: %s", e)
-        stop.wait(every_s)
+    try:
+        while not stop.is_set():
+            try:
+                m, prev = metrics(prev)
+                if time.time() - tools_at > 600:
+                    tools, tools_at = tool_versions(), time.time()
+                ws = worker_states()
+                used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
+                desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
+                    "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
+                    "tools": tools,
+                    "metrics": {**m, "hostname": socket.gethostname(),
+                                "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
+                    "workers": ws}, retries=2)["desired"]
+                if manage_workers:
+                    reconcile(desired.get("workers") or desired.get("accounts", []))
+                if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
+                    self_update(api, desired.get("release", ""))
+            except Exception as e:  # noqa: BLE001
+                log.warning("heartbeat failed: %s", e)
+            stop.wait(every_s)
+    finally:
+        if relay:
+            relay.stop()

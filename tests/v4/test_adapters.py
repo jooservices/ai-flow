@@ -86,11 +86,28 @@ def test_run_loop_quota_from_text_and_timeout(tmp_path):
     assert res.error_kind == "timeout"
 
 
-def test_claude_settings_carry_the_hook(tmp_path):
+def test_claude_settings_carry_the_hook_and_default_to_relay(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIFLOW4_POLICY_RELAY", raising=False)
     a = ClaudeAdapter()
     spec = RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path), control_url="http://10.44.0.10", run_token="t")
     a.prepare(spec)
     s = json.loads(a.settings_path(spec).read_text())
     hook = s["hooks"]["PreToolUse"][0]["hooks"][0]
-    assert hook["type"] == "http" and hook["url"] == "http://10.44.0.10/v1/policy/decide" and hook["onFailure"] == "block"
+    assert hook["type"] == "http" and hook["url"] == "http://127.0.0.1:8471/v1/policy/decide"
+    assert hook["timeout"] == 65 and hook["onFailure"] == "block"
     assert "--permission-mode" in a.argv(spec) and a.env(spec)["AIFLOW4_RUN_TOKEN"] == "t"
+
+
+def test_claude_settings_respect_policy_relay_toggle(tmp_path, monkeypatch):
+    a = ClaudeAdapter()
+    spec = RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path), control_url="http://10.44.0.10/")
+
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "1")
+    a.prepare(spec)
+    hook = json.loads(a.settings_path(spec).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["url"] == "http://127.0.0.1:8471/v1/policy/decide"
+
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    a.prepare(spec)
+    hook = json.loads(a.settings_path(spec).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["url"] == "http://10.44.0.10/v1/policy/decide"

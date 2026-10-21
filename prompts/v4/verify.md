@@ -20,6 +20,7 @@ Rules:
 
 The developer's summary:
 {dev_summary}
+{related}
 
 Ticket description:
 ---

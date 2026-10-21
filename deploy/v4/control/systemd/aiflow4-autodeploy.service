@@ -1,8 +1,10 @@
 [Unit]
 Description=AI Flow v4: deploy the newest published versioned release
 After=docker.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/aiflow/autodeploy.env
 ExecStart=/usr/local/sbin/aiflow4-autodeploy
 TimeoutStartSec=1800

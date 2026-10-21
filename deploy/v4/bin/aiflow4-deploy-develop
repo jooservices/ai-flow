@@ -1,14 +1,17 @@
 #!/bin/bash
 # DEVELOP CHANNEL (lab only, docs/v4/develop-channel.md). Deploy AI Flow v4 from the control-plane machine: optional git bundle -> push -> control image ->
 # restart control-api/control-loops -> node release tarball -> install on this node.
-#   aiflow4-deploy-develop [bundle-file] [ref]
+#   aiflow4-deploy-develop [--stage-only] [bundle-file] [ref]
 # Refuses to run unless the host is explicitly on the develop channel (AIFLOW4_CHANNEL=develop in /etc/aiflow/deploy.env).
 set -euo pipefail
+STAGE_ONLY=no
+if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=yes; shift; fi
 [ -r /etc/aiflow/deploy.env ] && { set -a; . /etc/aiflow/deploy.env; set +a; }
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this host is not on the develop channel (set AIFLOW4_CHANNEL=develop in /etc/aiflow/deploy.env)" >&2; exit 3; }
 exec 9>/run/aiflow4-deploy.lock; flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }   # one deploy at a time
 BUNDLE=${1:-}; REF=${2:-TESTFLOW-30-v4-core}
-R=/srv/aiflow/control/repos/ai-flow
+ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
+R=$ROOT/control/repos/ai-flow
 cd $R
 if [ -n "$BUNDLE" ]; then
   git fetch -q "$BUNDLE" "+$REF:refs/heads/$REF"
@@ -21,7 +24,15 @@ else
   esac
 fi
 SHA=$(git rev-parse --short=10 "$REF")
-B=/srv/aiflow/build/$SHA; rm -rf "$B"; mkdir -p "$B"; git archive "$REF" | tar -x -C "$B"
+RELEASES=$ROOT/control/releases
+mkdir -p "$RELEASES"
+TAR=$RELEASES/aiflow4-$SHA.tar.gz
+git archive --format=tar.gz -o "$TAR" "$REF"
+if [ "$STAGE_ONLY" = yes ]; then
+  echo "staged unsigned develop build $SHA"
+  exit 0
+fi
+B=$ROOT/build/$SHA; rm -rf "$B"; mkdir -p "$B"; git archive "$REF" | tar -x -C "$B"
 # reuse the image of a release built before (a rollback is then immediate); a build that hangs on the registry
 # (base image metadata) is cut after 5 minutes and tried again
 if ! docker image inspect "aiflow4/control:$SHA" >/dev/null 2>&1; then
@@ -43,17 +54,14 @@ for svc in control-api-a control-api-b; do               # one at a time: the ot
   docker rm -f aiflow4-control-api >/dev/null 2>&1 || true # the single container of the first layout
 done
 AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$SHA docker compose -f "$CF" up -d --no-deps control-loops 2>&1 | grep -v -e '^$' | tail -1
-mkdir -p /srv/aiflow/control/releases
-TAR=/srv/aiflow/control/releases/aiflow4-$SHA.tar.gz
-git archive --format=tar.gz -o "$TAR" "$REF"
 install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" "$B/deploy/v4/bin/aiflow4-autodeploy" \
   "$B/deploy/v4/bin/aiflow4-develop-install" "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" /usr/local/sbin/
 install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/ && systemctl daemon-reload && systemctl enable -q --now aiflow4-autodeploy.timer
 mkdir -p /root/.bridge/out/release; rm -f /root/.bridge/out/release/*.tar.gz
 cp "$TAR" /root/.bridge/out/release/; echo "$SHA" > /root/.bridge/out/release/SHA
 # nodes follow CURRENT through their heartbeat; write it before this node restarts its agent
-echo "$SHA" > /srv/aiflow/control/releases/CURRENT.tmp && mv /srv/aiflow/control/releases/CURRENT.tmp /srv/aiflow/control/releases/CURRENT
+echo "$SHA" > "$RELEASES/CURRENT.tmp" && mv "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT"
 aiflow4-develop-install "$TAR" "$SHA"
-ls -1t /srv/aiflow/control/releases/aiflow4-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep 10 releases
+ls -1t "$RELEASES"/aiflow4-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep 10 releases
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
 echo "deployed $SHA"

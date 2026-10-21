@@ -3,6 +3,10 @@
   aiflow4 migrate                       apply registry migrations
   aiflow4 control-api [--port 8080]     control API + dashboards
   aiflow4 control-loops                 Jira sync, watchdog
+  aiflow4 canary evaluate ...            evaluate the active auto-deploy canary
+  aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
+  aiflow4 canary record-promotion ...     record an under-observed canary promotion
+  aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
   aiflow4 node join --name N --join-token-file F [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
@@ -11,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -89,6 +94,30 @@ def main(argv: list[str] | None = None) -> int:
     pa = sub.add_parser("node-agent")
     pa.add_argument("--slots", type=int, default=2)
     pa.add_argument("--no-workers", action="store_true")
+    pc = sub.add_parser("canary")
+    canary_sub = pc.add_subparsers(dest="canary_action", required=True)
+    pe = canary_sub.add_parser("evaluate")
+    pe.add_argument("--node", required=True)
+    pe.add_argument("--target", required=True)
+    pe.add_argument("--previous", required=True)
+    pe.add_argument("--started-at", required=True)
+    pe.add_argument("--minimum-age-s", type=int, default=1200)
+    pe.add_argument("--minimum-runs", type=int, default=5)
+    pe.add_argument("--maximum-age-s", type=int, default=3600)
+    pe.add_argument("--failure-ratio", default="2")
+    pe.add_argument("--minimum-infra-failures", type=int, default=3)
+    pr = canary_sub.add_parser("record-rollback")
+    pr.add_argument("--node", required=True)
+    pr.add_argument("--target", required=True)
+    pr.add_argument("--previous", required=True)
+    pr.add_argument("--commit", required=True)
+    pr.add_argument("--measurements", required=True)
+    pp = canary_sub.add_parser("record-promotion")
+    pp.add_argument("--node", required=True)
+    pp.add_argument("--target", required=True)
+    pp.add_argument("--measurements", required=True)
+    pp.add_argument("--minimum-runs", type=int, default=5)
+    canary_sub.add_parser("retry-tickets")
     pw = sub.add_parser("worker")
     pw.add_argument("--account", required=True)
     a = ap.parse_args(argv)
@@ -118,6 +147,43 @@ def main(argv: list[str] | None = None) -> int:
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
+        return 0
+    if a.cmd == "canary":
+        from datetime import datetime, timezone
+        from .control.canary import (Thresholds, decide, measure_registry, record_promotion,
+                                     record_rollback, retry_pending_flow_bugs)
+        if a.canary_action == "evaluate":
+            from .control.db import DB
+            db = DB(s.database_url)
+            try:
+                installed = db.one("SELECT release_version FROM nodes WHERE name=%s", (a.node,))
+                measurements = measure_registry(db, a.node, datetime.fromisoformat(a.started_at), a.previous)
+                thresholds = Thresholds.from_values(a.minimum_age_s, a.minimum_runs, a.maximum_age_s,
+                                                    a.failure_ratio, a.minimum_infra_failures)
+                elapsed = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(a.started_at)).total_seconds()))
+                result = decide(measurements, elapsed, thresholds,
+                                installed=bool(installed and installed["release_version"] == a.target))
+                print(json.dumps(result, separators=(",", ":")))
+            finally:
+                db.close()
+            return 0
+        ctx = build_ctx(s)
+        try:
+            if a.canary_action == "retry-tickets":
+                print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
+                return 0
+            measurements = json.loads(a.measurements)
+            if a.canary_action == "record-rollback":
+                result = record_rollback(ctx, node=a.node, target=a.target, previous=a.previous,
+                                         commit=a.commit, measurements=measurements)
+            else:
+                result = {"incident_opened": record_promotion(
+                    ctx, target=a.target, node=a.node, measurements=measurements, under_observed=True,
+                    required_runs=a.minimum_runs)}
+            print(json.dumps(result, separators=(",", ":")))
+        finally:
+            ctx.db.close()
+            ctx.leases.r.close()
         return 0
     if a.cmd == "node":
         import httpx

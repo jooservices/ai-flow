@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import string
 import uuid
 from typing import Any
 
@@ -244,10 +245,16 @@ def tracker_for(ctx, project: Any, version_id: str, version_name: str) -> str:
 
 def _changelog(snapshot: dict[str, Any], sha: str, checks: list[dict[str, Any]]) -> str:
     lines = [f"## {snapshot['version']}", "", "### Included tickets"]
-    lines.extend(f"- [{ticket['key']}] {ticket['summary']}" for ticket in snapshot["tickets"])
+    lines.extend(f"- [{ticket['key']}] {_markdown_text(ticket['summary'])}" for ticket in snapshot["tickets"])
     lines.extend(("", "### Release checks", f"- Passed on `{sha}`"))
     lines.extend(f"- `{item['command']}`: passed" for item in checks)
     return "\n".join(lines) + "\n"
+
+
+def _markdown_text(value: str) -> str:
+    """Keep Jira-controlled text on one Markdown line and render its punctuation literally."""
+    normalized = re.sub(r"[\r\n]+", " ", str(value))
+    return "".join(f"\\{char}" if char in string.punctuation else char for char in normalized)
 
 
 def _audit(ctx, project: Any, tracker: str, run: dict, action: str, result: str, payload: dict) -> None:

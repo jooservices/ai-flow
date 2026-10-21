@@ -78,6 +78,20 @@ def test_version_membership_is_read_live_and_includes_tickets_added_later(ctx):
     assert second["reasons"] == ["TESTWP-3: missing Done, reviewer PASS, QA merge, QC checks"]
 
 
+def test_release_notes_escape_multiline_jira_summaries_as_markdown_text():
+    snapshot = {"version": CORE, "tickets": [{
+        "key": "TESTWP-999",
+        "summary": "Core update\r\n## Injected\n![image](https://evil.test/x) <img src=x>",
+    }]}
+
+    notes = version_release._changelog(snapshot, "a" * 40, [])
+
+    assert ("- [TESTWP-999] Core update \\#\\# Injected \\!\\[image\\]\\(https\\:\\/\\/evil\\.test\\/x\\) "
+            "\\<img src\\=x\\>") in notes
+    assert "Core update\r" not in notes and "Core update\n" not in notes
+    assert "\n## Injected" not in notes and "\n![image]" not in notes
+
+
 @pytest.mark.parametrize(("status", "reviewer", "qa", "qc", "missing"), [
     ("In Progress", True, True, True, "Done"),
     ("Done", False, True, True, "reviewer PASS"),

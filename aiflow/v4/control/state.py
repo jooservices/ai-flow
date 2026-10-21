@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import VERSION
+from ..core.toolchains import missing_tools
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -29,9 +30,11 @@ def snapshot(ctx) -> dict[str, Any]:
         status = n["status"]
         if status == "online" and (age is None or age > NODE_OFFLINE_S):
             status = "offline"
+        required = repo.tools_for_node(n["name"])
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
-                      "metrics": n["metrics"], "tools": n["tools"], "heartbeat_age_s": age,
+                      "metrics": n["metrics"], "tools": n["tools"],
+                      "missing_tools": missing_tools(n["tools"], required), "heartbeat_age_s": age,
                       "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",

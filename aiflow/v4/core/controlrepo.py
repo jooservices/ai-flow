@@ -12,6 +12,11 @@ from typing import Any
 
 import yaml
 
+from .toolchains import NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_stack, tools_for_stacks
+
+__all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
+           "tools_for_stack", "tools_for_stacks"]
+
 
 @dataclass
 class Account:
@@ -46,6 +51,11 @@ class Project:
     def work_minutes(self) -> dict[str, int]:
         wm = (self.limits or {}).get("work_minutes") or {}
         return {"target": int(wm.get("target", 30)), "warn": int(wm.get("warn", 45)), "hard": int(wm.get("hard", 60))}
+
+    @property
+    def tools(self) -> list[str]:
+        """Node tools plus the extra tools this project's stack needs."""
+        return tools_for_stack(self.stack)
 
 
 @dataclass
@@ -101,6 +111,13 @@ class ControlRepo:
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
+
+    def tools_for_node(self, node: str) -> list[str]:
+        """Tools the node needs for every project it serves. Unknown nodes need only the node tools."""
+        n = self.nodes.get(node)
+        if not n:
+            return list(NODE_TOOLS)
+        return tools_for_stacks(self.projects[p].stack for p in n.projects if p in self.projects)
 
     def account(self, account_id: str) -> Account | None:
         return next((a for a in self.accounts if a.id == account_id), None)

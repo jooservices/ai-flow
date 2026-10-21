@@ -17,23 +17,34 @@ import time
 from pathlib import Path
 
 from .. import VERSION
-from .policy_relay import PolicyRelay
+from ..core.toolchains import STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
+from .policy_relay import PolicyRelay
 
 log = logging.getLogger("aiflow4.node")
 TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "codex-code-mode-host": ["codex-code-mode-host", "--version"], "grok": ["grok", "--version"],
          "opencode": ["opencode", "--version"], "docker": ["docker", "--version"], "git": ["git", "--version"],
-         "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"]}
+         "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
+         "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version"],
+         "python3": ["python3", "--version"]}
+REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
 
 
-def tool_versions() -> dict[str, str]:
+def tool_versions(names: list[str] | None = None) -> dict[str, str]:
+    """One version line per tool, or `missing`; names default to the node tools and every stack tool."""
     out = {}
-    for name, cmd in TOOLS.items():
+    for name in names if names is not None else REPORTED_TOOLS:
+        cmd = TOOLS.get(name)
+        if not cmd:
+            out[name] = "missing"
+            continue
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            out[name] = (p.stdout or p.stderr).strip().splitlines()[0][:80] if (p.stdout or p.stderr) else "?"
+            output = (p.stdout or p.stderr).strip()
+            version = output.splitlines()[0][:80] if output else ""
+            out[name] = version if p.returncode == 0 and version else "missing"
         except (OSError, subprocess.TimeoutExpired):
             out[name] = "missing"
     return out

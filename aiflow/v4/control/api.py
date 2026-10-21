@@ -85,6 +85,26 @@ class Ctx:
     github: GitHubApp | None = None
 
 
+def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[str]:
+    """Notify the Jira assignee, or the configured owner, when a required human review starts."""
+    ticket = ticket or ctx.db.one("SELECT key, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
+    if not ticket or "require-human" not in (ticket.get("labels") or []):
+        return []
+    fields = ticket.get("fields") or {}
+    assignee = ticket.get("assignee") or fields.get("assignee") or {}
+    email = assignee.get("email") if isinstance(assignee, dict) else ""
+    title = f"{key} is ready for human review"
+    detail = ticket.get("summary") or key
+    link = f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}" if ctx.settings.jira_site else ""
+    sent = notify.send("info", title, detail, link, recipient=email or "")
+    ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
+               " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
+               (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
+    ctx.events.emit("notify.human_review", ticket=key, project=ticket.get("project", ""), account="control",
+                    outcome="sent" if sent else "no_channel", reason="require-human")
+    return sent
+
+
 # --- request bodies ---------------------------------------------------------------------------------------
 class JoinBody(BaseModel):
     name: str
@@ -191,6 +211,10 @@ class TriageAlertBody(BaseModel):
     detail: str
 
 
+class ReviewerBody(BaseModel):
+    comment: str = ""
+
+
 class MasterActionBody(BaseModel):
     run_id: str
     fence: int
@@ -291,6 +315,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(401, "unknown node token")
         return row["name"]
 
+    def reviewer_auth(authorization: str = Header(default="")) -> str:
+        configured = ctx.settings.reviewer_token
+        if not configured:
+            raise HTTPException(503, "reviewer actions are not configured")
+        scheme, separator, token = authorization.partition(" ")
+        if (not separator or scheme.lower() != "bearer" or not token.strip()
+                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            raise HTTPException(401, "reviewer authorization required",
+                                headers={"WWW-Authenticate": "Bearer"})
+        return "reviewer"
+
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
         ctx.db.run("INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
@@ -331,6 +366,53 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["node"] != node:
             raise HTTPException(403, "master run belongs to another node")
         return run
+
+    def reviewer_run(key: str) -> tuple[dict, str, int, int]:
+        ticket = ctx.db.one("SELECT key, project, status, labels, summary FROM tickets WHERE key=%s", (key,))
+        if not ticket:
+            raise HTTPException(404, "unknown ticket")
+        if ticket["status"] != "Human review":
+            raise HTTPException(409, "ticket is no longer in Human review")
+        if not ctx.jira or not ctx.github:
+            raise HTTPException(503, "Jira or GitHub is unavailable")
+        pr_run = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
+                            " ORDER BY started_at DESC LIMIT 1", (key,))
+        match = re.search(r"/pull/(\d+)(?:/|$)", (pr_run or {}).get("pr_url", ""))
+        if not match:
+            raise HTTPException(409, "ticket has no pull request to review")
+        run_id = str(uuid.uuid4())
+        claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+        if not claim.ok:
+            raise HTTPException(409, "ticket is already being changed")
+        try:
+            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash)"
+                        " VALUES (%s,%s,%s,'qa','reviewer-console','human','control',%s,'')",
+                        (run_id, key, ticket["project"], claim.fence))
+        except Exception:
+            ctx.leases.release(key, run_id, claim.fence)
+            raise
+        return ticket, run_id, claim.fence, int(match.group(1))
+
+    def finish_reviewer_run(key: str, run_id: str, fence: int, outcome: str, summary: str) -> None:
+        ctx.db.run("UPDATE runs SET status='finished', outcome=%s, summary=%s, ended_at=now() WHERE id=%s",
+                   (outcome, summary[:2000], run_id))
+        ctx.leases.release(key, run_id, fence)
+        ctx.events.emit("run.finished", ticket=key, project=key.split("-", 1)[0], step="qa", run_id=run_id,
+                        fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
+                        reason=summary[:200])
+
+    def merge_command(run: dict, number: int, title: str = "", method: str = "squash", node: str = "") -> dict:
+        project = ctx.repo().projects.get(run["project"])
+        if not project:
+            raise HTTPException(404, "project is not configured")
+        res = ctx.github.merge_pr(project.repo_name, number, title, method)
+        ok = bool(res.get("merged"))
+        audit("github", "merge", run["ticket_key"], str(run["id"]), run["fence"], run["account_id"], ok,
+              res.get("sha") or res.get("message", ""), {"number": number, "method": method})
+        ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=str(run["id"]), fence=run["fence"],
+                        account=run["account_id"], node=node or run["node"],
+                        outcome="merged" if ok else "refused", reason=res.get("message", "")[:200])
+        return res
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -727,7 +809,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                            "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
                            "dev_summary": dev["summary"]}
         if body.step == "dev":
-            v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s AND step='verify'"
+            v = ctx.db.one("SELECT summary, details, started_at FROM runs WHERE ticket_key=%s"
+                           " AND step IN ('verify','qa')"
                            " AND outcome='rework' ORDER BY started_at DESC LIMIT 1", (t["key"],))
             if v and (not dev or v["started_at"] > dev["started_at"]):
                 extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
@@ -992,12 +1075,15 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
                   "an impact run only comments", {"to": body.to})
             raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
+        previous = ctx.db.one("SELECT status, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
         status = ctx.jira.transition_to(key, body.to)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
                    " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
+        if previous and previous["status"] != "Human review" and status == "Human review":
+            notify_human_review(ctx, key, {**previous, "key": key})
         return {"status": status}
 
     @app.post("/v1/jira/{key}/comment")
@@ -1093,16 +1179,124 @@ def create_app(ctx: Ctx) -> FastAPI:
     def github_merge(body: MergeBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "merge", {"number": body.number})
         if run["step"] != "verify":
-            raise HTTPException(403, "only a verify run merges")
-        project = ctx.repo().projects[run["project"]]
-        res = ctx.github.merge_pr(project.repo_name, body.number, body.title, body.method)
-        ok = bool(res.get("merged"))
-        audit("github", "merge", run["ticket_key"], body.run_id, body.fence, run["account_id"], ok,
-              res.get("sha") or res.get("message", ""), {"number": body.number, "method": body.method})
-        ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
-                        account=run["account_id"], node=node, outcome="merged" if ok else "refused",
-                        reason=res.get("message", "")[:200])
-        return res
+            raise HTTPException(403, "only a verify run can merge")
+        return merge_command(run, body.number, body.title, body.method, node)
+
+    @app.get("/v1/reviews")
+    def human_reviews() -> dict:
+        """Ticket review queue with the latest PR, diff totals, verification result and gated preview link."""
+        repo = ctx.repo()
+        tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key"
+                             " FROM tickets WHERE status='Human review' ORDER BY project, key")
+        epics = {r["key"]: r["status"] for r in ctx.db.all(
+            "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
+        out = []
+        for ticket in tickets:
+            dev = ctx.db.one("SELECT pr_url, summary FROM runs WHERE ticket_key=%s AND pr_url<>''"
+                             " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
+            pr_url = (dev or {}).get("pr_url", "")
+            match = re.search(r"/pull/(\d+)(?:/|$)", pr_url)
+            project = repo.projects.get(ticket["project"])
+            pr_detail: dict[str, Any] = {}
+            if project and match and ctx.github:
+                try:
+                    pr_detail = ctx.github.pr(project.repo_name, int(match.group(1))) or {}
+                except Exception as e:  # noqa: BLE001
+                    log.warning("could not load PR details for %s: %s", ticket["key"], e)
+            verify = ctx.db.one("SELECT outcome, summary, details, started_at FROM runs"
+                                " WHERE ticket_key=%s AND step='verify' ORDER BY started_at DESC LIMIT 1",
+                                (ticket["key"],))
+            details = (verify or {}).get("details") or {}
+            preview_url = ""
+            preview = (project.environments or {}).get("preview") if project else None
+            if isinstance(preview, dict):
+                preview_url = str(preview.get("url") or "")
+            elif isinstance(preview, str):
+                preview_url = preview
+            if ticket["project"] != "TESTFLOW" or epics.get("TESTFLOW-5") != "Done":
+                preview_url = ""
+            out.append({
+                **ticket,
+                "jira_url": f"{ctx.settings.jira_site.rstrip('/')}/browse/{ticket['key']}",
+                "pr": {"url": pr_url, "number": int(match.group(1)) if match else None,
+                       "title": pr_detail.get("title", ""),
+                       "additions": pr_detail.get("additions"), "deletions": pr_detail.get("deletions"),
+                       "changed_files": pr_detail.get("changed_files")},
+                "verify": {"outcome": (verify or {}).get("outcome", ""),
+                           "summary": (verify or {}).get("summary", ""),
+                           "verdict": details.get("verdict", ""), "checks": details.get("checks", ""),
+                           "findings": details.get("findings", "")},
+                "preview_url": preview_url,
+            })
+        return {"tickets": out}
+
+    @app.post("/v1/reviews/{key}/approve")
+    def approve_review(key: str, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        ticket, run_id, fence, number = reviewer_run(key)
+        try:
+            run = fenced(run_id, fence, "github", "merge", {"number": number})
+            project = ctx.repo().projects[ticket["project"]]
+            result = merge_command(run, number, f"{key}: {ticket['summary']}",
+                                   (project.merge or {}).get("method", "squash"), "control")
+            if not result.get("merged"):
+                finish_reviewer_run(key, run_id, fence, "failed", result.get("message", "merge refused"))
+                return {"merged": False, "message": result.get("message", "GitHub refused the merge")}
+            comment_run = fenced(run_id, fence, "jira", "comment", {"chars": len(result.get("sha", ""))})
+            note = f"Human review approved in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
+            comment_id = ctx.jira.comment(key, note)
+            audit("jira", "comment", key, run_id, fence, comment_run["account_id"], True, comment_id,
+                  {"source": "human-review", "chars": len(note)})
+            transition_run = fenced(run_id, fence, "jira", "transition", {"to": "Done"})
+            status = ctx.jira.transition_to(key, "Done")
+            ctx.db.run("UPDATE tickets SET status=%s, done_at=coalesce(done_at,now()), synced_at=now() WHERE key=%s",
+                       (status, key))
+            audit("jira", "transition", key, run_id, fence, transition_run["account_id"], True, status,
+                  {"to": "Done", "source": "human-review"})
+            ctx.events.emit("jira.transition", ticket=key, run_id=run_id, fence=fence, account="reviewer-console",
+                            node="control", outcome=status, reason="human review approved")
+            finish_reviewer_run(key, run_id, fence, "merged", note)
+            return {"merged": True, "sha": result.get("sha", ""), "status": status}
+        except HTTPException:
+            finish_reviewer_run(key, run_id, fence, "failed", "review approval failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review approval failed for %s", key)
+            finish_reviewer_run(key, run_id, fence, "failed", "review approval failed")
+            raise HTTPException(502, "could not complete the review approval") from e
+
+    @app.post("/v1/reviews/{key}/rework")
+    def request_review_rework(key: str, body: ReviewerBody, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        comment = body.comment.strip()
+        if not comment:
+            raise HTTPException(400, "a rework comment is required")
+        ticket, run_id, fence, _number = reviewer_run(key)
+        try:
+            comment_run = fenced(run_id, fence, "jira", "comment", {"chars": len(comment)})
+            comment_id = ctx.jira.comment(key, f"Human review requested rework:\n\n{comment}")
+            audit("jira", "comment", key, run_id, fence, comment_run["account_id"], True, comment_id,
+                  {"source": "human-review", "chars": len(comment)})
+            fields_run = fenced(run_id, fence, "jira", "fields", {"add": ["rework"]})
+            ctx.jira.add_label(key, "rework")
+            ctx.db.run("UPDATE tickets SET labels=CASE WHEN 'rework'=ANY(labels) THEN labels"
+                       " ELSE array_append(labels,'rework') END WHERE key=%s", (key,))
+            audit("jira", "fields", key, run_id, fence, fields_run["account_id"], True, "rework label added",
+                  {"source": "human-review", "add": ["rework"]})
+            transition_run = fenced(run_id, fence, "jira", "transition", {"to": "To Do"})
+            status = ctx.jira.transition_to(key, "To Do")
+            ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
+            audit("jira", "transition", key, run_id, fence, transition_run["account_id"], True, status,
+                  {"to": "To Do", "source": "human-review"})
+            ctx.events.emit("jira.transition", ticket=key, run_id=run_id, fence=fence, account="reviewer-console",
+                            node="control", outcome=status, reason="human review requested rework")
+            finish_reviewer_run(key, run_id, fence, "rework", comment)
+            return {"status": status, "comment_id": comment_id}
+        except HTTPException:
+            finish_reviewer_run(key, run_id, fence, "failed", "review rework failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review rework failed for %s", key)
+            finish_reviewer_run(key, run_id, fence, "failed", "review rework failed")
+            raise HTTPException(502, "could not return the ticket for rework") from e
 
     @app.post("/v1/github/update-branch")
     def github_update_branch(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:

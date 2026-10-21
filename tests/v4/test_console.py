@@ -291,6 +291,30 @@ def test_delivery_report_button_loads_markdown_into_copyable_drawer():
     assert "window.navigator.clipboard.writeText(text)" in page and "document.execCommand('copy')" in page
 
 
+def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
+    ticket = {
+        "key": "TESTFLOW-28", "summary": "Reviewer queue", "description": "Ticket details",
+        "jira_url": "https://jira.test/browse/TESTFLOW-28",
+        "pr": {"url": "https://github.com/jooservices/testflow/pull/28", "number": 28,
+               "title": "Reviewer queue", "additions": 8, "deletions": 2, "changed_files": 3},
+        "verify": {"outcome": "human", "verdict": "PASS", "summary": "Verify passed",
+                   "checks": "pytest passed", "findings": ""},
+        "preview_url": "https://preview.testflow.test",
+    }
+    driver = f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (s) {{ return s === '#view-review' ? root : null; }};
+S.reviews = [{json.dumps(ticket)}];
+renderReviews();
+console.log(root.innerHTML);
+"""
+    out = run_script(driver)
+    for text in ("Human review queue", "TESTFLOW-28", "Ticket details", "pull/28", "Files changed",
+                 "Additions", "Deletions", "pytest passed", "Preview environment", "Approve and merge", "Send for rework"):
+        assert text in out
+    assert 'data-view="review"' in html() and 'id="view-review"' in html()
+
+
 def test_team_lead_view_selects_epics_and_offers_three_report_formats():
     page = html()
     assert 'data-view="lead">Team Lead</button>' in page
@@ -300,14 +324,15 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
     assert "Insufficient tasks" in page and "latest completed verify verdict" in page
 
 
-def test_team_lead_and_stakeholder_routes_both_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/stakeholder'].map(viewOf).join(','));")
-    assert routes.strip() == "lead,stakeholder"
+def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder'].map(viewOf).join(','));")
+    assert routes.strip() == "lead,review,stakeholder"
     page = html()
-    assert 'id="view-lead"' in page and 'id="view-stakeholder"' in page
+    assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert "else if (S.view === 'lead') renderLead();" in page
+    assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'stakeholder']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder']" in page
 
 
 def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():

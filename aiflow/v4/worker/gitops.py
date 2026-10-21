@@ -81,6 +81,7 @@ class Git:
         start = f"origin/{branch}" if self.remote_branch_exists(mirror, branch) else f"origin/{base}"
         if path.exists() and (path / ".git").exists():
             self.run("fetch", "--quiet", cwd=path, check=False)
+            self.scrub(path)
             self.run("checkout", "-q", "-B", branch, start, cwd=path)
             self.run("reset", "-q", "--hard", start, cwd=path)
             self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path)
@@ -89,10 +90,17 @@ class Git:
             self.run("worktree", "add", "-q", "-B", branch, str(path), start, cwd=mirror)
         return start
 
+    def scrub(self, path: Path) -> None:
+        """Drop whatever a previous run left in a reused worktree: an unfinished merge, edits, untracked files."""
+        self.run("merge", "--abort", cwd=path, check=False)
+        self.run("reset", "-q", "--hard", cwd=path, check=False)
+        self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path, check=False)
+
     def detached(self, mirror: Path, path: Path, ref: str) -> str:
         """Worktree at a commit without a branch (verify reads the PR head; the dev worktree may hold the branch)."""
         self.run("worktree", "prune", cwd=mirror, check=False)
         if path.exists() and (path / ".git").exists():
+            self.scrub(path)
             self.run("checkout", "-q", "--detach", ref, cwd=path)
             self.run("reset", "-q", "--hard", ref, cwd=path)
             self.run("clean", "-qfdx", "-e", "vendor/", "-e", "node_modules/", cwd=path)

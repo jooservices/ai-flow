@@ -121,11 +121,13 @@ def watchdog(ctx: Ctx) -> None:
     # tickets whose dev runs keep failing (backoff in the API keeps them from spinning; a person should look)
     from .api import BACKOFF_SQL
     streak_sql = BACKOFF_SQL.split("SELECT ticket_key, fails FROM streak")[0] + "SELECT ticket_key, fails FROM streak"
-    stuck = {r["ticket_key"]: r["fails"] for r in ctx.db.all(streak_sql)}
+    stuck: dict[str, int] = {}
+    for step in ("dev", "verify"):
+        for r in ctx.db.all(streak_sql, {"step": step}):
+            stuck[r["ticket_key"]] = max(stuck.get(r["ticket_key"], 0), r["fails"])
     for key, fails in stuck.items():
         if fails >= 3:
-            last = ctx.db.one("SELECT account_id, summary FROM runs WHERE ticket_key=%s AND step='dev' ORDER BY started_at DESC"
-                              " LIMIT 1", (key,))
+            last = ctx.db.one("SELECT account_id, summary FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1", (key,))
             open_incident(ctx, "ticket_stuck", key, "warning", f"{key} failed {fails} runs in a row",
                           f"Last error ({last['account_id'] if last else '?'}): {(last['summary'] if last else '')[:300]}."
                           " Retries wait up to 30 minutes; fix the cause or put the ticket on hold.")

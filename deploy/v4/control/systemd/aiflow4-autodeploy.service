@@ -1,5 +1,5 @@
 [Unit]
-Description=AI Flow v4: deploy develop when it moved and CI passed
+Description=AI Flow v4: deploy the newest published versioned release
 After=docker.service network-online.target
 
 [Service]

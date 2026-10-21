@@ -200,6 +200,63 @@ def test_verify_goes_to_another_account_and_merges(client, ctx):
     assert client.post("/v1/github/merge", json={"run_id": r["run_id"], "fence": r["fence"], "number": 1}, headers=cc).status_code in (403, 409)
 
 
+def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-63", status="Needs owner", labels=("aiflow-ready",))
+    add_ticket(ctx.db, "TESTWP-64", status="Needs owner", labels=("owner-escalated",))
+    add_ticket(ctx.db, "TESTWP-65", status="In Verify")
+    add_ticket(ctx.db, "TESTWP-66", status="To Do")
+
+    def add_run(key, step, account, outcome, summary, pr_url="", details=None):
+        run_id = str(uuid.uuid4())
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                    "summary,pr_url,details) VALUES (%s,%s,'TESTWP',%s,%s,%s,%s,1,'finished',%s,%s,%s,%s)",
+                    (run_id, key, step, account, "claude" if account.startswith("claude") else "codex",
+                     "cc" if account.startswith("claude") else "node1", outcome, summary, pr_url, J(details or {})))
+        return run_id
+
+    add_run("TESTWP-63", "dev", "claude-01", "blocked", "Can we change the API response shape?")
+    add_run("TESTWP-63", "verify", "codex-01", "rework", "verify failed", details={"findings": "- add a nonce"})
+    add_run("TESTWP-65", "dev", "claude-01", "done", "Implemented it", "https://github.com/x/y/pull/9")
+    add_run("TESTWP-65", "verify", "claude-01", "rework", "verify failed", details={"findings": "- add a nonce"})
+    ctx.jira.recent_comment_data["TESTWP-63"] = [
+        {"created": "2026-10-20T12:00:00Z", "author": "Owner", "body": "Keep the response backwards compatible."}
+    ]
+
+    # The developer account cannot triage its own question.
+    claude = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]
+    assert not any(t["key"] == "TESTWP-63" and t["step"] == "triage" for t in claude)
+
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert [(t["key"], t["step"]) for t in candidates] == [
+        ("TESTWP-65", "verify"), ("TESTWP-63", "triage"), ("TESTWP-66", "dev")]
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-63", "account": "codex-01", "step": "triage"},
+                          headers=n1).json()
+    assert claimed["claimed"] and claimed["step"] == "triage"
+    assert claimed["last_dev_summary"] == "Can we change the API response shape?"
+    assert claimed["verify_findings"] == "- add a nonce"
+    assert claimed["recent_comments"] == ctx.jira.recent_comment_data["TESTWP-63"]
+
+    # Triage receives a read-only GitHub token.
+    token = client.post("/v1/github/token", json={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                  "repo": "jooservices/test-aiflow-wp"}, headers=n1)
+    assert token.status_code == 200
+    assert ctx.github.token_requests[-1][1] == {"contents": "read", "metadata": "read"}
+    auth = {"Authorization": f"Bearer {claimed['run_token']}"}
+    assert client.post("/v1/policy/decide", json={"tool_name": "Bash", "tool_input": {"command": "git status"},
+                                                  "cwd": "/srv/work/TESTWP"}, headers=auth).json()[
+        "hookSpecificOutput"]["permissionDecision"] == "allow"
+    for tool, tool_input in (("Bash", {"command": "touch /tmp/changed"}),
+                             ("Bash", {"command": "cat ticket.txt > /tmp/copy"}),
+                             ("Bash", {"command": "find . -exec touch changed \\;"}),
+                             ("Bash", {"command": "git branch -f develop"}),
+                             ("Write", {"file_path": "/srv/work/TESTWP/changed.py"})):
+        hook = {"tool_name": tool, "tool_input": tool_input, "cwd": "/srv/work/TESTWP"}
+        assert client.post("/v1/policy/decide", json=hook, headers=auth).json()[
+            "hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_rework_findings_reach_the_next_dev_run(client, ctx):
     cc = join(client, "cc")
     n1 = join(client, "node1")

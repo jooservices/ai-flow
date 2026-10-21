@@ -461,7 +461,7 @@ function doing(a) {
   if (a.status === 'node_offline') return 'its node ' + a.node + ' is offline';
   return 'waiting for a ready ticket';
 }
-function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
+function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', answered: 'ok', escalated: 'crit', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
 function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
 
 /* ---------- fetch ---------- */
@@ -805,7 +805,7 @@ function renderDBody() {
   var att = [];
   work.forEach(function (t) {
     var lr = t.last_run;
-    if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The developer AI stopped with a question; answer in the Jira ticket']);
+    if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The master role triages the developer question; owner-escalated tickets need an owner decision']);
     else if (t.status === 'Human review') att.push([t, 'info', 'Human review', 'Require human = Yes; checks passed']);
     else if (t.run && (t.run.elapsed_s || 0) >= p.work_minutes.target * 60) att.push([t, (t.run.elapsed_s >= p.work_minutes.warn * 60 ? 'crit' : 'warn'), 'Over ' + p.work_minutes.target + ' min', t.run.account + ' · ' + mmss(t.run.elapsed_s)]);
     else if (!t.run && lr && t.status === 'To Do' && ['failed', 'lost', 'timeout', 'quota'].indexOf(lr.outcome) >= 0) att.push([t, 'warn', 'Retry', lr.account + ': ' + lr.outcome + (lr.error_kind ? ' (' + lr.error_kind + ')' : '')]);

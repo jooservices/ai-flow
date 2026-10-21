@@ -44,6 +44,9 @@ class Claimed:
     findings: str = ""
     branch: str = ""
     pr: dict | None = None
+    last_dev_summary: str = ""
+    verify_findings: str = ""
+    recent_comments: list[dict] | list[str] | None = None
 
 
 class LeaseLost(Exception):

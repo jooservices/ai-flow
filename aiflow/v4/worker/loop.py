@@ -20,6 +20,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
+from .triage import run_triage
 from .verify import run_verify
 
 log = logging.getLogger("aiflow4.worker")
@@ -123,11 +124,15 @@ class Worker:
             c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=self.account,
                         provider=r["provider"], model=r.get("model", ""), effort=r.get("effort", ""),
                         ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]), step=step,
-                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"))
+                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"),
+                        last_dev_summary=r.get("last_dev_summary") or "",
+                        verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [])
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "triage":
+                res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:
                 res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             try:

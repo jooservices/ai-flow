@@ -100,3 +100,44 @@ def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktr
     if tool in ("WebFetch", "WebSearch"):
         return Decision("allow", "documentation lookup")
     return Decision("deny", f"tool {tool} is not used by AI Flow runs")
+
+
+def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str) -> Decision:
+    """Triage may inspect source, but cannot run commands that write to the checkout or elsewhere."""
+    if tool in WRITE_TOOLS:
+        return Decision("deny", "a triage run reads the base branch and cannot edit files")
+    if tool == "Bash":
+        command = str(tool_input.get("command", "")).strip()
+        if any(ch in command for ch in (">", "<", "`", "$")):
+            return Decision("deny", "shell redirection and command substitution are not allowed during triage")
+        allowed = {command for command in READ_ONLY if command.split()[0] != "env" and command.split()[0] != "date"}
+        for segment in _segments(command):
+            try:
+                args = shlex.split(segment)
+            except ValueError:
+                return Decision("deny", "invalid shell quoting during triage")
+            if not args:
+                continue
+            prefix = " ".join(args[:2]) if args[0] == "git" and len(args) > 1 else args[0]
+            if prefix not in allowed:
+                return Decision("deny", f"command is not read-only during triage: {segment[:120]}")
+            if args[0] == "find" and any(a in ("-exec", "-execdir", "-delete", "-ok", "-okdir")
+                                           or a.startswith(("-fprint", "-fprintf"))
+                                           for a in args):
+                return Decision("deny", "find commands that execute or write are not allowed during triage")
+            if args[0] in ("sort", "tree") and any(a == "-o" or a.startswith("-o") or a == "--output"
+                                                       or a.startswith("--output=") for a in args):
+                return Decision("deny", f"{args[0]} output files are not allowed during triage")
+            if args[:2] == ["git", "branch"] and any(
+                    not a.startswith("-") or a in ("-d", "-D", "-m", "-M", "-c", "-C", "-f",
+                                                    "--delete", "--move", "--copy", "--force",
+                                                    "--edit-description") for a in args[2:]):
+                return Decision("deny", "git branch commands that change refs are not allowed during triage")
+            if args[0] == "git" and args[1:2] in (["diff"], ["show"], ["log"]) and any(
+                    a in ("--ext-diff", "--output", "-o") or a.startswith("--output=") for a in args[2:]):
+                return Decision("deny", "Git commands that write files or run external diff tools are not allowed")
+            for arg in args[1:]:
+                if any(fnmatch.fnmatch(arg, pattern) for pattern in (policy.get("files") or {}).get("deny_read", [])):
+                    return Decision("deny", f"reading {arg} is not allowed")
+        return Decision("allow", "read-only command during triage")
+    return decide(policy, tool, tool_input, worktree)

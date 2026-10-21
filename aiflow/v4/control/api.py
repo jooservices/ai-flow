@@ -25,8 +25,9 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp
 from .jira import Jira
-from .policy import Decision, decide
+from .policy import Decision, decide, decide_read_only
 from .report import ReportNotFound, build_report, render_markdown
+from . import notify
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
@@ -164,6 +165,12 @@ class PRCommentBody(BaseModel):
     fence: int
     number: int
     body: str
+
+
+class TriageAlertBody(BaseModel):
+    run_id: str
+    fence: int
+    detail: str
 
 
 class EventsBody(BaseModel):
@@ -305,7 +312,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                           " ORDER BY started_at DESC LIMIT 1", (key,))
 
     def eligible(account_id: str, node: str) -> list[dict]:
-        """Tickets this account may take now: verification of finished work first, then development."""
+        """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
         if not acc or acc.node != node:
@@ -331,6 +338,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "verify"})
+        if "master" in roles:
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
+                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
+                                (projects,)):
+                if t["key"] in held:
+                    continue
+                dev = last_dev(t["key"])
+                if dev and dev["account_id"] == acc.id:
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                out.append({**t, "step": "triage"})
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
@@ -363,6 +382,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             return JSONResponse({"claimed": False, "reason": "not eligible"}, status_code=409)
         repo = ctx.repo()
         acc = repo.account(body.account)
+        triage_context: dict[str, Any] = {}
+        if body.step == "triage":
+            verify = ctx.db.one("SELECT summary, details FROM runs WHERE ticket_key=%s AND step='verify'"
+                                " AND status<>'running' ORDER BY started_at DESC LIMIT 1", (t["key"],))
+            comments = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
+            triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
+                              "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
+                              if verify else "", "recent_comments": comments}
         run_id = str(uuid.uuid4())
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:
@@ -389,6 +416,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["findings"] = (v["details"] or {}).get("findings") or v["summary"]
             if dev and dev["branch"]:
                 extra["branch"] = dev["branch"]
+        if body.step == "triage":
+            extra.update(triage_context)
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
@@ -496,11 +525,28 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.jira.set_fields(key, body.fields)
         for lab in body.add_labels:
             ctx.jira.add_label(key, lab)
+            ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s = ANY(labels) THEN labels ELSE array_append(labels,%s) END"
+                       " WHERE key=%s", (lab, lab, key))
         for lab in body.remove_labels:
             ctx.jira.remove_label(key, lab)
+            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (lab, key))
         audit("jira", "fields", key, body.run_id, body.fence, run["account_id"], True, "ok",
               {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
         return {"ok": True}
+
+    @app.post("/v1/notify/triage")
+    def triage_alert(body: TriageAlertBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "notify", "triage-alert", {"chars": len(body.detail)})
+        if run["step"] != "triage":
+            raise HTTPException(403, "only a triage run can alert the owner")
+        blocks = ctx.db.one("SELECT 1 FROM tickets WHERE %s::text = ANY(blocked_by) LIMIT 1", (run["ticket_key"],))
+        severity = "critical" if blocks else "warning"
+        sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
+                           ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
+                           if ctx.settings.jira_site else "")
+        audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              ",".join(sent) or "no channel configured", {"severity": severity})
+        return {"ok": True, "severity": severity, "sent": sent}
 
     # --- GitHub (fenced) --------------------------------------------------------------------------------------
     @app.post("/v1/github/token")
@@ -509,7 +555,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(run["project"])
         if not project or project.repo.split("/")[-1] != body.repo.split("/")[-1]:
             raise HTTPException(403, "repository does not belong to the run's project")
-        token, expires = ctx.github.token(project.repo_name, {"contents": "write", "metadata": "read", "workflows": "write"})
+        permissions = {"contents": "read", "metadata": "read"} if run["step"] == "triage" else {
+            "contents": "write", "metadata": "read", "workflows": "write"}
+        token, expires = ctx.github.token(project.repo_name, permissions)
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
               {"repo": project.repo, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
@@ -581,7 +629,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not run:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": "no active AI Flow run for this token"}}
-        if run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        if run["step"] == "triage":
+            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
+                                 str(payload.get("cwd") or ""))
+        elif run["step"] == "verify" and tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             d = Decision("deny", "a verify run reviews and tests; it does not edit code")
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},

@@ -91,6 +91,14 @@ class Jira:
     def status(self, key: str) -> str:
         return self.call("GET", f"/rest/api/3/issue/{key}?fields=status")["fields"]["status"]["name"]
 
+    def recent_comments(self, key: str, limit: int = 10) -> list[dict[str, str]]:
+        """Return the newest Jira comments in a compact, prompt-safe form."""
+        data = self.call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={limit}")
+        return [{"author": (c.get("author") or {}).get("displayName", "unknown"),
+                 "created": c.get("created", ""),
+                 "body": adf_to_text(c.get("body"))[:2000]}
+                for c in data.get("comments", [])[:limit]]
+
     # --- writes ---------------------------------------------------------------------------------------------
     def transition_to(self, key: str, target: str) -> str:
         """Walk the workflow until `key` reaches `target`; direct transitions first, then the forward order."""

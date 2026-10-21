@@ -40,6 +40,18 @@ to OpenObserve (`/o2/`), Mailpit (`/mail/`) and Gatus, and the JOOservices copyr
 All values come from `/v1/state` (`version`, `env`, `control_repo`, `versions`, `links`). The Gatus link
 defaults to `/gatus/`; set `AIFLOW4_GATUS_URL` on the control API when Gatus is published elsewhere.
 
+### Needs owner triage
+
+Accounts with the `master` role can take `triage` runs for tickets in Needs owner unless the ticket already has
+the `owner-escalated` label. The last account that ran development is excluded. Verify and triage candidates
+are offered before new development work. Triage reads the ticket, last developer summary, latest verify findings,
+recent Jira comments, and the configured project's base branch in a read-only checkout.
+
+An `ANSWER` posts a Jira comment with What, Why, Result, and Next, then moves the ticket to To Do. An
+`ESCALATE` posts the same comment shape, adds `owner-escalated`, and alerts configured notify channels. The
+alert is critical when another ticket is blocked by this one. The Runs table records both outcomes under the
+`triage` step; an owner can resume an escalated ticket by resolving the decision and removing that label.
+
 ### Daily analytics
 
 `GET /v1/analytics/daily?days=14` (1 to 90 days, default 14; optional `project=KEY`) returns one row per

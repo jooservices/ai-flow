@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,25 @@ def test_merge_base_reports_conflicts_and_detached_verify(tmp_path):
     head = g.detached(mirror, vt, "origin/TESTWP-1-x")
     assert len(head) == 40
     assert g.merge_base_in(vt, "develop", ID, commit=False) == ["a.txt"]
+
+
+def test_triage_checkout_is_detached_from_base_and_read_only(tmp_path):
+    o = make_origin(tmp_path)
+    g = Git(str(tmp_path / "srv"))
+    mirror = tmp_path / "srv" / "mirrors" / "m.git"
+    mirror.parent.mkdir(parents=True)
+    g.run("clone", "--bare", "-q", str(o), str(mirror))
+    g.run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=mirror)
+    g.run("fetch", "-q", "origin", cwd=mirror)
+    wt = tmp_path / "srv" / "triage" / "TESTWP-1"
+    head = g.readonly_worktree(mirror, wt, "origin/develop")
+
+    assert len(head) == 40 and (wt / "a.txt").read_text() == "develop\n"
+    assert (wt / "a.txt").stat().st_uid == (0 if os.geteuid() == 0 else os.geteuid())
+    assert (wt / "a.txt").stat().st_mode & 0o222 == 0
+    assert wt.stat().st_mode & 0o222 == 0
+    g.remove_worktree(mirror, wt)
+    assert not wt.exists()
 
 
 def test_verdict_and_findings_parsing():

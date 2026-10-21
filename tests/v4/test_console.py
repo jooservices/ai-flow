@@ -210,6 +210,31 @@ console.log(JSON.stringify({{head: head.innerHTML, body: body.innerHTML}}));
     assert re.findall(r'data-act="epic" data-key="(TESTFLOW-\d+)"', out["body"]) == expected
 
 
+@pytest.mark.parametrize(
+    ("work_minutes", "expected_hard_seconds"),
+    [(None, 3600), ({"hard": 90}, 5400)],
+)
+def test_delivery_card_with_active_run_uses_project_hard_limit(work_minutes, expected_hard_seconds):
+    project = {"key": "TESTFLOW", "repo": "jooservices/testflow", "work_minutes": work_minutes}
+    ticket = {
+        "key": "TESTFLOW-19", "project": "TESTFLOW", "type": "Feature", "summary": "Active work",
+        "status": "In Progress", "labels": [], "blocked_by": [],
+        "run": {"account": "worker-1", "step": "dev", "fence": 4, "elapsed_s": 120},
+    }
+    driver = f"""
+var body = {{innerHTML: ''}};
+document.querySelector = function (s) {{ return s === '#dbody' ? body : null; }};
+S.data = {{projects: [{json.dumps(project)}], tickets: [{json.dumps(ticket)}],
+  recent_runs: [], active_runs: [], incidents: [], events: [], totals: {{}}, versions: {{}}}};
+S.project = 'TESTFLOW';
+renderDBody();
+console.log(body.innerHTML);
+"""
+    out = run_script(driver)
+    assert 'data-key="TESTFLOW-19"' in out
+    assert f'data-hard="{expected_hard_seconds}"' in out
+
+
 def test_delivery_selection_is_saved_and_restored_from_local_storage():
     prelude = STUBS + """
 var store = {'aiflow4-delivery': JSON.stringify({project: 'TESTFLOW', typeFilter: 'Bug', epic: 'TESTFLOW-2'})};

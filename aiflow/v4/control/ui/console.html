@@ -912,6 +912,7 @@ function card(t, p) {
   h += '<span class="c-title">' + esc(t.summary) + '</span>';
   if (flags) h += '<span class="c-top">' + flags + '</span>';
   if (t.run) {
+    var wm = p.work_minutes || {};
     var hard = (wm.hard || 60) * 60;
     h += '<span class="c-run"><span class="sdot" data-tone="info"></span><span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step) + ' · fence #' + t.run.fence + '</span>';
     h += '<span class="c-clock"><span class="track"><i data-clock="' + (t.run.elapsed_s || 0) + '" data-hard="' + hard + '"></i><b style="left:50%"></b><b style="left:75%"></b></span><span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span></span>';

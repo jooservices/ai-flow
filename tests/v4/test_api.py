@@ -519,3 +519,28 @@ def test_in_progress_ticket_without_a_run_is_requeued(client, ctx):
     watchdog(ctx)
     assert ctx.jira.status_of["TESTWP-40"] == "To Do"
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "To Do"
+
+
+def test_nodes_follow_the_current_release(client, ctx, tmp_path, monkeypatch):
+    n1 = join(client, "node1")
+    hb = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1).json()
+    assert "release" in hb["desired"]
+    assert client.get("/v1/releases/zzz.tar.gz", headers=n1).status_code in (400, 404)
+    assert client.get("/v1/releases/abc1234.tar.gz", headers=n1).status_code == 404
+    assert client.get("/v1/releases/abc1234.tar.gz").status_code == 401
+
+
+def test_failing_verify_backs_off(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-41")
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "claude-01"}, headers=cc).json()
+    client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "branch": "TESTWP-41-z",
+                                                        "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/9"}, headers=cc)
+    client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-41'")
+    v = client.post("/v1/work/claim", json={"ticket": "TESTWP-41", "account": "codex-01", "step": "verify"}, headers=n1).json()
+    client.post(f"/v1/runs/{v['run_id']}/result", json={"fence": v["fence"], "outcome": "failed", "summary": "verify worker error: x"}, headers=n1)
+    client.post(f"/v1/runs/{v['run_id']}/release", json={"fence": v["fence"]}, headers=n1)
+    cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert all(c["key"] != "TESTWP-41" for c in cands)

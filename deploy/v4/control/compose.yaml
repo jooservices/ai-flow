@@ -18,6 +18,7 @@ x-app: &app
   volumes:
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github:ro
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
+    - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
   logging: { driver: journald, options: { tag: "{{.Name}}" } }
   networks: [control, services, edge]
 

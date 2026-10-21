@@ -166,6 +166,10 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         return result
     finally:
         hb.stop.set()
+        try:  # leave the verify worktree clean for the next run (merge in progress, files the checks wrote)
+            git.scrub(Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, checks: str = "", t0: float | None = None) -> dict:

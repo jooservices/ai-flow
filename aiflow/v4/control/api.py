@@ -6,15 +6,17 @@ fencing is enforced in exactly one place; every accepted or refused write is rec
 from __future__ import annotations
 
 import hashlib
+import re
 import logging
 import secrets
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -37,7 +39,7 @@ BACKOFF_SQL = """
 WITH last AS (
   SELECT ticket_key, outcome, ended_at,
          row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
-  FROM runs WHERE step = 'dev' AND status <> 'running' AND started_at > now() - interval '1 day'
+  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
@@ -303,8 +305,27 @@ def create_app(ctx: Ctx) -> FastAPI:
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+                            "release": current_release(),
                             "projects": repo.nodes[node].projects if node in repo.nodes else [],
                             "versions": repo.versions}}
+
+    # --- releases: nodes follow the release the control plane runs (written by aiflow4-deploy) ---------------
+    RELEASES = Path("/srv/aiflow/control/releases")
+
+    def current_release() -> str:
+        try:
+            return (RELEASES / "CURRENT").read_text().strip()
+        except OSError:
+            return ""
+
+    @app.get("/v1/releases/{sha}.tar.gz")
+    def release_file(sha: str, node: str = Depends(node_auth)) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            raise HTTPException(400, "bad release id")
+        f = RELEASES / f"aiflow4-{sha}.tar.gz"
+        if not f.is_file():
+            raise HTTPException(404, "no such release")
+        return FileResponse(f, media_type="application/gzip")
 
     # --- work -----------------------------------------------------------------------------------------------
     def last_dev(key: str) -> dict | None:
@@ -326,9 +347,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
         if "verify" in roles:
+            verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if t["key"] in held:
+                if t["key"] in held or t["key"] in verify_cooling:
                     continue
                 dev = last_dev(t["key"])
                 if not dev or dev["outcome"] != "done" or not dev["pr_url"]:
@@ -352,7 +374,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "triage"})
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
-            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL)}
+            cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
             dev_rows = []
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):

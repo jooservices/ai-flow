@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/aiflow/node.env
+Environment="PATH=/opt/aiflow/offline/current/bin:/opt/aiflow/offline/current/python/bin:/opt/aiflow/offline/current/node/bin:/opt/aiflow/offline/current/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment=UV_PYTHON_INSTALL_DIR=/opt/aiflow/offline/current/python/managed
 ExecStart=/srv/aiflow/current/.venv/bin/aiflow4 node-agent --slots ${AIFLOW4_SLOTS}
 Restart=always
 RestartSec=5

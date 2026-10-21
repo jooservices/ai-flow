@@ -1,0 +1,9 @@
+#!/bin/sh
+# Build through the repository's frozen Python environment; installation uses only Python stdlib on the node.
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO=$(CDPATH= cd -- "$HERE/../.." && pwd)
+if [ "${1:-}" = build ]; then
+  exec uv run --project "$REPO" --frozen python "$HERE/offline/offline_bundle.py" "$@"
+fi
+exec python3 "$HERE/offline/offline_bundle.py" "$@"

@@ -202,7 +202,7 @@ def run_worker(iclient, ctx, tmp_path, monkeypatch, key, answer, spec=FakeGit.sp
     r = claim(iclient, key)
     c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=r["account"],
                 provider=r["provider"], model=r["model"], effort=r["effort"], ticket=r["ticket"], project=r["project"],
-                identity=tuple(r["identity"]), step="intake")
+                identity=tuple(r["identity"]), step="intake", recent_comments=r.get("recent_comments") or [])
     res = intake.run_intake(Api(iclient), c, str(tmp_path), "http://control", 3600, [])
     iclient.post(f"/v1/runs/{c.run_id}/result", json=res)
     return res, adapter
@@ -240,6 +240,15 @@ def test_questions_move_the_ticket_to_needs_owner(iclient, ctx, tmp_path, monkey
     assert ctx.jira.status_of["TESTWP-28"] == "Needs owner"
     assert not getattr(ctx.jira, "descriptions", [])
     assert ("add", "TESTWP-28", "aiflow-ready") not in ctx.jira.labels
+
+
+def test_owner_answers_in_comments_reach_the_next_intake(iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-29", status="Intake", labels=())
+    ctx.jira.recent_comment_data["TESTWP-29"] = [
+        {"created": "2026-10-21T12:20:00Z", "author": "Owner", "body": "Only the projects page; mobile layout yes."}]
+    answer = "QUESTIONS:\n- Anything else?\nINTAKE: QUESTIONS\n"
+    _res, adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-29", answer)
+    assert "Only the projects page; mobile layout yes." in adapter.prompts[0]
 
 
 def test_unusable_answer_leaves_the_ticket_in_intake(iclient, ctx, tmp_path, monkeypatch):

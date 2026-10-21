@@ -481,6 +481,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["triage_question"] = (q or {}).get("summary") or ""
         if body.step == "triage":
             extra.update(triage_context)
+        if body.step == "intake":
+            # owners answer intake questions in comments as often as in the description
+            try:
+                extra["recent_comments"] = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
+            except Exception as e:  # noqa: BLE001
+                log.warning("comments of %s for intake failed: %s", t["key"], e)
         extra["related"] = related_hits(t)
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,

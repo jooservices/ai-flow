@@ -76,8 +76,11 @@ def read_spec(worktree: Path | None) -> str:
 def build_prompt(c: Claimed, spec: str) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "intake.md").read_text(encoding="utf-8")
     t = c.ticket
+    comments = [f"- {x.get('created', '')} {x.get('author', 'unknown')}: {x.get('body', '')}" if isinstance(x, dict)
+                else f"- {x}" for x in c.recent_comments or []]
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
-                      description=t["description"] or "(no description)")
+                      description=t["description"] or "(no description)",
+                      comments="\n".join(comments) or "(no comments)")
 
 
 def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,

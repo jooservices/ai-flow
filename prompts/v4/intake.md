@@ -33,6 +33,12 @@ Ticket description as written by the author:
 {description}
 ---
 
+Comments on the ticket, newest first. When you asked questions before, the owner's answers may be here; use them
+as part of the author's intent and do not ask again what a comment already answers:
+---
+{comments}
+---
+
 Answer in exactly one of these two forms and nothing after it.
 
 When you rewrote the ticket:

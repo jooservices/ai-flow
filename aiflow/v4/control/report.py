@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from statistics import median
@@ -10,6 +11,15 @@ from typing import Any
 
 class ReportNotFound(LookupError):
     """The requested epic is not in the requested project."""
+
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()!|<>#~])")
+
+
+def _md_text(value: object) -> str:
+    """Keep untrusted report text inline and inert when rendered as Markdown."""
+    text = re.sub(r"[\r\n]+", " ", str(value))
+    return _MD_SPECIAL.sub(r"\\\1", text)
 
 
 def _under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool:
@@ -174,7 +184,7 @@ def _duration(stats: dict[str, Any]) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a report as portable Markdown for the Delivery drawer and copy action."""
-    title = report["epic"] or report["project"]
+    title = _md_text(report["epic"] or report["project"])
     period = report["period"]
     period_text = f"{period['start'] or 'unknown'} to {period['end'] or 'in progress'}"
     if period["days"] is not None:
@@ -182,46 +192,46 @@ def render_markdown(report: dict[str, Any]) -> str:
     out = [f"# Project report: {title}", "", f"**Period:** {period_text}", "",
            "## Tickets", "", f"Done: {report['tickets']['done']} of {report['tickets']['total']}", "",
            "| Type | Done |", "| --- | ---: |"]
-    out.extend(f"| {kind} | {count} |" for kind, count in report["tickets"]["done_by_type"].items())
+    out.extend(f"| {_md_text(kind)} | {count} |" for kind, count in report["tickets"]["done_by_type"].items())
     if not report["tickets"]["done_by_type"]:
         out.append("| — | 0 |")
     out += ["", "## Time", "", f"- Lead time: {_duration(report['lead_time'])}",
             f"- AI time per completed ticket: {_duration(report['ai_time'])}",
             f"- Total recorded AI time: {_duration_value(report['ai_time']['total_seconds'])}", "",
             "## Runs by outcome", "", "| Outcome | Runs |", "| --- | ---: |"]
-    out.extend(f"| {outcome} | {count} |" for outcome, count in report["runs_by_outcome"].items())
+    out.extend(f"| {_md_text(outcome)} | {count} |" for outcome, count in report["runs_by_outcome"].items())
     if not report["runs_by_outcome"]:
         out.append("| — | 0 |")
     out += ["", f"## Rework rounds ({report['rework_rounds']['count']})", ""]
-    out.extend(f"- {item['key']}: {item['rounds']}" for item in report["rework_rounds"]["tickets"])
+    out.extend(f"- {_md_text(item['key'])}: {item['rounds']}" for item in report["rework_rounds"]["tickets"])
     if not report["rework_rounds"]["tickets"]:
         out.append("- None")
     usage = report["usage"]
     out += ["", "## Tokens and cost", "", f"- Tokens: {usage['tokens_total']} ({usage['tokens_in']} in, {usage['tokens_out']} out)",
             f"- Cost: ${usage['cost_usd']:.6f}", "", "### By account", "",
             "| Account | Runs | Tokens | Cost (USD) |", "| --- | ---: | ---: | ---: |"]
-    out.extend(f"| {r['account']} | {r['runs']} | {r['tokens_total']} | ${r['cost_usd']:.6f} |"
+    out.extend(f"| {_md_text(r['account'])} | {r['runs']} | {r['tokens_total']} | ${r['cost_usd']:.6f} |"
                 for r in usage["by_account"])
     if not usage["by_account"]:
         out.append("| — | 0 | 0 | $0.000000 |")
     out += ["", "### By model", "", "| Provider | Model | Runs | Tokens | Cost (USD) |",
             "| --- | --- | ---: | ---: | ---: |"]
-    out.extend(f"| {r['provider'] or '—'} | {r['model'] or '—'} | {r['runs']} | {r['tokens_total']} | ${r['cost_usd']:.6f} |"
+    out.extend(f"| {_md_text(r['provider'] or '—')} | {_md_text(r['model'] or '—')} | {r['runs']} | {r['tokens_total']} | ${r['cost_usd']:.6f} |"
                 for r in usage["by_model"])
     if not usage["by_model"]:
         out.append("| — | — | 0 | 0 | $0.000000 |")
     out += ["", f"## Incidents opened ({report['incidents_opened']['count']})", ""]
-    out.extend(f"- {r['ticket']} · {r['kind']} · {r['title']} ({r['opened_at']})"
+    out.extend(f"- {_md_text(r['ticket'])} · {_md_text(r['kind'])} · {_md_text(r['title'])} ({r['opened_at']})"
                 for r in report["incidents_opened"]["items"])
     if not report["incidents_opened"]["items"]:
         out.append("- None")
     out += ["", f"## Tickets that needed the owner ({report['owner_needed']['count']})", ""]
-    out.extend(f"- {r['key']} · {r['summary']}" for r in report["owner_needed"]["tickets"])
+    out.extend(f"- {_md_text(r['key'])} · {_md_text(r['summary'])}" for r in report["owner_needed"]["tickets"])
     if not report["owner_needed"]["tickets"]:
         out.append("- None")
     out += ["", "## Five slowest tickets", "", "| Ticket | Type | Lead time | Summary |",
             "| --- | --- | ---: | --- |"]
-    out.extend(f"| {r['key']} | {r['type']} | {_duration_value(r['lead_time_seconds'])} | {r['summary'].replace('|', chr(92) + '|')} |"
+    out.extend(f"| {_md_text(r['key'])} | {_md_text(r['type'])} | {_duration_value(r['lead_time_seconds'])} | {_md_text(r['summary'])} |"
                 for r in report["slowest_tickets"])
     if not report["slowest_tickets"]:
         out.append("| — | — | — | No completed tickets with timestamps |")

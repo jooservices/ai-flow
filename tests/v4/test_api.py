@@ -351,6 +351,53 @@ def test_project_report_summarizes_seeded_project_and_epic_history(client, ctx):
     assert client.get("/v1/projects/TESTWP/report", params={"format": "html"}).status_code == 400
 
 
+def test_jira_sync_uses_resolution_date_for_done_ticket_insert_and_keeps_it_on_edits(ctx):
+    from aiflow.v4.control.jira import FIELDS, Jira
+    from aiflow.v4.control.loops import jira_sync
+
+    completed = datetime(2025, 2, 3, 12, tzinfo=timezone.utc)
+    issue = {"key": "TESTWP-501", "fields": {
+        "summary": "Already complete", "status": {"name": "Done"}, "issuetype": {"name": "Task"},
+        "created": "2025-02-01T12:00:00.000+0000", "updated": "2025-02-05T12:00:00.000+0000",
+        "resolutiondate": "2025-02-03T12:00:00.000+0000",
+    }}
+    ctx.jira.search = lambda _jql: [issue]
+    ctx.jira.normalize = Jira.normalize
+
+    assert "resolutiondate" in FIELDS
+    assert jira_sync(ctx, full=True) == 1
+    row = ctx.db.one("SELECT status, jira_updated, done_at FROM tickets WHERE key='TESTWP-501'")
+    assert row["status"] == "Done"
+    assert row["jira_updated"] == datetime(2025, 2, 5, 12, tzinfo=timezone.utc)
+    assert row["done_at"] == completed
+
+    issue["fields"]["updated"] = "2025-02-10T12:00:00.000+0000"
+    assert jira_sync(ctx, full=True) == 1
+    row = ctx.db.one("SELECT jira_updated, done_at FROM tickets WHERE key='TESTWP-501'")
+    assert row["jira_updated"] == datetime(2025, 2, 10, 12, tzinfo=timezone.utc)
+    assert row["done_at"] == completed
+
+
+def test_project_report_markdown_escapes_jira_text(client, ctx):
+    add_ticket(ctx.db, "TESTWP-510", status="Done", labels=())
+    created = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    done = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    summary = "Slow | title\n\n## Injected\n![image](https://attacker.test) <img src=x> ~~hidden~~"
+    ctx.db.run("UPDATE tickets SET summary=%s, jira_created=%s, jira_updated=%s, done_at=%s WHERE key='TESTWP-510'",
+               (summary, created, done, done))
+    ctx.db.run("INSERT INTO incidents (severity,kind,subject,title,opened_at) VALUES ('warning','test','TESTWP-510',%s,%s)",
+               ("Problem\n\n## Forged heading\n[link](https://attacker.test)", done))
+
+    markdown = client.get("/v1/projects/TESTWP/report", params={"format": "md"}).text
+
+    assert "\n\n## Injected" not in markdown
+    assert "\n\n## Forged heading" not in markdown
+    assert "Slow \\| title \\#\\# Injected \\!\\[image\\]\\(https://attacker.test\\) \\<img src=x\\> \\~\\~hidden\\~\\~" in markdown
+    assert "Problem \\#\\# Forged heading \\[link\\]\\(https://attacker.test\\)" in markdown
+    assert "![image](https://attacker.test)" not in markdown
+    assert "<img src=x>" not in markdown
+
+
 def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
     from aiflow.v4.control import notify
     from aiflow.v4.control.loops import watchdog

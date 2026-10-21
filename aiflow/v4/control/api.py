@@ -31,7 +31,7 @@ from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, knowledge, memory, rollout
+from . import business, knowledge, memory, rollout, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -229,6 +229,20 @@ class ClaimBody(BaseModel):
     ticket: str
     account: str
     step: str = "dev"
+
+
+class VersionReleaseClaimBody(BaseModel):
+    project: str
+    version_id: str
+    account: str
+
+
+class VersionReleaseCompleteBody(BaseModel):
+    run_id: str
+    fence: int
+    head_sha: str = ""
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
 
 
 class ProjectPreflightBody(BaseModel):
@@ -1725,6 +1739,118 @@ def create_app(ctx: Ctx) -> FastAPI:
                            "parent_key": t.get("parent_key")},
                 "project": project_data}
 
+    # --- configured Jira version releases ------------------------------------------------------------------
+    @app.get("/v1/version-releases/candidates")
+    def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        policy = rollout.node_compatible(ctx, node, RELEASES)
+        if not policy["compatible"]:
+            return {"versions": [], "reason": f"version skew: {policy['reason']}"}
+        return {"versions": version_release.candidates(ctx, account, node)}
+
+    @app.post("/v1/version-releases/claim")
+    def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        policy = rollout.node_compatible(ctx, node, RELEASES)
+        if not policy["compatible"]:
+            raise HTTPException(409, f"node version skew: {policy['reason']}")
+        repo = ctx.repo()
+        project = repo.projects.get(body.project)
+        acc = repo.account(body.account)
+        if (not project or not version_release.enabled(project)
+                or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
+            raise HTTPException(403, "project is not enabled for version releases")
+        if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
+            raise HTTPException(403, "a master or release account assigned to this node is required")
+        node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}
+        if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
+            raise HTTPException(403, "project is not assigned to this node")
+        version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
+        if not version:
+            raise HTTPException(404, "configured unreleased Jira version not found")
+        state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s",
+                           (project.key, version["id"]))
+        if state and state["status"] in ("checking", "released"):
+            raise HTTPException(409, "version already has an active or completed release run")
+        snapshot = version_release.evaluate(ctx, project, version)
+        if not snapshot["ready"]:
+            version_release.record_gate(ctx, project, version, snapshot)
+            raise HTTPException(409, {"reason": "version release gates are not met", "tickets": snapshot["tickets"],
+                                      "missing": snapshot["reasons"]})
+        key = version_release.version_identity(project.key, version["id"])
+        run_id = str(uuid.uuid4())
+        lease = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+        if not lease.ok:
+            raise HTTPException(409, "version release is already claimed")
+        try:
+            tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
+            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash)"
+                       " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'')",
+                       (run_id, key, project.key, acc.id, acc.provider, node, lease.fence))
+            ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot)"
+                       " VALUES (%s,%s,%s,%s,'checking','',%s) ON CONFLICT (project,version_id) DO UPDATE SET"
+                       " version_name=EXCLUDED.version_name,tracker_key=EXCLUDED.tracker_key,status='checking',"
+                       " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
+                       (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"])) )
+        except Exception:
+            ctx.leases.release(key, run_id, lease.fence)
+            raise
+        ctx.db.run("UPDATE accounts SET status='working',updated_at=now(),idle_since=NULL,cooldown_since=NULL WHERE id=%s",
+                   (acc.id,))
+        ctx.events.emit("version_release.claimed", ticket=tracker, project=project.key, step="version_release",
+                        run_id=run_id, fence=lease.fence, account=acc.id, provider=acc.provider, node=node,
+                        outcome="checking", reason=version["name"], data={"version_id": version["id"],
+                                                                            "tickets": snapshot["tickets"]})
+        project_data = {"key": project.key, "repo": project.repo, "base": project.base,
+                        "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
+                        "target_branch": version_release.target_branch(project),
+                        "work_minutes": project.work_minutes()}
+        ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
+                  "description": "Run full configured project checks on the current develop branch.",
+                  "labels": [], "priority": "Highest", "type": "Release"}
+        return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": lease.fence,
+                "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
+                "provider": acc.provider, "model": "", "effort": "", "account": acc.id,
+                "identity": bot_identity(), "ticket": ticket, "project": project_data,
+                "version": version, "tracker_key": tracker, "tickets": snapshot["tickets"]}
+
+    @app.post("/v1/version-releases/{version_id}/complete")
+    def version_release_complete(version_id: str, body: VersionReleaseCompleteBody,
+                                 node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "version_release", "complete",
+                     {"version_id": version_id, "head_sha": body.head_sha, "checks": body.checks})
+        if run["step"] != "version_release" or run["node"] != node:
+            raise HTTPException(403, "run is not a version release owned by this node")
+        project = ctx.repo().projects.get(run["project"])
+        if not project or not version_release.enabled(project):
+            raise HTTPException(403, "project is not enabled for version releases")
+        if project.repo.lower().rstrip("/") == "jooservices/ai-flow":
+            raise HTTPException(403, "AI Flow itself is never released by project version releases")
+        version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == version_id), None)
+        if not version:
+            raise HTTPException(409, "Jira version is no longer configured and unreleased")
+        commands = version_release.check_commands(project)
+        reported = [str(item.get("command") or "") for item in body.checks]
+        if not commands or any(command not in reported for command in commands):
+            body.error = body.error or "Worker did not report every configured full project check."
+        report = {"head_sha": body.head_sha, "checks": body.checks, "error": body.error}
+        try:
+            result = version_release.complete(ctx, project, version, run, report)
+        except Exception as exc:  # noqa: BLE001 - preserve a Jira audit entry and let the idempotent run retry
+            log.exception("version release publication failed for %s %s", project.key, version["name"])
+            tracker = version_release.tracker_for(ctx, project, version_id, version["name"])
+            message = f"Automatic publication stopped at an integration error: {str(exc)[:1000]}"
+            ctx.db.run("UPDATE version_releases SET status=CASE WHEN status='released' THEN status ELSE 'pending' END,"
+                       " gate_detail=%s,updated_at=now() WHERE project=%s AND version_id=%s",
+                       (message, project.key, version_id))
+            ctx.jira.comment(tracker, message)
+            ctx.events.emit("version_release.error", ticket=tracker, project=project.key, step="version_release",
+                            run_id=body.run_id, fence=body.fence, outcome="failed", reason=message,
+                            data={"version_id": version_id})
+            return {"released": False, "status": "failed", "reason": message}
+        ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
+                   (body.head_sha, f"version release {result['status']}", J({"release_result": result,
+                                                                              "checks": body.checks}), body.run_id))
+        return result
+
     # --- runs -----------------------------------------------------------------------------------------------
     @app.post("/v1/runs/{run_id}/heartbeat")
     def run_heartbeat(run_id: str, body: FenceBody, node: str = Depends(node_auth)) -> dict:
@@ -2029,8 +2155,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(run["project"])
         if not project or project.repo.split("/")[-1] != body.repo.split("/")[-1]:
             raise HTTPException(403, "repository does not belong to the run's project")
-        permissions = {"contents": "read", "metadata": "read"} if run["step"] == "triage" else {
-            "contents": "write", "metadata": "read", "workflows": "write"}
+        permissions = ({"contents": "read", "metadata": "read"}
+                       if run["step"] in ("triage", "version_release") else
+                       {"contents": "write", "metadata": "read", "workflows": "write"})
+        if run["step"] == "version_release" and not version_release.enabled(project):
+            raise HTTPException(403, "project is not enabled for version releases")
         token, expires = ctx.github.token(project.repo_name, permissions)
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
               {"repo": project.repo, "expires": expires.isoformat()})

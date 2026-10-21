@@ -25,6 +25,7 @@ from .impact import run_impact
 from .intake import run_intake
 from .verify import run_verify
 from .master import run_master
+from .version_release import run_version_release
 
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
@@ -116,6 +117,35 @@ class Worker:
             self.probe()
         if not self.probe_ok:
             return False
+        for release in self.api.call("GET", "/v1/version-releases/candidates",
+                                     params={"account": self.account}).get("versions", []):
+            try:
+                claimed = self.api.call("POST", "/v1/version-releases/claim",
+                                        {"project": release["project"], "version_id": release["version_id"],
+                                         "account": self.account})
+            except Conflict:
+                continue
+            if not claimed.get("claimed"):
+                continue
+            c = Claimed(run_id=claimed["run_id"], fence=claimed["fence"], run_token=claimed["run_token"],
+                        account=self.account, provider=claimed["provider"], model="", effort="",
+                        ticket=claimed["ticket"], project=claimed["project"], identity=tuple(claimed["identity"]),
+                        step="version_release")
+            self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id,
+                         step="version_release", since=time.time())
+            result = run_version_release(self.api, c, claimed["version"], claimed["tracker_key"],
+                                         self.srv, self.hb_s, self.run_as)
+            try:
+                self.api.call("POST", f"/v1/runs/{c.run_id}/result",
+                              {"fence": c.fence, **result})
+            except Exception as e:  # noqa: BLE001
+                log.warning("version release result not recorded: %s", e)
+            try:
+                self.api.call("POST", f"/v1/runs/{c.run_id}/release", {"fence": c.fence})
+            except Exception as e:  # noqa: BLE001
+                log.warning("version release lease cleanup failed: %s", e)
+            self.publish(state="idle", ticket=None, run_id=None, last_outcome=result.get("outcome"), since=time.time())
+            return True
         master = self.api.call("GET", "/v1/master/candidate", params={"account": self.account}).get("candidate")
         cands = ([master] if master else []) + self.api.call(
             "GET", "/v1/work/candidates", params={"account": self.account})["tickets"]

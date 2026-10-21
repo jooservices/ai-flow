@@ -7,14 +7,19 @@ moving branch. Release tags must use `vX.Y.Z` (for example, `v4.1.0`) and point 
 ## Build and publish
 
 Pushing a valid version tag starts `.github/workflows/release-v4.yml`. It runs `tests/v4` against Redis and
-PostgreSQL first and publishes only when those tests pass. The workflow then:
+PostgreSQL, builds and signs the release tarball, then installs that exact signed artifact in clean Ubuntu
+systemd containers with the control API and two nodes. The nodes must come online, claim a smoke ticket, upgrade
+to the candidate, and recover the previous release after an intentionally unhealthy install. The GHCR image is
+built and pushed and the GitHub Release is created only after these checks pass. The workflow:
 
 1. Archives the project code, `prompts/`, `deploy/`, `pyproject.toml` and `uv.lock` into
    `aiflow4-vX.Y.Z.tar.gz`.
-2. Builds and pushes `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z`.
-3. Writes `SHA256SUMS` for the tarball, signs the tarball as a Sigstore/cosign blob, and signs the GHCR image.
-   Both signatures use GitHub Actions OIDC; no long-lived signing key is stored in GitHub secrets.
-4. Creates or updates the matching GitHub Release with notes grouped from conventional commits since the
+2. Writes `SHA256SUMS` and signs the tarball as a Sigstore/cosign blob using GitHub Actions OIDC; no long-lived
+   signing key is stored in GitHub secrets.
+3. Runs the [Ubuntu systemd install smoke test](install.md) against that signed tarball. A failure stops the job
+   before GHCR or GitHub Release publication.
+4. Builds and pushes `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z` and signs the image with GitHub Actions OIDC.
+5. Creates or updates the matching GitHub Release with notes grouped from conventional commits since the
    previous reachable version tag (or all reachable history for the first versioned release), then attaches the
    tarball, its `.sigstore.json` bundle and `SHA256SUMS`.
 

@@ -164,6 +164,66 @@ def test_node_heartbeat_reports_policy_relay_health(monkeypatch):
     assert relays[0].started and relays[0].stopped
 
 
+def test_node_agent_reports_cli_expiry_and_queued_heartbeat_retry(monkeypatch):
+    expiry = "2026-10-25T10:00:00+00:00"
+    state = {"account": "claude-01", "state": "idle", "probe": {"credential_expires_at": expiry}}
+    assert agent.credential_expiries([state, {"account": "codex-01", "probe": {"credential_expires_at": None}}]) == {
+        "claude-01": expiry, "codex-01": None}
+
+    class FakeApi:
+        def __init__(self, *args, **kwargs):
+            self.heartbeats = 0
+            self.event_batches = []
+            self.calls = []
+
+        def call(self, method, path, body=None, **kwargs):
+            self.calls.append((method, path, body))
+            if path.endswith("/heartbeat"):
+                self.heartbeats += 1
+                if self.heartbeats == 1:
+                    raise RuntimeError("control API unreachable: timeout")
+                self.heartbeat_body = body
+                return {"desired": {"workers": [], "release": ""}}
+            if path == "/v1/events":
+                self.event_batches.append(body)
+                return {"accepted": len(body["events"])}
+            raise AssertionError(path)
+
+    class StopAfterRecovery:
+        waits = 0
+
+        def is_set(self):
+            return self.waits >= 2
+
+        def wait(self, _seconds):
+            self.waits += 1
+
+    clients = []
+
+    def make_client(*args, **kwargs):
+        api = FakeApi()
+        clients.append(api)
+        return api
+
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+    monkeypatch.setattr(agent, "ControlClient", make_client)
+    monkeypatch.setattr(agent, "tool_versions", lambda: {})
+    monkeypatch.setattr(agent, "metrics", lambda _previous: ({"cpu_pct": 0}, (1, 1)))
+    monkeypatch.setattr(agent, "worker_states", lambda: [state])
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+
+    agent.run_agent("http://control.test", "node1", "token", every_s=0, manage_workers=False,
+                    stop=StopAfterRecovery())
+
+    assert clients[0].heartbeat_body["credential_expiries"] == {"claude-01": expiry}
+    assert [path for _, path, _ in clients[0].calls] == ["/v1/nodes/node1/heartbeat", "/v1/nodes/node1/heartbeat",
+                                                       "/v1/events"]
+    event = clients[0].event_batches[0]["events"][0]
+    assert event["type"] == "node.heartbeat.error" and event["error_kind"] == "network"
+    assert event["retry"] is True and event["attempts"] == 2
+
+
 def test_a_slow_tool_check_is_not_reported_missing(monkeypatch):
     import subprocess as sp
 
@@ -344,3 +404,57 @@ def test_release_signature_verification_pins_the_tagged_workflow_identity(tmp_pa
     assert agent.verify_release_signature(tmp_path / "release.tar.gz", tmp_path / "bundle.json", "develop") == (
         False, "release version is not a vX.Y.Z tag")
     assert not commands
+
+
+def test_node_removes_the_worktrees_the_control_plane_marks_finished(tmp_path, monkeypatch):
+    import os
+    import time
+    from aiflow.v4.node import agent
+
+    work = tmp_path / "work" / "TESTWP"
+    for name in ("TESTWP-1-done", "TESTWP-2-open", "TESTWP-2--intake"):
+        (work / name / "node_modules").mkdir(parents=True)
+        os.utime(work / name, (time.time() - 3600,) * 2)
+    ro = work / "TESTWP-2--intake"
+    os.chmod(ro, 0o500)
+
+    class Api:
+        def call(self, method, path, body=None, retries=0):
+            assert path == "/v1/nodes/cc/worktrees/sweep"
+            assert sorted(body["dirs"]) == ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/TESTWP-2-open"]
+            return {"remove": ["TESTWP/TESTWP-1-done", "TESTWP/TESTWP-2--intake", "TESTWP/not-listed"]}
+
+    monkeypatch.setattr(agent, "_last_sweep", 0.0)
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 2
+    assert [p.name for p in work.iterdir()] == ["TESTWP-2-open"]
+    assert agent.clean_worktrees(Api(), "cc", str(tmp_path)) == 0  # at most every ten minutes
+
+
+def test_develop_channel_installs_a_commit_build_only_when_the_node_opted_in(tmp_path, monkeypatch):
+    sha = "0123456789"
+
+    class FakeHTTP:
+        def get(self, url, timeout):
+            assert url == f"/v1/releases/{sha}.tar.gz"
+            return _ReleaseResponse(b"develop archive")
+
+    class FakeAPI:
+        c = FakeHTTP()
+
+    commands = []
+    monkeypatch.setattr(agent, "RELEASE_INCOMING_DIR", tmp_path)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(agent.subprocess, "run", lambda cmd, **kwargs: commands.append(cmd)
+                        or SimpleNamespace(returncode=0, stdout="started", stderr=""))
+
+    monkeypatch.delenv("AIFLOW4_CHANNEL", raising=False)
+    agent._update_tried.clear()
+    agent.self_update(FakeAPI(), sha, "node-7")
+    assert not commands  # a release-channel node ignores unversioned builds
+
+    monkeypatch.setenv("AIFLOW4_CHANNEL", "develop")
+    agent._update_tried.clear()
+    agent.self_update(FakeAPI(), sha, "node-7")
+    assert commands[0][0] == "systemd-run" and commands[0][5] == "/usr/local/sbin/aiflow4-develop-install"
+    assert commands[0][6] == str(tmp_path / f"aiflow4-{sha}.tar.gz") and commands[0][7] == sha
+    assert (tmp_path / f"aiflow4-{sha}.tar.gz").read_bytes() == b"develop archive"

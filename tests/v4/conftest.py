@@ -30,9 +30,37 @@ def leases():
         r.delete(k)
 
 
+@pytest.fixture(scope="session")
+def test_database_url():
+    """A database of its own for this pytest session (created next to the configured one, dropped at the end), so
+    parallel dev runs sharing one PostgreSQL server never drop each other's schema or wait on its migration lock.
+    Falls back to the configured database when the role may not create databases."""
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+    name = f"aiflow4_t_{uuid.uuid4().hex[:12]}"
+    try:
+        admin = psycopg.connect(DATABASE_URL, autocommit=True)
+        template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
+        admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))
+                      .format(sql.Identifier(name), *([sql.Identifier(template)] if template else [])))
+    except psycopg.Error:
+        yield DATABASE_URL
+        return
+    own = make_conninfo(DATABASE_URL, dbname=name)
+    try:
+        yield own
+    finally:
+        try:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+        except psycopg.Error:
+            pass
+        admin.close()
+
+
 @pytest.fixture
-def db():
-    d = DB(DATABASE_URL)
+def db(test_database_url):
+    d = DB(test_database_url)
     with d.pool.connection() as c:
         c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
     d.migrate()

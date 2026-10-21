@@ -56,6 +56,25 @@ console.log(drawerNode(node.name));
     return result.stdout
 
 
+def render_sa(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the SA dashboard")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var saView = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-sa' ? saView : null; }};
+S.data = {json.dumps(state)};
+renderSA();
+console.log(saView.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def html() -> str:
     return PAGE.read_text()
 
@@ -170,12 +189,97 @@ def test_console_page_and_state_feed_the_footer(ctx):
     client = TestClient(app)
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
+    assert client.get("/sa").status_code == 200
+    assert 'id="view-sa"' in page.text and 'data-view="sa"' in page.text
     lead = client.get("/lead")
     assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
     s = client.get("/v1/state").json()
     assert s["version"] == VERSION
     assert s["env"] and "control_repo" in s and "versions" in s
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
+
+
+def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve_link():
+    state = {
+        "nodes": [{"name": "node1", "ip": "192.0.2.1", "status": "online", "slots_total": 4,
+                   "slots_used": 3, "heartbeat_age_s": 10, "metrics": {"cpu_pct": 81, "mem_total": 100,
+                   "mem_used": 50, "disk_free_pct": 20}}],
+        "accounts": [{"id": "claude-01", "provider": "claude", "node": "node1", "status": "signed_out",
+                      "provider_status": "signed_out", "check_failed": True, "credential_expires_at": "unknown",
+                      "credential_expiry_warning": False, "quota": {}, "roles": [], "last_error": "sign in"}],
+        "incidents": [{"id": 1, "severity": "warning", "kind": "account_quota", "title": "Quota low",
+                       "detail": "provider cooldown", "opened_at": "2026-10-21T00:00:00+00:00"}],
+        "active_runs": [], "recent_runs": [], "tickets": [], "events": [], "incidents_recent": [],
+        "totals": {}, "versions": {}, "links": {"o2": "/o2/"},
+        "sa": {"thresholds": {"slots_used_percent": 80, "slots_duration_minutes": 30,
+                                "role_cooldown_minutes": 15, "idle_days": 7},
+               "slots": {"used": 3, "total": 4, "utilization_percent": 75},
+               "recommendations": [{"kind": "add_node", "subject": "fleet", "reason": "slot pressure"}],
+               "provider_blocks": [{"id": "claude-01", "provider_status": "signed_out", "status": "signed_out",
+                                    "last_error": "sign in"}],
+               "policy_denials": [{"ts": "2026-10-21T00:00:00+00:00", "ticket": "TESTWP-3",
+                                   "account": "claude-01", "reason": "denied", "command": "git push"}],
+               "network_issues": [{"source": "event", "ts": "2026-10-21T00:00:00+00:00",
+                                   "type": "node.heartbeat.error", "node": "node1", "reason": "network down",
+                                   "data": {"retry": True}}]},
+    }
+    rendered = render_sa(state)
+    for label in ("Capacity recommendations", "Nodes and capacity", "Account access, quota and credentials",
+                  "AI blocked by policy", "AI blocked by provider", "Network errors and retries", "Incidents",
+                  "git push", "TESTWP-3", "Signed out", "network down", "OpenObserve", "scheduled"):
+        assert label in rendered
+    page = html()
+    assert "function viewOf(path)" in page
+    assert run_script("console.log(['/cc', '/delivery', '/sa', '/business'].map(viewOf).join(','));") == \
+        "cc,delivery,sa,business\n"
+    assert "fetch('/api/default/" not in page and "fetch('/o2/" not in page
+
+
+def _sa_state(**overrides):
+    state = {
+        "nodes": [], "accounts": [], "incidents": [], "active_runs": [], "recent_runs": [], "tickets": [],
+        "events": [], "incidents_recent": [], "totals": {}, "versions": {}, "links": {"o2": "/o2/"},
+        "sa": {"thresholds": {"slots_used_percent": 80, "slots_duration_minutes": 30, "role_cooldown_minutes": 15,
+                              "idle_days": 7, "credential_expiry_days": 7},
+               "slots": {"used": 0, "total": 0, "utilization_percent": None}, "recommendations": [],
+               "provider_blocks": [], "policy_denials": [], "network_issues": []},
+    }
+    for key, value in overrides.items():
+        if key in state["sa"]:
+            state["sa"][key] = value
+        else:
+            state[key] = value
+    return state
+
+
+def test_sa_node_metrics_sent_as_strings_are_not_rendered_as_html():
+    payload = "<img src=x onerror=alert(1)>"
+    rendered = render_sa(_sa_state(nodes=[{
+        "name": "node1", "status": "online", "slots_total": 2, "slots_used": 1, "heartbeat_age_s": 5,
+        "metrics": {"cpu_pct": payload, "disk_free_pct": payload, "mem_total": payload, "mem_used": payload}}]))
+    assert "<img" not in rendered and "onerror" not in rendered
+    rendered = render_sa(_sa_state(nodes=[{
+        "name": "node1", "status": "online", "slots_total": 2, "slots_used": 1, "heartbeat_age_s": 5,
+        "metrics": {"cpu_pct": "42.4", "disk_free_pct": 61}}]))
+    assert "42%" in rendered and "61%" in rendered
+
+
+def test_sa_credential_expiry_label_uses_configured_days():
+    state = _sa_state(accounts=[{"id": "claude-01", "provider": "claude", "node": "node1", "status": "idle",
+                                 "credential_expires_at": "2026-10-30T00:00:00+00:00",
+                                 "credential_expiry_warning": True, "quota": {}, "roles": []}])
+    state["sa"]["thresholds"]["credential_expiry_days"] = 14
+    rendered = render_sa(state)
+    assert "Expires within 14 days" in rendered and "Expires within 7 days" not in rendered
+
+
+def test_sa_network_runs_show_attempt_and_retry_derived_from_runs():
+    rendered = render_sa(_sa_state(network_issues=[
+        {"source": "run", "ts": "2026-10-21T00:10:00+00:00", "ticket": "TESTWP-9", "error_kind": "network",
+         "attempts": 2, "retry": False, "detail": "connection reset"},
+        {"source": "run", "ts": "2026-10-21T00:00:00+00:00", "ticket": "TESTWP-9", "error_kind": "network",
+         "attempts": 1, "retry": True, "detail": "connection reset"}]))
+    assert "attempt 2 · not retried yet" in rendered and "attempt 1 · retried" in rendered
 
 
 def test_delivery_report_button_loads_markdown_into_copyable_drawer():
@@ -228,7 +332,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
-    assert "['cc', 'delivery', 'lead', 'business', 'review', 'stakeholder']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder']" in page
 
 
 def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():

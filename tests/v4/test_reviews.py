@@ -157,6 +157,39 @@ def test_reviewer_rework_records_comment_label_and_returns_ticket_to_todo(client
     assert ticket["status"] == "To Do" and "rework" in ticket["labels"]
 
 
+def test_reviewer_rework_comment_reaches_the_next_dev_claim(client, ctx):
+    key = "TESTWP-87"
+    add_review_ticket(ctx, key, labels=("aiflow-ready", "require-human"))
+    review = client.post(f"/v1/reviews/{key}/rework", json={"comment": "Please cover the retry timeout."},
+                         headers={"Authorization": "Bearer review-secret"})
+    assert review.status_code == 200
+
+    joined = client.post("/v1/nodes/join", json={"name": "cc", "join_token": "join-secret"}).json()
+    node = {"Authorization": f"Bearer {joined['node_token']}"}
+    dev = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=node).json()
+
+    assert dev["claimed"] and dev["findings"] == "Please cover the retry timeout."
+
+
+def test_node_merge_endpoint_rejects_qa_runs(client, ctx):
+    key = "TESTWP-88"
+    add_review_ticket(ctx, key)
+    joined = client.post("/v1/nodes/join", json={"name": "node1", "join_token": "join-secret"}).json()
+    node = {"Authorization": f"Bearer {joined['node_token']}"}
+    run_id = str(uuid.uuid4())
+    claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+    assert claim.ok
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash)"
+               " VALUES (%s,%s,'TESTWP','qa','reviewer-console','human','node1',%s,'')",
+               (run_id, key, claim.fence))
+
+    response = client.post("/v1/github/merge", json={"run_id": run_id, "fence": claim.fence, "number": 42},
+                           headers=node)
+
+    assert response.status_code == 403
+    assert getattr(ctx.github, "merged", []) == []
+
+
 @pytest.mark.parametrize(("action", "body"), [
     ("approve", None),
     ("rework", {"comment": "Please add coverage for retries."}),

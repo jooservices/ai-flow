@@ -341,6 +341,19 @@ def test_rework_findings_reach_the_next_dev_run(client, ctx):
     ctx.db.run("UPDATE tickets SET status='To Do', labels=array['aiflow-ready','rework'] WHERE key='TESTWP-21'")
     d = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
     assert d["claimed"] and d["findings"] == "- core/x.php: missing nonce check" and d["branch"] == "TESTWP-21-y"
+    # a dev run that delivers nothing (blocked, no changes) does not answer the findings: the next one gets them too
+    client.post(f"/v1/runs/{d['run_id']}/result", json={"fence": d["fence"], "outcome": "blocked", "branch": "TESTWP-21-y",
+                                                        "summary": "the shell could not start"}, headers=cc)
+    client.post(f"/v1/runs/{d['run_id']}/release", json={"fence": d["fence"]}, headers=cc)
+    e = client.post("/v1/work/claim", json={"ticket": "TESTWP-21", "account": "claude-01"}, headers=cc).json()
+    assert e["claimed"] and e["findings"] == "- core/x.php: missing nonce check" and e["branch"] == "TESTWP-21-y"
+    # the owner sends it back to review after a run without changes: the delivered PR is reviewed
+    client.post(f"/v1/runs/{e['run_id']}/result", json={"fence": e["fence"], "outcome": "failed",
+                                                        "summary": "no changes: already done"}, headers=cc)
+    client.post(f"/v1/runs/{e['run_id']}/release", json={"fence": e["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-21'")
+    cands = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert ("TESTWP-21", "verify") in [(t["key"], t["step"]) for t in cands]
 
 
 def test_node_without_ai_accounts_is_flagged(client, ctx):

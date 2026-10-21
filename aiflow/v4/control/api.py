@@ -6,6 +6,8 @@ fencing is enforced in exactly one place; every accepted or refused write is rec
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import re
 import logging
 import secrets
@@ -13,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -218,6 +220,19 @@ class ChangeRequestBody(BaseModel):
 
 class CloseProjectBody(BaseModel):
     actor: str = "owner"
+
+
+class StakeholderVerdictBody(BaseModel):
+    change_key: str
+    target_key: str = ""
+    environment: Literal["develop", "production"]
+    verdict: Literal["expected", "not_expected"]
+    sender: str = Field(min_length=1, max_length=200)
+    release_commit: str = Field(default="", max_length=500)
+    expected: str = Field(default="", max_length=10_000)
+    actual: str = Field(default="", max_length=10_000)
+    screenshot_data: str = Field(default="", max_length=7_000_000)
+    screenshot_filename: str = Field(default="screenshot.png", max_length=255)
 
 
 class EventsBody(BaseModel):
@@ -1224,6 +1239,129 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("business.change_request", ticket=created["key"], project=project, outcome=created["status"],
                         reason=title[:200])
         return created
+
+    # --- Stakeholder acceptance and UAT feedback --------------------------------------------------------------
+    def stakeholder_project(key: str):
+        project = ctx.repo().projects.get(key)
+        if not project:
+            raise HTTPException(404, f"unknown project {key}")
+        return project
+
+    def stakeholder_changes(project: str) -> list[dict[str, Any]]:
+        rows = ctx.db.all(
+            "SELECT DISTINCT ON (t.key) t.key, t.summary, t.type, t.status, t.parent_key, p.type AS parent_type,"
+            " r.branch, r.head_sha, r.summary AS change_summary, r.details, r.started_at, r.ended_at"
+            " FROM runs r JOIN tickets t ON t.key=r.ticket_key LEFT JOIN tickets p ON p.key=t.parent_key"
+            " WHERE r.project=%s AND t.project=%s AND r.step='dev' AND r.status<>'running'"
+            " AND r.outcome IN ('done','merged')"
+            " ORDER BY t.key, r.started_at DESC", (project, project))
+        rows.sort(key=lambda r: r["ended_at"] or r["started_at"], reverse=True)
+        out = []
+        for row in rows[:30]:
+            details = row["details"] or {}
+            epic = row["key"] if row["type"] == "Epic" else (
+                row["parent_key"] if row["parent_type"] == "Epic" else "")
+            release_commit = (details.get("release") or details.get("version") or row["head_sha"] or row["branch"] or "")
+            out.append({"key": row["key"], "summary": row["summary"], "type": row["type"],
+                        "status": row["status"], "epic": epic, "branch": row["branch"],
+                        "commit": row["head_sha"], "release_commit": release_commit,
+                        "change_summary": row["change_summary"],
+                        "changed_at": (row["ended_at"] or row["started_at"]).isoformat()})
+        return out
+
+    @app.get("/v1/stakeholder/{key}")
+    def stakeholder_view(key: str) -> dict:
+        project = stakeholder_project(key)
+        configured = project.urls or {}
+        return {"project": key, "urls": {"develop": str(configured.get("develop") or ""),
+                                          "production": str(configured.get("production") or "")},
+                "changes": stakeholder_changes(key)}
+
+    @app.post("/v1/stakeholder/{key}/verdict")
+    def stakeholder_verdict(key: str, body: StakeholderVerdictBody) -> dict:
+        project = stakeholder_project(key)
+        if not ctx.jira:
+            raise HTTPException(503, "Jira is unavailable")
+        sender = body.sender.strip()
+        if not sender:
+            raise HTTPException(400, "sender is required")
+        change = ctx.db.one("SELECT key, summary, type, parent_key FROM tickets WHERE key=%s AND project=%s",
+                            (body.change_key, key))
+        if not change:
+            raise HTTPException(400, "change must belong to this project")
+        target = body.target_key.strip() or body.change_key
+        if target != body.change_key and target != change["parent_key"]:
+            raise HTTPException(400, "acceptance target must be the related ticket or its epic")
+        if target != body.change_key and not ctx.db.one(
+                "SELECT key FROM tickets WHERE key=%s AND project=%s AND type='Epic'", (target, key)):
+            raise HTTPException(400, "acceptance target must be the related epic")
+        if body.verdict == "not_expected" and (not body.expected.strip() or not body.actual.strip()):
+            raise HTTPException(400, "expected and actual behaviour are required for UAT feedback")
+
+        screenshot = None
+        if body.screenshot_data:
+            match = re.fullmatch(r"data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)", body.screenshot_data)
+            if not match:
+                raise HTTPException(400, "screenshot must be a PNG, JPEG, or WebP data URL")
+            try:
+                content = base64.b64decode(match.group(2), validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise HTTPException(400, "screenshot data is invalid") from exc
+            if not content or len(content) > 5_000_000:
+                raise HTTPException(400, "screenshot must be between 1 byte and 5 MB")
+            mime = match.group(1)
+            filename = Path(body.screenshot_filename).name
+            filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:200] or "screenshot"
+            ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
+            if not filename.lower().endswith(ext):
+                filename = filename.rsplit(".", 1)[0] + ext
+            screenshot = (filename, content, mime)
+
+        page_url = str((project.urls or {}).get(body.environment) or "").strip()
+        page_label = page_url or "chưa deploy"
+        release_commit = body.release_commit.strip() or "chưa có dữ liệu"
+        if body.verdict == "expected":
+            comment = (f"Comment nghiệm thu\nMôi trường: {body.environment}\n"
+                       f"Release hoặc commit: {release_commit}\nNgười gửi: {sender}")
+            try:
+                comment_id = ctx.jira.comment(target, comment)
+            except Exception as exc:  # Jira adapters and HTTP clients can raise different transport exceptions.
+                log.warning("Stakeholder acceptance comment failed for %s", target)
+                raise HTTPException(502, "Jira could not record the acceptance") from exc
+            audit("jira", "stakeholder_acceptance", target, "", None, sender, True, comment_id,
+                  {"project": key, "change": body.change_key, "environment": body.environment})
+            ctx.events.emit("stakeholder.acceptance", ticket=target, project=key, outcome="accepted",
+                            account=sender, reason=body.environment)
+            return {"ok": True, "verdict": body.verdict, "ticket": target, "comment_id": comment_id}
+
+        description = (f"Related change: {change['key']} - {change['summary']}\n"
+                       f"Page URL: {page_label}\nEnvironment: {body.environment}\n"
+                       f"Release or commit: {release_commit}\n"
+                       f"Expected behaviour (mong đợi):\n{body.expected.strip()}\n\n"
+                       f"Actual behaviour (thực tế):\n{body.actual.strip()}\n\n"
+                       f"Sender (người gửi): {sender}")
+        summary = f"[UAT {body.environment}] {change['key']}: {body.actual.strip().splitlines()[0][:120]}"
+        try:
+            issue_key = ctx.jira.create_issue(key, summary, description, issuetype="Bug", labels=["uat-bug"])
+            status = ctx.jira.transition_to(issue_key, "Intake")
+            if status != "Intake":
+                raise RuntimeError("new UAT issue did not reach Intake")
+            if screenshot:
+                ctx.jira.add_attachment(issue_key, screenshot[0], screenshot[1], screenshot[2])
+        except Exception as exc:  # Never tell the stakeholder a partial Jira write succeeded.
+            log.warning("Stakeholder UAT issue creation failed for project %s", key)
+            raise HTTPException(502, "Jira could not record the UAT feedback") from exc
+        ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
+                   " VALUES (%s,%s,'Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                   " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
+                   " description=EXCLUDED.description, synced_at=now()",
+                   (issue_key, key, ["uat-bug"], summary, description))
+        audit("jira", "stakeholder_bug", issue_key, "", None, sender, True, status,
+              {"project": key, "change": body.change_key, "environment": body.environment,
+               "screenshot": bool(screenshot)})
+        ctx.events.emit("stakeholder.feedback", ticket=issue_key, project=key, outcome="created",
+                        account=sender, reason=body.environment, data={"related": body.change_key})
+        return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}
 
     @app.get("/v1/state")
     def state() -> dict:

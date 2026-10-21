@@ -40,6 +40,7 @@ class Project:
     databases: list[str] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
     environments: dict[str, Any] = field(default_factory=dict)
+    urls: dict[str, str] = field(default_factory=dict)
     merge: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)

@@ -134,6 +134,9 @@ class Jira:
         if fields:
             self.call("PUT", f"/rest/api/3/issue/{key}", {"fields": fields})
 
+    def set_description(self, key: str, text: str) -> None:
+        self.call("PUT", f"/rest/api/3/issue/{key}", {"fields": {"description": text_to_adf(text)}})
+
     def add_label(self, key: str, label: str) -> None:
         self.call("PUT", f"/rest/api/3/issue/{key}", {"update": {"labels": [{"add": label}]}})
 

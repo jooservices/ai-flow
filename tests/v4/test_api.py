@@ -207,6 +207,7 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
     add_ticket(ctx.db, "TESTWP-64", status="Needs owner", labels=("owner-escalated",))
     add_ticket(ctx.db, "TESTWP-65", status="In Verify")
     add_ticket(ctx.db, "TESTWP-66", status="To Do")
+    add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
 
     def add_run(key, step, account, outcome, summary, pr_url="", details=None):
         run_id = str(uuid.uuid4())
@@ -227,10 +228,11 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
     # The developer account cannot triage its own question.
     claude = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]
     assert not any(t["key"] == "TESTWP-63" and t["step"] == "triage" for t in claude)
+    assert any(t["key"] == "TESTWP-67" and t["step"] == "triage" for t in claude)
 
     candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
     assert [(t["key"], t["step"]) for t in candidates] == [
-        ("TESTWP-65", "verify"), ("TESTWP-63", "triage"), ("TESTWP-66", "dev")]
+        ("TESTWP-65", "verify"), ("TESTWP-63", "triage"), ("TESTWP-67", "triage"), ("TESTWP-66", "dev")]
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-63", "account": "codex-01", "step": "triage"},
                           headers=n1).json()
     assert claimed["claimed"] and claimed["step"] == "triage"

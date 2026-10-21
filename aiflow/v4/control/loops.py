@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from ..core.toolchains import missing_tools
 from .incidents import close_incident, open_incident
 from .api import Ctx
 from .db import J
@@ -62,8 +63,43 @@ def watchdog(ctx: Ctx) -> None:
                           f"No heartbeat for {int(age or 0)} seconds. Its runs lose their lease after 90 s and go back to To Do.")
         elif n["status"] == "online":
             close_incident(ctx, "node_down", n["name"], "heartbeat is back")
-    # nodes that joined but have no AI account: they add slots, never work
+    # project stacks: an online node must have every tool its projects need, or a person installs it
     repo = ctx.repo()
+    tool_issues: set[str] = set()
+    for n in ctx.db.all("SELECT name, status, tools FROM nodes"):
+        node = repo.nodes.get(n["name"])
+        if not node:
+            continue
+        for key in node.projects:
+            project = repo.projects.get(key)
+            if not project:
+                continue
+            subject = f"{n['name']}:{key}"
+            if n["status"] != "online":
+                # an offline node sends no heartbeat, so keep its incident: nobody confirmed the tools either way
+                tool_issues.add(subject)
+                continue
+            missing = missing_tools(n["tools"], project.tools)
+            if not missing:
+                continue
+            tool_issues.add(subject)
+            open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses tools for {key}",
+                          f"Missing on {n['name']} for {key} ({project.stack or 'no stack'}): {', '.join(missing)}."
+                          " Install them on the node; the incident closes when a later heartbeat reports them.")
+        # the CLIs of the AI providers whose accounts run on the node
+        subject = f"{n['name']}:ai"
+        ai_missing = missing_tools(n["tools"], repo.provider_tools_for_node(n["name"])) if n["status"] == "online" else []
+        if n["status"] != "online" and repo.provider_tools_for_node(n["name"]):
+            tool_issues.add(subject)
+        elif ai_missing:
+            tool_issues.add(subject)
+            open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses AI tools",
+                          f"Missing on {n['name']} for its accounts: {', '.join(ai_missing)}. Install them on the node; the"
+                          " incident closes when a later heartbeat reports them.")
+    for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_tools' AND closed_at IS NULL"):
+        if i["subject"] not in tool_issues:
+            close_incident(ctx, "node_tools", i["subject"], "tools are installed or the node no longer serves the project")
+    # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {a.node for a in repo.accounts}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:

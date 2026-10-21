@@ -94,6 +94,8 @@ def test_claude_settings_carry_the_hook_and_default_to_relay(tmp_path, monkeypat
     s = json.loads(a.settings_path(spec).read_text())
     hook = s["hooks"]["PreToolUse"][0]["hooks"][0]
     assert hook["type"] == "http" and hook["url"] == "http://127.0.0.1:8471/v1/policy/decide"
+    assert all(tool in s["hooks"]["PreToolUse"][0]["matcher"] for tool in
+               ("Read", "Glob", "Grep", "WebFetch", "WebSearch"))
     assert hook["timeout"] == 65 and hook["onFailure"] == "block"
     assert "--permission-mode" in a.argv(spec) and a.env(spec)["AIFLOW4_RUN_TOKEN"] == "t"
 

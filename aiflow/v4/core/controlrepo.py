@@ -12,6 +12,12 @@ from typing import Any
 
 import yaml
 
+from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
+                         tools_for_stacks)
+
+__all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
+           "tools_for_stack", "tools_for_stacks"]
+
 
 @dataclass
 class Account:
@@ -37,6 +43,7 @@ class Project:
     merge: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
+    priority: int = 5          # lower first: workers serve the projects in this order
 
     @property
     def repo_name(self) -> str:
@@ -45,6 +52,11 @@ class Project:
     def work_minutes(self) -> dict[str, int]:
         wm = (self.limits or {}).get("work_minutes") or {}
         return {"target": int(wm.get("target", 30)), "warn": int(wm.get("warn", 45)), "hard": int(wm.get("hard", 60))}
+
+    @property
+    def tools(self) -> list[str]:
+        """Node tools plus the extra tools this project's stack needs."""
+        return tools_for_stack(self.stack)
 
 
 @dataclass
@@ -100,6 +112,20 @@ class ControlRepo:
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.node == node]
+
+    def tools_for_node(self, node: str) -> list[str]:
+        """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
+        out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
+        n = self.nodes.get(node)
+        for p in (n.projects if n else []):
+            if p in self.projects:
+                for tool in tools_for_stack(self.projects[p].stack):
+                    if tool not in out:
+                        out.append(tool)
+        return out
+
+    def provider_tools_for_node(self, node: str) -> list[str]:
+        return tools_for_providers(a.provider for a in self.accounts_on(node))
 
     def account(self, account_id: str) -> Account | None:
         return next((a for a in self.accounts if a.id == account_id), None)

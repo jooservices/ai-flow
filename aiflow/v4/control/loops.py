@@ -86,6 +86,16 @@ def watchdog(ctx: Ctx) -> None:
             open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses tools for {key}",
                           f"Missing on {n['name']} for {key} ({project.stack or 'no stack'}): {', '.join(missing)}."
                           " Install them on the node; the incident closes when a later heartbeat reports them.")
+        # the CLIs of the AI providers whose accounts run on the node
+        subject = f"{n['name']}:ai"
+        ai_missing = missing_tools(n["tools"], repo.provider_tools_for_node(n["name"])) if n["status"] == "online" else []
+        if n["status"] != "online" and repo.provider_tools_for_node(n["name"]):
+            tool_issues.add(subject)
+        elif ai_missing:
+            tool_issues.add(subject)
+            open_incident(ctx, "node_tools", subject, "warning", f"node {n['name']} misses AI tools",
+                          f"Missing on {n['name']} for its accounts: {', '.join(ai_missing)}. Install them on the node; the"
+                          " incident closes when a later heartbeat reports them.")
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_tools' AND closed_at IS NULL"):
         if i["subject"] not in tool_issues:
             close_incident(ctx, "node_tools", i["subject"], "tools are installed or the node no longer serves the project")

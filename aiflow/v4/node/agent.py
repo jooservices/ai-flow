@@ -42,11 +42,13 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             out[name] = "missing"
             continue
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             output = (p.stdout or p.stderr).strip()
             version = output.splitlines()[0][:80] if output else ""
             out[name] = version if p.returncode == 0 and version else "missing"
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:  # a busy node answers slowly; that says nothing about the tool
+            out[name] = "timeout"
+        except OSError:
             out[name] = "missing"
     return out
 

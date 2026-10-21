@@ -41,7 +41,12 @@ manifest and cosign identity, verifies the signed GHCR image, and then updates c
 and the control host's node agent. It stores signed assets in
 `/srv/aiflow/control/releases/vX.Y.Z/` and atomically updates `CURRENT`. The timer-based auto-deployer selects
 the highest published SemVer tag reachable from `master`; it no longer deploys unversioned commits from
-`develop`. It rolls back to the previous version when its health checks fail.
+`develop`. It rolls back to the previous version when its health checks fail: a previous `vX.Y.Z` is deployed
+again with `aiflow4-deploy`; when `CURRENT` is still a commit id from the old develop flow (the first versioned
+deploy), the control containers are restarted on the kept `aiflow4/control:<commit>` image and build tree,
+`CURRENT` is written back and the control host's node agent returns to `/srv/aiflow/releases/<commit>`. The
+critical alert says "rolled back" only when the rollback succeeded; otherwise its subject ends in
+"NOT rolled back" and the control plane must be restored by hand.
 
 The image tag is also its version and includes OCI source, version and revision labels. Control containers set
 `AIFLOW4_VERSION` from the release tag, so `/healthz`, `/v1/state` and the API metadata report the built version.
@@ -73,6 +78,28 @@ The installer entry point is:
 ```sh
 aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
 ```
+
+### Nodes still on the agent from before signed releases
+
+An older node agent unpacks the new installer from the tarball and calls it with only
+`aiflow4-node-install <release.tar.gz> <vX.Y.Z>`. The installer accepts that call: it uses the
+`.sigstore.json` bundle and `SHA256SUMS` next to the tarball when present, and otherwise fetches them from the
+control API with the node token from `/etc/aiflow/node.env`. It then checks the checksum and cosign signature
+exactly as above. When a file cannot be fetched or verification fails, it reports the rejection to
+`/v1/nodes/{name}/release-failures` (a critical incident) and installs nothing. After the first signed release is
+installed, the new agent calls the installer with all four arguments.
+
+Such a node therefore needs cosign before it can move to the first signed release. If cosign is missing, the
+installer refuses, opens the incident and prints the command to run. One-time manual step on that node:
+
+1. Install cosign ([instructions](https://docs.sigstore.dev/cosign/system_config/installation/)).
+2. Either wait for the next heartbeat retry (every 10 minutes) or install by hand from the files the control
+   host serves:
+
+   ```sh
+   aiflow4-node-install /srv/aiflow/releases/incoming/aiflow4-vX.Y.Z.tar.gz vX.Y.Z \
+     /path/to/aiflow4-vX.Y.Z.tar.gz.sigstore.json <sha256 from SHA256SUMS>
+   ```
 
 Do not install a tarball from a branch or commit hash. To make a release, merge the change to `master`, create a
 `vX.Y.Z` tag on that commit, then use the corresponding published GitHub Release.

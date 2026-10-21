@@ -1,12 +1,57 @@
 #!/bin/bash
 # Install a signed AI Flow v4 release on this node.
 #   aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
+# A node agent from before signed releases calls it as `aiflow4-node-install <release.tar.gz> <vX.Y.Z>`. Then the
+# signature bundle and SHA256SUMS are taken from next to the tarball or fetched from the control API, and the
+# release is verified the same way. A rejected release is reported to the control API as an incident.
 set -euo pipefail
-TAR=$1; VERSION=$2; BUNDLE=$3; EXPECTED_SHA256=$4
+if [ $# -ne 2 ] && [ $# -ne 4 ]; then
+  echo "usage: aiflow4-node-install <release.tar.gz> <vX.Y.Z> [<release.sigstore.json> <sha256>]" >&2; exit 2
+fi
+TAR=$1; VERSION=$2; BUNDLE=${3:-}; EXPECTED_SHA256=${4:-}
 if [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "release version must be vX.Y.Z" >&2; exit 2
 fi
+NODE_ENV=${AIFLOW4_NODE_ENV:-/etc/aiflow/node.env}
+if [ -r "$NODE_ENV" ]; then  # systemd-run does not pass the agent's environment
+  set -a; . "$NODE_ENV"; set +a
+fi
+CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://10.44.0.10}
+NODE_NAME=${AIFLOW4_NODE_NAME:-$(uname -n)}
+TOKEN_FILE=${AIFLOW4_NODE_TOKEN_FILE:-/srv/aiflow/state/node.token}
+# curl reads the node token from a config on stdin, so it never shows in the process list.
+control() {
+  local token
+  token=$(cat "$TOKEN_FILE" 2>/dev/null) || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fsS -K - --max-time 120 "$@"
+}
+reject() {
+  echo "$1" >&2
+  local body
+  body=$(printf '{"release_version": "%s", "detail": "installer: %s"}' "$VERSION" "${1//\"/}")
+  control -X POST -H 'Content-Type: application/json' --data "$body" \
+    "$CONTROL_URL/v1/nodes/$NODE_NAME/release-failures" >/dev/null 2>&1 \
+    || echo "could not report the rejected release to the control API" >&2
+  exit 4
+}
+
+if [ $# -eq 2 ]; then
+  echo "called without a signature bundle and checksum (node agent before signed releases); fetching them" >&2
+  [ -f "$TAR" ] || { echo "release tarball is missing" >&2; exit 2; }
+  BUNDLE=$TAR.sigstore.json
+  SUMS=$(dirname "$TAR")/SHA256SUMS
+  if [ ! -s "$BUNDLE" ] && ! control -o "$BUNDLE" "$CONTROL_URL/v1/releases/$VERSION.tar.gz.sigstore.json"; then
+    rm -f "$BUNDLE"; reject "could not get the signature bundle of $VERSION from the control API"
+  fi
+  if [ -s "$SUMS" ] && grep -q "aiflow4-$VERSION.tar.gz\$" "$SUMS"; then
+    SUMS_TEXT=$(cat "$SUMS")
+  elif ! SUMS_TEXT=$(control "$CONTROL_URL/v1/releases/$VERSION/SHA256SUMS"); then
+    reject "could not get SHA256SUMS of $VERSION from the control API"
+  fi
+  EXPECTED_SHA256=$(awk -v f="aiflow4-$VERSION.tar.gz" '$2 == f || $2 == "*" f {print $1; exit}' <<<"$SUMS_TEXT")
+fi
 if [[ ! $EXPECTED_SHA256 =~ ^[0-9a-f]{64}$ ]]; then
+  [ $# -eq 2 ] && reject "SHA256SUMS of $VERSION has no valid checksum for the tarball"
   echo "invalid release checksum" >&2; exit 2
 fi
 if [[ ! -f $TAR || ! -f $BUNDLE ]]; then
@@ -14,16 +59,16 @@ if [[ ! -f $TAR || ! -f $BUNDLE ]]; then
 fi
 ACTUAL_SHA256=$(sha256sum "$TAR" | awk '{print $1}')
 if [[ $ACTUAL_SHA256 != "$EXPECTED_SHA256" ]]; then
-  echo "release checksum verification failed" >&2; exit 4
+  reject "release checksum verification failed for $VERSION"
 fi
 IDENTITY="https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION"
 if ! command -v cosign >/dev/null 2>&1; then
-  echo "cosign is required to verify signed releases" >&2; exit 4
+  reject "cosign is required to verify signed releases; install cosign on this node, then run: aiflow4-node-install <release.tar.gz> $VERSION <release.sigstore.json> <sha256>"
 fi
 if ! cosign verify-blob "$TAR" --bundle "$BUNDLE" \
     --certificate-identity "$IDENTITY" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
-  echo "release signature verification failed" >&2; exit 4
+  reject "release signature verification failed for $VERSION"
 fi
 
 RELEASES=/srv/aiflow/releases

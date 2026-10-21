@@ -2,8 +2,10 @@
 # Deploy the newest published vX.Y.Z release whose commit is on master; roll back if health checks fail.
 # Run by aiflow4-autodeploy.timer on the control-plane machine.
 set -uo pipefail
-R=/srv/aiflow/control/repos/ai-flow
-CUR=$(cat /srv/aiflow/control/releases/CURRENT 2>/dev/null || true)
+ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
+R=$ROOT/control/repos/ai-flow
+RELEASES=$ROOT/control/releases
+CUR=$(cat "$RELEASES/CURRENT" 2>/dev/null || true)
 git -C "$R" fetch -q origin master --tags || exit 0
 TARGET=$(git -C "$R" tag --merged origin/master --list 'v[0-9]*' --sort=-version:refname | head -n 1)
 [ -n "$TARGET" ] || { echo "no versioned release tag on master"; exit 0; }
@@ -31,9 +33,33 @@ if aiflow4-deploy "$TARGET"; then
     echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed $TARGET" "Versioned release $TARGET passed the health checks (previous ${CUR:-none})."; exit 0
   fi
 fi
+# Before the first versioned release, CURRENT is a commit id deployed by the old develop flow. Its image
+# (aiflow4/control:<id>), build tree and node release are still on this host, so it is restored from them.
+rollback_commit() {
+  local cf="$ROOT/build/$CUR/deploy/v4/control/compose.yaml" svc
+  docker image inspect "aiflow4/control:$CUR" >/dev/null 2>&1 || { echo "image aiflow4/control:$CUR is gone"; return 1; }
+  [ -f "$cf" ] || { echo "build tree of $CUR is gone"; return 1; }
+  for svc in control-api-a control-api-b control-loops; do
+    AIFLOW4_IMAGE_REPOSITORY=aiflow4/control AIFLOW4_IMAGE_TAG=$CUR \
+      docker compose -f "$cf" up -d --no-deps "$svc" || return 1
+  done
+  printf '%s\n' "$CUR" > "$RELEASES/CURRENT.tmp" && mv -f "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT" || return 1
+  if [ -x "$ROOT/releases/$CUR/.venv/bin/aiflow4" ]; then
+    ln -sfn "$ROOT/releases/$CUR" "$ROOT/current.new" && mv -T "$ROOT/current.new" "$ROOT/current"
+    systemctl restart aiflow4-node-agent
+  fi
+}
 echo "deploy of $TARGET unhealthy; rolling back to ${CUR:-none}"
+ROLLED_BACK=no
 if [[ $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-  aiflow4-deploy "$CUR"
+  aiflow4-deploy "$CUR" && ROLLED_BACK=yes
+elif [[ $CUR =~ ^[0-9a-f]{7,40}$ ]]; then
+  rollback_commit && ROLLED_BACK=yes
 fi
-alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed" "The control plane was unhealthy after deploying $TARGET; it is rolling back to ${CUR:-none}. Look at the release checks and control logs."
+if [ $ROLLED_BACK = yes ]; then
+  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after deploying $TARGET; it runs $CUR again. Look at the release checks and control logs."
+else
+  echo "no rollback happened; the control plane may still run $TARGET"
+  alert "[CRITICAL] AI Flow: auto-deploy of $TARGET failed, NOT rolled back" "The control plane was unhealthy after deploying $TARGET and could not be rolled back to ${CUR:-none} (no previous release to restore, or the restore failed). It may still run $TARGET: restore it by hand, then look at the release checks and control logs."
+fi
 exit 1

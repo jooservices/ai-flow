@@ -1,5 +1,5 @@
-"""Dashboards: Command Center (/cc), Delivery view (/delivery) and Business view (/business), one page fed by
-/v1/state (the Business view adds /v1/business/<project>/change-requests, see control/business.py).
+"""Dashboards: Command Center (/cc), Delivery view (/delivery), Business view (/business) and Stakeholder view
+(/stakeholder), one page fed by /v1/state and the relevant view APIs.
 
 The page is the console designed in the demo, rendering the live registry instead of a simulation. Extra
 read-only endpoints give the drawers their detail (runs, events, audited writes and time segments of one ticket).
@@ -25,6 +25,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/cc", include_in_schema=False)
     @app.get("/delivery", include_in_schema=False)
     @app.get("/business", include_in_schema=False)
+    @app.get("/stakeholder", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

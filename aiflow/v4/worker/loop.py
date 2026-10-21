@@ -119,7 +119,8 @@ class Worker:
             c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account=self.account,
                         provider=r["provider"], model=r.get("model", ""), effort=r.get("effort", ""),
                         ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]), step=step,
-                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"))
+                        findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"),
+                        related=r.get("related") or [])
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":

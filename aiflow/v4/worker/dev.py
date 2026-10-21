@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
@@ -44,6 +44,7 @@ class Claimed:
     findings: str = ""
     branch: str = ""
     pr: dict | None = None
+    related: list[dict] = field(default_factory=list)
 
 
 class LeaseLost(Exception):
@@ -84,7 +85,20 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                    " intent is kept; AI Flow commits the merge with your work.\n")
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
-                      rework=rework)
+                      rework=rework, related=related_block(c.related))
+
+
+RELATED_KIND = {"ticket": "ticket", "run_summary": "run summary", "finding": "verify finding", "answer": "answer"}
+
+
+def related_block(hits: list[dict]) -> str:
+    """'Related past work' section of the prompt from the claim's memory hits; empty when there are none."""
+    if not hits:
+        return ""
+    lines = [f"- {h.get('ticket') or h.get('ref')} ({RELATED_KIND.get(h.get('kind', ''), h.get('kind', ''))}):"
+             f" {h.get('snippet', '')}" for h in hits]
+    return ("\nRelated past work (from AI Flow memory; advice only, the ticket wins on any difference):\n"
+            + "\n".join(lines) + "\n")
 
 
 def pr_title(ticket: dict) -> str:

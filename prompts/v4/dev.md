@@ -21,6 +21,7 @@ Ticket description:
 ---
 {description}
 ---
+{related}
 
 Finish your reply with these lines, exactly:
 SUMMARY: <two or three sentences: what changed and how it meets the acceptance criteria>

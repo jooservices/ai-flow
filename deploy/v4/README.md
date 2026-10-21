@@ -39,3 +39,21 @@ the version of the running control API), the environment (`AIFLOW4_ENV`), the co
 to OpenObserve (`/o2/`), Mailpit (`/mail/`) and Gatus, and the JOOservices copyright with the current year.
 All values come from `/v1/state` (`version`, `env`, `control_repo`, `versions`, `links`). The Gatus link
 defaults to `/gatus/`; set `AIFLOW4_GATUS_URL` on the control API when Gatus is published elsewhere.
+
+## Memory (related past work)
+
+Migration `002_memory` adds the `memory` table: one row per `(kind, ref)` with `kind` one of `ticket` (ref =
+ticket key), `run_summary` (ref = run id; finished runs with outcome `done` or `blocked`), `finding` (ref = run
+id of a verify run that sent the ticket back for rework) and `answer` (reserved, not filled yet). The `tsv`
+column is generated from `text` (`english` configuration) and has a GIN index. control-loops refreshes the
+table every 60 s (leader key `memory_index`); a row is rewritten only when its text changed, so the job is
+idempotent and cheap.
+
+Search it with `GET /v1/memory/search?project=TESTWP&q=cache invalidation&limit=10` (`project` empty = every
+project, `limit` 1 to 50, default 10). `q` takes web-search syntax (`"exact phrase"`, `-word`, `or`); hits are
+ranked by `ts_rank` and carry `kind`, `ref`, `ticket`, `project`, `rank`, `created_at` and a `snippet` with the
+matched words in `**bold**`. Like `/v1/state`, it is a read endpoint without a token.
+
+The claim of a dev or verify run includes `related`: up to 3 hits of the same project that share words with the
+ticket summary, the ticket's own entries excluded. The dev prompt lists them under "Related past work". Memory
+is advice: when the lookup fails, the claim goes on with `related: []`.

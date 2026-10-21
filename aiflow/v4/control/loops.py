@@ -3,6 +3,7 @@
 jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes.
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
             accounts whose cooldown ended. Opens and closes incidents, alerts people on critical ones.
+memory      every 60 s: tickets, finished run summaries and verify findings into the memory table (memory.index).
 Each loop runs on one control-plane instance at a time (leader key in Redis).
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from . import memory
 from .incidents import close_incident, open_incident
 from .api import Ctx
 from .db import J
@@ -169,7 +171,7 @@ def watchdog(ctx: Ctx) -> None:
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = 0.0
+    last_sync = last_full = last_wd = last_mem = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -184,6 +186,11 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
                 last_wd = now
+            if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
+                written = memory.index(ctx.db)
+                if any(written.values()):
+                    log.info("memory indexed: %s", written)
+                last_mem = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])

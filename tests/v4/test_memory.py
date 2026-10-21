@@ -39,12 +39,12 @@ def test_index_is_idempotent_by_kind_and_ref(db):
     ticket(db, "TESTWP-1", "Login form with nonce", "Add a nonce to the login form.")
     dev = run(db, "TESTWP-1", "dev", "done", "Added the nonce field and a capability check.")
     rework = run(db, "TESTWP-1", "verify", "rework", "verify failed: ...", {"findings": "- login.php: nonce is never verified"})
-    run(db, "TESTWP-1", "dev", "failed", "worker error: boom")             # failures are not memory
     run(db, "TESTWP-1", "dev", "done", "still running", status="running")  # not finished yet
-    assert memory.index(db) == {"ticket": 1, "run_summary": 1, "finding": 1}
+    run(db, "TESTWP-1", "dev", "failed", "")                               # finished without a summary
+    assert memory.index(db) == {"ticket": 1, "run_summary": 2, "finding": 1}
     assert memory.index(db) == {"ticket": 0, "run_summary": 0, "finding": 0}  # nothing changed: nothing rewritten
     rows = {(r["kind"], r["ref"]): r for r in db.all("SELECT * FROM memory")}
-    assert set(rows) == {("ticket", "TESTWP-1"), ("run_summary", dev), ("finding", rework)}
+    assert set(rows) == {("ticket", "TESTWP-1"), ("run_summary", dev), ("run_summary", rework), ("finding", rework)}
     assert "nonce is never verified" in rows[("finding", rework)]["text"]
     assert all(r["ticket"] == "TESTWP-1" and r["project"] == "TESTWP" for r in rows.values())
     # a changed ticket rewrites its one row
@@ -52,6 +52,19 @@ def test_index_is_idempotent_by_kind_and_ref(db):
     assert memory.index(db)["ticket"] == 1
     assert db.one("SELECT count(*) AS n FROM memory WHERE kind='ticket'")["n"] == 1
     assert "rate limit" in db.one("SELECT text FROM memory WHERE ref='TESTWP-1'")["text"]
+
+
+def test_every_finished_outcome_is_a_run_summary(db):
+    ticket(db, "TESTWP-2", "Checkout page")
+    outcomes = ("done", "blocked", "merged", "human", "failed", "refused", "timeout", "lost")
+    refs = {run(db, "TESTWP-2", "dev", o, f"run ended {o}"): o for o in outcomes}
+    run(db, "TESTWP-2", "dev", "", "no outcome recorded")
+    assert memory.index(db)["run_summary"] == len(outcomes) + 1
+    rows = {r["ref"]: r["text"] for r in db.all("SELECT ref, text FROM memory WHERE kind='run_summary'")}
+    for ref, outcome in refs.items():
+        assert f"dev {outcome}: run ended {outcome}" in rows[ref]
+    assert any("dev finished: no outcome recorded" in t for t in rows.values())
+    assert memory.search(db, "TESTWP", "merged")[0]["kind"] == "run_summary"
 
 
 def test_search_ranks_and_snippets(client, ctx):

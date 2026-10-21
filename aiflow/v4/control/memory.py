@@ -27,11 +27,11 @@ FROM tickets
 INDEX_RUN_SUMMARIES = f"""
 INSERT INTO memory (project, kind, ref, ticket, text, created_at)
 SELECT r.project, 'run_summary', r.id::text, r.ticket_key,
-       left(r.ticket_key || ': ' || coalesce(t.summary, '') || E'\\n' || r.step || ' ' || r.outcome || ': ' || r.summary,
-            {MAX_TEXT}),
+       left(r.ticket_key || ': ' || coalesce(t.summary, '') || E'\\n' || r.step || ' ' || coalesce(nullif(r.outcome, ''), 'finished')
+            || ': ' || r.summary, {MAX_TEXT}),
        coalesce(r.ended_at, r.started_at)
 FROM runs r LEFT JOIN tickets t ON t.key = r.ticket_key
-WHERE r.status = 'finished' AND r.outcome IN ('done', 'blocked') AND r.summary <> ''
+WHERE r.status = 'finished' AND r.summary <> ''
 """ + UPSERT
 
 INDEX_FINDINGS = f"""

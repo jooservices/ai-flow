@@ -56,7 +56,8 @@ The panel refreshes every minute.
 ## Memory (related past work)
 
 Migration `002_memory` adds the `memory` table: one row per `(kind, ref)` with `kind` one of `ticket` (ref =
-ticket key), `run_summary` (ref = run id; finished runs with outcome `done` or `blocked`), `finding` (ref = run
+ticket key), `run_summary` (ref = run id; every finished run with a summary, whatever its outcome: `done`, `blocked`, `merged`,
+`human`, `failed`, `rework`, ...; the text starts with step and outcome), `finding` (ref = run
 id of a verify run that sent the ticket back for rework) and `answer` (reserved, not filled yet). The `tsv`
 column is generated from `text` (`english` configuration) and has a GIN index. control-loops refreshes the
 table every 60 s (leader key `memory_index`); a row is rewritten only when its text changed, so the job is

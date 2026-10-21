@@ -95,6 +95,32 @@ class GitHubApp:
         data = self.api("GET", f"/repos/{self.org}/{repo}", repo=repo)
         return str(data["default_branch"])
 
+    def installation_repositories(self) -> list[dict[str, str]]:
+        """List repositories this GitHub App installation can access."""
+        out: list[dict[str, str]] = []
+        page = 1
+        while True:
+            data = self.api("GET", f"/installation/repositories?per_page=100&page={page}")
+            repositories = data.get("repositories", [])
+            out.extend({"full_name": str(item.get("full_name") or ""),
+                        "name": str(item.get("name") or ""),
+                        "default_branch": str(item.get("default_branch") or "")}
+                       for item in repositories if item.get("full_name"))
+            if len(repositories) < 100:
+                return out
+            page += 1
+
+    def branch_exists(self, repo: str, branch: str) -> bool:
+        """Check a branch name without accepting an arbitrary repository from the caller."""
+        encoded_branch = quote(branch, safe="")
+        try:
+            self.api("GET", f"/repos/{self.org}/{repo}/branches/{encoded_branch}", repo=repo)
+        except GitHubError as exc:
+            if "-> 404:" in str(exc):
+                return False
+            raise
+        return True
+
     def create_branch(self, repo: str, branch: str, base: str) -> None:
         ref = quote(f"heads/{base}", safe="/")
         data = self.api("GET", f"/repos/{self.org}/{repo}/git/ref/{ref}", repo=repo)
@@ -117,6 +143,15 @@ class GitHubApp:
         if sha:
             body["sha"] = sha
         result = self.api("PUT", f"/repos/{self.org}/{repo}/contents/{encoded_path}", body, repo=repo)
+        return str((result.get("commit") or {}).get("sha") or "")
+
+    def delete_file(self, repo: str, branch: str, path: str, message: str) -> str:
+        """Delete one control-repo file through the App, recording the removal as a bot commit."""
+        encoded_path = quote(path, safe="/")
+        branch_q = quote(branch, safe="")
+        current = self.api("GET", f"/repos/{self.org}/{repo}/contents/{encoded_path}?ref={branch_q}", repo=repo)
+        result = self.api("DELETE", f"/repos/{self.org}/{repo}/contents/{encoded_path}",
+                          {"message": message[:200], "sha": str(current["sha"]), "branch": branch}, repo=repo)
         return str((result.get("commit") or {}).get("sha") or "")
 
     def create_control_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:

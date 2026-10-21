@@ -102,8 +102,23 @@ class FakeJira:
         self.fields: list[tuple[str, dict]] = []
         self.labels: list[tuple[str, str, str]] = []
         self.attachments: list[tuple[str, str, bytes, str]] = []
+        self.projects_data = [{"key": "TESTWP", "name": "Test WordPress"},
+                              {"key": "NEWAPP", "name": "New App"}]
+        self.project_workflows: dict[str, list[str]] = {}
+        self.project_reads: list[str] = []
+        self.deleted: list[str] = []
+        self.transitions: list[tuple[str, str]] = []
+
+    def projects(self) -> list[dict[str, str]]:
+        return list(self.projects_data)
+
+    def project_statuses(self, key: str) -> list[str]:
+        self.project_reads.append(key)
+        return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
+                                                "Needs owner", "Done"])
 
     def transition_to(self, key: str, target: str) -> str:
+        self.transitions.append((key, target))
         self.status_of[key] = target
         return target
 
@@ -150,6 +165,20 @@ class FakeGitHub:
         self.prs: list[dict] = []
         self.commits: list[dict] = []
         self.branches: list[tuple[str, str, str]] = []
+        self.repositories = [{"full_name": "jooservices/test-aiflow-wp", "name": "test-aiflow-wp",
+                              "default_branch": "develop"},
+                             {"full_name": "jooservices/new-app", "name": "new-app",
+                              "default_branch": "develop"}]
+        self.available_branches: dict[tuple[str, str], bool] = {}
+        self.deleted_files: list[tuple[str, str]] = []
+        self.repository_deletions: list[str] = []
+
+    def installation_repositories(self) -> list[dict[str, str]]:
+        return list(self.repositories)
+
+    def branch_exists(self, repo: str, branch: str) -> bool:
+        self.branches.append((repo, branch, "check"))
+        return self.available_branches.get((repo, branch), branch == "develop")
 
     def default_branch(self, repo):
         return "develop"
@@ -159,6 +188,12 @@ class FakeGitHub:
 
     def commit_file(self, repo, branch, path, content, message):
         self.commits.append({"repo": repo, "branch": branch, "path": path, "content": content, "message": message})
+        return f"commit{len(self.commits):04d}"
+
+    def delete_file(self, repo, branch, path, message):
+        self.deleted_files.append((repo, path))
+        self.commits.append({"repo": repo, "branch": branch, "path": path, "content": "", "message": message,
+                             "deleted": True})
         return f"commit{len(self.commits):04d}"
 
     def token(self, repo=None, permissions=None):

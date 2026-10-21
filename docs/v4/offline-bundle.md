@@ -40,7 +40,9 @@ The output `.sha256` file can be checked before transferring the archive. After 
 The connected build host needs the locked `uv`, `python3-pip`, `dpkg-deb`, `curl`, `tar`, `xz` and the Docker CLI.
 
 The Debian packages are `aiflow4-node-agent` and `aiflow4-worker`. They install the systemd agent and worker
-template units, create the `aiflow-worker` system user, and prepare `/etc/aiflow` and `/srv/aiflow` directories.
+template units, add offline-only systemd drop-ins for the bundled runtime, create the `aiflow-worker` system user,
+and prepare `/etc/aiflow` and `/srv/aiflow` directories. The shared units remain suitable for online installs,
+which do not receive the offline PATH or uv Python directory settings.
 They depend only on `systemd` and `passwd`, already present on supported Ubuntu Server and Debian installations.
 They do not start the agent before the release runtime and its offline dependencies have been installed.
 
@@ -63,12 +65,17 @@ sudo python3 aiflow4-offline-v4.2.0-amd64/offline_bundle.py install \
 ```
 
 The installer checks every `SHA256SUMS` entry before changing the host, installs the two `.deb` packages, creates
-the Python 3.12 virtual environment from bundled wheels with uv offline mode enabled, installs the release,
-loads the included Docker image, and starts `aiflow4-node-agent`. It waits for the control API to report the node
-online at the installed release with no missing required tools. If accounts are assigned to the node, it also
+the Python 3.12 virtual environment from bundled wheels with uv offline mode enabled, and installs the release.
+It adds the extracted release tree to the virtual environment's import path so workers load prompt files from the
+release, then runs `.venv/bin/aiflow4 version` before restarting the agent. The installer loads the included
+Docker image and starts `aiflow4-node-agent`. It waits for the control API to report the node online at the
+installed release with no missing required tools. If accounts are assigned to the node, it also
 waits for an active `aiflow4-worker@<account>.service`. Workers can be running while their provider accounts are
 still signed out; TESTFLOW-76 handles sign-in separately. Check `systemctl status aiflow4-node-agent` and the
 node's `missing_tools` field in `/v1/state` for the green preflight result.
+
+Offline nodes do not install `/usr/local/sbin/aiflow4-node-install`, whose release upgrades use the network.
+Upgrade an offline node by building and installing a new offline bundle for the desired release.
 
 All packages are built with `Architecture: all` and use standard systemd paths. This keeps the `.deb` package
 format compatible with Debian 12 as well as the two supported Ubuntu releases; the bundle itself remains

@@ -1,10 +1,14 @@
+import base64
 import hashlib
 import importlib.util
+import io
 import json
 import platform
+import shutil
 import subprocess
+import sys
 import tarfile
-import io
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -251,6 +255,7 @@ def test_agent_and_worker_debs_include_systemd_user_directories_and_supported_ar
         contents = subprocess.run(["dpkg-deb", "--contents", str(deb)], check=True,
                                   capture_output=True, text=True).stdout
         assert "lib/systemd/system/aiflow4-" in contents
+        assert "etc/systemd/system/aiflow4-" in contents and ".service.d/offline.conf" in contents
         control_dir = tmp_path / "package-control" / deb.stem
         control_dir.mkdir(parents=True)
         subprocess.run(["dpkg-deb", "--control", str(deb), str(control_dir)], check=True, capture_output=True)
@@ -262,12 +267,60 @@ def test_agent_and_worker_debs_include_systemd_user_directories_and_supported_ar
         extracted.parent.mkdir(exist_ok=True)
         subprocess.run(["dpkg-deb", "--extract", str(deb), str(extracted)], check=True, capture_output=True)
         unit = next((extracted / "lib/systemd/system").glob("aiflow4-*.service"))
-        assert "/opt/aiflow/offline/current/node/bin" in unit.read_text()
+        assert "/opt/aiflow/offline/current" not in unit.read_text()
+        dropin = next((extracted / "etc/systemd/system").rglob("offline.conf"))
+        assert "/opt/aiflow/offline/current/node/bin" in dropin.read_text()
+        assert "UV_PYTHON_INSTALL_DIR=/opt/aiflow/offline/current/python/managed" in dropin.read_text()
+
+    for unit in (offline.DEPLOY_ROOT / "node/systemd").glob("*.service"):
+        assert "/opt/aiflow/offline/current" not in unit.read_text()
 
     assert set(offline.ARCHES[machine][0] for machine in ("x86_64", "aarch64")) == {"amd64", "arm64"}
 
 
-def _fixture_bundle(tmp_path):
+def _fixture_wheel(path):
+    files = {
+        "fixture_launcher.py": (
+            "import importlib.util\n"
+            "from pathlib import Path\n"
+            "import sys\n"
+            "\n"
+            "def main():\n"
+            "    if sys.argv[1:] != ['version']:\n"
+            "        raise SystemExit('expected version command')\n"
+            "    spec = importlib.util.find_spec('aiflow.v4.worker.dev')\n"
+            "    if spec is None or spec.origin is None:\n"
+            "        raise SystemExit('worker module is missing')\n"
+            "    release = Path(spec.origin).resolve().parents[3]\n"
+            "    prompts = release / 'prompts/v4'\n"
+            "    required = ('dev.md', 'verify.md', 'master.md', 'impact.md', 'triage.md', 'intake.md')\n"
+            "    missing = [name for name in required if not (prompts / name).is_file()]\n"
+            "    if missing:\n"
+            "        raise SystemExit('worker prompts are missing: ' + ', '.join(missing))\n"
+            "    print(release)\n"
+            "    return 0\n"
+        ).encode(),
+        "aiflow/__init__.py": b"WHEEL_COPY = True\n",
+        "aiflow/v4/__init__.py": b"WHEEL_COPY = True\n",
+        "aiflow/v4/worker/__init__.py": b"WHEEL_COPY = True\n",
+        "aiflow/v4/worker/dev.py": b"WHEEL_COPY = True\n",
+        "ai_flow-4.2.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: ai-flow\nVersion: 4.2.0\n\n",
+        "ai_flow-4.2.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nGenerator: offline-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        "ai_flow-4.2.0.dist-info/entry_points.txt": b"[console_scripts]\naiflow4 = fixture_launcher:main\n",
+    }
+    record_name = "ai_flow-4.2.0.dist-info/RECORD"
+    records = []
+    for name, data in files.items():
+        encoded = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        records.append(f"{name},sha256={encoded},{len(data)}")
+    records.append(f"{record_name},,")
+    files[record_name] = ("\n".join(records) + "\n").encode()
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
+        for name, data in files.items():
+            wheel.writestr(name, data)
+
+
+def _fixture_bundle(tmp_path, *, real_runtime=False):
     root = tmp_path / "bundle"
     for relative in ("assets", "packages", "payload/bin", "payload/node/bin", "payload/python/bin",
                      "payload/cli/bin", "payload/wheelhouse"):
@@ -289,6 +342,25 @@ def _fixture_bundle(tmp_path):
         contents = tmp_path / "pyproject.toml"
         contents.write_text("[project]\nname='ai-flow'\n")
         archive.add(contents, arcname="pyproject.toml")
+    if real_runtime:
+        uv = shutil.which("uv")
+        assert uv, "the offline install integration test requires the project's uv executable"
+        shutil.copy2(uv, root / "payload/bin/uv")
+        (root / "payload/bin/uv").chmod(0o755)
+        python = root / "payload/python/bin/python3.12"
+        shutil.copy2(sys.executable, python)
+        python.chmod(0o755)
+        for wheel in (root / "payload/wheelhouse").glob("*.whl"):
+            wheel.unlink()
+        _fixture_wheel(root / "payload/wheelhouse/ai_flow-4.2.0-py3-none-any.whl")
+        (root / "payload/requirements.txt").write_text("\n")
+        repo = Path(__file__).resolve().parents[2]
+        with tarfile.open(release_tar, "w:gz") as archive:
+            release_files = [repo / "aiflow/__init__.py", repo / "aiflow/v4/__init__.py",
+                             repo / "aiflow/v4/worker/__init__.py", repo / "aiflow/v4/worker/dev.py"]
+            release_files.extend(sorted((repo / "prompts/v4").glob("*.md")))
+            for source in release_files:
+                archive.add(source, arcname=source.relative_to(repo).as_posix())
     manifest = {
         "format": 1, "release": "v4.2.0", "architecture": "arm64", "image": "example/control:v4.2.0",
         "files": {"release": "assets/aiflow4-v4.2.0.tar.gz", "image": "assets/control-image.tar",
@@ -317,7 +389,7 @@ def test_bundle_manifest_checks_release_image_wheels_and_debs_and_rejects_tamper
 
 
 def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_internet(tmp_path):
-    bundle = _fixture_bundle(tmp_path)
+    bundle = _fixture_bundle(tmp_path, real_runtime=True)
     root = tmp_path / "root"
     (root / "etc/aiflow").mkdir(parents=True)
     (root / "srv/aiflow/state").mkdir(parents=True)
@@ -333,18 +405,10 @@ def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_
         "accounts": [{"id": "codex-01", "node": "offline-node", "status": "signed_out"}],
     }
     calls = []
+    real_runner = subprocess.run
 
     def run(args, **kwargs):
         calls.append((args, kwargs))
-        if args[0] == "uv" or args[0].endswith("/bin/uv"):
-            if "venv" in args:
-                venv = Path(args[-1])
-                (venv / "bin").mkdir(parents=True, exist_ok=True)
-                (venv / "bin/python").write_text("offline python")
-            elif "pip" in args and "install" in args:
-                assert "--offline" in args and "--no-index" in args
-                assert kwargs["env"]["UV_OFFLINE"] == "1"
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[0] == "curl":
             assert args[args.index("--config") + 1] == "-"
             assert kwargs["input"].startswith('header = "Authorization: Bearer ')
@@ -355,18 +419,33 @@ def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[0] == "systemctl" and "list-units" in args:
             return SimpleNamespace(returncode=0, stdout="aiflow4-worker@codex-01.service active running\n", stderr="")
+        if args[0] == "chown":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[0].endswith("/bin/uv") or args[0].endswith("/.venv/bin/aiflow4"):
+            assert kwargs.get("env", {}).get("UV_OFFLINE", "1") == "1"
+            return real_runner(args, **kwargs)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     result = offline.install_bundle(bundle, root=root, runner=run, wait_seconds=0)
 
     assert result["healthy"] is True and result["node"]["missing_tools"] == []
-    assert (root / "srv/aiflow/releases/v4.2.0/RELEASE").read_text() == "v4.2.0\n"
-    assert (root / "srv/aiflow/current").resolve() == (root / "srv/aiflow/releases/v4.2.0").resolve()
+    release = root / "srv/aiflow/releases/v4.2.0"
+    assert (release / "RELEASE").read_text() == "v4.2.0\n"
+    assert (root / "srv/aiflow/current").resolve() == release.resolve()
+    launcher = release / ".venv/bin/aiflow4"
+    installed = subprocess.run([str(launcher), "version"], check=True, capture_output=True, text=True,
+                                env={**offline.os.environ, "UV_OFFLINE": "1"})
+    assert installed.stdout.strip() == str(release.resolve())
+    assert (release / ".venv/lib/python3.12/site-packages/aiflow4-release.pth").is_file()
+    version_call = next(i for i, (args, _) in enumerate(calls)
+                        if args[0].endswith("/current/.venv/bin/aiflow4") and args[1:] == ["version"])
     assert (root / "srv/aiflow/accounts/codex-01").is_dir()
     assert any(args[0] == "docker" and args[1] == "load" for args, _ in calls)
     assert any(args[0] == "dpkg" and "-i" in args for args, _ in calls)
     assert any(args == ["systemctl", "enable", "aiflow4-node-agent.service"] for args, _ in calls)
-    assert any(args == ["systemctl", "restart", "aiflow4-node-agent.service"] for args, _ in calls)
+    restart_call = next(i for i, (args, _) in enumerate(calls)
+                        if args == ["systemctl", "restart", "aiflow4-node-agent.service"])
+    assert version_call < restart_call
     assert any(args[0] == "systemctl" and "list-units" in args for args, _ in calls)
     assert all(args[0] not in {"apt", "apt-get", "npm", "git", "pip"} for args, _ in calls)
     assert all(not any("login" in str(argument) for argument in args) for args, _ in calls)

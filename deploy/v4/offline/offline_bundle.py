@@ -298,6 +298,15 @@ def build_deb_packages(destination: Path, release_version: str) -> list[Path]:
         (root / "DEBIAN").mkdir(parents=True)
         _run(["install", "-D", "-m", "0644", str(DEPLOY_ROOT / "node/systemd" / unit),
               str(root / "lib/systemd/system" / unit)])
+        dropin = root / "etc/systemd/system" / f"{unit}.d/offline.conf"
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        dropin.write_text(
+            '[Service]\n'
+            'Environment="PATH=/opt/aiflow/offline/current/bin:/opt/aiflow/offline/current/python/bin:'
+            '/opt/aiflow/offline/current/node/bin:/opt/aiflow/offline/current/cli/bin:'
+            '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+            'Environment=UV_PYTHON_INSTALL_DIR=/opt/aiflow/offline/current/python/managed\n',
+            encoding="utf-8")
         (root / "DEBIAN/control").write_text(_deb_control(name, version, description), encoding="utf-8")
         postinst = """#!/bin/sh
 set -e
@@ -590,7 +599,8 @@ def install_bundle(bundle: Path, *, root: Path = Path("/"), runner: Callable = _
     if not app_wheels:
         raise BundleError("offline wheelhouse has no AI Flow application wheel")
     venv = build_root / ".venv"
-    runner([str(uv), "venv", "--python", str(python), str(venv)], capture_output=True, text=True)
+    runner([str(uv), "venv", "--python", str(python), str(venv)],
+           env={**os.environ, "UV_OFFLINE": "1"}, capture_output=True, text=True)
     runner([str(uv), "pip", "install", "--offline", "--no-index", "--find-links", str(wheelhouse),
             "--python", str(venv / "bin/python"), "--requirements",
             str(offline_root / "current/requirements.txt"), str(app_wheels[0])],
@@ -598,6 +608,26 @@ def install_bundle(bundle: Path, *, root: Path = Path("/"), runner: Callable = _
     (build_root / "RELEASE").write_text(manifest["release"] + "\n", encoding="utf-8")
     shutil.rmtree(release_root, ignore_errors=True)
     os.replace(build_root, release_root)
+
+    # Console-script launchers embed the venv path in their shebang. The release directory
+    # was staged under a temporary name, so rewrite that prefix before executing any script.
+    old_prefix = os.fsencode(str(build_root))
+    new_prefix = os.fsencode(str(release_root))
+    for launcher in (release_root / ".venv/bin").iterdir():
+        if launcher.is_symlink() or not launcher.is_file():
+            continue
+        contents = launcher.read_bytes()
+        if old_prefix in contents:
+            launcher.write_bytes(contents.replace(old_prefix, new_prefix))
+
+    site_packages = release_root / ".venv/lib/python3.12/site-packages"
+    site_packages.mkdir(parents=True, exist_ok=True)
+    release_path = str(release_root.resolve())
+    (site_packages / "aiflow4-release.pth").write_text(
+        f"import sys; sys.path.insert(0, {release_path!r})\n", encoding="utf-8")
+    launcher = release_root / ".venv/bin/aiflow4"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise BundleError("offline AI Flow installation did not create the aiflow4 launcher")
 
     image = _safe_bundle_path(bundle, files["image"])
     runner(["docker", "load", "--input", str(image)], capture_output=True, text=True)
@@ -608,6 +638,7 @@ def install_bundle(bundle: Path, *, root: Path = Path("/"), runner: Callable = _
     next_current.symlink_to(Path("releases") / manifest["release"])
     os.replace(next_current, current_link)
 
+    runner([str(current_link / ".venv/bin/aiflow4"), "version"], capture_output=True, text=True)
     runner(["systemctl", "daemon-reload"], capture_output=True, text=True)
     runner(["systemctl", "enable", AGENT_UNIT], capture_output=True, text=True)
     runner(["systemctl", "restart", AGENT_UNIT], capture_output=True, text=True)

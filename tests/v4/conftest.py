@@ -111,6 +111,10 @@ class FakeJira:
                               {"key": "NEWAPP", "name": "New App"}]
         self.project_workflows: dict[str, list[str]] = {}
         self.project_reads: list[str] = []
+        self.versions_data: dict[str, list[dict]] = {}
+        self.version_reads: list[str] = []
+        self.search_data: list[dict] = []
+        self.search_queries: list[str] = []
         self.deleted: list[str] = []
         self.transitions: list[tuple[str, str]] = []
 
@@ -121,6 +125,14 @@ class FakeJira:
         self.project_reads.append(key)
         return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
                                                 "Needs owner", "Done"])
+
+    def project_versions(self, key: str) -> list[dict]:
+        self.version_reads.append(key)
+        return list(self.versions_data.get(key, []))
+
+    def search(self, jql: str):
+        self.search_queries.append(jql)
+        return iter(self.search_data)
 
     def transition_to(self, key: str, target: str) -> str:
         self.transitions.append((key, target))

@@ -66,7 +66,8 @@ AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERS
   docker compose -f "$CF" up -d --no-deps control-loops 2>&1 | grep -v -e '^$' | tail -1
 
 install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" \
-  "$B/deploy/v4/bin/aiflow4-autodeploy" /usr/local/sbin/
+  "$B/deploy/v4/bin/aiflow4-autodeploy" "$B/deploy/v4/bin/aiflow4-develop-install" \
+  "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" /usr/local/sbin/
 install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/
 systemctl daemon-reload && systemctl enable -q --now aiflow4-autodeploy.timer
 mkdir -p /root/.bridge/out/release

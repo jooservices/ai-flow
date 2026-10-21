@@ -67,6 +67,18 @@ def test_jira_sync_reopens_done_epic_when_a_new_child_is_not_done(ctx):
     assert not ctx.jira.comments
 
 
+def test_first_sync_does_not_reopen_done_epic_for_its_first_seen_unfinished_child(ctx):
+    epic_key = "TESTWP-112"
+    ctx.jira.status_of[epic_key] = "Done"
+    sync_issues(ctx, [issue(epic_key, "Done", "Epic"), issue("TESTWP-113", "To Do", parent=epic_key)])
+
+    assert jira_sync(ctx, full=True) == 2
+
+    assert ctx.jira.status(epic_key) == "Done"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (epic_key,))["status"] == "Done"
+    assert not ctx.db.one("SELECT 1 FROM write_audit WHERE ticket=%s AND action='transition'", (epic_key,))
+
+
 def test_jira_sync_leaves_done_epic_alone_for_an_old_unfinished_child(ctx):
     epic_key = "TESTWP-115"
     add_ticket(ctx.db, epic_key, status="Done", labels=())
@@ -97,6 +109,26 @@ def test_jira_sync_reopens_done_epic_when_an_existing_child_is_reopened(ctx):
 
     assert ctx.jira.status(epic_key) == "To Do"
     assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (epic_key,))["status"] == "To Do"
+
+
+def test_jira_sync_reports_epic_when_stale_database_status_catches_up_to_jira(ctx, monkeypatch):
+    from aiflow.v4.control import notify
+
+    monkeypatch.setattr(notify, "send", lambda *args, **kwargs: [])
+    epic_key = "TESTWP-119"
+    child_key = "TESTWP-120"
+    add_ticket(ctx.db, epic_key, status="In Progress", labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key=%s", (epic_key,))
+    add_ticket(ctx.db, child_key, status="Done", labels=())
+    ctx.db.run("UPDATE tickets SET parent_key=%s WHERE key=%s", (epic_key, child_key))
+    ctx.jira.status_of[epic_key] = "Done"
+    sync_issues(ctx, [issue(child_key, "Done", parent=epic_key)])
+
+    assert jira_sync(ctx, full=True) == 1
+
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (epic_key,))["status"] == "Done"
+    report = ctx.db.one("SELECT scope, subject FROM project_reports WHERE project=%s", ("TESTWP",))
+    assert report == {"scope": "epic", "subject": epic_key}
 
 
 def test_flow_epic_completion_comment_has_child_count_time_and_report_link(ctx):

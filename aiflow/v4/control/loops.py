@@ -41,7 +41,8 @@ def _is_under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool
     return False
 
 
-def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str]) -> None:
+def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str],
+                     first_seen_ticket_keys: set[str], preexisting_ticket_keys: set[str]) -> None:
     """Close epics whose mirrored children are all Done, and reopen on newly active child work."""
     for project in projects:
         rows = ctx.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets WHERE project=%s ORDER BY key",
@@ -56,7 +57,9 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
             if all_done:
                 target = "Done"
             elif epic["status"] == "Done" and any(
-                    child["key"] in changed_ticket_keys and child["status"] != "Done" for child in children):
+                    child["key"] in changed_ticket_keys and child["status"] != "Done" and
+                    (child["key"] not in first_seen_ticket_keys or epic["key"] in preexisting_ticket_keys)
+                    for child in children):
                 target = "To Do"
             else:
                 continue
@@ -78,6 +81,11 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
                 ctx.events.emit("ticket.status", ticket=epic["key"], project=project, outcome=status,
                                 reason=f"from {previous_status}", from_status=previous_status, ready=ready,
                                 source="jira_sync")
+                if target == "Done":
+                    try:
+                        project_lifecycle.report_done_epic(ctx, project, epic["key"])
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("could not generate completion report for epic %s: %s", epic["key"], e)
                 if not moved_by_flow:
                     continue
                 reason = (f"all {len(children)} child tickets are Done" if target == "Done"
@@ -89,10 +97,6 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
                 ctx.events.emit("jira.transition", ticket=epic["key"], account="control", outcome=status,
                                 reason=reason)
                 if target == "Done":
-                    try:
-                        project_lifecycle.report_done_epic(ctx, project, epic["key"])
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("could not generate completion report for epic %s: %s", epic["key"], e)
                     report = (ctx.settings.public_url.rstrip("/") + f"/v1/projects/{quote(project, safe='')}/report"
                               f"?epic={quote(epic['key'], safe='')}&format=html")
                     comment = ("AI Flow · epic completed\n"
@@ -119,9 +123,17 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")
     n = 0
     changed_ticket_keys: set[str] = set()
+    first_seen_ticket_keys: set[str] = set()
+    preexisting_ticket_keys = {
+        row["key"]
+        for project in keys
+        for row in ctx.db.all("SELECT key FROM tickets WHERE project=%s", (project,))
+    }
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels, type, parent_key FROM tickets WHERE key=%s", (t["key"],))
+        old = ctx.db.one("SELECT status, labels, parent_key FROM tickets WHERE key=%s", (t["key"],))
+        if not old:
+            first_seen_ticket_keys.add(t["key"])
         if (not old or old["parent_key"] != t["parent_key"] or
                 (old["status"] == "Done" and t["status"] != "Done")):
             changed_ticket_keys.add(t["key"])
@@ -155,7 +167,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
                             reason=f"from {old['status']}" if old else "first seen", from_status=old["status"] if old else "",
                             ready=ready, source="jira_sync")
         n += 1
-    _reconcile_epics(ctx, keys, changed_ticket_keys)
+    _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
     return n
 
 

@@ -422,6 +422,17 @@ def test_owner_env_token_keeps_working_until_a_ui_credential_takes_priority(web,
     assert str(search.url).startswith(f"{API}/ex/jira/{CLOUD_ID}/") and search.headers["authorization"].startswith("Bearer ")
 
 
+def test_empty_control_repo_project_set_does_not_fall_back_to_jira_projects(web, jira_env, atlassian):
+    sign_in(web)
+    connect_oauth(web, atlassian)
+    jira_env.settings.jira_projects = ["LEGACY"]
+    jira_env.repo().projects.clear()
+    before = len(atlassian.requests)
+
+    assert jira_sync(jira_env, full=True) == 0
+    assert len(atlassian.requests) == before
+
+
 def test_without_secret_store_wiring_the_gateway_still_uses_fixed_basic_auth(atlassian):
     email, token = next(iter(atlassian.basic))
     jira = Jira(SITE, email, token, client=httpx.Client(transport=httpx.MockTransport(atlassian.handle), base_url=SITE,

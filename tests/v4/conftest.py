@@ -12,6 +12,7 @@ import redis
 from aiflow.v4.control.api import Ctx, create_app
 from aiflow.v4.control.db import DB
 from aiflow.v4.control.events import Events
+from aiflow.v4.control.jira import Jira
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
@@ -92,6 +93,8 @@ def control_repo(tmp_path: Path) -> Path:
 
 
 class FakeJira:
+    normalize = staticmethod(Jira.normalize)
+
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
         self.comments: list[tuple[str, str]] = []
@@ -163,13 +166,20 @@ class FakeGitHub:
         self.merged = getattr(self, "merged", []) + [(repo, number, title, method)]
         return {"merged": True, "sha": "abc123", "message": "Pull Request successfully merged"}
 
+    def pr(self, repo, number):
+        return getattr(self, "pr_data", {}).get(number, {
+            "number": number, "html_url": f"https://github.com/jooservices/{repo}/pull/{number}",
+            "title": f"PR #{number}", "additions": 0, "deletions": 0, "changed_files": 0,
+        })
+
     def comment(self, repo, number, body):
         self.comments = getattr(self, "comments", []) + [(number, body)]
 
 
 @pytest.fixture
 def ctx(db, leases, control_repo):
-    s = Settings(join_token="join-secret", lease_ms=90_000, jira_projects=["TESTWP"])
+    s = Settings(join_token="join-secret", reviewer_token="review-secret", lease_ms=90_000,
+                 jira_projects=["TESTWP"])
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
     return c

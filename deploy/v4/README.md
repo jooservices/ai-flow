@@ -11,6 +11,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
+- [SA system health](../../docs/v4/sa-health.md): node and account health, capacity recommendations, credential expiry, blocked AI and network diagnostics
 - [Team Lead requirement coverage and progress reports](../../docs/v4/team-lead-report.md): inspect epic AC coverage and export Markdown, CSV or printable HTML progress reports
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release

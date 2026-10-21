@@ -100,6 +100,7 @@ class HeartbeatBody(BaseModel):
     tools: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
+    credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
 
 
 class ClaimBody(BaseModel):
@@ -166,6 +167,7 @@ class ProbeBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    credential_expires_at: datetime | None = None
 
 
 class MergeBody(BaseModel):
@@ -389,8 +391,15 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status FROM nodes WHERE name=%s", (node,))
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, last_heartbeat=now() WHERE name=%s",
-                   (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics), node))
+                   " metrics=%s, last_heartbeat=now(), idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now())"
+                   " ELSE NULL END WHERE name=%s",
+                   (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics),
+                    body.slots_used, node))
+        for account_id, expires_at in body.credential_expiries.items():
+            ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
+                       (expires_at, account_id, node))
+        from .sa import update_slot_pressure
+        update_slot_pressure(ctx)
         ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
                         slots_used=body.slots_used, release_version=body.release_version, metrics=body.metrics)
         if prev and prev["status"] != "online":
@@ -412,9 +421,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         for acc, w in merged.items():
             state = w.pop("_state")
             # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
-            ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN cooldown_until > now() THEN 'cooldown'"
-                       " WHEN %s = 'unavailable' THEN status WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
+            ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN status='signed_out' THEN status"
+                       " WHEN cooldown_until > now() THEN 'cooldown' WHEN %s = 'unavailable' THEN status"
+                       " WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
                        " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, state, state, acc, node))
+            ctx.db.run("UPDATE accounts SET idle_since=CASE WHEN status='idle' THEN coalesce(idle_since,now()) ELSE NULL END,"
+                       " cooldown_since=CASE WHEN status='cooldown' THEN coalesce(cooldown_since,now()) ELSE NULL END"
+                       " WHERE id=%s AND node=%s", (acc, node))
         repo = ctx.repo()
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
@@ -702,7 +715,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence, token_hash)"
                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                    (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
-        ctx.db.run("UPDATE accounts SET status='working', updated_at=now() WHERE id=%s", (acc.id,))
+        ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
+                   (acc.id,))
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
         p = repo.projects.get(t["project"])
@@ -796,11 +810,15 @@ def create_app(ctx: Ctx) -> FastAPI:
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
             ctx.leases.cooldown(run["account_id"], seconds, body.error_kind)
-            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now() WHERE id=%s",
-                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300], run["account_id"]))
+            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
+                       " cooldown_since=CASE WHEN %s='quota' THEN coalesce(cooldown_since,now()) ELSE NULL END,"
+                       " idle_since=NULL WHERE id=%s",
+                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300],
+                        body.error_kind, run["account_id"]))
         else:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
-                       " updated_at=now() WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
+                       " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
+                       " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
@@ -1165,18 +1183,27 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
         ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
+        if "credential_expires_at" in body.model_fields_set:
+            ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
+                       (body.credential_expires_at, account_id))
         if body.error_kind in ("quota", "auth"):
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
             ctx.leases.cooldown(account_id, seconds, body.error_kind)
-            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s WHERE id=%s AND status<>'working'",
-                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300], account_id))
+            ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s,"
+                       " cooldown_since=CASE WHEN %s='quota' THEN coalesce(cooldown_since,now()) ELSE NULL END,"
+                       " idle_since=NULL WHERE id=%s AND status<>'working'",
+                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300],
+                        body.error_kind, account_id))
         elif body.ok:
             ctx.leases.uncool(account_id)
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'idle' END,"
-                       " cooldown_until=NULL, last_error='' WHERE id=%s", (account_id,))
+                       " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
+                       " idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
+                       " WHERE id=%s", (account_id,))
         else:
-            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s"
+            ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s,"
+                       " cooldown_since=NULL, idle_since=NULL"
                        " WHERE id=%s", (body.summary[:300] or body.error_kind, account_id))
         ctx.events.emit("account.probe", account=account_id, provider=acc.provider, node=node,
                         outcome="ok" if body.ok else (body.error_kind or "error"), reason=body.summary[:200],

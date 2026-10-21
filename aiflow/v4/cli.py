@@ -44,7 +44,19 @@ class RepoCache:
     def _puller(self) -> None:
         while True:
             time.sleep(self.pull_every)
-            subprocess.run(["git", "-C", self.path, "pull", "-q", "--ff-only"], capture_output=True, timeout=60)
+            try:
+                self.refresh()
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger("aiflow4").warning("control repo pull failed: %s", e)
+
+    def refresh(self) -> None:
+        """Fetch the latest committed control repo state and replace the in-memory snapshot."""
+        if (Path(self.path) / ".git").exists():
+            subprocess.run(["git", "-C", self.path, "pull", "-q", "--ff-only"], capture_output=True,
+                           timeout=60, check=True)
+        with self._lock:
+            self._snap = self._cls.load(self.path)
+            self._at = time.time()
 
     def __call__(self):
         with self._lock:
@@ -70,8 +82,10 @@ def build_ctx(s: Settings):
     if Path(s.github_app_dir, "app.pem").exists():
         from .control.github import GitHubApp
         github = GitHubApp(s.github_app_dir, s.github_org)
+    repo_cache = RepoCache(s.control_repo)
     return Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
-               events=Events(db, s.o2_url, s.o2_basic), repo=RepoCache(s.control_repo), jira=jira, github=github)
+               events=Events(db, s.o2_url, s.o2_basic), repo=repo_cache, jira=jira, github=github,
+               refresh_repo=repo_cache.refresh)
 
 
 def main(argv: list[str] | None = None) -> int:

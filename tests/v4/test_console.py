@@ -75,6 +75,27 @@ console.log(saView.innerHTML);
     return result.stdout
 
 
+def render_knowledge(data: dict, history: dict | None = None) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Knowledge view")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var knowledgeView = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-knowledge' ? knowledgeView : null; }};
+S.knowledge.data = {json.dumps(data)};
+S.knowledge.actor = 'Mai Nguyen';
+S.knowledge.history = {json.dumps(history)};
+renderKnowledge();
+console.log(knowledgeView.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def html() -> str:
     return PAGE.read_text()
 
@@ -339,14 +360,35 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder'].map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge'].map(viewOf).join(','));")
+    assert routes.strip() == "lead,review,stakeholder,knowledge"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge']" in page
+
+
+def test_knowledge_view_renders_resources_history_and_owner_approval_diff():
+    data = {
+        "resources": [{"type": "knowledge", "id": "ops", "title": "Ops notes", "content": "after",
+                       "archived": False, "version": 2, "updated_by": "Mai Nguyen", "updated_at": "2026-10-21T00:00:00Z"}],
+        "proposals": [{"proposal_id": 7, "type": "policy", "id": "default", "title": "Default policy",
+                       "content": "allow: []", "base_content": "allow: [git status]", "base_version": 2,
+                       "archived": False, "actor": "Mai Nguyen", "created_at": "2026-10-21T00:00:00Z",
+                       "pr_number": 19, "pr_url": "https://github.com/jooservices/aiflow-control/pull/19"}],
+    }
+    history = {"type": "knowledge", "id": "ops", "history": [
+        {"version": 2, "content": "after", "title": "Ops notes", "actor": "An Tran", "action": "save",
+         "created_at": "2026-10-21T00:00:00Z", "archived": False},
+        {"version": 1, "content": "before", "title": "Ops notes", "actor": "Mai Nguyen", "action": "save",
+         "created_at": "2026-10-20T00:00:00Z", "archived": False},
+    ], "proposals": []}
+    output = render_knowledge(data, history)
+    assert "Ops notes" in output and "knowledge-history" in output
+    assert "Before · v1" in output and "After · Ops notes" in output
+    assert "Policy approvals" in output and "allow: [git status]" in output and "Approve and merge policy" in output
 
 
 def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():

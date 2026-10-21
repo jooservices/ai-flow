@@ -25,7 +25,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from . import business, memory, projects as project_lifecycle
+from . import business, knowledge, memory, projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
@@ -84,6 +84,7 @@ class Ctx:
     repo: Callable[[], ControlRepo]
     jira: Jira | None = None
     github: GitHubApp | None = None
+    refresh_repo: Callable[[], None] | None = None
 
 
 def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[str]:
@@ -254,6 +255,25 @@ class CloseProjectBody(BaseModel):
     actor: str = "owner"
 
 
+class KnowledgeBody(BaseModel):
+    id: str = ""
+    type: str
+    title: str
+    content: str
+    actor: str
+    archived: bool = False
+    version: int | None = None
+
+
+class KnowledgeApprovalBody(BaseModel):
+    approved_by: str = "owner"
+
+
+class KnowledgeRestoreBody(BaseModel):
+    version: int
+    actor: str
+
+
 class StakeholderVerdictBody(BaseModel):
     change_key: str
     target_key: str = ""
@@ -335,6 +355,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(401, "reviewer authorization required",
                                 headers={"WWW-Authenticate": "Bearer"})
         return "reviewer"
+
+    def owner_auth(authorization: str = Header(default="")) -> str:
+        configured = ctx.settings.owner_token
+        if not configured:
+            raise HTTPException(503, "owner actions are not configured")
+        scheme, separator, token = authorization.partition(" ")
+        if (not separator or scheme.lower() != "bearer" or not token.strip()
+                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            raise HTTPException(401, "owner authorization required",
+                                headers={"WWW-Authenticate": "Bearer"})
+        return "owner"
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
@@ -1790,5 +1821,135 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/memory/study-cases")
     def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
         return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
+
+    # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
+    def load_managed_resources() -> None:
+        knowledge.import_local(ctx.db, ctx.repo().root)
+
+    def submit_resource_change(kind: str, resource_id: str, title: str, content: str, archived: bool,
+                               actor: str, action: str, expected_version: int | None = None) -> dict:
+        try:
+            kind, resource_id, title, content, actor = knowledge.validate(kind, resource_id, title, content, actor)
+        except knowledge.Invalid as e:
+            raise HTTPException(400, str(e)) from e
+        if not ctx.github:
+            raise HTTPException(503, "control repo bot is unavailable")
+        load_managed_resources()
+        current = knowledge.get_resource(ctx.db, kind, resource_id)
+        if expected_version is not None and (not current or int(current["version"]) != expected_version):
+            raise HTTPException(409, "resource changed since it was loaded; refresh and try again")
+        path = knowledge.path_for(kind, resource_id)
+        repo_name = Path(ctx.settings.control_repo).name
+        payload = knowledge.file_content(kind, resource_id, title, content, archived)
+        try:
+            base = ctx.github.default_branch(repo_name)
+            if kind == "policy":
+                branch = f"aiflow/policy-{resource_id.lower()}-{secrets.token_hex(4)}"
+                ctx.github.create_branch(repo_name, branch, base)
+                sha = ctx.github.commit_file(repo_name, branch, path, payload,
+                                             f"policy: propose {action} {resource_id}")
+                pr = ctx.github.create_control_pr(repo_name, branch, base, f"Policy: {title}",
+                                                  f"Policy {action} for `{resource_id}` proposed by {actor}.\n\n"
+                                                  "Merge only after owner approval in the AI Flow Knowledge screen.")
+                ctx.db.run("INSERT INTO managed_resource_proposals (resource_type,resource_id,title,content,archived,"
+                           "base_title,base_content,base_archived,base_version,actor,action,branch,pr_number,pr_url)"
+                           " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                           (kind, resource_id, title, content, archived, current["title"] if current else "",
+                            current["content"] if current else "", current["archived"] if current else False,
+                            current["version"] if current else 0, actor, action, branch, int(pr["number"]),
+                            str(pr.get("html_url") or "")))
+                audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
+                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
+                ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
+                                account=actor, outcome="pending", reason=f"PR #{pr['number']}",
+                                data={"type": kind, "id": resource_id})
+                return {"pending": True, "type": kind, "id": resource_id, "title": title,
+                        "pr_number": int(pr["number"]), "pr_url": str(pr.get("html_url") or ""), "version":
+                        int(current["version"]) if current else 0}
+
+            sha = ctx.github.commit_file(repo_name, base, path, payload, f"{kind}: {action} {resource_id}")
+        except HTTPException:
+            raise
+        except Exception as e:  # GitHub errors vary between App and transport implementations.
+            log.warning("control repo write failed for %s/%s", kind, resource_id)
+            raise HTTPException(502, "control repo could not save the resource") from e
+        row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
+                                     archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
+        audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
+              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
+        ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
+                        data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
+        return row
+
+    @app.get("/v1/knowledge/resources")
+    def knowledge_resources(include_archived: bool = True) -> dict:
+        load_managed_resources()
+        return {"resources": knowledge.list_resources(ctx.db, include_archived),
+                "proposals": knowledge.proposals(ctx.db)}
+
+    @app.get("/v1/knowledge/resources/{kind}/{resource_id}/history")
+    def knowledge_history(kind: str, resource_id: str) -> dict:
+        load_managed_resources()
+        if kind not in knowledge.KINDS:
+            raise HTTPException(404, "unknown resource type")
+        return {"type": kind, "id": resource_id, "history": knowledge.history(ctx.db, kind, resource_id),
+                "proposals": knowledge.proposals(ctx.db, kind, resource_id)}
+
+    @app.post("/v1/knowledge/resources")
+    def knowledge_save(body: KnowledgeBody) -> dict:
+        if not body.id.strip():
+            raise HTTPException(400, "resource id is required")
+        action = "archive" if body.archived else "save"
+        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, body.actor, action,
+                                      body.version)
+
+    @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
+    def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody) -> dict:
+        load_managed_resources()
+        version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
+                             " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
+        if not version:
+            raise HTTPException(404, "resource version not found")
+        return submit_resource_change(kind, resource_id, version["title"], version["content"], version["archived"],
+                                      body.actor, "restore")
+
+    @app.post("/v1/knowledge/proposals/{proposal_id}/approve")
+    def knowledge_approve(proposal_id: int, body: KnowledgeApprovalBody,
+                          _owner: str = Depends(owner_auth)) -> dict:
+        proposal = ctx.db.one("SELECT * FROM managed_resource_proposals WHERE id=%s", (proposal_id,))
+        if not proposal:
+            raise HTTPException(404, "policy proposal not found")
+        if proposal["status"] != "pending":
+            raise HTTPException(409, "policy proposal is no longer pending")
+        if not ctx.github:
+            raise HTTPException(503, "control repo bot is unavailable")
+        repo_name = Path(ctx.settings.control_repo).name
+        owner = body.approved_by.strip() or "owner"
+        try:
+            merged = ctx.github.merge_pr(repo_name, int(proposal["pr_number"]),
+                                         f"Policy: {proposal['title']}", "squash")
+        except Exception as e:  # Do not expose provider responses or credentials through the UI.
+            log.warning("policy proposal merge failed for PR #%s", proposal["pr_number"])
+            raise HTTPException(502, "policy proposal could not be merged") from e
+        if not merged.get("merged"):
+            return {"merged": False, "message": merged.get("message", "GitHub refused the merge")}
+        resource = knowledge.save_current(
+            ctx.db, kind="policy", resource_id=proposal["resource_id"], title=proposal["title"],
+            content=proposal["content"], archived=proposal["archived"], actor=proposal["actor"],
+            action=proposal["action"], path=knowledge.path_for("policy", proposal["resource_id"]),
+            commit_sha=str(merged.get("sha") or ""), approved_by=owner)
+        ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
+                   (owner, proposal_id))
+        audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
+              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
+        ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
+                        account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
+                        data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})
+        if ctx.refresh_repo:
+            try:
+                ctx.refresh_repo()
+            except Exception:
+                log.warning("control repo refresh after policy merge failed")
+        return {"merged": True, "sha": merged.get("sha", ""), "resource": resource}
 
     return app

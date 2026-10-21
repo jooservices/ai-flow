@@ -244,6 +244,13 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .stakeholder-result{font-size:13px; color:var(--good)}
 .stakeholder-error{font-size:13px; color:var(--crit)}
 @media (max-width:640px){.stakeholder-form{grid-template-columns:minmax(0,1fr)}}
+.knowledge-grid{display:grid;grid-template-columns:minmax(250px,.8fr) minmax(0,1.5fr);gap:14px;align-items:start}
+.knowledge-list{display:flex;flex-direction:column;gap:8px}.knowledge-item{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--surface-2);display:flex;flex-direction:column;gap:7px}
+.knowledge-item h3{margin:0;font-size:15px}.knowledge-actions{display:flex;gap:6px;flex-wrap:wrap}.knowledge-form{display:grid;gap:10px}.knowledge-form label{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+.knowledge-form input,.knowledge-form select,.knowledge-form textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface-2);color:var(--fg)}
+.knowledge-form textarea{min-height:230px;resize:vertical;font-family:var(--f-mono);font-size:12px;line-height:1.5}.knowledge-history{display:grid;gap:9px}.knowledge-version{border:1px solid var(--line);border-radius:9px;padding:10px;background:var(--surface-2)}
+.knowledge-version pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;margin:4px 0 10px;padding:8px;border-radius:7px;background:var(--surface)}
+@media(max-width:850px){.knowledge-grid{grid-template-columns:minmax(0,1fr)}}
 .bd{display:flex; flex-direction:column; gap:8px}
 .bd-row{display:grid; grid-template-columns:96px minmax(0,1fr) 64px; gap:10px; align-items:center; font-size:12.5px}
 .bd-bar{display:flex; height:16px; border-radius:6px; overflow:hidden; background:var(--track)}
@@ -394,6 +401,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
       <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
+      <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -422,6 +430,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
   </section>
+  <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -442,7 +451,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 <script>
 (function () {
 'use strict';
-/* AI Flow v4 console: Command Center, Delivery, Business, Human review and Stakeholder, rendered from the live registry (/v1/state every 5 s,
+/* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder and Knowledge, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
 
@@ -491,7 +500,8 @@ var S = {
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
-  sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' }
+  sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' },
+  knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' }
 };
 function viewOf(path) {
   if (path.indexOf('/sa') === 0) return 'sa';
@@ -500,6 +510,7 @@ function viewOf(path) {
   if (path.indexOf('/business') === 0) return 'business';
   if (path.indexOf('/review') === 0) return 'review';
   if (path.indexOf('/stakeholder') === 0) return 'stakeholder';
+  if (path.indexOf('/knowledge') === 0) return 'knowledge';
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
@@ -1107,6 +1118,156 @@ function submitReview(key, action, comment) {
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 
+/* ---------- Knowledge: versioned resources in aiflow-control ---------- */
+var KNOWLEDGE_TYPES = { study_case: 'Study case', knowledge: 'Knowledge', skill: 'Skill', agent: 'Agent', guide: 'Guide', policy: 'Policy' };
+function loadKnowledge(force) {
+  var k = S.knowledge;
+  if (k.loading || (!force && k.data && Date.now() - k.loadedAt < 30000)) return;
+  k.loading = true; k.error = '';
+  fetch('/v1/knowledge/resources?include_archived=true', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) {
+    k.data = d; k.loadedAt = Date.now(); k.loading = false;
+    if (S.view === 'knowledge') renderKnowledge();
+  }).catch(function (e) {
+    k.error = String(e.message || e); k.loading = false;
+    if (S.view === 'knowledge') renderKnowledge();
+  });
+}
+function knowledgeNew() {
+  S.knowledge.editor = { type: 'knowledge', id: '', title: '', content: '', archived: false, version: null };
+  S.knowledge.history = null; renderKnowledge();
+}
+function knowledgeEdit(type, id) {
+  var rows = (S.knowledge.data && S.knowledge.data.resources) || [];
+  var row = rows.filter(function (r) { return r.type === type && r.id === id; })[0];
+  if (!row) return;
+  S.knowledge.editor = { type: row.type, id: row.id, title: row.title, content: row.content,
+    archived: row.archived, version: row.version };
+  S.knowledge.history = null; renderKnowledge();
+}
+function knowledgeSlug(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+}
+function knowledgeDate(value) { return value ? when(value) : '—'; }
+function renderKnowledge() {
+  var root = $('#view-knowledge'); if (!root) return;
+  var k = S.knowledge, d = k.data || { resources: [], proposals: [] }, rows = d.resources || [];
+  var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Knowledge and Skills</h1>' +
+    '<span class="hint">Study cases, knowledge, skills, agents, guides and policies are versioned in aiflow-control.</span><span class="spacer"></span>' +
+    '<button class="btn primary" data-act="knowledge-new">New resource</button><button class="btn" data-act="knowledge-refresh">Refresh</button></div>';
+  h += '<div class="lead-controls"><label>Editor name<input data-knowledge-actor value="' + esc(k.actor || '') + '" placeholder="Your name" autocomplete="name"></label>' +
+    '<label>Type<select id="knowledge-kind"><option value="all">All types</option>' + Object.keys(KNOWLEDGE_TYPES).map(function (type) {
+      return '<option value="' + type + '"' + (k.type === type ? ' selected' : '') + '>' + KNOWLEDGE_TYPES[type] + '</option>';
+    }).join('') + '</select></label><div class="seg">' + [['active','Active'],['archived','Archived'],['all','All']].map(function (f) {
+      return '<button data-act="knowledge-filter" data-filter="' + f[0] + '" aria-pressed="' + (k.filter === f[0]) + '">' + f[1] + '</button>';
+    }).join('') + '</div></div>';
+  if (k.error) h += '<div class="knowledge-error" style="color:var(--crit)">' + esc(k.error) + '</div>';
+  if (k.loading && !k.data) h += '<div class="empty">Loading resources…</div>';
+  h += '</section>';
+  var visible = rows.filter(function (r) {
+    return (k.type === 'all' || r.type === k.type) && (k.filter === 'all' || (k.filter === 'archived') === Boolean(r.archived));
+  });
+  h += '<div class="knowledge-grid"><section class="panel"><div class="panel-h"><h2 style="margin:0">Resources</h2><span class="pill">' + visible.length + '</span></div><div class="knowledge-list">';
+  if (!visible.length) h += '<div class="empty">No resources in this view yet.</div>';
+  visible.forEach(function (r) {
+    h += '<article class="knowledge-item"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>' + esc(r.title) + '</h3>' +
+      '<span class="pill" data-tone="' + (r.archived ? 'muted' : 'ok') + '">' + (r.archived ? 'Archived' : 'Active') + '</span></div>' +
+      '<div class="small"><span class="mono">' + esc(r.id) + '</span> · ' + esc(KNOWLEDGE_TYPES[r.type] || r.type) + ' · v' + r.version + '</div>' +
+      '<div class="small">Edited by ' + esc(r.updated_by) + ' · ' + esc(knowledgeDate(r.updated_at)) + '</div><div class="knowledge-actions">' +
+      '<button class="btn sm" data-act="knowledge-edit" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">Edit</button>' +
+      '<button class="btn sm" data-act="knowledge-history" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">History</button>' +
+      '<button class="btn sm" data-act="knowledge-archive" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '" data-archived="' + (!r.archived) + '">' + (r.archived ? 'Restore active' : 'Archive') + '</button></div></article>';
+  });
+  h += '</div></section><div class="stack">';
+  var e = k.editor;
+  if (e) {
+    h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">' + (e.version == null ? 'Create resource' : 'Edit resource') + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-cancel">Cancel</button></div>' +
+      '<div class="knowledge-form"><label>Type<select data-knowledge-field="type">' + Object.keys(KNOWLEDGE_TYPES).map(function (type) {
+        return '<option value="' + type + '"' + (e.type === type ? ' selected' : '') + '>' + KNOWLEDGE_TYPES[type] + '</option>';
+      }).join('') + '</select></label><label>Id<input data-knowledge-field="id" value="' + esc(e.id) + '" placeholder="lowercase-slug or project key"></label>' +
+      '<label>Title<input data-knowledge-field="title" value="' + esc(e.title) + '" maxlength="200"></label>' +
+      '<label>Content<textarea data-knowledge-field="content" spellcheck="false">' + esc(e.content) + '</textarea></label>' +
+      (e.type === 'policy' ? '<div class="small">Policy YAML is proposed as a pull request. It becomes active only after owner approval and merge.</div>' : '') +
+      '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-save">Save</button></div></div></section>';
+  }
+  if (k.history) {
+    var versions = k.history.history || [], pendingHistory = k.history.proposals || [];
+    h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">History · ' + esc(k.history.id) + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-history-close">Close</button></div><div class="knowledge-history">';
+    if (!versions.length && !pendingHistory.length) h += '<div class="empty">No history is available.</div>';
+    versions.forEach(function (v) {
+      var older = versions.filter(function (x) { return x.version === v.version - 1; })[0];
+      h += '<article class="knowledge-version"><div><strong>Version ' + v.version + '</strong> · ' + esc(v.action) + ' · edited by <strong>' + esc(v.actor) + '</strong> · ' + esc(knowledgeDate(v.created_at)) +
+        (v.approved_by ? ' · approved by ' + esc(v.approved_by) : '') + '</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before' + (older ? ' · v' + older.version : '') + '</div><pre>' + esc(older ? older.content : '(no earlier version)') + '</pre></div>' +
+        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre><button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + v.version + '">Restore this version</button></div></div></article>';
+    });
+    pendingHistory.forEach(function (p) {
+      h += '<article class="knowledge-version"><div><strong>Pending PR #' + p.pr_number + '</strong> · proposed by <strong>' + esc(p.actor) + '</strong> · ' + esc(knowledgeDate(p.created_at)) +
+        ' · before v' + p.base_version + ' · not active</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div>' +
+        '<div><div class="small">Proposed after · ' + esc(p.title) + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre><a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review pull request ' + ICON.ext + '</a></div></div></article>';
+    });
+    h += '</div></section>';
+  }
+  var pending = d.proposals || [];
+  h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">Policy approvals</h2><span class="pill" data-tone="' + (pending.length ? 'warn' : 'ok') + '">' + pending.length + ' pending</span></div>';
+  h += '<div class="knowledge-form"><label>Owner name<input data-knowledge-owner value="' + esc(k.owner || '') + '" placeholder="Owner name" autocomplete="name"></label>' +
+    '<label class="review-auth">Owner access token<input type="password" autocomplete="new-password" data-owner-token value="' + esc(k.ownerToken) + '" aria-label="Owner access token"></label></div>' +
+    '<div class="small">Policy proposals do not affect running decisions until an owner merges the pull request.</div>';
+  if (!pending.length) h += '<div class="empty">No policy pull requests are waiting for approval.</div>';
+  pending.forEach(function (p) {
+    h += '<article class="knowledge-item"><h3>' + esc(p.title) + '</h3><div class="small">' + esc(p.id) + ' · proposed by ' + esc(p.actor) + ' · ' + esc(knowledgeDate(p.created_at)) + '</div>' +
+      '<details><summary>View proposed change</summary><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before · v' + p.base_version + '</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div><div><div class="small">After' + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre></div></div></details>' +
+      '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a><div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div></article>';
+  });
+  h += '</section></div></div>';
+  root.innerHTML = h;
+}
+function submitKnowledge() {
+  var e = S.knowledge.editor;
+  if (!e) return;
+  var actor = String(S.knowledge.actor || '').trim();
+  if (!actor) { toast('Editor name required', 'Enter your name before saving or restoring a version.', 'warn'); return; }
+  var body = { type: e.type, id: String(e.id || knowledgeSlug(e.title)), title: e.title, content: e.content,
+    actor: actor, archived: Boolean(e.archived), version: e.version };
+  fetch('/v1/knowledge/resources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) {
+      toast(d.pending ? 'Policy pull request opened' : 'Resource saved', d.pending ? 'PR #' + d.pr_number + ' waits for owner approval.' : d.type + ' · ' + d.id + ' · v' + d.version, d.pending ? 'info' : 'ok');
+      S.knowledge.editor = null; loadKnowledge(true);
+    }).catch(function (err) { toast('Resource save failed', String(err.message || err), 'crit'); });
+}
+function archiveKnowledge(type, id, archived) {
+  var row = (S.knowledge.data.resources || []).filter(function (r) { return r.type === type && r.id === id; })[0];
+  if (!row) return;
+  if (!S.knowledge.actor.trim()) { toast('Editor name required', 'Enter your name before archiving a resource.', 'warn'); return; }
+  fetch('/v1/knowledge/resources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    type: type, id: id, title: row.title, content: row.content, actor: S.knowledge.actor, archived: archived, version: row.version
+  }) }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { toast(d.pending ? 'Policy archive proposed' : (archived ? 'Resource archived' : 'Resource restored'), d.pending ? 'Waiting for owner approval.' : type + ' · ' + id, 'ok'); loadKnowledge(true); })
+    .catch(function (err) { toast('Archive failed', String(err.message || err), 'crit'); });
+}
+function restoreKnowledge(type, id, version) {
+  if (!S.knowledge.actor.trim()) { toast('Editor name required', 'Enter your name before restoring a version.', 'warn'); return; }
+  fetch('/v1/knowledge/resources/' + encodeURIComponent(type) + '/' + encodeURIComponent(id) + '/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version: Number(version), actor: S.knowledge.actor })
+  }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { toast(d.pending ? 'Policy restore proposed' : 'Version restored', d.pending ? 'Waiting for owner approval.' : 'Saved as a new version.', 'ok'); loadKnowledge(true); })
+    .catch(function (err) { toast('Restore failed', String(err.message || err), 'crit'); });
+}
+function approveKnowledge(proposalId) {
+  var tokenField = $('[data-owner-token]'); S.knowledge.ownerToken = tokenField ? tokenField.value : S.knowledge.ownerToken;
+  if (!S.knowledge.ownerToken || !String(S.knowledge.owner || '').trim()) {
+    toast('Owner access required', 'Enter the owner name and access token before approving a policy.', 'warn'); return;
+  }
+  fetch('/v1/knowledge/proposals/' + encodeURIComponent(proposalId) + '/approve', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.knowledge.ownerToken },
+    body: JSON.stringify({ approved_by: S.knowledge.owner })
+  }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { if (!d.merged) throw new Error(d.message || 'GitHub refused the merge'); toast('Policy merged', 'The policy is now active.', 'ok'); loadKnowledge(true); })
+    .catch(function (err) { toast('Policy approval failed', String(err.message || err), 'crit'); });
+}
+
 /* ---------- Team Lead epic coverage and portable reports ---------- */
 function loadLeadReport(project, epic) {
   var current = S.leadReport;
@@ -1693,6 +1854,7 @@ function render() {
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
+  else if (S.view === 'knowledge') renderKnowledge();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -1712,7 +1874,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -1722,6 +1884,7 @@ function setView(v) {
   try { history.pushState(null, '', v === 'cc' ? '/cc' : '/' + v); } catch (e) { /* file preview */ }
   render();
   if (v === 'review') loadReviews();
+  if (v === 'knowledge') loadKnowledge(true);
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -1739,6 +1902,23 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
+  else if (act === 'knowledge-new') knowledgeNew();
+  else if (act === 'knowledge-refresh') loadKnowledge(true);
+  else if (act === 'knowledge-filter') { S.knowledge.filter = el.getAttribute('data-filter'); renderKnowledge(); }
+  else if (act === 'knowledge-cancel') { S.knowledge.editor = null; renderKnowledge(); }
+  else if (act === 'knowledge-save') submitKnowledge();
+  else if (act === 'knowledge-edit') knowledgeEdit(el.getAttribute('data-kind'), el.getAttribute('data-id'));
+  else if (act === 'knowledge-archive') archiveKnowledge(el.getAttribute('data-kind'), el.getAttribute('data-id'), el.getAttribute('data-archived') === 'true');
+  else if (act === 'knowledge-history-close') { S.knowledge.history = null; renderKnowledge(); }
+  else if (act === 'knowledge-history') {
+    var kt = el.getAttribute('data-kind'), ki = el.getAttribute('data-id');
+    fetch('/v1/knowledge/resources/' + encodeURIComponent(kt) + '/' + encodeURIComponent(ki) + '/history', { cache: 'no-store' })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+      .then(function (d) { S.knowledge.history = d; renderKnowledge(); })
+      .catch(function (err) { toast('History unavailable', String(err.message || err), 'warn'); });
+  }
+  else if (act === 'knowledge-restore') restoreKnowledge(el.getAttribute('data-kind'), el.getAttribute('data-id'), el.getAttribute('data-version'));
+  else if (act === 'knowledge-approve') approveKnowledge(el.getAttribute('data-proposal'));
   else if (act === 'jump') flash(el.getAttribute('data-target'));
   else if (act === 'open-node') openDrawer('node', el.getAttribute('data-id'), el);
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
@@ -1761,6 +1941,12 @@ document.addEventListener('click', function (e) {
 });
 document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
+  if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
+  if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
+  if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
+  if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
+    S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
+  }
 });
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && S.drawer) closeAll();
@@ -1776,6 +1962,13 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target.matches && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
+  if (e.target.matches && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
+  if (e.target.id === 'knowledge-kind') { S.knowledge.type = e.target.value; renderKnowledge(); }
+  if (e.target.matches && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
+    S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
+    if (e.target.getAttribute('data-knowledge-field') === 'type') renderKnowledge();
+  }
   if (e.target.id === 'epicSel') { S.epic = e.target.value; savePrefs(); renderDBody(); tick(); }
   else if (e.target.id === 'leadProject') {
     S.project = e.target.value; S.leadEpic = null; S.leadReport = null; S.epic = 'all'; savePrefs(); renderLead();
@@ -1799,6 +1992,7 @@ try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentE
 loadPrefs();
 showView();
 render();
+if (S.view === 'knowledge') loadKnowledge(true);
 poll(); pollServices(); pollAnalytics(); pollReviews();
 setInterval(tick, 1000);
 })();

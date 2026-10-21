@@ -53,6 +53,7 @@ class Settings:
     control_repo: str = "/srv/aiflow/control/repos/aiflow-control"
     join_token: str = ""
     reviewer_token: str = ""
+    owner_token: str = ""
     o2_url: str = ""
     o2_basic: str = ""
     public_url: str = "http://127.0.0.1:18480"
@@ -96,5 +97,6 @@ class Settings:
         s.jira_token = os.environ.get("JIRA_API_TOKEN") or secrets.get("JIRA_API_TOKEN", "")
         s.join_token = os.environ.get("AIFLOW4_JOIN_TOKEN") or secrets.get("AIFLOW4_JOIN_TOKEN", "")
         s.reviewer_token = os.environ.get("AIFLOW4_REVIEWER_TOKEN") or secrets.get("AIFLOW4_REVIEWER_TOKEN", "")
+        s.owner_token = os.environ.get("AIFLOW4_OWNER_TOKEN") or secrets.get("AIFLOW4_OWNER_TOKEN", "")
         s.o2_basic = os.environ.get("O2_BASIC") or secrets.get("O2_BASIC", "")
         return s

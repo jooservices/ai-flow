@@ -23,7 +23,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from . import memory
+from . import business, memory
 from .db import DB, J
 from .events import Events
 from .github import GitHubApp
@@ -55,10 +55,11 @@ WITH last AS (
 SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
 """
-# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try.
+# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try (the same for the
+# impact assessment of a change request).
 INTAKE_BACKOFF_SQL = """
 SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
-WHERE step = 'intake' AND status <> 'running' AND started_at > now() - interval '1 day'
+WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
 ORDER BY ticket_key, started_at DESC
 """
 
@@ -207,6 +208,12 @@ class MasterActionBody(BaseModel):
     title: str = ""
     detail: str = ""
     target_status: str = ""
+
+
+class ChangeRequestBody(BaseModel):
+    title: str = ""
+    description: str = ""
+    epic: str = ""
 
 
 class EventsBody(BaseModel):
@@ -520,9 +527,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 out.append({**t, "step": "triage"})
         if "intake_refiner" in roles:
-            waiting = {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL)
-                       if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
-                       and r["ended_at"] > utcnow() - timedelta(minutes=10)}
+            def backoff(step: str) -> set[str]:
+                return {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL, {"step": step})
+                        if r["outcome"] in ("failed", "timeout", "lost") and r["ended_at"]
+                        and r["ended_at"] > utcnow() - timedelta(minutes=10)}
+            waiting = backoff("intake")
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
@@ -531,6 +540,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 out.append({**t, "step": "intake"})
+            # change requests from the Business view: assess the impact once, while they wait in Backlog
+            waiting = backoff("impact")
+            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
+                                " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
+                                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
+                                " AND r.step = 'impact' AND r.outcome = 'assessed')"
+                                " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                if t["key"] in held or t["key"] in waiting:
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                out.append({**t, "step": "impact"})
         out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
@@ -674,6 +695,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["recent_comments"] = ctx.jira.recent_comments(t["key"], limit=10) if ctx.jira else []
             except Exception as e:  # noqa: BLE001
                 log.warning("comments of %s for intake failed: %s", t["key"], e)
+        if body.step == "impact":
+            # the board the assessment compares against: the project's epics and its open work
+            extra["project_tickets"] = ctx.db.all(
+                "SELECT key, type, status, summary, parent_key FROM tickets WHERE project=%s AND status<>'Done'"
+                " AND key<>%s ORDER BY type<>'Epic', key LIMIT 300", (t["project"], t["key"]))
         if body.step == "master":
             extra["master_scope"] = "global"
         else:
@@ -692,7 +718,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
-                "ticket": {k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
+                "ticket": {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
+                           "parent_key": t.get("parent_key")},
                 "project": project_data}
 
     # --- runs -----------------------------------------------------------------------------------------------
@@ -902,6 +929,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "jira", "transition", {"to": body.to})
         if run["ticket_key"] != key:
             raise HTTPException(403, "run is for another ticket")
+        if run["step"] == "impact":
+            audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], False,
+                  "an impact run only comments", {"to": body.to})
+            raise HTTPException(403, "an impact run only comments; the owner moves the ticket")
         status = ctx.jira.transition_to(key, body.to)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
                    " THEN now() ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, key))
@@ -924,6 +955,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "jira", "fields", {"fields": list(body.fields), "add": body.add_labels})
         if run["ticket_key"] != key:
             raise HTTPException(403, "run is for another ticket")
+        if run["step"] == "impact":
+            raise HTTPException(403, "an impact run only comments")
         if body.fields:
             ctx.jira.set_fields(key, body.fields)
         for lab in body.add_labels:
@@ -1061,6 +1094,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         elif run["step"] == "intake":
             d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                                  str(payload.get("cwd") or ""), "an intake run rewrites the ticket text; it does not change files")
+        elif run["step"] == "impact":
+            d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
+                                 str(payload.get("cwd") or ""), "an impact run assesses a change request; it does not change files")
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""))
@@ -1140,6 +1176,35 @@ def create_app(ctx: Ctx) -> FastAPI:
         if format == "html":
             return HTMLResponse(render_html(report))
         return report
+
+    # --- Business view: change requests (same access as the console, no node token) -----------------------------
+    def business_project(key: str) -> str:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        return key
+
+    @app.get("/v1/business/{key}/change-requests")
+    def business_change_requests(key: str) -> dict:
+        project = business_project(key)
+        return {"project": project, "jira_site": ctx.settings.jira_site, "epics": business.epics(ctx.db, project),
+                "change_requests": business.change_requests(ctx.db, project, ctx.settings.jira_site)}
+
+    @app.post("/v1/business/{key}/change-requests")
+    def business_change_request(key: str, body: ChangeRequestBody) -> dict:
+        project = business_project(key)
+        try:
+            title, description, epic = business.validate(ctx.db, project, body.title, body.description, body.epic)
+        except business.Invalid as e:
+            raise HTTPException(400, str(e)) from e
+        if not ctx.jira:
+            raise HTTPException(503, "Jira is unavailable")
+        created = business.create(ctx, project, title, description, epic)
+        audit("jira", "create", created["key"], "", None, business.ACTOR, True, created["status"],
+              {"project": project, "type": "Story", "labels": [business.LABEL], "epic": epic,
+               "chars": len(description)})
+        ctx.events.emit("business.change_request", ticket=created["key"], project=project, outcome=created["status"],
+                        reason=title[:200])
+        return created
 
     @app.get("/v1/state")
     def state() -> dict:

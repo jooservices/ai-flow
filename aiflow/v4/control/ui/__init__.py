@@ -1,7 +1,9 @@
-"""Dashboards: Command Center (/cc), Delivery (/delivery), Team Lead (/lead), fed by the live registry.
+"""Dashboards: Command Center (/cc), Delivery (/delivery), Team Lead (/lead) and Business (/business).
 
-The page is the console designed in the demo, rendering the live registry instead of a simulation. Extra
-read-only endpoints give the drawers their detail (runs, events, audited writes and time segments of one ticket).
+All views are fed by the live registry; the Business view adds
+/v1/business/<project>/change-requests (see control/business.py).
+The console renders the live registry; extra read-only endpoints give its drawers ticket details, runs, events,
+audited writes and time segments.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/cc", include_in_schema=False)
     @app.get("/delivery", include_in_schema=False)
     @app.get("/lead", include_in_schema=False)
+    @app.get("/business", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

@@ -65,6 +65,8 @@ def test_triage_checkout_is_detached_from_base_and_read_only(tmp_path):
     g.run = run
     # root owns the checkout, git runs as the AI user: rev-parse must trust the path
     assert ("-c", f"safe.directory={wt}", "rev-parse", "HEAD") in calls
+    # the Codex sandbox would otherwise try to create these in the read-only checkout
+    assert (wt / ".codex").is_dir() and (wt / ".agents").is_dir()
 
     assert len(head) == 40 and (wt / "a.txt").read_text() == "develop\n"
     assert (wt / "a.txt").stat().st_uid == (0 if os.geteuid() == 0 else os.geteuid())

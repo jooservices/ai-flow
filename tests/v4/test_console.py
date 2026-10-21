@@ -129,6 +129,13 @@ def test_small_screens_keep_the_gutter_and_never_scroll_sideways():
     assert "padding-left:max(16px" in re.search(r"\n\.wrap\{([^}]*)\}", style).group(1)
 
 
+def test_runs_table_shows_triage_step():
+    rendered = run_script("console.log(runsTable([{step: 'triage', ticket: 'TESTWP-70', account: 'codex-01', "
+                          "model: 'gpt-6-luna', node: 'node1', outcome: 'answered', duration_s: 12, "
+                          "tokens_in: 1, tokens_out: 2, cost_usd: 0}], 10));")
+    assert "<td>triage</td>" in rendered
+
+
 def test_footer_has_version_environment_control_ref_links_and_copyright():
     page = html()
     footer = re.search(r'<footer class="footer" id="footer">(.*?)</footer>', page, re.S).group(1)

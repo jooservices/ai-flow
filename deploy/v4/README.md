@@ -8,6 +8,8 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
+
 ## Tools on a node
 
 Every node needs the AI CLIs used by its accounts, on the `PATH` of the node agent and the workers. Install

@@ -46,6 +46,11 @@ class Claimed:
     findings: str = ""
     branch: str = ""
     pr: dict | None = None
+    last_dev_summary: str = ""
+    verify_findings: str = ""
+    recent_comments: list[dict] | list[str] | None = None
+    triage_answer: str = ""
+    triage_question: str = ""
     related: list[dict] = field(default_factory=list)
 
 
@@ -81,6 +86,11 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
     if c.findings:
         rework += ("\nThis is a rework: the branch already holds your earlier work and a reviewer sent it back. Fix every"
                    " finding below, keep what was right, and run the checks again.\nFindings:\n" + c.findings.strip() + "\n")
+    if c.triage_answer:
+        rework += ("\nAn earlier run on this ticket stopped with a question and the master AI answered it. Use this"
+                   " answer and continue; do not stop on the same question again.\n"
+                   + (f"Question:\n{c.triage_question.strip()}\n" if c.triage_question else "")
+                   + "Answer:\n" + c.triage_answer.strip() + "\n")
     if conflicts:
         rework += ("\nThe latest " + c.project["base"] + " was merged into the branch and these files have conflict"
                    " markers (<<<<<<<, =======, >>>>>>>): " + ", ".join(conflicts) + ". Resolve them so both sides'"

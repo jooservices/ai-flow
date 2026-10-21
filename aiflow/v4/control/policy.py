@@ -268,7 +268,7 @@ def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktr
 
 def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
                      why: str) -> Decision:
-    """The intake policy: no writes, reads stay in the checkout, and network tools are denied.
+    """Read-only AI work cannot write, read outside the checkout, or access the network.
 
     The project's command allowlist is ignored (it holds installs and builds that change the worktree); its deny
     rules and deny_read globs still apply through decide(). Only INSPECT_ONLY shell commands are allowed.
@@ -276,7 +276,7 @@ def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, An
     if tool in WRITE_TOOLS:
         return Decision("deny", why)
     if tool in ("WebFetch", "WebSearch"):
-        return Decision("deny", f"{why} (network access is not allowed during intake)")
+        return Decision("deny", f"{why} (network access is not allowed during a read-only run)")
     if tool in ("Read", "Glob", "Grep"):
         root = worktree
         if tool == "Read":

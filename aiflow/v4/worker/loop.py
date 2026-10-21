@@ -20,6 +20,7 @@ from pathlib import Path
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
+from .triage import run_triage
 from .intake import run_intake
 from .verify import run_verify
 
@@ -125,11 +126,16 @@ class Worker:
                         provider=r["provider"], model=r.get("model", ""), effort=r.get("effort", ""),
                         ticket=r["ticket"], project=r["project"], identity=tuple(r["identity"]), step=step,
                         findings=r.get("findings") or "", branch=r.get("branch") or "", pr=r.get("pr"),
+                        last_dev_summary=r.get("last_dev_summary") or "",
+                        verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
+                        triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
                         related=r.get("related") or [])
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "triage":
+                res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "intake":
                 res = run_intake(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:

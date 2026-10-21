@@ -109,6 +109,33 @@ class Git:
             self.run("worktree", "add", "-q", "--detach", str(path), ref, cwd=mirror)
         return self.run("rev-parse", "HEAD", cwd=path).strip()
 
+    def readonly_worktree(self, mirror: Path, path: Path, ref: str) -> str:
+        """Create a detached checkout owned by root and readable, but not writable, by the AI user."""
+        self.run("worktree", "prune", "--expire=now", cwd=mirror, check=False)
+        self.mkdirs(path.parent)
+        self.run("worktree", "add", "-q", "--detach", str(path), ref, cwd=mirror)
+        for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
+            for name in dirs + files:
+                item = Path(root) / name
+                if item.is_symlink():
+                    continue
+                mode = item.stat().st_mode
+                if os.geteuid() == 0:
+                    os.chown(item, 0, 0)
+                os.chmod(item, 0o555 if item.is_dir() or mode & 0o111 else 0o444)
+        if os.geteuid() == 0:
+            os.chown(path, 0, 0)
+        os.chmod(path, 0o555)
+        return self.run("rev-parse", "HEAD", cwd=path).strip()
+
+    def remove_worktree(self, mirror: Path, path: Path) -> None:
+        """Remove a triage checkout after the AI process has stopped, then prune its Git metadata."""
+        if path.exists():
+            for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
+                os.chmod(root, 0o700)
+            shutil.rmtree(path)
+        self.run("worktree", "prune", "--expire=now", cwd=mirror, check=False)
+
     def merge_base_in(self, path: Path, base: str, identity: tuple[str, str], commit: bool = True) -> list[str]:
         """Merge origin/<base> into the checked-out branch. Returns the conflicted files ([] when clean). With
         conflicts the merge stays in progress so the AI can resolve the markers and the worker commits it."""

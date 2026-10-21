@@ -52,8 +52,8 @@ def control_repo(tmp_path: Path) -> Path:
     (r / "profiles.yaml").write_text(
         "providers:\n  claude: {models: {senior: opus, middle: sonnet}}\n  codex: {models: {middle: gpt-6-luna}, effort: {middle: high}}\n")
     (r / "accounts.yaml").write_text(
-        "accounts:\n  - {id: claude-01, provider: claude, node: cc, tier: senior, roles: [dev, verify]}\n"
-        "  - {id: codex-01, provider: codex, node: node1, tier: middle, roles: [dev, verify]}\n"
+        "accounts:\n  - {id: claude-01, provider: claude, node: cc, tier: senior, roles: [dev, verify, master]}\n"
+        "  - {id: codex-01, provider: codex, node: node1, tier: middle, roles: [dev, verify, master]}\n"
         "  - {id: opencode-01, provider: opencode, node: cc, tier: middle, roles: [dev], explicit_only: true}\n")
     (r / "nodes" / "cc.yaml").write_text("name: cc\nip: 10.44.0.10\nslots: 2\nprojects: [TESTWP]\n")
     (r / "nodes" / "node1.yaml").write_text("name: node1\nip: 10.44.0.11\nslots: 2\nprojects: [TESTWP]\n")
@@ -67,6 +67,7 @@ class FakeJira:
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
         self.comments: list[tuple[str, str]] = []
+        self.recent_comment_data: dict[str, list[dict]] = {}
         self.fields: list[tuple[str, dict]] = []
         self.labels: list[tuple[str, str, str]] = []
 
@@ -80,6 +81,9 @@ class FakeJira:
     def comment(self, key: str, text: str) -> str:
         self.comments.append((key, text))
         return str(len(self.comments))
+
+    def recent_comments(self, key: str, limit: int = 10) -> list[dict]:
+        return self.recent_comment_data.get(key, [])[:limit]
 
     def set_fields(self, key: str, values: dict) -> None:
         self.fields.append((key, values))
@@ -102,6 +106,7 @@ class FakeGitHub:
 
     def token(self, repo=None, permissions=None):
         from datetime import datetime, timedelta, timezone
+        self.token_requests = getattr(self, "token_requests", []) + [(repo, permissions)]
         return "ghs_fake", datetime.now(timezone.utc) + timedelta(hours=1)
 
     def create_pr(self, repo, head, base, title, body, draft=True):

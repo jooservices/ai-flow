@@ -200,6 +200,131 @@ def test_verify_goes_to_another_account_and_merges(client, ctx):
     assert client.post("/v1/github/merge", json={"run_id": r["run_id"], "fence": r["fence"], "number": 1}, headers=cc).status_code in (403, 409)
 
 
+def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(client, ctx):
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-63", status="Needs owner", labels=("aiflow-ready",))
+    add_ticket(ctx.db, "TESTWP-64", status="Needs owner", labels=("owner-escalated",))
+    add_ticket(ctx.db, "TESTWP-65", status="In Verify")
+    add_ticket(ctx.db, "TESTWP-66", status="To Do")
+    add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+
+    def add_run(key, step, account, outcome, summary, pr_url="", details=None):
+        run_id = str(uuid.uuid4())
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                    "summary,pr_url,details) VALUES (%s,%s,'TESTWP',%s,%s,%s,%s,1,'finished',%s,%s,%s,%s)",
+                    (run_id, key, step, account, "claude" if account.startswith("claude") else "codex",
+                     "cc" if account.startswith("claude") else "node1", outcome, summary, pr_url, J(details or {})))
+        return run_id
+
+    add_run("TESTWP-63", "dev", "claude-01", "blocked", "Can we change the API response shape?")
+    add_run("TESTWP-63", "verify", "codex-01", "rework", "verify failed", details={"findings": "- add a nonce"})
+    add_run("TESTWP-65", "dev", "claude-01", "done", "Implemented it", "https://github.com/x/y/pull/9")
+    add_run("TESTWP-65", "verify", "claude-01", "rework", "verify failed", details={"findings": "- add a nonce"})
+    ctx.jira.recent_comment_data["TESTWP-63"] = [
+        {"created": "2026-10-20T12:00:00Z", "author": "Owner", "body": "Keep the response backwards compatible."}
+    ]
+
+    # The developer account cannot triage its own question.
+    claude = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]
+    assert not any(t["key"] == "TESTWP-63" and t["step"] == "triage" for t in claude)
+    assert any(t["key"] == "TESTWP-67" and t["step"] == "triage" for t in claude)
+
+    candidates = client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1).json()["tickets"]
+    assert [(t["key"], t["step"]) for t in candidates] == [
+        ("TESTWP-65", "verify"), ("TESTWP-63", "triage"), ("TESTWP-67", "triage"), ("TESTWP-66", "dev")]
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-63", "account": "codex-01", "step": "triage"},
+                          headers=n1).json()
+    assert claimed["claimed"] and claimed["step"] == "triage"
+    assert claimed["last_dev_summary"] == "Can we change the API response shape?"
+    assert claimed["verify_findings"] == "- add a nonce"
+    assert claimed["recent_comments"] == ctx.jira.recent_comment_data["TESTWP-63"]
+
+    # Triage receives a read-only GitHub token.
+    token = client.post("/v1/github/token", json={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                  "repo": "jooservices/test-aiflow-wp"}, headers=n1)
+    assert token.status_code == 200
+    assert ctx.github.token_requests[-1][1] == {"contents": "read", "metadata": "read"}
+    auth = {"Authorization": f"Bearer {claimed['run_token']}"}
+    assert client.post("/v1/policy/decide", json={"tool_name": "Bash", "tool_input": {"command": "git status"},
+                                                  "cwd": "/srv/work/TESTWP"}, headers=auth).json()[
+        "hookSpecificOutput"]["permissionDecision"] == "allow"
+    for tool, tool_input in (("Bash", {"command": "touch /tmp/changed"}),
+                             ("Bash", {"command": "cat ticket.txt > /tmp/copy"}),
+                             ("Bash", {"command": "find . -exec touch changed \\;"}),
+                             ("Bash", {"command": "git branch -f develop"}),
+                             ("Write", {"file_path": "/srv/work/TESTWP/changed.py"})):
+        hook = {"tool_name": tool, "tool_input": tool_input, "cwd": "/srv/work/TESTWP"}
+        assert client.post("/v1/policy/decide", json=hook, headers=auth).json()[
+            "hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_failed_triage_backs_off_before_the_ticket_is_offered_again(client, ctx):
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+
+    def triage_keys():
+        return [t["key"] for t in client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1)
+                .json()["tickets"] if t["step"] == "triage"]
+
+    assert triage_keys() == ["TESTWP-67"]
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-67", "account": "codex-01", "step": "triage"},
+                    headers=n1).json()
+    client.post(f"/v1/runs/{r['run_id']}/result", json={
+        "fence": r["fence"], "outcome": "failed",
+        "summary": "triage returned no valid DECISION: ANSWER or DECISION: ESCALATE response"}, headers=n1)
+    client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=n1)
+    assert triage_keys() == []
+    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-67", "account": "codex-01", "step": "triage"},
+                       headers=n1).status_code == 409
+    ctx.db.run("UPDATE runs SET ended_at = now() - interval '40 minutes' WHERE ticket_key='TESTWP-67'")
+    assert triage_keys() == ["TESTWP-67"]
+
+
+def test_triage_answer_reaches_the_next_dev_prompt(client, ctx):
+    from aiflow.v4.worker.dev import Claimed, build_prompt
+    cc = join(client, "cc")
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-68")
+    d = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "claude-01"}, headers=cc).json()
+    client.post(f"/v1/runs/{d['run_id']}/result", json={
+        "fence": d["fence"], "outcome": "blocked", "branch": "TESTWP-68-x",
+        "summary": "Which Redis database should the cache use?"}, headers=cc)
+    client.post(f"/v1/runs/{d['run_id']}/release", json={"fence": d["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='Needs owner' WHERE key='TESTWP-68'")
+    t = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "codex-01", "step": "triage"},
+                    headers=n1).json()
+    assert t["claimed"]
+    client.post(f"/v1/runs/{t['run_id']}/result", json={
+        "fence": t["fence"], "outcome": "answered", "summary": "Use database 2.",
+        "details": {"decision": "ANSWER", "answer": "Use Redis database 2, as deploy/v4 configures."}}, headers=n1)
+    client.post(f"/v1/runs/{t['run_id']}/release", json={"fence": t["fence"]}, headers=n1)
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key='TESTWP-68'")
+
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "claude-01"}, headers=cc).json()
+    assert r["claimed"] and r["triage_answer"] == "Use Redis database 2, as deploy/v4 configures."
+    assert r["triage_question"] == "Which Redis database should the cache use?"
+    c = Claimed(run_id=r["run_id"], fence=r["fence"], run_token=r["run_token"], account="claude-01",
+                provider=r["provider"], model=r["model"], effort=r["effort"], ticket=r["ticket"], project=r["project"],
+                identity=tuple(r["identity"]), branch=r["branch"], triage_answer=r["triage_answer"],
+                triage_question=r["triage_question"])
+    prompt = build_prompt(c, c.branch)
+    assert "Use Redis database 2, as deploy/v4 configures." in prompt
+    assert "Which Redis database should the cache use?" in prompt
+
+    def next_dev(outcome):
+        nonlocal r
+        client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": outcome}, headers=cc)
+        client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
+        ctx.db.run("UPDATE runs SET ended_at = now() - interval '40 minutes' WHERE ticket_key='TESTWP-68'")
+        ctx.db.run("UPDATE tickets SET status='To Do' WHERE key='TESTWP-68'")
+        r = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "claude-01"}, headers=cc).json()
+        return r
+
+    assert next_dev("failed")["triage_answer"] == "Use Redis database 2, as deploy/v4 configures."  # survives a crash
+    assert "triage_answer" not in next_dev("done")  # used once a dev run finished with it
+
+
 def test_rework_findings_reach_the_next_dev_run(client, ctx):
     cc = join(client, "cc")
     n1 = join(client, "node1")

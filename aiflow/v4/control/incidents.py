@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 
+from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
 from . import notify
 
 
@@ -156,3 +157,113 @@ def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:
     if row:
         ctx.events.emit("incident.closed", reason=note or row["title"], kind=kind, subject=subject)
         notify.send("info", f"resolved: {row['title']}", note)
+
+
+# --- a flow that stands still -------------------------------------------------------------------------------
+IDLE_DEFAULT_MINUTES = 15.0
+
+
+def idle_minutes(repo) -> float:
+    """Minutes without a started run before the flow counts as idle (policy key `idle_alert_minutes`)."""
+    try:
+        value = float((repo.policy or {}).get("idle_alert_minutes", IDLE_DEFAULT_MINUTES))
+    except (TypeError, ValueError):
+        return IDLE_DEFAULT_MINUTES
+    return value if value > 0 else IDLE_DEFAULT_MINUTES
+
+
+def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
+    """Tickets a worker could take right now ignoring who and where: To Do and aiflow-ready with every blocker
+    Done, or In Verify; not on hold, not in retry backoff, not leased. `older_than_min` keeps only tickets that
+    have been waiting that long (a ticket that just became ready is not a stall)."""
+    from .api import BACKOFF_SQL
+    cooling = {step: {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": step})} for step in ("dev", "verify")}
+    held = set(ctx.leases.held_keys())
+    done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
+    out = []
+    for t in ctx.db.all(
+            "SELECT key, project, status, blocked_by FROM tickets WHERE NOT ('aiflow-hold' = ANY(labels))"
+            " AND ((status='To Do' AND 'aiflow-ready' = ANY(labels)) OR status='In Verify')"
+            " AND coalesce(jira_updated, synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
+        if t["key"] in held:
+            continue
+        if t["status"] == "To Do" and (t["key"] in cooling["dev"] or any(b not in done for b in t["blocked_by"])):
+            continue
+        if t["status"] == "In Verify" and t["key"] in cooling["verify"]:
+            continue
+        out.append(t)
+    return out
+
+
+def idle_reasons(ctx, projects: set[str]) -> list[str]:
+    """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
+    repo = ctx.repo()
+    reasons: list[str] = []
+    nodes = ctx.db.all("SELECT name, status, tools, projects, dynamic FROM nodes")
+    online = [n for n in nodes if n["status"] == "online"]
+    if not online:
+        return ["no node is online"]
+    for key in sorted(projects):
+        project = repo.projects.get(key)
+        serving = [n for n in online if key in repo.projects_for_node(n["name"], n["projects"] or [], n["dynamic"])]
+        if not project or not serving:
+            reasons.append(f"no online node serves {key}")
+            continue
+        blocked = []
+        for n in serving:
+            gaps = toolchain_gaps(n["tools"], project.tools, repo.versions, project.stacks,
+                                  require_pins=bool(project.stacks))
+            if gaps:
+                unpinned = [g for g in gaps if g in {x for s in normalize_stacks(project.stacks) for x in STACK_TOOLS.get(s, ())}
+                            and not locked_version(repo.versions, g)]
+                why = (f"versions.lock has no pin for {', '.join(unpinned)}" if unpinned
+                       else f"tools missing or outside their pin: {', '.join(gaps)}")
+                blocked.append(f"{n['name']} ({why})")
+        if len(blocked) == len(serving):
+            reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
+    accounts = ctx.db.all("SELECT a.id, a.status, a.node FROM accounts a")
+    ready = [a for a in accounts if a["status"] in ("idle", "working", "probing")
+             and any(n["name"] == a["node"] for n in online) and not ctx.leases.cooling(a["id"])]
+    if not ready:
+        states = ", ".join(f"{a['id']}={a['status']}" for a in accounts) or "no accounts"
+        reasons.append(f"no AI account is ready ({states})")
+    return reasons or ["no cause found: check the candidates endpoint and the master cycle"]
+
+
+def check_idle_flow(ctx) -> None:
+    """Critical incident `flow_idle` when tickets have been ready for longer than `idle_alert_minutes` and no
+    non-master run is running or has started in that time; it closes by itself when work moves again."""
+    minutes = idle_minutes(ctx.repo())
+    waiting = workable_tickets(ctx, minutes)
+    active = ctx.db.one("SELECT 1 AS x FROM runs WHERE step <> 'master' AND (status='running'"
+                        " OR started_at > now() - %s * interval '1 minute') LIMIT 1", (minutes,))
+    if not waiting or active:
+        close_incident(ctx, "flow_idle", "global", "work started again" if waiting else "no ticket is waiting")
+        return
+    projects = {t["project"] for t in waiting}
+    reasons = idle_reasons(ctx, projects)
+    shown = ", ".join(t["key"] for t in waiting[:8]) + (f" and {len(waiting) - 8} more" if len(waiting) > 8 else "")
+    open_incident(ctx, "flow_idle", "global", "critical",
+                  f"flow is idle: {len(waiting)} tickets are ready but no run started for {minutes:g} minutes",
+                  f"Ready: {shown}. Cause: " + "; ".join(reasons) + ".")
+
+
+def check_stack_pins(ctx) -> None:
+    """A project stack needs a pin in versions.lock for each of its tools. Missing pins keep the project from
+    getting any work, so report them as a configuration error at once, naming the pin."""
+    repo = ctx.repo()
+    missing: set[str] = set()
+    for key, project in repo.projects.items():
+        for stack in normalize_stacks(project.stacks):
+            for tool in STACK_TOOLS.get(stack, ()):
+                if not locked_version(repo.versions, tool):
+                    missing.add(f"{key}:{tool}")
+    for subject in sorted(missing):
+        key, tool = subject.split(":")
+        open_incident(ctx, "config_pin", subject, "critical", f"versions.lock has no pin for {tool} ({key})",
+                      f"Project {key} declares a stack that needs {tool}, but aiflow-control/versions.lock has no"
+                      f" `tools.{tool}` entry, so no node is offered {key} tickets. Add the pin (a version or a release"
+                      " line such as 8.3).")
+    for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='config_pin' AND closed_at IS NULL"):
+        if i["subject"] not in missing:
+            close_incident(ctx, "config_pin", i["subject"], "the pin exists")

@@ -86,6 +86,7 @@ class Adapter:
     def base_env(self, spec: RunSpec) -> dict[str, str]:
         env = {"HOME": spec.account_home, "USER": os.environ.get("USER", "aiflow-worker"), "LANG": "C.UTF-8",
                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "TERM": "dumb", "NO_COLOR": "1"}
+        env.update(scratch_env(spec))
         env.update(self.env(spec))
         env.update(spec.extra_env)
         return env
@@ -183,6 +184,25 @@ class Adapter:
         if m:
             res.verdict, res.verdict_reason = m.group(2).upper(), m.group(3).strip()
         return res
+
+
+def scratch_root(spec: RunSpec) -> Path:
+    """Disk space for temp files and package caches of AI runs (/tmp on the lab machines is RAM)."""
+    home = Path(spec.account_home)
+    srv = home.parent.parent if home.parent.name == "accounts" else Path("/srv/aiflow")
+    return srv / "cache" / "ai"
+
+
+def scratch_env(spec: RunSpec) -> dict[str, str]:
+    root = scratch_root(spec)
+    for sub in ("tmp", "uv", "npm", "composer", "pip"):
+        try:
+            (root / sub).mkdir(parents=True, exist_ok=True)
+            os.chmod(root / sub, 0o1777)  # shared by the AI user's runs; sticky like /tmp
+        except OSError:
+            pass
+    return {"TMPDIR": str(root / "tmp"), "UV_CACHE_DIR": str(root / "uv"), "npm_config_cache": str(root / "npm"),
+            "COMPOSER_CACHE_DIR": str(root / "composer"), "PIP_CACHE_DIR": str(root / "pip")}
 
 
 def get_adapter(provider: str) -> Adapter:

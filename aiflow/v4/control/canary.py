@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from typing import Any, Iterable
 
 
@@ -111,7 +112,7 @@ def decide(measurements: dict[str, Any], elapsed_s: int, thresholds: Thresholds,
 
 def record_rollback(ctx, *, node: str, target: str, previous: str, commit: str,
                     measurements: dict[str, Any]) -> dict[str, Any]:
-    """Open a canary incident and create one Jira flow-bug for the suspected release commit."""
+    """Open a canary incident and queue a Jira flow-bug for the suspected release commit."""
     from .incidents import open_incident
 
     canary = measurements["canary"]
@@ -127,33 +128,84 @@ def record_rollback(ctx, *, node: str, target: str, previous: str, commit: str,
               f"Previous release infrastructure failures: {baseline['infra_failures']}\n"
               f"Previous release infrastructure failure rate: {baseline['failure_rate']:.4f}")
     opened = open_incident(ctx, "canary_rollback", target, "critical", title, detail)
-    issue = ""
-    if opened and ctx.jira:
-        summary = f"[flow-bug] Canary rollback for {target} ({commit[:12]})"
-        description = (f"AI Flow auto-deployer rolled back a canary release: {reason}.\n\n" + detail)
+    project = ctx.settings.canary_bug_project
+    summary = f"[flow-bug] Canary rollback for {target} ({commit[:12]})"
+    description = (f"AI Flow auto-deployer rolled back a canary release: {reason}.\n\n" + detail)
+    label_hash = sha256(f"{target}\0{commit}".encode()).hexdigest()[:24]
+    dedupe_label = f"aiflow4-canary-{label_hash}"
+    # Queue even when open_incident returned false: the incident already exists, but its previous Jira attempt
+    # may still be pending. One row per release keeps retries idempotent.
+    ctx.db.run(
+        "INSERT INTO canary_flow_bugs (target,node,previous,suspected_commit,project,summary,description,dedupe_label)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (target) DO UPDATE SET"
+        " node=EXCLUDED.node, previous=EXCLUDED.previous, suspected_commit=EXCLUDED.suspected_commit,"
+        " project=EXCLUDED.project, summary=EXCLUDED.summary, description=EXCLUDED.description,"
+        " dedupe_label=EXCLUDED.dedupe_label, updated_at=now() WHERE canary_flow_bugs.ticket=''",
+        (target, node, previous, commit, project, summary, description, dedupe_label),
+    )
+    issue = retry_pending_flow_bugs(ctx, target=target).get(target, "")
+    if not issue:
+        row = ctx.db.one("SELECT ticket FROM canary_flow_bugs WHERE target=%s", (target,))
+        issue = str(row.get("ticket") or "") if row else ""
+    return {"incident_opened": opened, "ticket": issue}
+
+
+def retry_pending_flow_bugs(ctx, *, target: str | None = None) -> dict[str, str]:
+    """Retry queued Jira creation without depending on a new incident opening."""
+    sql = ("SELECT target,node,project,summary,description,dedupe_label,suspected_commit FROM canary_flow_bugs"
+           " WHERE ticket=''" + (" AND target=%s" if target is not None else "") + " ORDER BY created_at")
+    rows = ctx.db.all(sql, (target,) if target is not None else None)
+    created: dict[str, str] = {}
+    for row in rows:
+        release = row["target"]
+        if not ctx.jira:
+            error = "Jira is not configured"
+            ctx.db.run("UPDATE canary_flow_bugs SET last_error=%s,updated_at=now() WHERE target=%s",
+                       (error, release))
+            ctx.db.run("UPDATE incidents SET detail=regexp_replace(detail, E'\\nFlow-bug ticket [^\\n]*$', '') || %s"
+                       " WHERE kind='canary_rollback' AND subject=%s AND closed_at IS NULL",
+                       (f"\nFlow-bug ticket creation unavailable: {error}", release))
+            ctx.events.emit("canary.rollback_ticket", node=row["node"], outcome="failed", reason=error)
+            continue
+        labels = ["flow-bug", row["dedupe_label"]]
         try:
-            issue = ctx.jira.create_issue(ctx.settings.canary_bug_project, summary, description,
-                                          issuetype="Bug", labels=["flow-bug"])
+            # A Jira create may succeed while its response or our local DB write fails. Search by a stable
+            # release+commit label before creating, so a retry adopts the existing issue.
+            jql = (f'project = "{row["project"]}" AND labels = "{row["dedupe_label"]}"'
+                   ' AND issuetype = Bug')
+            existing = next((issue for issue in ctx.jira.search(
+                jql, fields=["summary", "labels", "issuetype"], page=100)
+                if row["dedupe_label"] in (issue.get("fields", {}).get("labels") or [])), None)
+            issue = existing["key"] if existing else ctx.jira.create_issue(
+                row["project"], row["summary"], row["description"], issuetype="Bug", labels=labels)
             status = ctx.jira.status(issue)
             ctx.db.run(
                 "INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
                 " VALUES (%s,%s,%s,'Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                (issue, ctx.settings.canary_bug_project, status, ["flow-bug"], summary, description),
+                (issue, row["project"], status, labels, row["summary"], row["description"]),
             )
             from .db import J
             ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                        " VALUES ('jira','create',%s,'aiflow4-autodeploy',true,%s,%s)",
-                       (issue, status, J({"project": ctx.settings.canary_bug_project, "type": "Bug",
-                                          "labels": ["flow-bug"], "commit": commit, "release": target})))
-            ctx.events.emit("canary.rollback_ticket", ticket=issue, node=node, outcome="created", reason=target)
-        except Exception as exc:  # noqa: BLE001 - keep the rollback incident even if Jira is unavailable
-            ctx.db.run("UPDATE incidents SET detail=detail || %s WHERE kind='canary_rollback' AND subject=%s"
-                       " AND closed_at IS NULL", (f"\nFlow-bug ticket creation failed: {str(exc)[:300]}", target))
-            ctx.events.emit("canary.rollback_ticket", node=node, outcome="failed", reason=str(exc)[:300])
-    elif opened:
-        ctx.db.run("UPDATE incidents SET detail=detail || %s WHERE kind='canary_rollback' AND subject=%s"
-                   " AND closed_at IS NULL", ("\nFlow-bug ticket creation unavailable: Jira is not configured.", target))
-    return {"incident_opened": opened, "ticket": issue}
+                       (issue, status, J({"project": row["project"], "type": "Bug", "labels": labels,
+                                          "commit": row["suspected_commit"], "release": release})))
+            ctx.db.run("UPDATE canary_flow_bugs SET ticket=%s,last_error='',updated_at=now() WHERE target=%s",
+                       (issue, release))
+            ctx.db.run("UPDATE incidents SET detail=regexp_replace(detail, E'\\nFlow-bug ticket [^\\n]*$', '') || %s"
+                       " WHERE kind='canary_rollback' AND subject=%s AND closed_at IS NULL",
+                       (f"\nFlow-bug ticket created: {issue}", release))
+            ctx.events.emit("canary.rollback_ticket", ticket=issue, node=row["node"], outcome="created",
+                            reason=release)
+            created[release] = issue
+        except Exception as exc:  # noqa: BLE001 - rollback stays recorded if Jira is unavailable
+            error = str(exc)[:300]
+            ctx.db.run("UPDATE canary_flow_bugs SET last_error=%s,updated_at=now() WHERE target=%s",
+                       (error, release))
+            ctx.db.run("UPDATE incidents SET detail=regexp_replace(detail, E'\\nFlow-bug ticket [^\\n]*$', '') || %s"
+                       " WHERE kind='canary_rollback' AND subject=%s AND closed_at IS NULL",
+                       (f"\nFlow-bug ticket creation failed: {error}", release))
+            ctx.events.emit("canary.rollback_ticket", node=row["node"], outcome="failed", reason=error)
+    return created
 
 
 def record_promotion(ctx, *, target: str, node: str, measurements: dict[str, Any], under_observed: bool,

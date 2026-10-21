@@ -1,25 +1,26 @@
 #!/bin/bash
-# DEVELOP CHANNEL (lab only, docs/v4/develop-channel.md): deploy origin/develop when it moved and its CI passed; roll back when the control plane is unhealthy after it.
-# Run by aiflow4-autodeploy.timer on the control-plane machine. Nodes follow by themselves (heartbeat release).
+# DEVELOP CHANNEL (lab only, docs/v4/develop-channel.md): canary origin/develop before promoting it to the fleet.
+# Run by aiflow4-autodeploy.timer on the control-plane machine.
 set -uo pipefail
-R=/srv/aiflow/control/repos/ai-flow
-CUR=$(cat /srv/aiflow/control/releases/CURRENT 2>/dev/null || true)
-git -C $R fetch -q origin || exit 0
-TARGET=$(git -C $R rev-parse --short=10 origin/develop)
-[ "$TARGET" = "$CUR" ] && exit 0
-FULL=$(git -C $R rev-parse origin/develop)
-CI=$(aiflow4-gh api GET "/repos/jooservices/ai-flow/commits/$FULL/check-runs" | python3 -c '
-import json,sys; d=json.load(sys.stdin); b=d.get("body") or d; cs=b.get("check_runs",[])
-if any(c["status"]!="completed" for c in cs): print("pending")
-elif any(c["conclusion"] not in ("success","skipped","neutral") for c in cs): print("failed")
-else: print("ok" if cs else "none")' 2>/dev/null || echo error)
-AGE=$(( $(date +%s) - $(git -C $R log -1 --format=%ct origin/develop) ))
-case "$CI" in
-  ok) ;;
-  none) [ $AGE -gt 1200 ] || { echo "develop $TARGET has no CI yet"; exit 0; } ;;
-  *) echo "develop $TARGET CI: $CI; not deploying"; exit 0 ;;
-esac
-echo "deploying develop $TARGET (was $CUR)"
+ROOT=${AIFLOW4_ROOT:-/srv/aiflow}
+R=$ROOT/control/repos/ai-flow
+RELEASES=$ROOT/control/releases
+CURRENT_FILE=$RELEASES/CURRENT
+CANARY_FILE=$RELEASES/CANARY.json
+REJECTED_FILE=$RELEASES/CANARY_REJECTED
+CUR=$(cat "$CURRENT_FILE" 2>/dev/null || true)
+CANARY_MIN_AGE_S=${AIFLOW4_CANARY_MIN_AGE_S:-1200}
+CANARY_MIN_RUNS=${AIFLOW4_CANARY_MIN_RUNS:-5}
+CANARY_MAX_AGE_S=${AIFLOW4_CANARY_MAX_AGE_S:-3600}
+CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
+CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
+CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
+AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
+
+mkdir -p "$RELEASES"
+exec 8>"$RELEASES/autodeploy.lock"
+flock -n 8 || { echo "another auto-deploy pass is running"; exit 0; }
+
 alert() { python3 - "$1" "$2" <<'P' || true
 import smtplib, sys
 from email.message import EmailMessage
@@ -27,14 +28,149 @@ m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow
 with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
-if aiflow4-deploy-develop "" develop; then
-  sleep 20
-  if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
-     && curl -fsS -o /dev/null http://127.0.0.1/cc; then
-    echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed develop $TARGET" "Auto-deploy of $TARGET passed the health checks (previous $CUR)."; exit 0
+control_state() { curl -fsS http://127.0.0.1/v1/state; }
+canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
+now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
+write_canary() {
+  python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" "$5" <<'P'
+import json, os, sys
+path, target, node, previous, started, requested = sys.argv[1:]
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({"target": target, "node": node, "previous": previous, "started_at": started,
+               "requested_at": requested}, f)
+    f.write("\n")
+os.replace(tmp, path)
+P
+}
+reject_canary() {
+  local why=$1 measurements=$2 commit
+  commit=$(git -C "$R" rev-parse "$TARGET^{commit}" 2>/dev/null || true)
+  [ -n "$commit" ] || commit=$TARGET
+  printf '%s\n' "$TARGET" > "$REJECTED_FILE.tmp" && mv -f "$REJECTED_FILE.tmp" "$REJECTED_FILE"
+  rm -f "$CANARY_FILE"
+  canary_cli record-rollback --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
+    --commit "$commit" --measurements "$measurements" || echo "could not write canary rollback incident/ticket" >&2
+  echo "canary $TARGET $why; $NODE returned to $PREVIOUS"
+  alert "[CRITICAL] AI Flow: develop canary $TARGET rolled back" \
+    "Develop canary node $NODE returned to $PREVIOUS: $why. Suspected commit: $commit. A canary incident and flow-bug ticket are recorded."
+}
+
+# Retry Jira work independently of opening a rollback incident; failed Jira writes survive removal of CANARY.json.
+canary_cli retry-tickets || echo "could not retry pending canary flow-bug tickets" >&2
+
+if [ -f "$CANARY_FILE" ]; then
+  IFS=$'\t' read -r TARGET NODE PREVIOUS STARTED_AT REQUESTED_AT < <(python3 - "$CANARY_FILE" <<'P'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d["target"], d["node"], d["previous"], d.get("started_at") or "-", d.get("requested_at") or "-", sep="\t")
+except (OSError, ValueError, KeyError):
+    raise SystemExit("invalid canary state")
+P
+  ) || { echo "cannot read $CANARY_FILE" >&2; exit 1; }
+  [ -n "${TARGET:-}" ] && [ -n "${NODE:-}" ] && [ -n "${PREVIOUS:-}" ] || {
+    echo "canary state is incomplete" >&2; exit 1;
+  }
+  [ "$STARTED_AT" != - ] || STARTED_AT=
+  [ "$REQUESTED_AT" != - ] || REQUESTED_AT=
+  if [ -z "${STARTED_AT:-}" ]; then
+    NODE_RELEASE=$(control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); n=next((x for x in d["nodes"] if x["name"]==sys.argv[1]),None); print(n["release"] if n else "")' "$NODE" 2>/dev/null || true)
+    if [ "$NODE_RELEASE" != "$TARGET" ]; then
+      if [ -z "$REQUESTED_AT" ]; then
+        write_canary "$TARGET" "$NODE" "$PREVIOUS" "" "$(now_utc)"
+        echo "waiting for develop canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown})"
+        exit 0
+      fi
+      WAITED=$(python3 -c 'import sys; from datetime import datetime,timezone; print(max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(sys.argv[1])).total_seconds())))' "$REQUESTED_AT") || WAITED=0
+      if [ "$WAITED" -ge "$CANARY_INSTALL_TIMEOUT_S" ]; then
+        WHY="was not installed on $NODE within ${CANARY_INSTALL_TIMEOUT_S}s (node reports ${NODE_RELEASE:-unknown})"
+        MEASUREMENTS=$(python3 -c 'import json,sys; zero={"runs":0,"infra_failures":0,"failure_rate":0.0}; print(json.dumps({"action":"rollback","rollback_reason":sys.argv[1],"canary":zero,"baseline":zero}))' "$WHY")
+        reject_canary "$WHY" "$MEASUREMENTS"
+        exit 0
+      fi
+      echo "waiting for develop canary node $NODE to install $TARGET (currently ${NODE_RELEASE:-unknown}, ${WAITED}s of ${CANARY_INSTALL_TIMEOUT_S}s)"
+      exit 0
+    fi
+    STARTED_AT=$(now_utc)
+    write_canary "$TARGET" "$NODE" "$PREVIOUS" "$STARTED_AT" "$REQUESTED_AT"
+    echo "develop canary node $NODE installed $TARGET; observation window started"
+    exit 0
   fi
+
+  DECISION=$(canary_cli evaluate --node "$NODE" --target "$TARGET" --previous "$PREVIOUS" \
+    --started-at "$STARTED_AT" --minimum-age-s "$CANARY_MIN_AGE_S" --minimum-runs "$CANARY_MIN_RUNS" \
+    --maximum-age-s "$CANARY_MAX_AGE_S" --failure-ratio "$CANARY_FAILURE_RATIO" \
+    --minimum-infra-failures "$CANARY_MIN_INFRA_FAILURES") || {
+      echo "could not read develop canary run measurements; keeping $TARGET isolated on $NODE" >&2; exit 1;
+    }
+  ACTION=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])' <<<"$DECISION")
+  case "$ACTION" in
+    wait)
+      echo "develop canary $TARGET on $NODE: $(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["reason"])' <<<"$DECISION")"
+      exit 0
+      ;;
+    rollback)
+      reject_canary "failed its infrastructure rate threshold" "$DECISION"
+      exit 0
+      ;;
+    promote)
+      UNDER_OBSERVED=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if "too few completed runs" in d["reason"] else "no")' <<<"$DECISION")
+      if [ "$UNDER_OBSERVED" = yes ]; then
+        canary_cli record-promotion --node "$NODE" --target "$TARGET" --measurements "$DECISION" \
+          --minimum-runs "$CANARY_MIN_RUNS" || echo "could not record under-observed develop canary note" >&2
+      fi
+      rm -f "$CANARY_FILE"
+      echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
+      if aiflow4-deploy-develop "" "$TARGET"; then
+        sleep 20
+        if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+           && curl -fsS -o /dev/null http://127.0.0.1/cc; then
+          echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
+          alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
+          exit 0
+        fi
+      fi
+      echo "develop deploy of $TARGET unhealthy; rolling back to $PREVIOUS"
+      aiflow4-deploy-develop "" "$PREVIOUS" || true
+      alert "[CRITICAL] AI Flow: develop auto-deploy of $TARGET rolled back" \
+        "The control plane was unhealthy after promoting $TARGET; it was returned to $PREVIOUS."
+      exit 1
+      ;;
+    *) echo "unknown canary decision: $ACTION" >&2; exit 1 ;;
+  esac
 fi
-echo "deploy of $TARGET unhealthy; rolling back to $CUR"
-[ -n "$CUR" ] && aiflow4-deploy-develop "" "$CUR"
-alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after deploying $TARGET; it runs $CUR again. Look at the merged PRs of develop."
-exit 1
+
+git -C "$R" fetch -q origin || exit 0
+FULL=$(git -C "$R" rev-parse origin/develop)
+TARGET=$(git -C "$R" rev-parse --short=10 "$FULL")
+[ -n "$CUR" ] || { echo "cannot canary develop $TARGET without a current release to roll back to" >&2; exit 1; }
+[ "$TARGET" = "$CUR" ] && exit 0
+REJECTED=$(cat "$REJECTED_FILE" 2>/dev/null || true)
+if [ "$TARGET" = "$REJECTED" ]; then
+  echo "develop $TARGET already failed its canary; waiting for a newer commit"
+  exit 0
+fi
+CI=$(aiflow4-gh api GET "/repos/jooservices/ai-flow/commits/$FULL/check-runs" | python3 -c '
+import json,sys; d=json.load(sys.stdin); b=d.get("body") or d; cs=b.get("check_runs",[])
+if any(c["status"]!="completed" for c in cs): print("pending")
+elif any(c["conclusion"] not in ("success","skipped","neutral") for c in cs): print("failed")
+else: print("ok" if cs else "none")' 2>/dev/null || echo error)
+AGE=$(( $(date +%s) - $(git -C "$R" log -1 --format=%ct "$FULL") ))
+case "$CI" in
+  ok) ;;
+  none) [ "$AGE" -gt 1200 ] || { echo "develop $TARGET has no CI yet"; exit 0; } ;;
+  *) echo "develop $TARGET CI: $CI; not deploying"; exit 0 ;;
+esac
+
+STATE=$(control_state) || { echo "control registry is unavailable; not starting a develop canary" >&2; exit 1; }
+NODE=$(python3 -c 'import json,sys; configured,previous=sys.argv[1:]; nodes=json.load(sys.stdin).get("nodes",[]); eligible=lambda n:n.get("status")=="online" and n.get("release")==previous and n.get("accounts_assigned",0)>0; selected=next((n for n in nodes if n.get("name")==configured and eligible(n)),None) if configured else next(iter(sorted((n for n in nodes if eligible(n)),key=lambda n:n["name"])),None); print(selected["name"] if selected else "")' \
+  "$AIFLOW4_CANARY_NODE" "$CUR" <<<"$STATE") || exit 1
+if [ -z "$NODE" ]; then
+  echo "no online develop-channel node on $CUR with assigned accounts is available for canary"
+  exit 0
+fi
+echo "staging develop $TARGET for canary node $NODE; fleet remains on $CUR"
+aiflow4-deploy-develop --stage-only "" "$FULL" || { echo "could not stage develop $TARGET" >&2; exit 1; }
+write_canary "$TARGET" "$NODE" "$CUR" "" "$(now_utc)"
+echo "develop canary $TARGET requested on $NODE; other nodes remain on $CUR"

@@ -6,6 +6,7 @@
   aiflow4 canary evaluate ...            evaluate the active auto-deploy canary
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
+  aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
   aiflow4 node join --name N --join-token-file F [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
@@ -116,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--target", required=True)
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
+    canary_sub.add_parser("retry-tickets")
     pw = sub.add_parser("worker")
     pw.add_argument("--account", required=True)
     a = ap.parse_args(argv)
@@ -149,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "canary":
         from datetime import datetime, timezone
         from .control.canary import (Thresholds, decide, measure_registry, record_promotion,
-                                     record_rollback)
+                                     record_rollback, retry_pending_flow_bugs)
         if a.canary_action == "evaluate":
             from .control.db import DB
             db = DB(s.database_url)
@@ -167,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         ctx = build_ctx(s)
         try:
+            if a.canary_action == "retry-tickets":
+                print(json.dumps(retry_pending_flow_bugs(ctx), separators=(",", ":")))
+                return 0
             measurements = json.loads(a.measurements)
             if a.canary_action == "record-rollback":
                 result = record_rollback(ctx, node=a.node, target=a.target, previous=a.previous,

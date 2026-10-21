@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.canary import (Thresholds, decide as decide_canary, is_infrastructure_failure,
-                                      measure_registry, record_promotion, record_rollback, summarize_runs)
+                                      measure_registry, record_promotion, record_rollback,
+                                      retry_pending_flow_bugs, summarize_runs)
 from aiflow.v4.core.release_notes import git_commits, render_changelog
 
 
@@ -210,22 +211,56 @@ def test_canary_rollback_opens_incident_and_flow_bug_with_suspected_commit():
     class DB:
         def __init__(self):
             self.calls = []
+            self.incident_open = False
+            self.pending = {}
 
         def one(self, sql, params=None):
             self.calls.append((sql, params))
-            return {"id": 9} if "INSERT INTO incidents" in sql else None
+            if "INSERT INTO incidents" in sql:
+                if self.incident_open:
+                    return None
+                self.incident_open = True
+                return {"id": 9}
+            if "SELECT ticket FROM canary_flow_bugs" in sql:
+                return {"ticket": self.pending.get(params[0], {}).get("ticket", "")}
+            return None
+
+        def all(self, sql, params=None):
+            self.calls.append((sql, params))
+            rows = [row for row in self.pending.values() if not row["ticket"]]
+            if params:
+                rows = [row for row in rows if row["target"] == params[0]]
+            return rows
 
         def run(self, sql, params=None):
             self.calls.append((sql, params))
+            if "INSERT INTO canary_flow_bugs" in sql:
+                target, node, previous, commit, project, summary, description, label = params
+                self.pending.setdefault(target, {"target": target, "ticket": ""}).update(
+                    node=node, previous=previous, suspected_commit=commit, project=project, summary=summary,
+                    description=description, dedupe_label=label)
+            elif "SET last_error=" in sql:
+                self.pending[params[1]]["last_error"] = params[0]
+            elif "SET ticket=" in sql:
+                self.pending[params[1]]["ticket"] = params[0]
             return 1
 
     class Jira:
         def __init__(self):
-            self.created = None
+            self.created = []
+            self.issues = []
+            self.fail = True
+
+        def search(self, jql, fields, page):
+            return self.issues
 
         def create_issue(self, project, summary, description, issuetype, labels):
-            self.created = (project, summary, description, issuetype, labels)
-            return "TESTFLOW-999"
+            if self.fail:
+                raise RuntimeError("Jira temporarily unavailable")
+            key = f"TESTFLOW-{999 + len(self.created)}"
+            self.created.append((project, summary, description, issuetype, labels))
+            self.issues.append({"key": key, "fields": {"labels": labels}})
+            return key
 
         def status(self, key):
             return "Backlog"
@@ -237,20 +272,32 @@ def test_canary_rollback_opens_incident_and_flow_bug_with_suspected_commit():
     db, jira = DB(), Jira()
     ctx = SimpleNamespace(db=db, jira=jira, events=Events(),
                           settings=SimpleNamespace(canary_bug_project="TESTFLOW", public_url="http://test"))
-    result = record_rollback(ctx, node="canary", target="v4.3.0", previous="v4.2.0", commit="abcdef0123456789",
-                             measurements={"canary": {"runs": 5, "infra_failures": 3, "failure_rate": 0.6},
-                                           "baseline": {"runs": 10, "infra_failures": 1, "failure_rate": 0.1}})
+    measurements = {"canary": {"runs": 5, "infra_failures": 3, "failure_rate": 0.6},
+                    "baseline": {"runs": 10, "infra_failures": 1, "failure_rate": 0.1}}
+    result = record_rollback(ctx, node="canary", target="v4.3.0", previous="v4.2.0",
+                             commit="abcdef0123456789", measurements=measurements)
 
-    assert result == {"incident_opened": True, "ticket": "TESTFLOW-999"}
-    assert "abcdef0123456789" in jira.created[2]
-    assert jira.created[3:] == ("Bug", ["flow-bug"])
+    assert result == {"incident_opened": True, "ticket": ""}
+    assert "Jira temporarily unavailable" in db.pending["v4.3.0"]["last_error"]
     assert any("INSERT INTO incidents" in call[0] and "critical" in call[1] for call in db.calls)
+    assert db.pending["v4.3.0"]["dedupe_label"].startswith("aiflow4-canary-")
+
+    jira.fail = False
+    assert retry_pending_flow_bugs(ctx) == {"v4.3.0": "TESTFLOW-999"}
+    assert "abcdef0123456789" in jira.created[0][2]
+    assert jira.created[0][3:] == ("Bug", ["flow-bug", db.pending["v4.3.0"]["dedupe_label"]])
+    # Another rollback pass sees the existing incident and ticket, and never creates a duplicate.
+    repeated = record_rollback(ctx, node="canary", target="v4.3.0", previous="v4.2.0",
+                               commit="abcdef0123456789", measurements=measurements)
+    assert repeated == {"incident_opened": False, "ticket": "TESTFLOW-999"}
+    assert len(jira.created) == 1
 
     zero = {"runs": 0, "infra_failures": 0, "failure_rate": 0.0}
+    jira.fail = False
     record_rollback(ctx, node="canary", target="v4.4.0", previous="v4.2.0", commit="0123456789abcdef",
                     measurements={"rollback_reason": "was not installed on canary within 1800s",
                                   "canary": zero, "baseline": zero})
-    assert "was not installed on canary within 1800s" in jira.created[2]
+    assert "was not installed on canary within 1800s" in jira.created[1][2]
 
 
 def test_under_observed_promotion_records_the_run_count_and_configured_minimum():
@@ -301,12 +348,23 @@ def test_release_deployer_stage_only_exits_before_control_and_current_promotion(
     assert stage_only < deployer.index('printf \'%s\\n\' "$VERSION" > "$RELEASES/CURRENT.tmp"')
 
 
+def test_develop_deployer_stage_only_publishes_node_archive_without_control_or_current_promotion():
+    deployer = Path("deploy/v4/bin/aiflow4-deploy-develop").read_text()
+    stage_only = deployer.index('if [ "$STAGE_ONLY" = yes ]; then')
+
+    assert 'git archive --format=tar.gz -o "$TAR" "$REF"' in deployer
+    assert stage_only > deployer.index('git archive --format=tar.gz -o "$TAR" "$REF"')
+    assert stage_only < deployer.index('docker build -q')
+    assert stage_only < deployer.index('echo "$SHA" > "$RELEASES/CURRENT.tmp"')
+
+
 # --- the installer and auto-deployer, run against stub commands ----------------------------------------------
 
 INSTALLER = Path("deploy/v4/bin/aiflow4-node-install").resolve()
 AUTODEPLOY = Path("deploy/v4/bin/aiflow4-autodeploy").resolve()
+DEVELOP_AUTODEPLOY = Path("deploy/v4/bin/aiflow4-autodeploy-develop").resolve()
 _SYSTEM_TOOLS = ("bash", "cat", "awk", "sha256sum", "dirname", "grep", "uname", "rm", "mv", "ln", "mkdir", "head",
-                 "printf", "touch", "flock")
+                 "printf", "touch", "flock", "date")
 
 
 def _bin(tmp_path, stubs: dict[str, str]) -> str:
@@ -616,6 +674,124 @@ def test_autodeploy_promotes_stable_canary_and_records_under_observed_timeout(tm
     assert "record-promotion" in calls
     assert current == "v4.3.0"
     assert state is None
+
+
+def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True):
+    root = tmp_path / "srv"
+    releases = root / "control" / "releases"
+    releases.mkdir(parents=True)
+    previous = "0123456789"
+    target = "abcdef0123"
+    commit = "abcdef0123456789abcdef0123456789abcdef01"
+    (releases / "CURRENT").write_text(previous + "\n")
+    log = tmp_path / "develop-calls.log"
+    log.write_text("")
+    state = tmp_path / "develop-state.json"
+    state.write_text(json.dumps({"nodes": [{"name": "canary", "status": "online",
+                                             "release": target if active else previous,
+                                             "accounts_assigned": 1},
+                                            {"name": "worker-2", "status": "online", "release": previous,
+                                             "accounts_assigned": 1}]}))
+    if active:
+        started = datetime.now(timezone.utc) - timedelta(minutes=21)
+        (releases / "CANARY.json").write_text(json.dumps({"target": target, "node": "canary",
+                                                           "previous": previous, "started_at": started.isoformat(),
+                                                           "requested_at": started.isoformat()}))
+    if decision is None:
+        decision = {"action": "promote", "reason": "minimum canary time and completed run count reached",
+                    "canary": {"runs": 5, "infra_failures": 0, "failure_rate": 0.0},
+                    "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
+    decision_file = tmp_path / "develop-decision.json"
+    decision_file.write_text(json.dumps(decision))
+    py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
+          f'exec {sys.executable} "$@"\n')
+    stubs = {
+        "git": f'case "$*" in *"rev-parse origin/develop"*) echo {commit} ;; '
+               f'*"rev-parse --short=10"*) echo {target} ;; *"rev-parse {target}^{{commit}}"*) echo {commit} ;; '
+               '*"log -1 --format=%ct"*) echo 1700000000 ;; esac\n',
+        "aiflow4-gh": 'echo \'{"check_runs":[{"status":"completed","conclusion":"success"}]}\'\n',
+        "aiflow4-deploy-develop": f'echo "develop-deploy $*" >> {log}\n'
+                                  f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
+                                  f'echo "$2" > {releases}/CURRENT\nexit 0\n',
+        "docker": f'echo "docker $*" >> {log}\n'
+                  f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
+        "curl": f'case "$*" in *"/v1/state"*) cat {state} ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
+                f' *) exit 7 ;; esac\n',
+        "python3": py,
+        "sleep": "exit 0\n",
+    }
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root)}
+    result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
+    canary_file = releases / "CANARY.json"
+    current = (releases / "CURRENT").read_text().strip()
+    return result, log.read_text(), current, json.loads(canary_file.read_text()) if canary_file.exists() else None, releases, state
+
+
+def test_develop_autodeploy_stages_new_commit_on_one_canary_before_current_moves(tmp_path):
+    result, calls, current, canary, _, state_file = _develop_autodeploy(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "develop-deploy --stage-only  abcdef0123456789abcdef0123456789abcdef01" in calls
+    assert current == "0123456789"
+    assert canary["target"] == "abcdef0123" and canary["node"] == "canary"
+    nodes = json.loads(state_file.read_text())["nodes"]
+    assert [node["release"] for node in nodes] == ["0123456789", "0123456789"]
+
+
+def test_develop_autodeploy_rolls_back_canary_only_when_fake_two_release_registry_exceeds_threshold(tmp_path):
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(minutes=21)
+    previous, target = "0123456789", "abcdef0123"
+    runs = [{"node": "stable", "started_at": started - timedelta(hours=1) + timedelta(minutes=i),
+             "status": "finished", "outcome": "failed" if i < 2 else "done",
+             "error_kind": "provider" if i < 2 else ""} for i in range(10)]
+    runs += [{"node": "canary", "started_at": started + timedelta(minutes=i), "status": "finished",
+              "outcome": outcome, "error_kind": error_kind}
+             for i, (outcome, error_kind) in enumerate((
+                 ("failed", "worker"), ("blocked", "infra"), ("lost", ""), ("quota", "quota"), ("done", "")))]
+    registry = _FakeCanaryRegistry({"stable": previous, "canary": target}, runs)
+    measurements = measure_registry(registry, "canary", started, previous)
+    decision = decide_canary(measurements, 21 * 60, Thresholds(), installed=True)
+
+    result, calls, current, canary, releases, state_file = _develop_autodeploy(
+        tmp_path, active=True, decision=decision)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert measurements["baseline"]["failure_rate"] == 0.2
+    assert measurements["canary"]["failure_rate"] == 0.6
+    assert decision["action"] == "rollback"
+    assert current == previous
+    assert canary is None
+    assert (releases / "CANARY_REJECTED").read_text().strip() == target
+    expected_rollback = f"canary record-rollback --node canary --target {target} --previous {previous} --commit abcdef0123456789abcdef0123456789abcdef01"
+    assert expected_rollback in calls
+    assert "--minimum-age-s 1200 --minimum-runs 5 --maximum-age-s 3600 --failure-ratio 2 --minimum-infra-failures 3" in calls
+    assert "develop-deploy  abcdef0123" not in calls
+    assert [node["release"] for node in json.loads(state_file.read_text())["nodes"]] == [target, previous]
+
+
+def test_develop_autodeploy_promotes_a_stable_canary_to_current_and_remaining_nodes(tmp_path):
+    result, calls, current, canary, _, _ = _develop_autodeploy(tmp_path, active=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert current == "abcdef0123"
+    assert canary is None
+    assert "develop-deploy  abcdef0123" in calls
+    assert "deployed develop abcdef0123 to the control plane" in result.stdout
+
+
+def test_develop_autodeploy_records_under_observed_promotion_at_maximum_age(tmp_path):
+    metrics = {"canary": {"runs": 2, "infra_failures": 0, "failure_rate": 0.0},
+               "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
+    decision = decide_canary(metrics, 3600, Thresholds(), installed=True)
+
+    result, calls, current, canary, _, _ = _develop_autodeploy(tmp_path, active=True, decision=decision)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert current == "abcdef0123"
+    assert canary is None
+    assert "canary record-promotion --node canary --target abcdef0123" in calls
+    assert "--minimum-runs 5" in calls
 
 
 

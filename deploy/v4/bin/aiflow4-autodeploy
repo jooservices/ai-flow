@@ -35,6 +35,8 @@ P
 control_state() { curl -fsS http://127.0.0.1/v1/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
+# Retry Jira work even when the rollback incident already exists and CANARY.json has been removed.
+canary_cli retry-tickets || echo "could not retry pending canary flow-bug tickets" >&2
 write_canary() {
   python3 - "$CANARY_FILE" "$1" "$2" "$3" "$4" "$5" <<'P'
 import json, os, sys

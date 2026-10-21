@@ -1,13 +1,15 @@
 # Canary auto-deploy
 
 `aiflow4-autodeploy` stages the newest published release, then targets one online node with assigned accounts.
-Set `AIFLOW4_CANARY_NODE` in `/etc/aiflow/autodeploy.env` to pin the canary; when it is empty, the deployer picks
+The develop-channel handoff uses the same observation and rollback policy for `origin/develop`, staging its
+unsigned commit archive before requesting that node. Set `AIFLOW4_CANARY_NODE` in `/etc/aiflow/deploy.env`
+to pin the canary; when it is empty, the deployer picks
 the first eligible node by name. The selected node receives the candidate through `CANARY.json`; `CURRENT` stays
 on the previous release, so other nodes keep that version during observation.
 
 The canary clock starts when its heartbeat reports the candidate installed. Defaults are 20 minutes minimum,
 five completed runs minimum, and 60 minutes maximum. The timer checks once a minute. Override the defaults in
-`/etc/aiflow/autodeploy.env`:
+`/etc/aiflow/deploy.env`:
 
 ```ini
 AIFLOW4_CANARY_MIN_AGE_S=1200
@@ -31,7 +33,9 @@ a `lost` run. The baseline is completed runs from the previous release on the ot
 before the canary started. A rollback requires at least the configured number of canary infrastructure failures
 and a canary failure rate at least the configured multiple of the baseline rate. A zero-run baseline has a zero
 rate. A failed candidate is rejected until a newer release is published; rollback clears its node override,
-opens a critical incident and creates a `flow-bug` Jira Bug with the suspected tag commit.
+opens a critical incident and creates a `flow-bug` Jira Bug with the suspected commit. If Jira is unavailable,
+the pending ticket payload and latest failure are stored in the registry and retried on later auto-deploy passes,
+even after the canary state is removed.
 
 When the minimum time and run count are met, the deployer promotes the release to the control plane and changes
 `CURRENT`; other nodes then receive it on heartbeat. At the maximum time, a candidate with fewer than the

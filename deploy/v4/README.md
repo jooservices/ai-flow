@@ -40,6 +40,19 @@ to OpenObserve (`/o2/`), Mailpit (`/mail/`) and Gatus, and the JOOservices copyr
 All values come from `/v1/state` (`version`, `env`, `control_repo`, `versions`, `links`). The Gatus link
 defaults to `/gatus/`; set `AIFLOW4_GATUS_URL` on the control API when Gatus is published elsewhere.
 
+### Daily analytics
+
+`GET /v1/analytics/daily?days=14` (1 to 90 days, default 14; optional `project=KEY`) returns one row per
+UTC day, project and account that had runs: `runs`, `done`, `failed`, `rework`, `merged`, `tokens_in`,
+`tokens_out`, `cost_usd` and `median_run_s`. A day is the UTC date a run started, and the window includes
+today. `failed` counts failed, blocked, timeout and lost runs, the same set as the Command Center 24 h total.
+`runs` also counts runs that are still running and runs with any other outcome (quota, human, released).
+The median uses finished runs only. The numbers are read live from the `runs` table, so there is no rollup.
+
+The Delivery view shows the selected project in an **Analytics** panel: a 14-day inline SVG bar chart of runs
+per day, split into done or merged, rework, failed and other, and a table with one row per day and account.
+The panel refreshes every minute.
+
 ## Memory (related past work)
 
 Migration `002_memory` adds the `memory` table: one row per `(kind, ref)` with `kind` one of `ticket` (ref =

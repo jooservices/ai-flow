@@ -615,6 +615,63 @@ def test_agent_retries_stack_preflight_after_release_and_versions_lock_changes(m
     assert prepared[2][1]["tools"]["composer"] == "2.8"
 
 
+def test_agent_applies_the_preflight_probe_once_and_keeps_refreshing_tool_versions(monkeypatch):
+    import time
+
+    stop = threading.Event()
+    prepared = threading.Event()
+    clock = {"now": 0.0}
+    reported = []
+    probes = []
+    desired = {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}},
+               "workers": [], "accounts": []}
+
+    class FakeApi:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, path, body=None, **kwargs):
+            if path.endswith("/heartbeat"):
+                if len(reported) == 1:
+                    assert prepared.wait(1)
+                    time.sleep(0.02)
+                reported.append(dict(body["tools"]))
+                clock["now"] += 400  # one heartbeat later; the refresh is due every 600 seconds
+                if len(reported) == 8:
+                    stop.set()
+                return {"desired": desired}
+            return {"operation": None}
+
+    def fake_tool_versions(*_names):
+        probes.append(clock["now"])
+        # The first probe runs at start; PHP is repaired by hand after the post-install preflight.
+        return {"php": "missing"} if len(probes) == 1 else {"php": "PHP 8.3.7"}
+
+    def prepare(stacks, versions):
+        prepared.set()
+        return {"tools": {"php": "missing"}}
+
+    monkeypatch.setattr(agent, "time", SimpleNamespace(time=lambda: clock["now"]))
+    monkeypatch.setattr(agent, "ControlClient", FakeApi)
+    monkeypatch.setattr(agent, "metrics", lambda previous: ({}, previous))
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "tool_versions", fake_tool_versions)
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+    monkeypatch.setattr(operations, "prepare_project_toolchains", prepare)
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+
+    runner = threading.Thread(target=agent.run_agent, args=("http://control", "node1", "token"),
+                              kwargs={"every_s": 0, "manage_workers": False, "stop": stop})
+    runner.start()
+    runner.join(3)
+    assert not runner.is_alive()
+    assert len(reported) == 8
+    assert reported[2]["php"] == "missing"  # the post-install probe is reported once
+    assert len(probes) >= 2  # the 10-minute tool_versions() refresh still runs after preparation
+    assert reported[-1]["php"] == "PHP 8.3.7"
+
+
 def test_server_installer_argv_comes_from_the_module_whitelist():
     binary = "/opt/server-installer/v1.1.0/bin/server-installer"
     assert str(operations.SERVER_INSTALLER) == binary

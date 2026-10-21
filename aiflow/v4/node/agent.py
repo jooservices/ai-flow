@@ -481,9 +481,11 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 toolchain_thread = threading.Thread(target=prepare, name=f"aiflow4-toolchain-{name}", daemon=True)
                 toolchain_thread.start()
             if toolchain_thread is not None and not toolchain_thread.is_alive():
+                # Apply the post-install probe once; later heartbeats rely on the regular tool_versions() refresh
+                # so tools fixed by hand or by repair are reported again.
                 with toolchain_lock:
-                    prepared_tools = toolchain_result.get("tools")
-                if isinstance(prepared_tools, dict):
+                    prepared_tools = toolchain_result.pop("tools", None)
+                if isinstance(prepared_tools, dict) and prepared_tools:
                     tools.update({str(k): str(v) for k, v in prepared_tools.items()})
                     tools_at = time.time()
             if pending_network_events:

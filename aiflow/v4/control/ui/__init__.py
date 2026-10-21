@@ -1,7 +1,7 @@
 """Dashboards: Command Center (/cc) and Delivery view (/delivery), one page fed by /v1/state.
 
 The page is the console designed in the demo, rendering the live registry instead of a simulation. Extra
-read-only endpoints give the drawers their detail (runs, events and audited writes of one ticket).
+read-only endpoints give the drawers their detail (runs, events, audited writes and time segments of one ticket).
 """
 from __future__ import annotations
 
@@ -41,7 +41,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
         for r in runs:
             r["id"] = str(r["id"])
             r["cost_usd"] = float(r["cost_usd"])
-        return {"ticket": t, "runs": runs, "events": events, "writes": writes,
+        from ..timeline import timeline
+        return {"ticket": t, "runs": runs, "events": events, "writes": writes, "timeline": timeline(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
     @app.get("/v1/services")

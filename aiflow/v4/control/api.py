@@ -267,7 +267,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics), node))
         if prev and prev["status"] != "online":
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
-            ctx.db.run("UPDATE incidents SET closed_at=now() WHERE kind='node_down' AND subject=%s AND closed_at IS NULL", (node,))
+            from .incidents import close_incident
+            close_incident(ctx, "node_down", node, "heartbeats are back")
         for w in body.workers:
             acc = str(w.get("account", ""))
             if not acc:

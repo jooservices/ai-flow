@@ -415,8 +415,8 @@ function incBy(id) { return D().incidents.concat(D().incidents_recent || []).fil
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function nodeLabel(n) { return { online: 'Online', offline: 'Offline', draining: 'Draining', joined: 'Joining' }[n.status] || n.status; }
-function accTone(a) { return { working: 'info', probing: 'info', idle: 'ok', cooldown: 'warn', signed_out: 'crit', error: 'crit', stopped: 'muted', unknown: 'muted' }[a.status] || 'muted'; }
-function accLabel(a) { return { working: 'Working', probing: 'Checking', idle: 'Ready', cooldown: 'No quota', signed_out: 'Signed out', error: 'Failing', stopped: 'Stopped', unknown: 'No worker' }[a.status] || a.status; }
+function accTone(a) { return { working: 'info', probing: 'info', idle: 'ok', cooldown: 'warn', signed_out: 'crit', error: 'crit', stopped: 'muted', unknown: 'muted', node_offline: 'crit' }[a.status] || 'muted'; }
+function accLabel(a) { return { working: 'Working', probing: 'Checking', idle: 'Ready', cooldown: 'No quota', signed_out: 'Signed out', error: 'Failing', stopped: 'Stopped', unknown: 'No worker', node_offline: 'Node offline' }[a.status] || a.status; }
 function doing(a) {
   if (a.run) return a.run.ticket + ' · ' + a.run.step + ' · ' + mmss((a.run.elapsed_s || 0) + since());
   if (a.status === 'cooldown') return 'paused until ' + (a.cooldown_until ? when(a.cooldown_until) : 'reset') + (a.last_error ? ' · ' + a.last_error : '');
@@ -424,6 +424,7 @@ function doing(a) {
   if (a.status === 'error') return a.last_error || 'last check failed';
   if (a.status === 'unknown') return 'no worker reported yet';
   if (a.status === 'stopped') return 'worker stopped';
+  if (a.status === 'node_offline') return 'its node ' + a.node + ' is offline';
   return 'waiting for a ready ticket';
 }
 function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
@@ -642,7 +643,7 @@ function renderCC() {
 function accMatch(a, f) {
   if (f === 'all') return true;
   if (f === 'working') return a.status === 'working' || a.status === 'probing';
-  if (f === 'bad') return a.status === 'signed_out' || a.status === 'error' || a.status === 'unknown' || a.status === 'stopped';
+  if (f === 'bad') return a.status === 'signed_out' || a.status === 'error' || a.status === 'unknown' || a.status === 'stopped' || a.status === 'node_offline';
   return a.status === f;
 }
 function incCard(i, closed) {

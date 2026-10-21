@@ -37,9 +37,10 @@ class Jira:
         self.last_limits: dict[str, str] = {}
 
     # --- plumbing -------------------------------------------------------------------------------------------
-    def call(self, method: str, path: str, json: Any = None, ok: tuple[int, ...] = (200, 201, 204)) -> Any:
+    def call(self, method: str, path: str, json: Any = None, ok: tuple[int, ...] = (200, 201, 204),
+             files: Any = None, headers: dict[str, str] | None = None) -> Any:
         for attempt in range(6):
-            r = self.c.request(method, path, json=json)
+            r = self.c.request(method, path, json=json, files=files, headers=headers)
             self.last_limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-ratelimit")}
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(min(30, int(r.headers.get("Retry-After", "0") or 0) or 2 ** attempt))
@@ -112,6 +113,11 @@ class Jira:
         if parent:
             fields["parent"] = {"key": parent}
         return self.call("POST", "/rest/api/3/issue", {"fields": fields})["key"]
+
+    def add_attachment(self, key: str, filename: str, content: bytes, content_type: str) -> None:
+        """Attach a stakeholder screenshot to an issue."""
+        self.call("POST", f"/rest/api/3/issue/{key}/attachments", ok=(200,),
+                  files={"file": (filename, content, content_type)}, headers={"X-Atlassian-Token": "no-check"})
 
     def transition_to(self, key: str, target: str) -> str:
         """Walk the workflow until `key` reaches `target`; direct transitions first, then the forward order."""

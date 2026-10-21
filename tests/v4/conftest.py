@@ -73,6 +73,7 @@ class FakeJira:
         self.recent_comment_data: dict[str, list[dict]] = {}
         self.fields: list[tuple[str, dict]] = []
         self.labels: list[tuple[str, str, str]] = []
+        self.attachments: list[tuple[str, str, bytes, str]] = []
 
     def transition_to(self, key: str, target: str) -> str:
         self.status_of[key] = target
@@ -112,6 +113,9 @@ class FakeJira:
                              "issuetype": issuetype, "labels": list(labels or []), "parent": parent})
         self.status_of[key] = self.initial_status
         return key
+
+    def add_attachment(self, key, filename, content, content_type):
+        self.attachments.append((key, filename, content, content_type))
 
 class FakeGitHub:
     def __init__(self) -> None:

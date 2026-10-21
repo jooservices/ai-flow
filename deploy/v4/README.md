@@ -23,6 +23,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
 - [Join a node](../../docs/v4/node-join.md): Command Center issues a five-minute one-use token and the pinned server-installer CLI bootstraps a node
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
+- [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 
 ## Tools on a node
 

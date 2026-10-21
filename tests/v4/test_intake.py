@@ -17,6 +17,22 @@ Acceptance criteria:
 Technical notes: WordPress theme template.
 Definition of done:
 - tests cover AC1"""
+BUG_REWRITE = """Business requirement: Visitors need checkout to complete reliably.
+Steps to reproduce: Submit a cart with a valid payment method.
+Expected result: The order completes and a confirmation is shown.
+Actual result: Checkout returns an error.
+Environment: Production, current Chrome.
+Acceptance criteria:
+- AC1: A valid checkout completes.
+Technical notes: Keep the payment integration backward compatible.
+Definition of done:
+- Tests cover AC1."""
+EXPECTED_EXTRA_SECTIONS = {
+    "Epic": (), "Story": (), "Feature": (), "Bug": ("Steps to reproduce:", "Expected result:", "Actual result:", "Environment:"),
+    "Hotfix": ("Steps to reproduce:", "Expected result:", "Actual result:", "Environment:"),
+    "Tech Debt": ("Problem:", "Risk:"), "Chore": (), "Spike": ("Question:", "Timebox:", "Output:"),
+    "Docs": ("Reader:",), "Security": ("Threat:", "Impact:"), "Sub-task": (),
+}
 
 
 @pytest.fixture
@@ -63,6 +79,15 @@ def test_intake_tickets_are_offered_to_intake_refiners_only(iclient, ctx):
     assert candidates(iclient, "grok-01") == []  # held by the run
     # a dev claim of an Intake ticket is refused
     assert iclient.post("/v1/work/claim", json={"ticket": "TESTWP-20", "account": "claude-01", "step": "dev"}).status_code == 409
+
+
+def test_ready_hold_and_senior_labels_keep_their_existing_routing(iclient, ctx):
+    add_ticket(ctx.db, "TESTWP-32", status="To Do", labels=("aiflow-ready", "tier-senior"))
+    add_ticket(ctx.db, "TESTWP-33", status="To Do", labels=("aiflow-ready", "tier-senior", "aiflow-hold"))
+
+    assert ("TESTWP-32", "dev") not in candidates(iclient, "grok-01")  # middle-tier account
+    assert ("TESTWP-32", "dev") in candidates(iclient, "claude-01")  # senior-tier account
+    assert ("TESTWP-33", "dev") not in candidates(iclient, "claude-01")  # hold still takes precedence
 
 
 def test_failed_intake_waits_before_the_next_try(iclient, ctx):
@@ -217,6 +242,8 @@ def test_rewrite_keeps_the_original_and_queues_the_ticket(iclient, ctx, tmp_path
     assert res["outcome"] == "refined"
     prompt = adapter.prompts[0]
     assert "make a portfolio page pls" in prompt and "Every AC needs a PHPUnit test." in prompt  # AC2
+    assert "Jira issue type: Task. Use the Story template." in prompt  # missing Jira types still default to Task
+    assert "Business requirement:" in prompt and "- AC1:" in prompt
     assert adapter.extra_env == {}  # the project's node-local secrets never reach an intake run
     comments = [t for k, t in ctx.jira.comments if k == "TESTWP-27"]
     assert len(comments) == 1 and "Original description:" in comments[0] and "make a portfolio page pls" in comments[0]
@@ -226,6 +253,83 @@ def test_rewrite_keeps_the_original_and_queues_the_ticket(iclient, ctx, tmp_path
     actions = [a["action"] for a in ctx.db.all("SELECT action FROM write_audit WHERE ticket='TESTWP-27' ORDER BY id")]
     assert actions == ["token", "comment", "description", "fields", "transition"]  # original saved before the rewrite
     assert ctx.db.one("SELECT outcome FROM runs WHERE ticket_key='TESTWP-27'")["outcome"] == "refined"
+
+
+def test_typed_intake_uses_bug_template_and_preserves_known_and_unknown_labels(iclient, ctx, tmp_path, monkeypatch):
+    labels = (
+        "aiflow-ready", "rework", "require-human", "tier-senior", "ai-grok", "area-flow",
+        "regression", "uat-bug", "blocked-external", "needs-design", "breaking-change", "perf", "a11y", "seo",
+        "security", "customer-custom",
+    )
+    add_ticket(ctx.db, "TESTWP-34", status="Intake", labels=labels)
+    ctx.db.run("UPDATE tickets SET type='Bug' WHERE key='TESTWP-34'")
+    res, adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-34",
+                              f"DESCRIPTION:\n<<<\n{BUG_REWRITE}\n>>>\nINTAKE: REWRITE\n")
+
+    assert res["outcome"] == "refined"
+    prompt = adapter.prompts[0]
+    assert "Jira issue type: Bug. Use the Bug template." in prompt
+    for section in ("Steps to reproduce:", "Expected result:", "Actual result:", "Environment:"):
+        assert section in prompt
+    assert "ai-grok (recognized)" in prompt and "area-flow (recognized)" in prompt
+    assert "customer-custom (unrecognized; preserve)" in prompt
+    assert set(labels) | {"aiflow-ready"} == set(ctx.db.one("SELECT labels FROM tickets WHERE key='TESTWP-34'")["labels"])
+    assert ctx.jira.labels == [("add", "TESTWP-34", "aiflow-ready")]
+
+
+@pytest.mark.parametrize("issue_type,extras", EXPECTED_EXTRA_SECTIONS.items())
+def test_each_issue_type_requires_its_documented_template_sections(issue_type, extras):
+    common_and_extras = ("Business requirement:", *extras, "Acceptance criteria:", "Technical notes:",
+                         "Definition of done:")
+    assert intake.required_sections(issue_type) == common_and_extras
+    description = "\n".join(
+        f"{section}\n- AC1: observable behavior" if section == "Acceptance criteria:" else f"{section} example"
+        for section in common_and_extras
+    )
+    wrapped = f"DESCRIPTION:\n<<<\n{description}\n>>>\nINTAKE: REWRITE"
+    assert intake.parse(wrapped, issue_type) == ("rewrite", description)
+    if extras:
+        missing = description.replace(f"{extras[0]} example\n", "")
+        kind, why = intake.parse(f"DESCRIPTION:\n<<<\n{missing}\n>>>\nINTAKE: REWRITE", issue_type)
+        assert kind == "invalid" and extras[0] in why
+
+
+@pytest.mark.parametrize("issue_type", [None, "", "Task", "Custom type"])
+def test_unknown_and_missing_issue_types_use_story_template(issue_type):
+    assert intake.effective_issue_type(issue_type) == "Story"
+    assert intake.required_sections(issue_type) == intake.required_sections("Story")
+    assert intake.parse(f"DESCRIPTION:\n<<<\n{REWRITE}\n>>>\nINTAKE: REWRITE", issue_type)[0] == "rewrite"
+
+
+def test_jira_mirror_keeps_default_task_type_when_issue_type_is_missing(ctx):
+    mirrored = ctx.jira.normalize({"key": "TESTWP-35", "fields": {}})
+    assert mirrored["type"] == "Task"
+    assert intake.effective_issue_type(mirrored["type"]) == "Story"
+
+
+def test_intake_recognizes_all_label_names_and_patterns():
+    recognized = (
+        "aiflow-ready", "aiflow-hold", "rework", "require-human", "tier-senior", "ai-grok", "area-core",
+        "area-theme", "area-plugin", "area-platform", "area-flow", "regression", "uat-bug", "blocked-external",
+        "needs-design", "breaking-change", "perf", "a11y", "seo", "security",
+    )
+    assert all(intake.is_known_label(label) for label in recognized)
+    assert not intake.is_known_label("area-other")
+    assert not intake.is_known_label("customer-custom")
+
+
+def test_issue_type_document_covers_templates_labels_and_jira_setup_plan():
+    doc = (intake.REPO_ROOT / "docs" / "v4" / "issue-types.md").read_text()
+    for issue_type in EXPECTED_EXTRA_SECTIONS:
+        assert f"| {issue_type} |" in doc
+    for section in ("Business requirement", "Acceptance criteria", "Technical notes", "Definition of done",
+                    "Steps to reproduce", "Expected result", "Actual result", "Environment", "Question", "Timebox",
+                    "Output", "Problem", "Risk", "Threat", "Impact", "Reader"):
+        assert section in doc
+    for label in ("aiflow-ready", "aiflow-hold", "rework", "require-human", "tier-senior", "ai-", "area-", "regression",
+                  "uat-bug", "blocked-external", "needs-design", "breaking-change", "perf", "a11y", "seo", "security"):
+        assert label in doc
+    assert "TESTFLOW-50" in doc and "owner" in doc and "Task" in doc
 
 
 def test_questions_move_the_ticket_to_needs_owner(iclient, ctx, tmp_path, monkeypatch):

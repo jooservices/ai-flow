@@ -1,0 +1,146 @@
+{
+  "version": 8,
+  "title": "AI Flow events and runs",
+  "description": "Run outcomes, AI time, policy denials, incidents and node heartbeat activity from the aiflow4_events stream.",
+  "defaultDatetimeDuration": {
+    "type": "relative",
+    "relativeTimePeriod": "7d"
+  },
+  "tabs": [
+    {
+      "tabId": "default",
+      "name": "Overview",
+      "panels": [
+        {
+          "id": "runs-per-hour-outcome",
+          "type": "bar",
+          "title": "Runs per hour by outcome",
+          "description": "Finished runs grouped by hour and outcome.",
+          "config": {"show_legends": true},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp, '1 hour') AS hour, outcome, count(*) AS runs FROM \"aiflow4_events\" WHERE type = 'run.finished' GROUP BY hour, outcome ORDER BY hour",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Hour", "alias": "hour", "column": "hour"}],
+                "y": [{"label": "Runs", "alias": "runs", "column": "runs"}],
+                "z": [],
+                "breakdown": [{"label": "Outcome", "alias": "outcome", "column": "outcome"}],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 0, "y": 0, "w": 96, "h": 18, "i": 0}
+        },
+        {
+          "id": "ai-time-per-account",
+          "type": "bar",
+          "title": "AI time per account",
+          "description": "Total finished-run duration in minutes for each AI account.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT account, SUM(duration_ms) / 60000.0 AS ai_minutes FROM \"aiflow4_events\" WHERE type = 'run.finished' AND duration_ms IS NOT NULL GROUP BY account ORDER BY ai_minutes DESC",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Account", "alias": "account", "column": "account"}],
+                "y": [{"label": "AI minutes", "alias": "ai_minutes", "column": "ai_minutes"}],
+                "z": [],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 96, "y": 0, "w": 96, "h": 18, "i": 1}
+        },
+        {
+          "id": "policy-denials",
+          "type": "line",
+          "title": "Policy denials",
+          "description": "Denied policy decisions per hour, grouped by account.",
+          "config": {"show_legends": true},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp, '1 hour') AS hour, account, count(*) AS denials FROM \"aiflow4_events\" WHERE type = 'policy.decision' AND outcome = 'deny' GROUP BY hour, account ORDER BY hour",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Hour", "alias": "hour", "column": "hour"}],
+                "y": [{"label": "Denials", "alias": "denials", "column": "denials"}],
+                "z": [],
+                "breakdown": [{"label": "Account", "alias": "account", "column": "account"}],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 0, "y": 18, "w": 96, "h": 18, "i": 2}
+        },
+        {
+          "id": "incidents-opened",
+          "type": "bar",
+          "title": "Incidents opened",
+          "description": "Incidents opened per hour, grouped by severity.",
+          "config": {"show_legends": true},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp, '1 hour') AS hour, outcome AS severity, count(*) AS incidents FROM \"aiflow4_events\" WHERE type = 'incident.opened' GROUP BY hour, severity ORDER BY hour",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Hour", "alias": "hour", "column": "hour"}],
+                "y": [{"label": "Incidents", "alias": "incidents", "column": "incidents"}],
+                "z": [],
+                "breakdown": [{"label": "Severity", "alias": "severity", "column": "severity"}],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 96, "y": 18, "w": 96, "h": 18, "i": 3}
+        },
+        {
+          "id": "node-heartbeats",
+          "type": "line",
+          "title": "Node heartbeats",
+          "description": "Successful node heartbeats per minute, grouped by node.",
+          "config": {"show_legends": true},
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp, '1 minute') AS minute, node, count(*) AS heartbeats FROM \"aiflow4_events\" WHERE type = 'node.heartbeat' GROUP BY minute, node ORDER BY minute",
+              "vrlFunctionQuery": "",
+              "customQuery": true,
+              "fields": {
+                "stream": "aiflow4_events",
+                "stream_type": "logs",
+                "x": [{"label": "Minute", "alias": "minute", "column": "minute"}],
+                "y": [{"label": "Heartbeats", "alias": "heartbeats", "column": "heartbeats"}],
+                "z": [],
+                "breakdown": [{"label": "Node", "alias": "node", "column": "node"}],
+                "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}
+              },
+              "config": {}
+            }
+          ],
+          "layout": {"x": 0, "y": 36, "w": 192, "h": 18, "i": 4}
+        }
+      ]
+    }
+  ]
+}

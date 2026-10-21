@@ -267,7 +267,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, last_heartbeat=now() WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics), node))
-        ctx.events.emit("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
+        ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
                         slots_used=body.slots_used, release_version=body.release_version, metrics=body.metrics)
         if prev and prev["status"] != "online":
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")

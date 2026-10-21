@@ -1,9 +1,13 @@
+import importlib.util
 import json
 from pathlib import Path
 
-from deploy.v4.o2 import provision as provision_module
-
-DASHBOARDS = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "o2" / "dashboards"
+O2_DIR = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "o2"
+DASHBOARDS = O2_DIR / "dashboards"
+# deploy/ is not a package and the repo root is not on sys.path under `uv run pytest`: load the script by path
+_spec = importlib.util.spec_from_file_location("aiflow4_o2_provision", O2_DIR / "provision.py")
+provision_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(provision_module)
 EXPECTED_PANELS = {
     "Runs per hour by outcome": "run.finished",
     "AI time per account": "run.finished",

@@ -57,8 +57,9 @@ The panel refreshes every minute.
 
 `o2/dashboards/aiflow-events.json` defines the **AI Flow events and runs** dashboard with panels for runs per
 hour by outcome, AI time per account, policy denials, incidents opened and node heartbeats. The panels query
-the `aiflow4_events` log stream populated by the control plane. Node heartbeat data is recorded once per
-successful heartbeat.
+the `aiflow4_events` log stream populated by the control plane. Each successful node heartbeat is sent to
+OpenObserve as a `node.heartbeat` event only; it is not stored in the registry `events` table, so the Command
+Center event list and the table do not fill with heartbeats.
 
 From the repository root on a host that can reach OpenObserve, set the same URL and basic-auth value used by
 event shipping, then run the provisioner:

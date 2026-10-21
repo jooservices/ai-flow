@@ -1,6 +1,7 @@
 """Background loops of the control plane (process `aiflow4 control-loops`).
 
-jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes.
+jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes. A changed status or
+            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline).
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
             accounts whose cooldown ended. Opens and closes incidents, alerts people on critical ones.
 Each loop runs on one control-plane instance at a time (leader key in Redis).
@@ -32,6 +33,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
+        old = ctx.db.one("SELECT status, labels FROM tickets WHERE key=%s", (t["key"],))
         ctx.db.run(
             "INSERT INTO tickets (key, project, status, type, priority, labels, summary, description, parent_key, blocked_by,"
             " jira_created, jira_updated, synced_at) VALUES (%(key)s,%(project)s,%(status)s,%(type)s,%(priority)s,%(labels)s,"
@@ -40,6 +42,12 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " labels=EXCLUDED.labels, summary=EXCLUDED.summary, description=EXCLUDED.description,"
             " parent_key=EXCLUDED.parent_key, blocked_by=EXCLUDED.blocked_by, jira_updated=EXCLUDED.jira_updated, synced_at=now()",
             t)
+        ready = "aiflow-ready" in t["labels"]
+        if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
+            # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
+            ctx.events.emit("ticket.status", ticket=t["key"], project=t["project"], outcome=t["status"],
+                            reason=f"from {old['status']}" if old else "first seen", from_status=old["status"] if old else "",
+                            ready=ready, source="jira_sync")
         n += 1
     return n
 
@@ -100,6 +108,8 @@ def watchdog(ctx: Ctx) -> None:
                                    " VALUES ('jira','transition',%s,%s,%s,'control',true,'To Do (lease lost)')",
                                    (r["ticket_key"], str(r["id"]), r["fence"]))
                         ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (r["ticket_key"],))
+                        ctx.events.emit("jira.transition", ticket=r["ticket_key"], run_id=str(r["id"]), fence=r["fence"],
+                                        account="control", node=r["node"], outcome="To Do", reason="lease lost")
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not requeue %s: %s", r["ticket_key"], e)
             continue

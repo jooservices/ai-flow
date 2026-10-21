@@ -631,4 +631,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         from .state import snapshot
         return snapshot(ctx)
 
+    @app.get("/v1/tickets/{key}/timeline")
+    def ticket_timeline(key: str) -> dict:
+        from .timeline import timeline
+        tl = timeline(ctx.db, key)
+        if tl is None:
+            raise HTTPException(404, "unknown ticket")
+        return tl
+
     return app

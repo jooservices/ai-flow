@@ -28,3 +28,27 @@ Download `codex-code-mode-host` from the same GitHub release as the installed `c
 (<https://github.com/openai/codex/releases>) and put the executable next to the `codex` binary, in the same
 directory on `PATH` (for example `/usr/local/bin`). Install both from the same release: a host from a
 different release may not speak the protocol of the `codex` it runs beside.
+
+## Ticket timeline
+
+`GET /v1/tickets/{key}/timeline` shows where a ticket's time went. It is computed from the registry's events and
+runs, not from Jira worklogs. The ticket drawer in the console shows the totals and a coloured bar; hover a
+segment to see its kind, duration, times, status, account and outcome.
+
+| Segment | Meaning |
+|---|---|
+| `queued` | waits for an AI: To Do with `aiflow-ready`, or In Verify, while no run works on it |
+| `dev` | one dev run, from claim to result |
+| `rework` | one dev run after a verify sent the ticket back (`round` 1, 2, ...) |
+| `verify` | one verify run |
+| `waiting` | waits on a person: Needs owner or Human review |
+| `ai` | a run of another step (intake, master, qa) |
+
+Totals: `lead_time_s` (first time ready to Done, or to now while open), `ai_s` (all runs), `queue_s`, `waiting_s`,
+`rework_rounds` (verify runs that sent the ticket back), `runs` and `runs_by_outcome`. Time in other statuses
+(Backlog, Intake, To Do without `aiflow-ready`) is in no segment.
+
+Moves made through the control API are recorded as `jira.transition` events. Moves and `aiflow-ready` changes
+made by people in Jira are recorded by the Jira sync as `ticket.status` events (`from_status`, `ready`), at most
+one sync (20 s) late. Tickets from before the sync recorded `ticket.status` have no ready time, so their lead
+time starts at the first known event or run.

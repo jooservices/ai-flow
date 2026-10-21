@@ -26,6 +26,7 @@ from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from . import business, memory
+from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
 from .github import GitHubApp
@@ -212,6 +213,11 @@ class MasterActionBody(BaseModel):
     target_status: str = ""
 
 
+class MasterFlowBugsBody(BaseModel):
+    run_id: str
+    fence: int
+
+
 class ChangeRequestBody(BaseModel):
     title: str = ""
     description: str = ""
@@ -363,6 +369,102 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"scope": "global", "captured_at": now.isoformat(), "open_incidents": incidents,
                 "needs_owner": needs_owner, "running_clocks": clocks, "offline_nodes": offline_nodes,
                 "quota_accounts": quota_accounts, "quota_incidents": quota_incidents}
+
+    def process_flow_bugs(run: dict) -> list[dict]:
+        """Create or update detected TESTFLOW Bugs from this valid, fenced master cycle."""
+        if not ctx.jira:
+            return []
+        reports: list[dict] = []
+        terminal = {"done", "closed", "resolved", "cancelled", "canceled"}
+        for candidate in flow_bug_candidates(ctx):
+            tracker = ctx.db.one("SELECT ticket_key, run_ids, repeat_count FROM flow_bug_tracker WHERE signature=%s",
+                                 (candidate["signature"],))
+            if tracker:
+                ticket_key = tracker["ticket_key"]
+                try:
+                    status = ctx.jira.status(ticket_key)
+                except Exception as exc:  # Jira reads can fail transiently; retry on the next master cycle.
+                    log.warning("could not check status of flow-bug %s: %s", ticket_key, type(exc).__name__)
+                    continue
+                ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, ticket_key))
+                if status.casefold() not in terminal:
+                    known = set(tracker["run_ids"] or [])
+                    new_runs = [r for r in candidate["runs"] if r["id"] not in known]
+                    if new_runs:
+                        repeat_count = int(tracker["repeat_count"]) + len(new_runs)
+                        total = len(known) + len(new_runs)
+                        body = ("AI Flow · master · repeated flow error\n"
+                                f"Pattern: {candidate['pattern']}\n"
+                                f"Repeat count: {repeat_count} additional failed runs since this Bug was opened "
+                                f"({total} matching runs recorded).\n"
+                                f"Affected tickets: {', '.join(candidate['tickets'])}\n"
+                                "New run IDs: " + ", ".join(r["id"] for r in new_runs))
+                        comment_id = ctx.jira.comment(ticket_key, body)
+                        all_ids = sorted(known | {r["id"] for r in new_runs})
+                        ctx.db.run("UPDATE flow_bug_tracker SET run_ids=%s, repeat_count=%s, updated_at=now()"
+                                   " WHERE signature=%s", (all_ids, repeat_count, candidate["signature"]))
+                        audit("jira", "flow_bug_repeat", ticket_key, str(run["id"]), run["fence"],
+                              run["account_id"], True, comment_id,
+                              {"signature": candidate["signature"], "repeat_count": repeat_count,
+                               "new_run_ids": [r["id"] for r in new_runs]})
+                        ctx.events.emit("flow_bug.repeated", ticket=ticket_key, project="TESTFLOW",
+                                        run_id=str(run["id"]), fence=run["fence"], account=run["account_id"],
+                                        node=run["node"], outcome="commented", reason=candidate["pattern"],
+                                        data={"repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
+                        reports.append({"action": "repeated", "ticket": ticket_key,
+                                        "repeat_count": repeat_count, "new_run_ids": [r["id"] for r in new_runs]})
+                    continue
+
+            run_lines = [f"- {item['id']} · {item['ticket']} · {item['step']} · node {item['node']} · release {item['release']}"
+                         for item in candidate["runs"]]
+            reason = ("at least three matching failed runs across at least two TESTFLOW tickets in 30 minutes"
+                      if len(candidate["runs"]) >= 3 and len(candidate["tickets"]) >= 2 else
+                      "a ticket_stuck incident for this error pattern remained open over 30 minutes")
+            description = ("Automatically detected by the AI Flow master cycle.\n\n"
+                           f"Fingerprint: {candidate['signature']}\n"
+                           f"Pattern: {candidate['pattern']}\n"
+                           f"Error kind: {candidate['error_kind']}\n"
+                           f"Detection: {reason}.\n"
+                           f"Affected tickets: {', '.join(candidate['tickets'])}\n"
+                           f"Steps: {', '.join(candidate['steps'])}\n"
+                           f"Nodes: {', '.join(candidate['nodes'])}\n"
+                           f"AI Flow releases: {', '.join(candidate['releases'])}\n"
+                           "Related runs:\n" + "\n".join(run_lines) + "\n\n"
+                           f"Suggested fix: {suggested_flow_fix(candidate)}")
+            summary = f"[Flow bug] {candidate['pattern'].splitlines()[0]}"[:240]
+            try:
+                ticket_key = ctx.jira.create_issue("TESTFLOW", summary, description, issuetype="Bug",
+                                                   labels=["flow-bug"])
+                status = ctx.jira.transition_to(ticket_key, "Intake")
+                if status != "Intake":
+                    raise RuntimeError("new flow-bug did not reach Intake")
+            except Exception as exc:  # Keep the monitoring snapshot available and retry detection next cycle.
+                audit("jira", "flow_bug_create", "", str(run["id"]), run["fence"], run["account_id"], False,
+                      "Jira issue creation or Intake transition failed",
+                      {"signature": candidate["signature"], "error": type(exc).__name__})
+                log.warning("could not create flow-bug for signature %s: %s",
+                            candidate["signature"], type(exc).__name__)
+                continue
+            ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
+                       " VALUES (%s,'TESTFLOW','Intake','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO UPDATE SET"
+                       " status='Intake', type='Bug', labels=EXCLUDED.labels, summary=EXCLUDED.summary,"
+                       " description=EXCLUDED.description, synced_at=now()",
+                       (ticket_key, ["flow-bug"], summary, description))
+            run_ids = sorted(item["id"] for item in candidate["runs"])
+            ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, run_ids, repeat_count)"
+                       " VALUES (%s,%s,%s,0) ON CONFLICT (signature) DO UPDATE SET ticket_key=EXCLUDED.ticket_key,"
+                       " run_ids=EXCLUDED.run_ids, repeat_count=0, updated_at=now()",
+                       (candidate["signature"], ticket_key, run_ids))
+            audit("jira", "flow_bug_create", ticket_key, str(run["id"]), run["fence"], run["account_id"], True,
+                  status, {"signature": candidate["signature"], "run_ids": run_ids,
+                           "tickets": candidate["tickets"], "labels": ["flow-bug"]})
+            ctx.events.emit("flow_bug.created", ticket=ticket_key, project="TESTFLOW", run_id=str(run["id"]),
+                            fence=run["fence"], account=run["account_id"], node=run["node"], outcome="Intake",
+                            reason=candidate["pattern"], data={"signature": candidate["signature"],
+                                                               "run_ids": run_ids, "tickets": candidate["tickets"]})
+            reports.append({"action": "created", "ticket": ticket_key, "signature": candidate["signature"],
+                            "run_ids": run_ids})
+        return reports
 
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/healthz")
@@ -611,6 +713,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
+        # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
+        out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
         return out
 
     def master_ready(account_id: str, node: str) -> bool:
@@ -832,6 +936,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     def master_context(run_id: str, fence: int, node: str = Depends(node_auth)) -> dict:
         master_run(run_id, fence, node, "context")
         return master_snapshot()
+
+    @app.post("/v1/master/flow-bugs")
+    def master_flow_bugs(body: MasterFlowBugsBody, node: str = Depends(node_auth)) -> dict:
+        run = master_run(body.run_id, body.fence, node, "flow-bug-scan")
+        return {"reports": process_flow_bugs(run)}
 
     @app.post("/v1/master/actions")
     def master_action(body: MasterActionBody, node: str = Depends(node_auth)) -> dict:

@@ -16,6 +16,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
+- [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 
 ## Tools on a node
 

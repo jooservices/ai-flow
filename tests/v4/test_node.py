@@ -164,6 +164,68 @@ def test_node_heartbeat_reports_policy_relay_health(monkeypatch):
     assert relays[0].started and relays[0].stopped
 
 
+def test_node_agent_reports_cli_expiry_and_queued_heartbeat_retry(monkeypatch):
+    expiry = "2026-10-25T10:00:00+00:00"
+    state = {"account": "claude-01", "state": "idle", "probe": {"credential_expires_at": expiry}}
+    assert agent.credential_expiries([state, {"account": "codex-01", "probe": {"credential_expires_at": None}}]) == {
+        "claude-01": expiry, "codex-01": None}
+
+    class FakeApi:
+        def __init__(self, *args, **kwargs):
+            self.heartbeats = 0
+            self.event_batches = []
+            self.calls = []
+
+        def call(self, method, path, body=None, **kwargs):
+            self.calls.append((method, path, body))
+            if path.endswith("/heartbeat"):
+                self.heartbeats += 1
+                if self.heartbeats == 1:
+                    raise RuntimeError("control API unreachable: timeout")
+                self.heartbeat_body = body
+                return {"desired": {"workers": [], "release": ""}}
+            if path == "/v1/events":
+                self.event_batches.append(body)
+                return {"accepted": len(body["events"])}
+            if path.endswith("/operations/next"):
+                return {"operation": None}
+            raise AssertionError(path)
+
+    class StopAfterRecovery:
+        waits = 0
+
+        def is_set(self):
+            return self.waits >= 2
+
+        def wait(self, _seconds):
+            self.waits += 1
+
+    clients = []
+
+    def make_client(*args, **kwargs):
+        api = FakeApi()
+        clients.append(api)
+        return api
+
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+    monkeypatch.setattr(agent, "ControlClient", make_client)
+    monkeypatch.setattr(agent, "tool_versions", lambda: {})
+    monkeypatch.setattr(agent, "metrics", lambda _previous: ({"cpu_pct": 0}, (1, 1)))
+    monkeypatch.setattr(agent, "worker_states", lambda: [state])
+    monkeypatch.setattr(agent, "installed_release", lambda: "")
+
+    agent.run_agent("http://control.test", "node1", "token", every_s=0, manage_workers=False,
+                    stop=StopAfterRecovery())
+
+    assert clients[0].heartbeat_body["credential_expiries"] == {"claude-01": expiry}
+    assert [path for _, path, _ in clients[0].calls] == ["/v1/nodes/node1/heartbeat", "/v1/nodes/node1/heartbeat",
+                                                       "/v1/events", "/v1/nodes/node1/operations/next"]
+    event = clients[0].event_batches[0]["events"][0]
+    assert event["type"] == "node.heartbeat.error" and event["error_kind"] == "network"
+    assert event["retry"] is True and event["attempts"] == 2
+
+
 def test_a_slow_tool_check_is_not_reported_missing(monkeypatch):
     import subprocess as sp
 

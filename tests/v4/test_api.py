@@ -36,6 +36,118 @@ def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     assert ctx.db.one("SELECT count(*) AS n FROM events WHERE type='node.heartbeat'")["n"] == 0
 
 
+def test_node_heartbeat_persists_only_its_accounts_credential_expiry(client, ctx):
+    cc = join(client, "cc")
+    expires_at = datetime.now(timezone.utc) + timedelta(days=3)
+    response = client.post("/v1/nodes/cc/heartbeat", json={
+        "credential_expiries": {"claude-01": expires_at.isoformat(), "codex-01": expires_at.isoformat()}
+    }, headers=cc)
+    assert response.status_code == 200
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='claude-01'")["credential_expires_at"] == expires_at
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='codex-01'")["credential_expires_at"] is None
+
+    client.post("/v1/nodes/cc/heartbeat", json={"credential_expiries": {"claude-01": None}}, headers=cc)
+    assert ctx.db.one("SELECT credential_expires_at FROM accounts WHERE id='claude-01'")["credential_expires_at"] is None
+
+
+def test_sa_state_tracks_capacity_recommendations_and_control_repo_thresholds(client, ctx):
+    cc = join(client, "cc")
+    node1 = join(client, "node1")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 4, "slots_used": 4}, headers=cc)
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 4, "slots_used": 0}, headers=node1)
+    ctx.db.run("UPDATE sa_health SET slot_pressure_since=now() - interval '31 minutes' WHERE id=true")
+    ctx.db.run("UPDATE nodes SET idle_since=now() - interval '8 days' WHERE name='node1'")
+    ctx.db.run("UPDATE accounts SET status='cooldown', cooldown_since=now() - interval '16 minutes'")
+    ctx.db.run("UPDATE accounts SET status='idle', cooldown_since=NULL, idle_since=now() - interval '8 days'"
+               " WHERE id='opencode-01'")
+
+    state = client.get("/v1/state").json()
+    assert state["sa"]["thresholds"] == {"slots_used_percent": 80, "slots_duration_minutes": 30,
+                                         "role_cooldown_minutes": 15, "idle_days": 7,
+                                         "credential_expiry_days": 7}
+    assert {k: state["sa"]["slots"][k] for k in ("used", "total", "utilization_percent")} == {
+        "used": 4, "total": 8, "utilization_percent": 50.0}
+    assert state["sa"]["slots"]["pressure_since"]
+    suggestions = {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+    assert ("add_node", "fleet") not in suggestions  # fleet total is below the 80% threshold
+    assert ("add_account", "verify") in suggestions and ("add_account", "master") in suggestions
+    assert ("remove_node", "node1") in suggestions and ("remove_account", "opencode-01") in suggestions
+
+    ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='node1'")  # 4 / 5 slots = the default 80% threshold
+    state = client.get("/v1/state").json()
+    assert state["sa"]["slots"]["utilization_percent"] == 80.0
+    assert ("add_node", "fleet") in {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+
+    ctx.repo().sa = {"thresholds": {"slots_used_percent": 90, "slots_duration_minutes": 30,
+                                    "role_cooldown_minutes": 15, "idle_days": 7}}
+    state = client.get("/v1/state").json()
+    assert state["sa"]["thresholds"]["slots_used_percent"] == 90
+    assert ("add_node", "fleet") not in {(r["kind"], r["subject"]) for r in state["sa"]["recommendations"]}
+
+
+def test_sa_surfaces_account_probe_failures_and_credential_expiry(client, ctx):
+    cc = join(client, "cc")
+    expiry = datetime.now(timezone.utc) + timedelta(days=5)
+    assert client.post("/v1/accounts/claude-01/probe", json={
+        "ok": False, "error_kind": "auth", "summary": "sign in required",
+        "credential_expires_at": expiry.isoformat()}, headers=cc).status_code == 200
+    assert client.post("/v1/accounts/opencode-01/probe", json={
+        "ok": False, "error_kind": "provider", "summary": "provider check failed"}, headers=cc).status_code == 200
+    client.post("/v1/nodes/cc/heartbeat", json={"workers": [
+        {"account": "claude-01", "state": "unavailable", "probe": {"ok": False, "error_kind": "auth"}},
+        {"account": "opencode-01", "state": "unavailable", "probe": {"ok": False, "error_kind": "provider"}},
+    ]}, headers=cc)
+
+    state = client.get("/v1/state").json()
+    accounts = {a["id"]: a for a in state["accounts"]}
+    assert accounts["claude-01"]["status"] == "signed_out"
+    assert accounts["claude-01"]["credential_expiry_warning"] is True
+    assert accounts["claude-01"]["credential_expires_at"].startswith(expiry.date().isoformat())
+    assert accounts["opencode-01"]["status"] == "error" and accounts["opencode-01"]["check_failed"] is True
+    assert accounts["codex-01"]["credential_expires_at"] == "unknown"
+    assert {a["id"] for a in state["sa"]["provider_blocks"]} == {"claude-01"}
+
+
+def test_sa_reports_both_policy_and_provider_blocks(client, ctx):
+    ctx.events.emit("policy.decision", ticket="TESTWP-50", account="claude-01", node="cc",
+                    run_id="run-50", outcome="deny", reason="policy refused command",
+                    command="git push origin main")
+    ctx.db.run("UPDATE accounts SET status='cooldown', cooldown_since=now() WHERE id='codex-01'")
+    sa = client.get("/v1/state").json()["sa"]
+    assert sa["policy_denials"][0]["ticket"] == "TESTWP-50"
+    assert sa["policy_denials"][0]["account"] == "claude-01"
+    assert sa["policy_denials"][0]["command"] == "git push origin main"
+    assert "codex-01" in {a["id"] for a in sa["provider_blocks"]}
+
+
+def test_sa_network_diagnostics_include_heartbeat_events_runs_and_retry(client, ctx):
+    import uuid
+
+    ctx.events.emit("node.heartbeat.error", node="cc", reason="node-agent could not reach control",
+                    error_kind="network", retry=True, attempts=2)
+    # two network failures of the same ticket and step, then a successful retry; no retry metadata is written
+    for minutes, error_kind, outcome in ((30, "network", "failed"), (20, "network", "failed"), (10, "", "done")):
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind,"
+                   "details,started_at) VALUES (%s,'TESTWP-51','TESTWP','dev','claude-01','cc',1,'finished',%s,%s,"
+                   "%s,now() - make_interval(mins => %s))",
+                   (uuid.uuid4(), outcome, error_kind, J({"error_message": "connection reset"}), minutes))
+    # a single network failure of another ticket that has not been retried yet
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,status,outcome,error_kind)"
+               " VALUES (%s,'TESTWP-52','TESTWP','dev','claude-01','cc',1,'finished','failed','network')",
+               (uuid.uuid4(),))
+    sa = client.get("/v1/state").json()["sa"]
+    sources = {issue["source"] for issue in sa["network_issues"]}
+    assert sources == {"event", "run"}
+    event = next(issue for issue in sa["network_issues"] if issue["source"] == "event")
+    assert event["data"]["error_kind"] == "network" and event["data"]["retry"] is True
+    runs = [issue for issue in sa["network_issues"] if issue["source"] == "run"]
+    retried = sorted((r for r in runs if r["ticket"] == "TESTWP-51"), key=lambda r: r["attempts"])
+    assert [(r["attempts"], r["retry"]) for r in retried] == [(1, True), (2, True)]
+    assert all(r["error_kind"] == "network" and r["detail"] == "connection reset" for r in retried)
+    pending = next(r for r in runs if r["ticket"] == "TESTWP-52")
+    assert pending["attempts"] == 1 and pending["retry"] is False
+
+
 def test_command_center_events_survive_many_heartbeats(client, ctx):
     cc = join(client, "cc")
     ctx.events.emit("policy.denied", ticket="TESTWP-1", account="claude-01", reason="force push")

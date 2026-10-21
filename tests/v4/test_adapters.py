@@ -72,6 +72,21 @@ def test_run_loop_reads_events_and_verdict(tmp_path):
     assert (tmp_path / "run.jsonl").read_text().count("\n") == 2
 
 
+def test_run_loop_captures_cli_credential_expiry_and_network_errors(tmp_path):
+    a = CodexAdapter()
+    expiry = "2026-10-25T10:00:00Z"
+    a.argv = lambda spec: fake_cli(tmp_path, [{"type": "auth.status", "auth": {"expires_at": expiry}}])
+    res = a.run(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path)))
+    assert res.credential_expires_at.isoformat() == "2026-10-25T10:00:00+00:00"
+    assert res.to_dict()["credential_expires_at"] == "2026-10-25T10:00:00+00:00"
+
+    script = tmp_path / "network.py"
+    script.write_text("import sys\nprint('Could not resolve host: provider.invalid')\nsys.exit(1)\n")
+    a.argv = lambda spec: [sys.executable, str(script)]
+    failed = a.run(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path)))
+    assert failed.error_kind == "network"
+
+
 def test_run_loop_quota_from_text_and_timeout(tmp_path):
     a = CodexAdapter()
     script = tmp_path / "q.py"

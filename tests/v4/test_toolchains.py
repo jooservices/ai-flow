@@ -48,6 +48,14 @@ def test_node_can_declare_extra_installable_tools_and_versions_use_lock_then_sta
     assert pinned_version({}, "php", [repo.projects["TESTWP"].stack]) == "8.3"
 
 
+def test_control_repo_reads_sa_thresholds(control_repo):
+    (control_repo / "sa.yaml").write_text(
+        "thresholds:\n  slots_used_percent: 75\n  slots_duration_minutes: 20\n  role_cooldown_minutes: 12\n  idle_days: 5\n")
+    repo = ControlRepo.load(control_repo)
+    assert repo.sa["thresholds"] == {"slots_used_percent": 75, "slots_duration_minutes": 20,
+                                     "role_cooldown_minutes": 12, "idle_days": 5}
+
+
 def test_watchdog_warns_when_a_node_misses_tools_for_a_project(client, ctx):
     from aiflow.v4.control.loops import watchdog
 

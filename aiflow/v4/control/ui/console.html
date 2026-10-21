@@ -223,6 +223,8 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .bd-bar span{height:100%; transition:width .9s cubic-bezier(.2,.7,.2,1); position:relative}
 .bd-bar span:hover{filter:brightness(1.12)}
 .seg-work{background:var(--accent)} .seg-ci{background:var(--faint)} .seg-queue{background:var(--warn)} .seg-blocked{background:var(--crit)}
+.bd-bar.tl-bar span{min-width:2px}
+.tl-queued{background:var(--warn)} .tl-dev{background:var(--accent)} .tl-rework{background:#7b6cff} .tl-verify{background:var(--good)} .tl-waiting{background:var(--crit)} .tl-ai{background:var(--faint)}
 .legend{display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted)}
 .legend span{display:inline-flex; align-items:center; gap:6px}
 .legend i{width:10px; height:10px; border-radius:3px; display:inline-block}
@@ -931,6 +933,21 @@ function fact(l, v) { return '<div class="fact"><span class="fl">' + l + '</span
 function acLines(text) {
   return String(text || '').split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return /^(-\s*)?AC\s?\d+[:.)]/i.test(l); }).map(function (l) { return l.replace(/^-\s*/, ''); });
 }
+var TL_KIND = { queued: 'Queued', dev: 'Dev', rework: 'Rework', verify: 'Verify', waiting: 'Waiting on a person', ai: 'Other AI' };
+function timeSec(tl) {
+  var tt = tl.totals || {}, segs = tl.segments || [];
+  var outcomes = Object.keys(tt.runs_by_outcome || {}).map(function (o) { return o + ' ' + tt.runs_by_outcome[o]; }).join(' · ');
+  var h = '<div class="dsec"><h4>Where the time went</h4><div class="facts">' + fact('Lead time', mmss(tt.lead_time_s) + (tt.done ? '' : ' so far')) + fact('AI time', mmss(tt.ai_s)) + fact('Queue time', mmss(tt.queue_s)) + fact('Waiting on a person', mmss(tt.waiting_s)) + fact('Rework rounds', String(tt.rework_rounds || 0)) + fact('Runs', (tt.runs || 0) + (outcomes ? ' · ' + esc(outcomes) : '')) + '</div>';
+  var total = segs.reduce(function (s, x) { return s + x.seconds; }, 0);
+  if (!total) return h + '<div class="empty">No time recorded yet.</div></div>';
+  h += '<div class="bd-bar tl-bar" role="img" aria-label="Time segments">';
+  segs.forEach(function (s) {
+    var label = (TL_KIND[s.kind] || s.kind) + (s.round ? ' round ' + s.round : '') + ' · ' + mmss(s.seconds) + ' · ' + when(s.start) + '–' + when(s.end) + (s.status ? ' · ' + s.status : '') + (s.account ? ' · ' + s.account : '') + (s.outcome ? ' · ' + s.outcome : '');
+    h += '<span class="tl-' + esc(s.kind) + '" style="width:' + (100 * s.seconds / total).toFixed(2) + '%" title="' + esc(label) + '"></span>';
+  });
+  h += '</div><div class="legend">' + Object.keys(TL_KIND).filter(function (k) { return (tt.seconds_by_kind || {})[k] != null; }).map(function (k) { return '<span><i class="tl-' + k + '"></i>' + TL_KIND[k] + '</span>'; }).join('') + '</div></div>';
+  return h;
+}
 function drawerTicket(key) {
   var t = ticketBy(key) || { key: key, summary: key, status: '?', type: '', labels: [], blocked_by: [] };
   var det = S.ticket[key];
@@ -949,6 +966,7 @@ function drawerTicket(key) {
     var passed = t.status === 'Done';
     b += '<div class="dsec"><h4>Acceptance criteria</h4><ul class="checklist">' + acs.map(function (a) { return '<li><span class="' + (passed ? 'ico-ok' : 'ico-pend') + '">' + (passed ? ICON.ok : ICON.pend) + '</span><span>' + esc(a) + '</span></li>'; }).join('') + '</ul></div>';
   }
+  if (det.timeline) b += timeSec(det.timeline);
   if (full.description) b += '<div class="dsec"><h4>Description</h4><div class="prose">' + esc(full.description) + '</div></div>';
   b += '<div class="dsec"><h4>Runs</h4>';
   if (!det.runs.length) b += '<div class="empty">No run yet.</div>';

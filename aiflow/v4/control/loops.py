@@ -1,6 +1,7 @@
 """Background loops of the control plane (process `aiflow4 control-loops`).
 
-jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes.
+jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes. A changed status or
+            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline).
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
             accounts whose cooldown ended. Opens and closes incidents, alerts people on critical ones.
 Each loop runs on one control-plane instance at a time (leader key in Redis).
@@ -33,6 +34,7 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
+        old = ctx.db.one("SELECT status, labels FROM tickets WHERE key=%s", (t["key"],))
         done_at = t.get("done_at")
         if t["status"] == "Done" and done_at is None:
             done_at = t["jira_updated"]
@@ -47,6 +49,12 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
             {**t, "done_at": done_at})
+        ready = "aiflow-ready" in t["labels"]
+        if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
+            # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
+            ctx.events.emit("ticket.status", ticket=t["key"], project=t["project"], outcome=t["status"],
+                            reason=f"from {old['status']}" if old else "first seen", from_status=old["status"] if old else "",
+                            ready=ready, source="jira_sync")
         n += 1
     return n
 
@@ -129,6 +137,8 @@ def watchdog(ctx: Ctx) -> None:
                 ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (t["key"],))
                 ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result) VALUES"
                            " ('jira','transition',%s,'control',true,'To Do (orphan)')", (t["key"],))
+                ctx.events.emit("jira.transition", ticket=t["key"], account="control", outcome="To Do",
+                                reason="In Progress without a run for 10 minutes")
                 ctx.events.emit("ticket.requeued", ticket=t["key"], reason="In Progress without a run for 10 minutes")
             except Exception as e:  # noqa: BLE001
                 log.warning("could not requeue orphan %s: %s", t["key"], e)
@@ -167,6 +177,8 @@ def watchdog(ctx: Ctx) -> None:
                                    " VALUES ('jira','transition',%s,%s,%s,'control',true,'To Do (lease lost)')",
                                    (r["ticket_key"], str(r["id"]), r["fence"]))
                         ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (r["ticket_key"],))
+                        ctx.events.emit("jira.transition", ticket=r["ticket_key"], run_id=str(r["id"]), fence=r["fence"],
+                                        account="control", node=r["node"], outcome="To Do", reason="lease lost")
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not requeue %s: %s", r["ticket_key"], e)
             continue

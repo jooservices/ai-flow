@@ -1,0 +1,6 @@
+[Unit]
+Description=AI Flow node resource limits
+
+[Slice]
+CPUQuota={{ ((aiflow4_node_cpu_limit | float) * 100) | int }}%
+MemoryMax={{ aiflow4_node_memory_limit }}

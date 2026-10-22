@@ -1035,6 +1035,8 @@ function renderCC() {
   });
   h += '</tbody></table></div></section>';
 
+  h += readinessPanel(d.release_readiness || [], 'en', 'p-ready');
+
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
 
   h += '<div class="grid-2">';
@@ -1757,11 +1759,44 @@ function projTabs() {
   if (!d.projects.length) h += '<span class="muted">No project in aiflow-control/projects</span>';
   return h + '</div>';
 }
+/* Release readiness of each unreleased Jira version (/v1/state release_readiness): every ticket currently in the
+   version must be Done, verified, out of rework and not blocked by an open release-qa Bug. Command Center (en)
+   and Business (vi) show the same reasons from this one place. */
+var READY_TEXT = {
+  en: { title: 'Release readiness', hint: 'Every ticket now in the Jira version must be Done, verified, not in rework and not blocked by an open release-qa Bug',
+        none: 'No unreleased Jira version.', ready: 'Ready', notReady: 'Not ready', done: 'Done',
+        empty: function () { return 'The version is empty: no ticket is in it'; },
+        not_done: function (r) { return r.ticket + ': not Done (status ' + r.status + ')'; },
+        rework: function (r) { return r.ticket + ': in rework'; },
+        not_verified: function (r) { return r.ticket + ': Done but not verified'; },
+        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; } },
+  vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
+        none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
+        empty: function () { return 'Version rỗng: chưa có ticket nào'; },
+        not_done: function (r) { return r.ticket + ': chưa Done (đang ở ' + r.status + ')'; },
+        rework: function (r) { return r.ticket + ': đang rework'; },
+        not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
+        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; } }
+};
+function readinessReason(r, lang) { var t = READY_TEXT[lang] || READY_TEXT.en; return (t[r.cause] || function () { return (r.ticket || '') + ': ' + r.cause; })(r); }
+function readinessPanel(versions, lang, id) {
+  var t = READY_TEXT[lang] || READY_TEXT.en;
+  var h = '<section class="panel" id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">' + esc(t.title) + '</h2><span class="hint">' + esc(t.hint) + '</span></div>';
+  if (!versions.length) return h + '<div class="empty">' + esc(t.none) + '</div></section>';
+  versions.forEach(function (v) {
+    h += '<div class="att-item" data-version="' + esc(v.version_id) + '" data-ready="' + (v.ready ? 'yes' : 'no') + '"><span class="flag" data-tone="' + (v.ready ? 'ok' : 'warn') + '">' + esc(v.ready ? t.ready : t.notReady) + '</span>';
+    h += '<span style="min-width:0"><div class="t"><span class="mono muted">' + esc(v.project) + '</span> ' + esc(v.version) + ' · ' + v.done_count + ' / ' + v.ticket_count + ' ' + esc(t.done) + '</div>';
+    if (v.reasons.length) h += '<ul class="d">' + v.reasons.map(function (r) { return '<li data-cause="' + esc(r.cause) + '">' + esc(readinessReason(r, lang)) + '</li>'; }).join('') + '</ul>';
+    h += '</span></div>';
+  });
+  return h + '</section>';
+}
 function renderBHead() { $('#bhead').innerHTML = projTabs(); }
 function renderBBody() {
   var all = projTickets();
   var h = epicsPanel(all, 'open-ticket', 'b-epics') || '<section class="panel" id="b-epics"><div class="panel-h"><h2>Epics</h2></div><div class="empty">Project này chưa có epic.</div></section>';
   var wait = needsOwner(all);
+  h += readinessPanel((D().release_readiness || []).filter(function (v) { return v.project === S.project; }), 'vi', 'b-ready');
   h += '<section class="panel" id="b-answer" aria-labelledby="h-b-answer"><div class="panel-h"><h2 id="h-b-answer">Cần bạn trả lời</h2><span class="hint">Ticket ở Needs owner: câu hỏi của intake và việc triage chuyển lên owner. Trả lời trong Jira.</span></div><div class="att">';
   if (!wait.length) h += '<div class="col-empty">Không có ticket nào chờ bạn trả lời</div>';
   wait.forEach(function (w) {

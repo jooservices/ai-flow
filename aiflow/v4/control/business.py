@@ -7,6 +7,8 @@ only what the console does not have yet:
            epic as parent, status Backlog. Written through the Jira gateway and recorded in write_audit.
   list     the project's change requests (tickets labelled change-request) with the latest impact assessment of an
            intake refiner (runs of step "impact", outcome "assessed", details.impact) or "assessing" while none.
+  readiness  whether each unreleased Jira version of the project is ready to release and why not
+           (release_readiness; /v1/state carries the same list for the console).
 
 Neither path moves a ticket out of Backlog: the owner moves an assessed change request to Intake in Jira.
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import release_readiness as readiness
 from .projects import reopen_for_new_ticket
 
 LABEL = "change-request"
@@ -44,6 +47,10 @@ def change_requests(db, project: str, jira_site: str = "") -> list[dict[str, Any
                     "assessment": "done" if impact else "assessing", "impact": impact or None,
                     "assessed_at": a["ended_at"].isoformat() if impact and a["ended_at"] else None})
     return out
+
+
+def release_readiness(db, project: str) -> list[dict[str, Any]]:
+    return readiness.project_versions(db, project)
 
 
 def validate(db, project: str, title: str, description: str, epic: str) -> tuple[str, str, str]:

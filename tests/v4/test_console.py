@@ -18,7 +18,8 @@ from aiflow.v4.core.settings import Settings
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
-var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {}},
+var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
+  classList: {add: function () {}, remove: function () {}}},
   getElementById: function () { return null; }, querySelector: function () { return null; },
   querySelectorAll: function () { return []; }};
 var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
@@ -463,7 +464,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "[['cc', 'board'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n  ['machines', 'projects', 'users', 'knowledge', 'integrations']]" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -526,7 +527,7 @@ def test_super_admin_session_shows_github_connect_and_project_resume_controls(ct
     session = client.get("/v1/console/session")
     assert session.status_code == 200
     user = session.json()
-    assert user["role"] == "super_admin"
+    assert user["role"] == "administrator"
     assert "*" in user["permissions"]
 
     jira = {"connected": False, "source": "none", "state": "disconnected", "needs_reconnect": False,
@@ -581,6 +582,8 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
         app = create_app(ctx)
+        from aiflow.v4.control.ui import mount_ui
+        mount_ui(app, ctx)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(("127.0.0.1", 0))
@@ -600,15 +603,87 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
             page.get_by_label("Email").fill("browser-admin@example.test")
             page.get_by_label("Password").fill(password)
             page.get_by_role("button", name="Sign in").click()
-            page.wait_for_url("**/integrations")
-            page.get_by_role("button", name="Connect GitHub").wait_for(state="visible", timeout=10000)
+            page.wait_for_url("**/cc")
+            page.get_by_role("tab", name="Integrations").click()
+            github_app_setup = page.locator(
+                "#view-integrations summary, #view-integrations a[href*='installation-settings']")
+            github_app_setup.first.wait_for(state="visible", timeout=10000)
             existing_app = page.locator("#view-integrations summary").filter(has_text="Use an existing GitHub App")
-            existing_app.click()
-            page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
-            page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            if existing_app.count():
+                existing_app.click()
+                page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
+                page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            else:
+                page.get_by_role("link", name="Add repositories on GitHub").wait_for(state="visible", timeout=10000)
 
             page.get_by_role("tab", name="Projects").click()
             page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+        finally:
+            browser.close()
+            server.should_exit = True
+            if server_thread.is_alive():
+                server_thread.join(timeout=5)
+            server_socket.close()
+    finally:
+        playwright.stop()
+
+
+def test_role_navigation_and_forbidden_pages_in_a_browser_for_three_roles(ctx):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error, sync_playwright
+    import uvicorn
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.api import create_app
+
+    try:
+        playwright = sync_playwright().start()
+    except Error as exc:
+        pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Error as exc:
+            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+        ctx.settings.console_login = True
+        ctx.settings.console_session_secret = "browser-role-test-secret-at-least-32-bytes"
+        people = [
+            ("delivery@example.test", "delivery", "/delivery", ["Dashboard", "Work board", "Delivery", "Human review"], "/sa"),
+            ("ba@example.test", "ba", "/business", ["Dashboard", "Work board", "Business", "Knowledge"], "/review"),
+            ("stakeholder@example.test", "stakeholder", "/stakeholder",
+             ["Dashboard", "Work board", "Stakeholder"], "/integrations"),
+        ]
+        passwords = {email: login.seed_user(ctx.db, email, role, role.title()) for email, role, *_ in people}
+        app = create_app(ctx)
+        from aiflow.v4.control.ui import mount_ui
+        mount_ui(app, ctx)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("127.0.0.1", 0))
+        server_socket.listen(128)
+        base_url = f"http://127.0.0.1:{server_socket.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
+        server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
+        try:
+            server_thread.start()
+            deadline = time.monotonic() + 10
+            while not server.started and server_thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert server.started, "console test server did not start"
+            for email, _role, landing, visible, forbidden in people:
+                page = browser.new_page()
+                page.goto(base_url + "/login", wait_until="domcontentloaded")
+                page.get_by_label("Email").fill(email)
+                page.get_by_label("Password").fill(passwords[email])
+                page.get_by_role("button", name="Sign in").click()
+                page.wait_for_url("**" + landing)
+                for label in visible:
+                    page.get_by_role("tab", name=label).wait_for(state="visible", timeout=10000)
+                for label in ("SA", "Machines and AI", "Integrations", "Projects", "Users and roles"):
+                    assert page.get_by_role("tab", name=label).count() == 0 or not page.get_by_role("tab", name=label).is_visible()
+                page.goto(base_url + forbidden, wait_until="domcontentloaded")
+                assert "This view is not available for your role." in page.locator("body").inner_text()
+                page.close()
         finally:
             browser.close()
             server.should_exit = True

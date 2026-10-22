@@ -59,7 +59,7 @@ def test_seed_user_is_created_once_and_stores_only_a_hash(ctx):
     password = login.seed_user(ctx.db, "Admin@Example.Test", "super_admin")
     assert password and login.seed_user(ctx.db, EMAIL, "super_admin") is None
     row = ctx.db.one("SELECT email, role, password_hash FROM console_users")
-    assert row["email"] == EMAIL and row["role"] == "super_admin" and password not in row["password_hash"]
+    assert row["email"] == EMAIL and row["role"] == "administrator" and password not in row["password_hash"]
     with pytest.raises(ValueError):
         login.seed_user(ctx.db, "not-an-email", "super_admin")
     with pytest.raises(ValueError):
@@ -71,7 +71,8 @@ def test_sign_in_sets_a_signed_strict_http_only_cookie_and_me_logout_work(ctx, s
     client = make_client(ctx)
     assert "Sign in" in client.get("/login").text
     r = sign_in(client, seeded)
-    assert r.status_code == 200 and r.json()["role"] == "super_admin" and r.json()["role_label"] == "Super Administrator"
+    assert r.status_code == 200 and r.json()["role"] == "administrator" and r.json()["role_label"] == "Administrator"
+    assert r.json()["roles"] == ["administrator"] and r.json()["landing_page"] == "/cc"
     assert r.json()["email"] == EMAIL
     cookie = r.headers["set-cookie"].lower()
     assert COOKIE_NAME in cookie and "httponly" in cookie and "samesite=strict" in cookie and "path=/" in cookie
@@ -211,15 +212,13 @@ def test_super_administrator_passes_every_role_check_and_lead_does_not():
     assert not has_permission("lead", "nodes.manage")
 
 
-def test_non_owner_role_gets_endpoint_access_from_its_mapped_permissions(ctx, monkeypatch):
-    monkeypatch.setitem(console_auth.ROLE_PERMISSIONS, "integration_admin", frozenset({"integrations.manage"}))
-    monkeypatch.setattr(console_auth, "ALLOWED_ROLES", console_auth.ALLOWED_ROLES | {"integration_admin"})
+def test_sa_session_gets_endpoint_access_from_the_shared_permission_table(ctx):
     client = make_client(ctx)
-    client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "integration_admin", EXP, SECRET))
+    client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "sa", EXP, SECRET))
     assert client.get("/v1/integrations/github").status_code == 200
     assert client.get("/v1/projects/catalog").status_code == 403
     session = client.get("/v1/console/session")
-    assert session.status_code == 200 and session.json()["permissions"] == ["integrations.manage"]
+    assert session.status_code == 200 and session.json()["permissions"] == sorted(console_auth.ROLE_PERMISSIONS["sa"])
 
 
 def test_console_ui_uses_session_permission_identifiers_for_controls():
@@ -245,7 +244,7 @@ def test_owner_only_endpoints_accept_super_admin(ctx):
     assert get("lead", "/v1/integrations/jira") == 403 and get("super_admin", "/v1/integrations/jira") != 403
     client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "super_admin", EXP, SECRET))
     session = client.get("/v1/console/session").json()
-    assert session["role"] == "super_admin" and session["permissions"] == ["*"]
+    assert session["role"] == "administrator" and session["permissions"] == ["*"]
 
 
 # --- AC6: the gate -----------------------------------------------------------------------------------------------------

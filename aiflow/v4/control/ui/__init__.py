@@ -1,6 +1,6 @@
-"""Dashboards: Command Center (/cc), Delivery (/delivery), SA health (/sa), Team Lead (/lead),
+"""Dashboards: Dashboard (/cc), Work board (/board), Delivery (/delivery), SA health (/sa), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge) and
-Integrations (/integrations, control/jira_connect.py), fed by /v1/state and relevant view APIs.
+Integrations (/integrations, control/jira_connect.py), Users and roles (/users), fed by /v1/state and relevant view APIs.
 
 All views are fed by the live registry; the Business view adds
 /v1/business/<project>/change-requests (see control/business.py).
@@ -26,6 +26,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return RedirectResponse("/cc")
 
     @app.get("/cc", include_in_schema=False)
+    @app.get("/board", include_in_schema=False)
     @app.get("/delivery", include_in_schema=False)
     @app.get("/sa", include_in_schema=False)
     @app.get("/lead", include_in_schema=False)
@@ -33,8 +34,10 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/review", include_in_schema=False)
     @app.get("/stakeholder", include_in_schema=False)
     @app.get("/knowledge", include_in_schema=False)
+    @app.get("/machines", include_in_schema=False)
     @app.get("/integrations", include_in_schema=False)
     @app.get("/projects", include_in_schema=False)
+    @app.get("/users", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

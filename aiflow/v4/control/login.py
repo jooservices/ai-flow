@@ -43,7 +43,9 @@ from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.routing import Match
 
-from .console_auth import COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, issue_session, verify_session
+from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSIONS, ConsoleUser, has_permission,
+                           issue_session, landing_page, normalize_roles, permissions_for_view, resolve_session_user,
+                           verify_session)
 from .db import J
 
 log = logging.getLogger(__name__)
@@ -59,8 +61,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = {"/", "/cc", "/delivery", "/sa", "/lead", "/business", "/review", "/stakeholder", "/knowledge",
-         "/integrations", "/projects"}
+PAGES = set(PAGE_VIEWS)
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -138,22 +139,22 @@ def write_password_file(path: str, password: str) -> None:
         os.close(fd)
 
 
-def seed_user(db, email: str, role: str, display_name: str = "",
+def seed_user(db, email: str, role: str | list[str] | tuple[str, ...], display_name: str = "",
               deliver: Callable[[str], None] | None = None) -> str | None:
     """Create the user with a generated password and return it; return None when the user already exists.
 
     `deliver(password)` runs inside the transaction, before the commit: when it fails the user is rolled back, so a
     password nobody received never becomes the account's password."""
     email = normalize_email(email)
-    if role not in ROLE_PERMISSIONS:
-        raise ValueError(f"unknown role {role}; choose one of {', '.join(sorted(ROLE_PERMISSIONS))}")
+    roles = normalize_roles(role)
     if db.one("SELECT 1 AS x FROM console_users WHERE email=%s", (email,)):
         return None
     password = generate_password()
     with db.pool.connection() as c:
-        created = c.execute("INSERT INTO console_users (email, display_name, role, password_hash) VALUES (%s,%s,%s,%s)"
+        created = c.execute("INSERT INTO console_users (email, display_name, role, roles, password_hash)"
+                            " VALUES (%s,%s,%s,%s,%s)"
                             " ON CONFLICT (email) DO NOTHING RETURNING email",
-                            (email, display_name.strip(), role, hash_password(password))).fetchone()
+                            (email, display_name.strip(), roles[0], list(roles), hash_password(password))).fetchone()
         if not created:
             return None
         if deliver:
@@ -240,13 +241,14 @@ button:disabled{opacity:.6;cursor:default}#msg{min-height:20px;margin-top:12px;c
 var next=new URLSearchParams(location.search).get("next")||"/cc";
 if(next.charAt(0)!=="/"||next.charAt(1)==="/"||next.indexOf("\\\\")>=0){next="/cc"}
 // SameSite=Strict: a page reached from another site arrives without the cookie; this same-site request has it.
-fetch("/v1/auth/me",{credentials:"same-origin"}).then(function(r){if(r.status===200){location.replace(next)}});
+fetch("/v1/auth/me",{credentials:"same-origin"}).then(function(r){if(r.status===200){return r.json()}
+}).then(function(d){if(d){location.replace(d.landing_page||next)}});
 document.getElementById("f").addEventListener("submit",function(e){e.preventDefault();
 var b=document.getElementById("go"),m=document.getElementById("msg");b.disabled=true;m.textContent="";
 fetch("/v1/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",
 body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value})})
 .then(function(r){return r.json().then(function(d){return[r.status,d]})})
-.then(function(x){if(x[0]===200){location.href=next}
+.then(function(x){if(x[0]===200){location.href=x[1].landing_page||next}
 else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false}})
 .catch(function(){m.textContent="Cannot reach the server";b.disabled=false})});
 </script></body></html>
@@ -314,8 +316,11 @@ def install_login(app: FastAPI, ctx) -> None:
     def secure_cookie() -> bool:
         return str(settings.public_url or "").lower().startswith("https://")
 
-    def user_json(email: str, role: str, name: str = "") -> dict:
-        return {"email": email, "name": name, "role": role, "role_label": ROLE_LABELS.get(role, role)}
+    def user_json(email: str, roles: list[str] | tuple[str, ...], name: str = "") -> dict:
+        assigned = normalize_roles(roles)
+        return {"email": email, "name": name, "role": assigned[0], "role_label": ROLE_LABELS[assigned[0]],
+                "roles": list(assigned), "role_labels": [ROLE_LABELS[role] for role in assigned],
+                "landing_page": landing_page(assigned)}
 
     def attempt(ip: str, email: str, password: str) -> tuple[int, dict, dict]:
         """The blocking part of a sign-in (Redis, database, scrypt); runs in a worker thread."""
@@ -326,7 +331,7 @@ def install_login(app: FastAPI, ctx) -> None:
         if email:
             ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, updated_at=now()"
                        " WHERE email=%s AND locked_until IS NOT NULL AND locked_until <= now()", (email,))
-            row = ctx.db.one("SELECT email, display_name, role, password_hash, disabled, locked_until"
+            row = ctx.db.one("SELECT email, display_name, role, roles, password_hash, disabled, locked_until"
                              " FROM console_users WHERE email=%s", (email,))
         locked = bool(row and row["locked_until"])
         usable = bool(row and not locked and not row["disabled"])
@@ -342,7 +347,7 @@ def install_login(app: FastAPI, ctx) -> None:
                    " WHERE email=%s", (email,))
         ctx.leases.r.delete(key("ip_email", digest(f"{ip}\n{email}")))
         audit("login", email, True, "signed in")
-        return 200, user_json(email, row["role"], row["display_name"]), {}
+        return 200, user_json(email, row.get("roles") or [row["role"]], row["display_name"]), {}
 
     @app.get("/login", include_in_schema=False)
     def login_page() -> HTMLResponse:
@@ -371,7 +376,7 @@ def install_login(app: FastAPI, ctx) -> None:
             return JSONResponse({"detail": "sign-in is unavailable; try again shortly"}, status_code=503)
         response = JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **headers})
         if status == 200:
-            response.set_cookie(COOKIE_NAME, issue_session(email, body["role"], int(time.time()) + SESSION_TTL_S, secret),
+            response.set_cookie(COOKIE_NAME, issue_session(email, body["roles"], int(time.time()) + SESSION_TTL_S, secret),
                                 max_age=SESSION_TTL_S, httponly=True, secure=secure_cookie(), samesite="strict", path="/")
         return response
 
@@ -389,25 +394,125 @@ def install_login(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/auth/me")
     def me(request: Request) -> JSONResponse:
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:
             return JSONResponse({"detail": "not signed in"}, status_code=401)
         row = ctx.db.one("SELECT display_name FROM console_users WHERE email=%s", (user.subject,))
-        return JSONResponse(user_json(user.subject, user.role, (row or {}).get("display_name", "")))
+        data = user_json(user.subject, list(user.assigned_roles), (row or {}).get("display_name", ""))
+        data["landing_page"] = landing_page(user.effective_roles)
+        return JSONResponse(data)
 
     if not settings.console_login:
         return
+
+    def api_permission(path: str) -> str:
+        """Return the view permission that owns a console API path."""
+        if path.startswith(("/v1/console/users", "/v1/console/audit", "/v1/console/view-as")):
+            return "console.manage"
+        if path.startswith("/v1/knowledge/"):
+            return "view.knowledge"
+        if path.startswith("/v1/integrations/"):
+            return "view.integrations"
+        if path == "/v1/reviews" or path.startswith("/v1/reviews/"):
+            return "view.human_review"
+        if path.startswith("/v1/business/"):
+            return "view.business"
+        if path.startswith("/v1/stakeholder/"):
+            return "view.stakeholder"
+        if path.startswith(("/v1/nodes/", "/v1/accounts/", "/v1/services", "/v1/sa/")):
+            return "view.machines_ai"
+        if path.startswith("/v1/projects"):
+            if "/study-cases" in path:
+                return "view.knowledge"
+            if any(suffix in path for suffix in ("/versions", "/report", "/close")):
+                return "view.delivery"
+            return "projects.manage"
+        if path.startswith("/v1/memory/"):
+            return "view.knowledge"
+        if path.startswith("/v1/tickets/"):
+            return "view.work_board"
+        if path.startswith("/v1/analytics/") or path == "/v1/state":
+            return "view.dashboard"
+        return "view.dashboard"
+
+    def project_for_path(request: Request) -> str:
+        path = request.url.path
+        match = re.match(r"^/v1/(?:business|stakeholder|projects)/([^/]+)", path)
+        if match:
+            return match.group(1)
+        match = re.match(r"^/v1/tickets/([^/]+)", path)
+        if match:
+            row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (match.group(1),))
+            return str((row or {}).get("project") or "")
+        match = re.match(r"^/v1/reviews/([^/]+)", path)
+        if match:
+            row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (match.group(1),))
+            return str((row or {}).get("project") or "")
+        return request.query_params.get("project", "") if path.startswith(("/v1/analytics/", "/v1/memory/")) else ""
+
+    def audit_refusal(user: ConsoleUser, request: Request, reason: str = "not available for your role") -> None:
+        ctx.db.run("INSERT INTO write_audit (target,action,ticket,run_id,fence,actor,accepted,result,payload)"
+                   " VALUES ('console','access_denied','', '', NULL,%s,false,%s,%s)",
+                   (user.subject, reason, J({"path": request.url.path, "method": request.method,
+                                             "roles": list(user.effective_roles)})))
+
+    def active_user(request: Request) -> ConsoleUser | None:
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
+        return resolve_session_user(ctx.db, claims) if claims else None
+
+    def forbidden_page() -> HTMLResponse:
+        return HTMLResponse("<!doctype html><html lang='en'><meta charset='utf-8'><title>View unavailable</title>"
+                            "<main style='font:16px system-ui;max-width:42rem;margin:12vh auto;padding:2rem'>"
+                            "<h1>View unavailable</h1><p>This view is not available for your role.</p>"
+                            "<a href='/cc'>Return to Dashboard</a></main></html>", status_code=403,
+                            headers={"Cache-Control": "no-store"})
 
     @app.middleware("http")
     async def gate(request: Request, call_next):
         path = request.url.path
         if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES):
             return await call_next(request)
-        if request.headers.get("authorization") and checks_token(request):
+        bearer_route = bool(request.headers.get("authorization") and checks_token(request))
+        user = active_user(request)
+        if user is None and bearer_route:
             return await call_next(request)
-        if verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret):
+        if user is None:
+            if path in PAGES:
+                target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
+                return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=302)
+            if request.cookies.get(COOKIE_NAME):
+                return JSONResponse({"detail": "not signed in"}, status_code=401)
+            return JSONResponse({"detail": "sign in required"}, status_code=401)
+
+        if path == "/" and not user.view_as:
+            return RedirectResponse(landing_page(user.assigned_roles), status_code=302)
+        page_view = PAGE_VIEWS.get(path)
+        required = permissions_for_view(page_view) if page_view else api_permission(path)
+        view_as_stop = path == "/v1/console/view-as/stop"
+        if view_as_stop:
+            allowed = user.is_administrator
+        else:
+            allowed = has_permission(user.effective_roles, required)
+        project = project_for_path(request)
+        if allowed and project and user.project_keys is not None:
+            allowed = project in user.project_keys
+        if not allowed:
+            audit_refusal(user, request)
+            if page_view:
+                return forbidden_page()
+            return JSONResponse({"detail": "not available for your role"}, status_code=403)
+        if page_view is not None:
+            request.state.console_user = user
+        if path in PAGES and user.view_as:
+            request.state.console_user = user
+        if path.startswith("/v1/"):
+            request.state.console_user = user
+        if bearer_route and request.cookies.get(COOKIE_NAME) and user:
+            # A signed-in person cannot use a separate bearer header to skip the role menu.
             return await call_next(request)
         if path in PAGES:
             target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
-            return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=302)
-        return JSONResponse({"detail": "sign in required"}, status_code=401)
+            # Retain the current page for an already authenticated browser; sign-in itself lands by role priority.
+            request.state.console_user = user
+        return await call_next(request)

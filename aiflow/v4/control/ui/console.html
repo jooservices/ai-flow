@@ -44,6 +44,7 @@
 }
 *{box-sizing:border-box}
 html{overflow-x:hidden}
+html.role-loading .tabs,html.role-loading #view-as-switch{visibility:hidden}
 body{margin:0; min-height:100vh; display:flex; flex-direction:column; overflow-x:hidden; background:var(--bg); color:var(--fg); font-family:var(--f-ui); font-size:14px; line-height:1.45}
 body > main{flex:1 0 auto; width:100%}
 body::before{content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top,0px); z-index:30; background:var(--surface)}
@@ -65,6 +66,7 @@ a{color:var(--accent)}
 .tabs{display:flex; gap:4px; background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:3px}
 .tab{border:0; background:transparent; padding:8px 14px; border-radius:8px; cursor:pointer; color:var(--muted); font-weight:500; min-height:38px}
 .tab[aria-selected="true"]{background:var(--surface); color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.08), inset 0 0 0 1px var(--line)}
+.tab-divider{align-self:center;width:1px;height:20px;background:var(--line);margin-inline:5px;flex:none}
 .spacer{flex:1 1 auto}
 .sim{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
 .sim .clock{font-family:var(--f-mono); font-size:15px; padding:6px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); min-width:92px; text-align:center}
@@ -403,17 +405,21 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <span>AI Flow</span>
     </div>
     <div class="tabs" role="tablist" aria-label="Views">
-      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Command Center</button>
+      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Dashboard</button>
+      <button class="tab" role="tab" id="tab-board" aria-controls="view-board" aria-selected="false" data-act="view" data-view="board">Work board</button>
       <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-view="delivery">Delivery</button>
       <button class="tab" role="tab" id="tab-sa" aria-controls="view-sa" aria-selected="false" data-act="view" data-view="sa">SA</button>
       <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-view="lead">Team Lead</button>
       <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
       <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
+      <button class="tab" role="tab" id="tab-machines" aria-controls="view-machines" aria-selected="false" data-act="view" data-view="machines">Machines and AI</button>
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-users" aria-controls="view-users" aria-selected="false" data-act="view" data-view="users">Users and roles</button>
     </div>
+    <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
@@ -424,6 +430,10 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 </header>
 <main class="wrap">
   <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"></section>
+  <section class="view" id="view-board" role="tabpanel" aria-labelledby="tab-board" hidden>
+    <div class="dhead" id="board-head"></div>
+    <div id="board-body" class="view"></div>
+  </section>
   <section class="view" id="view-delivery" role="tabpanel" aria-labelledby="tab-delivery" hidden>
     <div class="dhead" id="dhead"></div>
     <div id="dbody" class="view"></div>
@@ -441,9 +451,11 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
   </section>
+  <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -463,6 +475,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <script>
 (function () {
+document.documentElement.classList.add('role-loading');
 'use strict';
 /* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder and Knowledge, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
@@ -507,7 +520,8 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
+  consoleUser: null, consoleSessionLoaded: false, userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
+    loading: false, error: '', editing: '', temporaryPassword: '' }, nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
@@ -523,7 +537,18 @@ var S = {
   knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' },
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
+var VIEW_PERMISSION = { cc: 'view.dashboard', board: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
+  lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
+  machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage' };
+var VIEW_PATH = { cc: '/cc', board: '/board', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
+  review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
+  projects: '/projects', users: '/users' };
+var VIEW_GROUPS = [['cc', 'board'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
+  ['machines', 'projects', 'users', 'knowledge', 'integrations']];
 function viewOf(path) {
+  if (path.indexOf('/board') === 0) return 'board';
+  if (path.indexOf('/users') === 0) return 'users';
+  if (path.indexOf('/machines') === 0) return 'machines';
   if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/integrations') === 0) return 'integrations';
   if (path.indexOf('/sa') === 0) return 'sa';
@@ -628,16 +653,60 @@ function poll() {
 }
 function pollConsoleSession() {
   fetch('/v1/console/session', { cache: 'no-store' }).then(function (r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) { var error = new Error('HTTP ' + r.status); error.status = r.status; throw error; }
     return r.json();
   }).then(function (d) {
-    S.consoleUser = d.authenticated ? d : null;
+    S.consoleUser = d.authenticated ? d : null; S.consoleSessionLoaded = true;
+    document.documentElement.classList.remove('role-loading');
+    applyRoleNavigation();
+    if (S.consoleUser && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
+      location.replace(S.consoleUser.landing_page || '/cc'); return;
+    }
     render();
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
-  }).catch(function () { S.consoleUser = null; render(); })
+    if (consoleCan('view.machines_ai')) pollServices();
+    if (S.view === 'users' && consoleCan('console.manage')) loadUsers();
+  }).catch(function (error) {
+    if (error && error.status === 401) { location.replace('/login'); return; }
+    S.consoleUser = null; S.consoleSessionLoaded = true;
+    document.documentElement.classList.remove('role-loading'); applyRoleNavigation(); render(); pollServices(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
+}
+function applyRoleNavigation() {
+  var tabs = $$('.tab[data-view]');
+  tabs.forEach(function (tab) {
+    var view = tab.getAttribute('data-view'), permission = VIEW_PERMISSION[view] || 'view.dashboard';
+    tab.hidden = !!S.consoleUser && !consoleCan(permission);
+  });
+  var nav = $('.tabs');
+  if (nav) {
+    $$('.tab-divider', nav).forEach(function (divider) { divider.remove(); });
+    VIEW_GROUPS.forEach(function (group, index) {
+      if (index) { var divider = document.createElement('span'); divider.className = 'tab-divider'; divider.setAttribute('aria-hidden', 'true'); nav.appendChild(divider); }
+      group.forEach(function (view) { var tab = $('#tab-' + view); if (tab) nav.appendChild(tab); });
+    });
+  }
+  var as = $('#view-as-switch'), select = $('#view-as-role'), user = S.consoleUser;
+  if (!as || !select) return;
+  as.hidden = !(user && user.can_view_as);
+  if (!user || !user.can_view_as) return;
+  var choices = user.role_options || [];
+  select.innerHTML = '<option value="">' + (user.viewing_as ? 'Viewing as ' + esc(user.role_label) : 'My roles') + '</option>' +
+    (user.viewing_as ? '<option value="__stop">Return to my role</option>' : '') + choices.map(function (r) {
+      return '<option value="' + esc(r.id) + '">' + esc(r.label) + '</option>';
+    }).join('');
+  select.value = '';
+  select.onchange = function () {
+    var value = select.value; if (!value) return;
+    var endpoint = value === '__stop' ? '/v1/console/view-as/stop' : '/v1/console/view-as';
+    fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: value === '__stop' ? '{}' : JSON.stringify({ role: value }) })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+      .then(function () { location.href = value === '__stop' ? '/cc' : (choices.filter(function (r) { return r.id === value; })[0] || {}).landing_page || '/cc'; })
+      .catch(function (e) { toast('View as failed', String(e.message || e), 'crit'); select.value = ''; });
+  };
 }
 function projectResponseError(response) {
   return response.json().then(function (data) {
@@ -654,6 +723,135 @@ function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+}
+function adminRequest(url, options) {
+  return fetch(url, Object.assign({ cache: 'no-store' }, options || {})).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+}
+function loadUsers(force) {
+  var u = S.userAdmin;
+  if (!consoleCan('console.manage') || u.loading || (u.users && !force)) return;
+  u.loading = true; u.error = ''; renderUsers();
+  adminRequest('/v1/console/users').then(function (d) {
+    u.users = d.users || []; u.projects = d.projects || []; u.roleOptions = d.role_options || []; u.audit = d.audit || [];
+    u.error = ''; u.loading = false; renderUsers();
+  }).catch(function (e) { u.error = String(e.message || e); u.loading = false; renderUsers(); });
+}
+var ROLE_VIEW_LABELS = { 'view.dashboard': 'Dashboard', 'view.work_board': 'Work board', 'view.delivery': 'Delivery',
+  'view.sa': 'SA', 'view.team_lead': 'Team Lead', 'view.business': 'Business', 'view.human_review': 'Human review',
+  'view.stakeholder': 'Stakeholder', 'view.machines_ai': 'Machines and AI', 'view.knowledge': 'Knowledge',
+  'view.integrations': 'Integrations', 'projects.manage': 'Projects', 'console.manage': 'Users and roles' };
+function roleChecks(root, className, selected) {
+  return S.userAdmin.roleOptions.map(function (r) {
+    return '<label class="chip2" style="cursor:pointer"><input type="checkbox" class="' + className + '" value="' + esc(r.id) + '"' +
+      (selected.indexOf(r.id) >= 0 ? ' checked' : '') + '> ' + esc(r.label) + '</label>';
+  }).join('');
+}
+function projectChoices(selected, all) {
+  return '<label class="fld">Projects <select class="in" data-user-projects multiple size="' + Math.min(5, Math.max(2, S.userAdmin.projects.length)) + '"' + (all ? ' disabled' : '') + '>' +
+    S.userAdmin.projects.map(function (key) { return '<option value="' + esc(key) + '"' + (selected.indexOf(key) >= 0 ? ' selected' : '') + '>' + esc(key) + '</option>'; }).join('') +
+    '</select></label><label class="chip2" style="cursor:pointer"><input type="checkbox" data-user-all' + (all ? ' checked' : '') + '> All projects</label>';
+}
+function renderUsers() {
+  var root = $('#view-users'); if (!root) return;
+  if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
+  var u = S.userAdmin, h = '<section class="panel"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
+  if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
+  if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
+  if (u.loading && !u.users) h += '<div class="muted">Loading people…</div>';
+  else {
+    h += '<div class="project-table"><table><thead><tr><th>Person</th><th>Roles</th><th>Projects</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead><tbody>';
+    (u.users || []).forEach(function (person) {
+      var labels = (person.roles || []).map(function (role) { return (u.roleOptions.filter(function (r) { return r.id === role; })[0] || {}).label || role; });
+      var projects = person.project_keys == null ? 'All projects' : person.project_keys.length ? person.project_keys.join(', ') : 'No projects';
+      h += '<tr><td><b>' + esc(person.display_name || person.email) + '</b><div class="small muted">' + esc(person.email) + '</div></td><td>' +
+        labels.map(function (label) { return '<span class="pill">' + esc(label) + '</span>'; }).join(' ') + '</td><td>' + esc(projects) + '</td><td>' +
+        esc(person.last_login_at ? new Date(person.last_login_at).toLocaleString() : 'Never') + '</td><td>' +
+        (person.disabled ? '<span class="pill" data-tone="crit">Disabled</span>' : '<span class="pill" data-tone="ok">Active</span>') +
+        '</td><td><div class="project-actions"><button class="btn sm" data-user-edit="' + esc(person.email) + '">Edit</button><button class="btn sm' +
+        (person.disabled ? '' : ' danger') + '" data-user-toggle="' + esc(person.email) + '" data-disabled="' + (!person.disabled) + '">' +
+        (person.disabled ? 'Enable' : 'Disable') + '</button></div></td></tr>';
+      if (u.editing === person.email) {
+        h += '<tr><td colspan="6"><div class="project-form"><div class="wide"><strong>Roles</strong><div>' +
+          roleChecks(root, 'edit-role', person.roles || []) + '</div></div><div>' + projectChoices(person.project_keys || [], person.project_keys == null) +
+          '</div><div class="project-actions"><button class="btn primary sm" data-user-save="' + esc(person.email) + '">Save changes</button>' +
+          '<button class="btn sm" data-user-cancel>Cancel</button></div></div></td></tr>';
+      }
+    });
+    if (!(u.users || []).length) h += '<tr><td colspan="6" class="muted">No people have been added.</td></tr>';
+    h += '</tbody></table></div>';
+  }
+  h += '</section><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
+    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required></label>' +
+    '<label>Name<input class="in" data-user-name autocomplete="off"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', []) +
+    '</div></div><div>' + projectChoices([], true) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Views by role</h2><span class="hint">A person with multiple roles sees the union of their views.</span></div>' +
+    '<div class="project-table"><table><thead><tr><th>View</th>' + u.roleOptions.map(function (r) { return '<th>' + esc(r.label) + '</th>'; }).join('') +
+    '</tr></thead><tbody>' + Object.keys(ROLE_VIEW_LABELS).map(function (permission) {
+      return '<tr><td>' + esc(ROLE_VIEW_LABELS[permission]) + '</td>' + u.roleOptions.map(function (r) {
+        var on = r.permissions.indexOf('*') >= 0 || r.permissions.indexOf(permission) >= 0;
+        return '<td>' + (on ? '✓' : '—') + '</td>';
+      }).join('') + '</tr>';
+    }).join('') + '</tbody></table></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Change history</h2><span class="hint">Who made each account or role change</span></div>' +
+    '<div class="project-table"><table><thead><tr><th>When</th><th>Who</th><th>Change</th><th>Details</th></tr></thead><tbody>' +
+    (u.audit || []).map(function (item) { return '<tr><td>' + esc(item.ts ? new Date(item.ts).toLocaleString() : '') + '</td><td>' + esc(item.actor) +
+      '</td><td>' + esc(item.action.replace(/_/g, ' ')) + '</td><td>' + esc(item.result) + '<div class="small muted">' +
+      esc(JSON.stringify(item.payload || {})) + '</div></td></tr>'; }).join('') +
+    '</tbody></table></div></section>';
+  root.innerHTML = h;
+  $$('[data-user-refresh]', root).forEach(function (b) { b.onclick = function () { loadUsers(true); }; });
+  $$('[data-user-password-dismiss]', root).forEach(function (b) { b.onclick = function () { u.temporaryPassword = ''; renderUsers(); }; });
+  $$('[data-user-edit]', root).forEach(function (b) { b.onclick = function () { u.editing = b.dataset.userEdit; renderUsers(); }; });
+  $$('[data-user-cancel]', root).forEach(function (b) { b.onclick = function () { u.editing = ''; renderUsers(); }; });
+  $$('[data-user-all]', root).forEach(function (box) { box.onchange = function () { var select = $('[data-user-projects]', box.closest('.project-form')); if (select) select.disabled = box.checked; }; });
+  $$('[data-user-toggle]', root).forEach(function (b) { b.onclick = function () {
+    adminRequest('/v1/console/users/' + encodeURIComponent(b.dataset.userToggle) + '/disabled', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled: b.dataset.disabled === 'true' })
+    }).then(function () { loadUsers(true); }).catch(function (e) { toast('Account update failed', String(e.message || e), 'crit'); });
+  }; });
+  $$('[data-user-save]', root).forEach(function (b) { b.onclick = function () {
+    var edit = b.closest('.project-form'), roles = $$('.edit-role:checked', edit).map(function (x) { return x.value; });
+    var all = $('[data-user-all]', edit).checked, projects = all ? null : $$('[data-user-projects] option:checked', edit).map(function (x) { return x.value; });
+    adminRequest('/v1/console/users/' + encodeURIComponent(b.dataset.userSave), { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roles: roles, project_keys: projects })
+    }).then(function () { u.editing = ''; loadUsers(true); }).catch(function (e) { toast('Person update failed', String(e.message || e), 'crit'); });
+  }; });
+  $$('[data-user-add]', root).forEach(function (b) { b.onclick = function () {
+    var form = b.closest('.project-form'), email = $('[data-user-email]', form).value, name = $('[data-user-name]', form).value;
+    var roles = $$('.new-role:checked', form).map(function (x) { return x.value; }), all = $('[data-user-all]', form).checked;
+    var projects = all ? null : $$('[data-user-projects] option:checked', form).map(function (x) { return x.value; });
+    adminRequest('/v1/console/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, display_name: name, roles: roles, project_keys: projects })
+    }).then(function (d) { u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true); })
+      .catch(function (e) { toast('Person could not be added', String(e.message || e), 'crit'); });
+  }; });
+}
+function renderMachines() {
+  var d = D(), root = $('#view-machines'); if (!root) return;
+  var h = '<section class="panel"><div class="panel-h"><h2>Machines and AI</h2><span class="hint">Node health, capacity, AI account status and service checks</span>' +
+    '<span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div>';
+  if (!(d.nodes || []).length) h += '<div class="empty">No machine has joined yet.</div>';
+  else h += '<div class="project-table"><table><thead><tr><th>Machine</th><th>Status</th><th>Capacity</th><th>Projects</th><th>Last heartbeat</th><th></th></tr></thead><tbody>' +
+    d.nodes.map(function (node) { return '<tr><td><b class="mono">' + esc(node.name) + '</b><div class="small muted">' + esc(node.ip || '') + '</div></td><td>' +
+      pill(nodeTone(node), nodeLabel(node)) + '</td><td class="mono">' + Number(node.slots_used || 0) + ' / ' + Number(node.slots_total || 0) +
+      '</td><td>' + esc((node.projects || []).join(', ') || '—') + '</td><td>' + esc(node.last_heartbeat ? when(node.last_heartbeat) : 'Never') +
+      '</td><td><button class="btn sm" data-act="open-node" data-id="' + esc(node.name) + '">Details</button></td></tr>'; }).join('') + '</tbody></table></div>';
+  h += '</section><section class="panel"><div class="panel-h"><h2>AI accounts</h2><span class="hint">Account readiness and provider status</span></div>';
+  if (!(d.accounts || []).length) h += '<div class="empty">No AI accounts are assigned to these machines.</div>';
+  else h += '<div class="project-table"><table><thead><tr><th>Account</th><th>Provider</th><th>Machine</th><th>Role</th><th>Status</th><th>Quota</th></tr></thead><tbody>' +
+    d.accounts.map(function (account) { return '<tr tabindex="0" data-act="open-acc" data-id="' + esc(account.id) + '"><td class="mono">' + esc(account.id) +
+      '</td><td>' + esc(PROVIDER[account.provider] || account.provider) + '</td><td class="mono">' + esc(account.node) + '</td><td>' +
+      esc((account.roles || []).join(', ') || '—') + '</td><td>' + pill(accTone(account), accLabel(account)) + '</td><td>' + qwin(account) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+  h += '</section><section class="panel"><div class="panel-h"><h2>Service checks</h2><span class="hint">Active platform checks</span></div>';
+  if (S.svcError) h += '<div class="muted">' + esc(S.svcError) + '</div>';
+  if (!S.services.length && !S.svcError) h += '<div class="empty">No service checks reported.</div>';
+  else h += '<div class="project-table"><table><thead><tr><th>Service</th><th>Group</th><th>Status</th><th>Response</th></tr></thead><tbody>' +
+    S.services.map(function (service) { return '<tr><td>' + esc(service.name) + '</td><td>' + esc(service.group || '—') + '</td><td>' +
+      pill(service.up ? 'ok' : 'crit', service.up ? 'Up' : 'Down') + '</td><td class="mono">' + Number(service.ms || 0) + ' ms</td></tr>'; }).join('') +
+    '</tbody></table></div>';
+  root.innerHTML = h + '</section>';
 }
 function loadProjectRepositories(key) {
   S.projectAdmin.repositoryEditor = { key: key, busy: true, saving: false, error: '', data: null };
@@ -880,9 +1078,12 @@ function copyJoinCommand(name) {
   } else toast('Select and copy the join command', '', 'info');
 }
 function pollServices() {
+  if (!S.consoleSessionLoaded) { setTimeout(pollServices, SVC_MS); return; }
+  if (S.consoleUser && !consoleCan('view.machines_ai')) return;
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
     S.services = d.services || []; S.svcError = d.error || '';
     if (S.view === 'cc' && S.data) renderCC();
+    if (S.view === 'machines' && S.data) renderMachines();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
 }
@@ -892,7 +1093,7 @@ function pollAnalytics() {
     return r.json();
   }).then(function (d) {
     S.analytics = d.rows || []; S.anError = '';
-    if (S.view === 'delivery' && S.data) renderDBody();
+    if ((S.view === 'delivery' || S.view === 'board') && S.data) renderDBody();
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
@@ -986,6 +1187,19 @@ function renderLive() {
 /* ---------- Command Center ---------- */
 function renderCC() {
   var d = D();
+  if (S.consoleUser && !consoleCan('view.machines_ai')) {
+    var h = '<section class="panel"><div class="panel-h"><h2>My projects</h2><span class="hint">Projects available to your account</span><span class="spacer"></span>' +
+      '<button class="btn primary sm" data-act="view" data-view="board">Open work board</button></div>';
+    if (!(d.projects || []).length) h += '<div class="empty">No projects are assigned to your account.</div>';
+    else h += '<div class="project-table"><table><thead><tr><th>Project</th><th>Repository</th><th>Open tickets</th><th>Completed</th></tr></thead><tbody>' +
+      d.projects.map(function (p) {
+        var counts = p.counts || {}, total = Object.keys(counts).reduce(function (sum, key) { return sum + Number(counts[key] || 0); }, 0);
+        return '<tr><td><b class="mono">' + esc(p.key) + '</b></td><td>' + esc((p.repositories || [p.repo]).join(', ')) +
+          '</td><td class="num">' + Math.max(0, total - Number(counts.Done || 0)) + '</td><td class="num">' + Number(counts.Done || 0) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    $('#view-cc').innerHTML = h + '</section>';
+    return;
+  }
   var online = d.nodes.filter(function (n) { return n.status === 'online'; });
   var offline = d.nodes.filter(function (n) { return n.status === 'offline'; });
   var hasAcc = {}; d.accounts.forEach(function (a) { hasAcc[a.node] = 1; });
@@ -1317,7 +1531,7 @@ function renderDHead() {
   h += '<span class="spacer"></span>';
   var p = d.projects.filter(function (x) { return x.key === S.project; })[0];
   if (p) h += '<button class="btn sm" data-act="open-report">Report</button>' + projectCloseControl(p) + '<a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
-  $('#dhead').innerHTML = h;
+  $('#' + (S.view === 'board' ? 'board-head' : 'dhead')).innerHTML = h;
 }
 function epicOf(t, byKey) {
   var cur = t, guard = 0;
@@ -1403,7 +1617,7 @@ function renderDBody() {
   h += '</div></section>';
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
-  $('#dbody').innerHTML = h;
+  $('#' + (S.view === 'board' ? 'board-body' : 'dbody')).innerHTML = h;
 }
 
 /* ---------- Human review ---------- */
@@ -2514,15 +2728,18 @@ function render() {
   renderLive();
   renderFooter();
   if (S.view === 'cc') renderCC();
+  else if (S.view === 'board') { renderDHead(); renderDBody(); }
   else if (S.view === 'delivery') { renderDHead(); renderDBody(); }
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
+  else if (S.view === 'machines') renderMachines();
   else if (S.view === 'knowledge') renderKnowledge();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
+  else if (S.view === 'users') renderUsers();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2542,19 +2759,26 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'board', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'knowledge', 'integrations', 'projects', 'users'].forEach(function (v) {
+    var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
+  });
 }
 function setView(v) {
   if (S.view === v) return;
+  if (S.consoleUser && !consoleCan(VIEW_PERMISSION[v] || 'view.dashboard')) {
+    toast('View unavailable', 'This view is not available for your role.', 'warn'); return;
+  }
   S.view = v;
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
   showView();
-  try { history.pushState(null, '', v === 'cc' ? '/cc' : '/' + v); } catch (e) { /* file preview */ }
+  try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
+  if (v === 'users') loadUsers();
+  if (v === 'machines') pollServices();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 

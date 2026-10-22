@@ -6,6 +6,7 @@ from typing import Any
 
 from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
+from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
 from .sa import dashboard_data, thresholds
 
@@ -45,7 +46,20 @@ def snapshot(ctx) -> dict[str, Any]:
                           n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
                           require_pins=bool(repo.projects[project].stacks))}
         desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
-        nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
+        reported_services = (n["metrics"] or {}).get("services") or {}
+        declared: dict[str, list[str]] = {}
+        for project in projects:
+            for service in repo.projects[project].required_services if project in repo.projects else []:
+                declared.setdefault(service, []).append(project)
+        gaps = service_gaps(reported_services, list(declared))
+        node_services = [{"name": svc, "projects": declared.get(svc, []), "healthy": svc not in gaps,
+                          "state": (reported_services.get(svc) or {}).get("state", "unknown"),
+                          "endpoint": (reported_services.get(svc) or {}).get("endpoint") or endpoint(svc),
+                          "image": (reported_services.get(svc) or {}).get("image", ""),
+                          "detail": gaps.get(svc) or (reported_services.get(svc) or {}).get("detail", "")}
+                         for svc in sorted(set(declared) | set(reported_services)) if svc in SERVICES]
+        nodes.append({"name": n["name"], "ip": n["ip"], "services": node_services,
+                      "role": n["role"], "status": status,
                       "accepting_work": bool(n["accepting_work"]),
                       "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],

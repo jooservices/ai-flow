@@ -543,7 +543,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
@@ -580,8 +580,10 @@ function ticketBy(k) { return D().tickets.filter(function (x) { return x.key ===
 function incBy(id) { return D().incidents.concat(D().incidents_recent || []).filter(function (x) { return String(x.id) === String(id); })[0]; }
 function consoleCan(permission) {
   var permissions = S.consoleUser && S.consoleUser.permissions || [];
-  return permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0;
+  return Array.isArray(permissions) && (permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0);
 }
+function consoleOwner() { return consoleCan('console.manage') || consoleCan('integrations.manage'); }
+function consoleReader() { return consoleCan('console.read'); }
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
@@ -639,6 +641,7 @@ function pollConsoleSession() {
     render();
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
+    if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
   }).catch(function () { S.consoleUser = null; render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
 }
@@ -1460,6 +1463,7 @@ function submitReview(key, action, comment) {
 var KNOWLEDGE_TYPES = { study_case: 'Study case', knowledge: 'Knowledge', skill: 'Skill', agent: 'Agent', guide: 'Guide', policy: 'Policy' };
 function loadKnowledge(force) {
   var k = S.knowledge;
+  if (!consoleCan('knowledge.read')) return;
   if (k.loading || (!force && k.data && Date.now() - k.loadedAt < 30000)) return;
   k.loading = true; k.error = '';
   fetch('/v1/knowledge/resources?include_archived=true', { cache: 'no-store' }).then(function (r) {
@@ -1490,10 +1494,16 @@ function knowledgeSlug(value) {
 function knowledgeDate(value) { return value ? when(value) : '—'; }
 function renderKnowledge() {
   var root = $('#view-knowledge'); if (!root) return;
+  if (!consoleCan('knowledge.read')) {
+    root.innerHTML = '<section class="panel"><h1>Knowledge and Skills</h1><div class="muted">Sign in with a role that can view knowledge resources.</div></section>';
+    return;
+  }
+  var canManage = consoleCan('knowledge.manage'), canApprove = consoleCan('knowledge.approve');
   var k = S.knowledge, d = k.data || { resources: [], proposals: [] }, rows = d.resources || [];
   var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Knowledge and Skills</h1>' +
     '<span class="hint">Study cases, knowledge, skills, agents, guides and policies are versioned in aiflow-control.</span><span class="spacer"></span>' +
-    '<button class="btn primary" data-act="knowledge-new">New resource</button><button class="btn" data-act="knowledge-refresh">Refresh</button></div>';
+    (canManage ? '<button class="btn primary" data-act="knowledge-new">New resource</button>' : '') +
+    '<button class="btn" data-act="knowledge-refresh">Refresh</button></div>';
   h += '<div class="lead-controls"><label>Editor name<input data-knowledge-actor value="' + esc(k.actor || '') + '" placeholder="Your name" autocomplete="name"></label>' +
     '<label>Type<select id="knowledge-kind"><option value="all">All types</option>' + Object.keys(KNOWLEDGE_TYPES).map(function (type) {
       return '<option value="' + type + '"' + (k.type === type ? ' selected' : '') + '>' + KNOWLEDGE_TYPES[type] + '</option>';
@@ -1513,13 +1523,13 @@ function renderKnowledge() {
       '<span class="pill" data-tone="' + (r.archived ? 'muted' : 'ok') + '">' + (r.archived ? 'Archived' : 'Active') + '</span></div>' +
       '<div class="small"><span class="mono">' + esc(r.id) + '</span> · ' + esc(KNOWLEDGE_TYPES[r.type] || r.type) + ' · v' + r.version + '</div>' +
       '<div class="small">Edited by ' + esc(r.updated_by) + ' · ' + esc(knowledgeDate(r.updated_at)) + '</div><div class="knowledge-actions">' +
-      '<button class="btn sm" data-act="knowledge-edit" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">Edit</button>' +
+      (canManage ? '<button class="btn sm" data-act="knowledge-edit" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">Edit</button>' : '') +
       '<button class="btn sm" data-act="knowledge-history" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">History</button>' +
-      '<button class="btn sm" data-act="knowledge-archive" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '" data-archived="' + (!r.archived) + '">' + (r.archived ? 'Restore active' : 'Archive') + '</button></div></article>';
+      (canManage ? '<button class="btn sm" data-act="knowledge-archive" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '" data-archived="' + (!r.archived) + '">' + (r.archived ? 'Restore active' : 'Archive') + '</button>' : '') + '</div></article>';
   });
   h += '</div></section><div class="stack">';
   var e = k.editor;
-  if (e) {
+  if (e && canManage) {
     h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">' + (e.version == null ? 'Create resource' : 'Edit resource') + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-cancel">Cancel</button></div>' +
       '<div class="knowledge-form"><label>Type<select data-knowledge-field="type">' + Object.keys(KNOWLEDGE_TYPES).map(function (type) {
         return '<option value="' + type + '"' + (e.type === type ? ' selected' : '') + '>' + KNOWLEDGE_TYPES[type] + '</option>';
@@ -1537,7 +1547,7 @@ function renderKnowledge() {
       var older = versions.filter(function (x) { return x.version === v.version - 1; })[0];
       h += '<article class="knowledge-version"><div><strong>Version ' + v.version + '</strong> · ' + esc(v.action) + ' · edited by <strong>' + esc(v.actor) + '</strong> · ' + esc(knowledgeDate(v.created_at)) +
         (v.approved_by ? ' · approved by ' + esc(v.approved_by) : '') + '</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before' + (older ? ' · v' + older.version : '') + '</div><pre>' + esc(older ? older.content : '(no earlier version)') + '</pre></div>' +
-        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre><button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + v.version + '">Restore this version</button></div></div></article>';
+        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre>' + (canManage ? '<button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + v.version + '">Restore this version</button>' : '') + '</div></div></article>';
     });
     pendingHistory.forEach(function (p) {
       h += '<article class="knowledge-version"><div><strong>Pending PR #' + p.pr_number + '</strong> · proposed by <strong>' + esc(p.actor) + '</strong> · ' + esc(knowledgeDate(p.created_at)) +
@@ -1548,14 +1558,14 @@ function renderKnowledge() {
   }
   var pending = d.proposals || [];
   h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">Policy approvals</h2><span class="pill" data-tone="' + (pending.length ? 'warn' : 'ok') + '">' + pending.length + ' pending</span></div>';
-  h += '<div class="knowledge-form"><label>Owner name<input data-knowledge-owner value="' + esc(k.owner || '') + '" placeholder="Owner name" autocomplete="name"></label>' +
-    '<label class="review-auth">Owner access token<input type="password" autocomplete="new-password" data-owner-token value="' + esc(k.ownerToken) + '" aria-label="Owner access token"></label></div>' +
-    '<div class="small">Policy proposals do not affect running decisions until an owner merges the pull request.</div>';
+  if (canApprove) h += '<div class="knowledge-form"><label>Approver name<input data-knowledge-owner value="' + esc(k.owner || (S.consoleUser && S.consoleUser.user) || '') + '" placeholder="Approver name" autocomplete="name"></label>' +
+    '<label class="review-auth">Owner access token (not needed with an authorized console session)<input type="password" autocomplete="new-password" data-owner-token value="' + esc(k.ownerToken) + '" aria-label="Owner access token"></label></div>';
+  h += '<div class="small">Policy proposals do not affect running decisions until an authorized administrator merges the pull request.</div>';
   if (!pending.length) h += '<div class="empty">No policy pull requests are waiting for approval.</div>';
   pending.forEach(function (p) {
     h += '<article class="knowledge-item"><h3>' + esc(p.title) + '</h3><div class="small">' + esc(p.id) + ' · proposed by ' + esc(p.actor) + ' · ' + esc(knowledgeDate(p.created_at)) + '</div>' +
       '<details><summary>View proposed change</summary><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before · v' + p.base_version + '</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div><div><div class="small">After' + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre></div></div></details>' +
-      '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a><div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div></article>';
+      '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div>' : '') + '</article>';
   });
   h += '</section></div></div>';
   root.innerHTML = h;
@@ -1595,12 +1605,15 @@ function restoreKnowledge(type, id, version) {
 }
 function approveKnowledge(proposalId) {
   var tokenField = $('[data-owner-token]'); S.knowledge.ownerToken = tokenField ? tokenField.value : S.knowledge.ownerToken;
-  if (!S.knowledge.ownerToken || !String(S.knowledge.owner || '').trim()) {
-    toast('Owner access required', 'Enter the owner name and access token before approving a policy.', 'warn'); return;
+  var approver = String(S.knowledge.owner || (S.consoleUser && S.consoleUser.user) || '').trim();
+  if ((!consoleCan('knowledge.approve') && !S.knowledge.ownerToken) || !approver) {
+    toast('Owner access required', 'Enter an approver name and, without an authorized console session, an access token.', 'warn'); return;
   }
+  var headers = { 'Content-Type': 'application/json' };
+  if (S.knowledge.ownerToken) headers.Authorization = 'Bearer ' + S.knowledge.ownerToken;
   fetch('/v1/knowledge/proposals/' + encodeURIComponent(proposalId) + '/approve', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.knowledge.ownerToken },
-    body: JSON.stringify({ approved_by: S.knowledge.owner })
+    method: 'POST', headers: headers,
+    body: JSON.stringify({ approved_by: approver })
   }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
     .then(function (d) { if (!d.merged) throw new Error(d.message || 'GitHub refused the merge'); toast('Policy merged', 'The policy is now active.', 'ok'); loadKnowledge(true); })
     .catch(function (err) { toast('Policy approval failed', String(err.message || err), 'crit'); });
@@ -1632,8 +1645,9 @@ function loadJiraIntegrations() {
 }
 function renderJiraIntegrations() {
   var g = S.integ, j = g.jira;
+  if (!consoleOwner()) return '<section class="panel"><h1>Integrations</h1><div class="muted">Only a role with integration management permission can manage Jira.</div></section>';
   var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Integrations</h1>' +
-    '<span class="hint">Connect AI Flow to Jira Cloud. Only the owner can connect or disconnect.</span><span class="spacer"></span>' +
+    '<span class="hint">Connect AI Flow to Jira Cloud. Users with integration management permission can connect or disconnect.</span><span class="spacer"></span>' +
     '<button class="btn" data-act="integ-refresh">Refresh</button></div>' +
     '<div class="knowledge-form"><label class="review-auth">Owner access token (not needed with an owner console session)<input type="password" autocomplete="new-password" data-integ-owner-token value="' + esc(g.ownerToken) + '" aria-label="Owner access token"></label></div>';
   if (g.notice) h += '<div class="small" role="status">' + esc(g.notice) + '</div>';
@@ -2224,6 +2238,13 @@ function drawerNode(name) {
   missingTools.forEach(function (k) { if (!(n.tools || {})[k]) b += '<span class="vk">' + esc(k) + '</span><span class="vv bad">missing</span>'; });
   b += '</div>';
   if (missingTools.length) b += '<div class="small" style="color:var(--crit);margin-top:6px">Missing for this node\'s project stacks: ' + esc(missingTools.join(', ')) + '. Install them on the node; the watchdog warns until a heartbeat reports them.</div>';
+  b += '</div><div class="dsec"><h4>Test services</h4>';
+  var nodeServices = n.services || [];
+  if (!nodeServices.length) b += '<div class="empty">No project served by this node declares test services.</div>';
+  nodeServices.forEach(function (svc) {
+    b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + (svc.healthy ? 'ok' : 'crit') + '"></span><span class="who">' + esc(svc.name) + ' <span class="mono small">' + esc(svc.endpoint) + '</span></span><span class="what">' + esc(svc.healthy ? svc.state : 'unhealthy') + ' · ' + esc(svc.detail || '') + (svc.projects && svc.projects.length ? ' · ' + esc(svc.projects.join(', ')) : '') + '</span></div>';
+    if (!svc.healthy) b += '<div class="small" style="color:var(--crit)">This node takes no work for ' + esc((svc.projects || []).join(', ') || 'its projects') + ' until ' + esc(svc.name) + ' is healthy.</div>';
+  });
   b += '</div><div class="dsec"><h4>Workers</h4>';
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
@@ -2292,6 +2313,7 @@ function drawerInc(id) {
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
+    node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
     ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';

@@ -1,4 +1,4 @@
-"""Verify the signed console session shared by role-aware Command Center endpoints.
+"""Verify signed console sessions and define the permissions shown by the Command Center.
 
 The console login (control/login.py, docs/v4/console-login.md) issues this small HS256 JWT contract in the
 ``aiflow4_session`` cookie: ``sub`` is the authenticated user, ``role`` is one of ``ROLE_PERMISSIONS``, and ``exp``
@@ -20,8 +20,11 @@ COOKIE_NAME = "aiflow4_session"
 # given access by adding its permissions here without changing endpoint code.
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "super_admin": frozenset({"*"}),
-    "owner": frozenset({"console.read", "console.write", "integrations.manage", "nodes.manage", "projects.manage"}),
-    "lead": frozenset({"console.read"}),
+    "owner": frozenset({
+        "console.read", "console.write", "console.manage", "integrations.manage", "nodes.manage", "projects.manage",
+        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve",
+    }),
+    "lead": frozenset({"console.read", "node.operations.read", "knowledge.read"}),
 }
 ROLE_LABELS = {"super_admin": "Super Administrator", "owner": "Owner", "lead": "Lead"}
 ALLOWED_ROLES = set(ROLE_PERMISSIONS)
@@ -50,6 +53,10 @@ class ConsoleUser:
     subject: str
     role: str
 
+    @property
+    def permissions(self) -> frozenset[str]:
+        return ROLE_PERMISSIONS.get(self.role, frozenset())
+
 
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -72,7 +79,7 @@ def issue_session(subject: str, role: str, expires_at: int, secret: str) -> str:
 
 
 def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUser | None:
-    """Return claims only for a valid, unexpired owner/lead session signed with the configured key."""
+    """Return claims only for a valid, unexpired session signed with the configured key."""
     if not token or len(secret.encode()) < 32:
         return None
     try:

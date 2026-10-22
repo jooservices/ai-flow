@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from .services import normalize_services
 from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
 
@@ -59,6 +60,7 @@ class Project:
     hotfix_base: str = "master"
     stack: str | list[str] = ""
     databases: list[str] = field(default_factory=list)
+    services: list[str] | str = field(default_factory=list)  # test services every node prepares: postgres, redis
     checks: list[str] = field(default_factory=list)
     release_check: list[str] = field(default_factory=list)
     tag_prefix: str = ""
@@ -134,6 +136,11 @@ class Project:
             if isinstance(item, dict):
                 values.extend(normalize_stacks(item.get("stack")))
         return list(dict.fromkeys(values))
+
+    @property
+    def required_services(self) -> list[str]:
+        """Canonical test services the nodes must run healthy before taking work for this project."""
+        return normalize_services(self.services)
 
     @property
     def parallel_limit(self) -> int:

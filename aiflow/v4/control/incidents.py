@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 
+from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
 from . import notify
 
@@ -199,7 +200,7 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
     """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
     repo = ctx.repo()
     reasons: list[str] = []
-    nodes = ctx.db.all("SELECT name, status, tools, projects, dynamic FROM nodes")
+    nodes = ctx.db.all("SELECT name, status, tools, metrics, projects, dynamic FROM nodes")
     online = [n for n in nodes if n["status"] == "online"]
     if not online:
         return ["no node is online"]
@@ -219,6 +220,11 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
                 why = (f"versions.lock has no pin for {', '.join(unpinned)}" if unpinned
                        else f"tools missing or outside their pin: {', '.join(gaps)}")
                 blocked.append(f"{n['name']} ({why})")
+            else:
+                svc = service_gaps((n["metrics"] or {}).get("services"), project.required_services)
+                if svc:
+                    blocked.append(f"{n['name']} (test services unhealthy: "
+                                   + ", ".join(f"{k}: {v}" for k, v in svc.items()) + ")")
         if len(blocked) == len(serving):
             reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
     accounts = ctx.db.all("SELECT a.id, a.status, a.node FROM accounts a")

@@ -434,7 +434,7 @@ def version_release_scan(ctx: Ctx) -> int:
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -460,6 +460,11 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 if any(written.values()):
                     log.info("memory indexed: %s", written)
                 last_mem = now
+            if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
+                from ..worker import backups as backup_worker
+                backup_worker.scheduled_backup(ctx)
+                backup_worker.weekly_restore_test(ctx)
+                last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])

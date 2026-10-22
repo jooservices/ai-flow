@@ -190,6 +190,12 @@ class ControlRepo:
 
         accounts = [Account(**{k: v for k, v in a.items() if k in Account.__dataclass_fields__})
                     for a in (y("accounts.yaml", {}).get("accounts") or [])]
+        # A configured senior account is the default master on a fresh control repo. Keep an explicit
+        # master assignment authoritative; this fallback only fills the role when nobody has it.
+        if accounts and not any("master" in (a.roles or []) for a in accounts):
+            senior = next((a for a in accounts if a.tier == "senior"), None)
+            if senior:
+                senior.roles = list(dict.fromkeys([*(senior.roles or []), "master"]))
         nodes: dict[str, Node] = {}
         for p in sorted((r / "nodes").glob("*.yaml")):
             d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}

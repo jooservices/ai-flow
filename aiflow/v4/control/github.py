@@ -145,6 +145,9 @@ class GitHubApp:
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str, draft: bool = True) -> dict:
         existing = self.find_pr(repo, head)
         if existing:
+            if existing.get("title") != title:
+                return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{existing['number']}",
+                                {"title": title}, repo=repo)
             return existing
         return self.api("POST", f"/repos/{self.org}/{repo}/pulls",
                         {"title": title, "head": head, "base": base, "body": body, "draft": draft}, repo=repo)

@@ -1,6 +1,7 @@
 # Connect Jira from the UI
 
-The owner connects AI Flow to Jira Cloud on the **Integrations** screen (`/integrations`) instead of putting
+Users with integration management permission connect AI Flow to Jira Cloud on the **Integrations** screen
+(`/integrations`) instead of putting
 `JIRA_EMAIL` / `JIRA_API_TOKEN` in `/etc/aiflow/secrets/owner.env`. There are two ways:
 
 - **Connect Jira** with OAuth 2.0 (3LO): the browser goes to Atlassian's consent page, Atlassian calls the control
@@ -14,9 +15,11 @@ expires and a **Disconnect** button. Code: `aiflow/v4/control/jira_connect.py`; 
 
 ## Who may do it
 
-Only the owner: a signed console session with role `owner`, or the owner bearer token (`AIFLOW4_OWNER_TOKEN`,
-typed into the "Owner access token" field). Anyone else gets 401 (not signed in, wrong token) or 403 (another
-role) and the credential stays as it was. Refused attempts are audited too.
+The `integrations.manage` permission grants access to the signed-in console session. It is granted directly to
+`owner`; `super_admin` receives every permission, including `integrations.manage`. The configured owner bearer
+token (`AIFLOW4_OWNER_TOKEN`, typed into the "Owner access token" field) is also accepted. Anyone else gets 401
+(not signed in, wrong token) or 403 (permission missing) and the credential stays as it was. Refused attempts are
+audited too.
 
 ## 1. Create the OAuth app at Atlassian (once)
 

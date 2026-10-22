@@ -1,6 +1,16 @@
 """Knowledge screen CRUD, version history and owner-gated policy rollout."""
 
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.control.console_auth import issue_session
+
+
+SESSION_SECRET = "test-knowledge-console-secret-at-least-32-bytes"
+
+
+def sign_in(client, ctx, role="owner"):
+    ctx.settings.console_session_secret = SESSION_SECRET
+    client.cookies.set("aiflow4_session", issue_session("knowledge@example.test", role, 2_000_000_000,
+                                                         SESSION_SECRET))
 
 
 def save(client, *, kind, resource_id, title, content, actor="Mai Nguyen", archived=False, version=None):
@@ -11,6 +21,7 @@ def save(client, *, kind, resource_id, title, content, actor="Mai Nguyen", archi
 
 
 def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(client, ctx):
+    sign_in(client, ctx)
     examples = [
         ("study_case", "checkout-migration", "Checkout migration", "Lesson learned: keep the old route until cutover."),
         ("knowledge", "postgres-indexes", "Postgres indexes", "Use a partial index for active records."),
@@ -60,6 +71,7 @@ def test_resource_types_commit_to_control_repo_archive_and_restore_with_history(
 
 
 def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ctx):
+    sign_in(client, ctx)
     resources = client.get("/v1/knowledge/resources?include_archived=true").json()["resources"]
     current = next(row for row in resources if row["type"] == "policy" and row["id"] == "default")
     prior_content = current["content"]
@@ -81,6 +93,7 @@ def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ct
     assert before["proposals"][0]["status"] == "pending"
 
     proposal_id = before["proposals"][0]["proposal_id"]
+    client.cookies.clear()
     assert client.post(f"/v1/knowledge/proposals/{proposal_id}/approve", json={"approved_by": "Owner"}).status_code == 401
     assert client.post(f"/v1/knowledge/proposals/{proposal_id}/approve", json={"approved_by": "Owner"},
                        headers={"Authorization": "Bearer review-secret"}).status_code == 401
@@ -91,6 +104,7 @@ def test_policy_waits_for_owner_pr_merge_then_refreshes_active_policy(client, ct
     assert approved.status_code == 200 and approved.json()["merged"] is True
     assert ctx.github.merged[-1] == ("aiflow-control", 1, "Policy: Default policy", "squash")
     assert refreshes == [True]
+    sign_in(client, ctx)
     history = client.get("/v1/knowledge/resources/policy/default/history").json()["history"]
     assert history[0]["content"] == new_content and history[0]["actor"] == "Mai Nguyen"
     assert history[0]["approved_by"] == "Owner"

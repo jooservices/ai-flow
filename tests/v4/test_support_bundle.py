@@ -52,14 +52,50 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
         assert {"versions.json", "settings.json", "machine-state.json", "account-state.json", "incidents.json",
                 "logs/control-service.log", "inventory.json"} <= set(bundle.namelist())
         assert len(bundle.read("logs/control-service.log")) == support_bundle.MAX_LOG_BYTES
-        assert json.loads(bundle.read("machine-state.json"))[0]["name"] == "node1"
-        assert json.loads(bundle.read("account-state.json"))[0]["provider"] == "claude"
-        assert len(json.loads(bundle.read("incidents.json"))) == 100
+        versions = json.loads(bundle.read("versions.json"))
+        settings = json.loads(bundle.read("settings.json"))
+        machine = json.loads(bundle.read("machine-state.json"))[0]
+        account = json.loads(bundle.read("account-state.json"))[0]
+        incidents = json.loads(bundle.read("incidents.json"))
+        assert versions["aiflow"] and versions["python"] and versions["nodes"][0]["release"] == "4.1.0"
+        assert settings["control_version"] == versions["aiflow"]
+        assert settings["configured_account_count"] == len(ctx.repo().accounts)
+        assert machine["name"] == "node1" and machine["status"] == "online" and machine["slots_used"] == 2
+        assert account["provider"] == "claude" and account["status"] == "idle"
+        assert len(incidents) == 100
+        assert all(item["kind"] != "old" for item in incidents)
         assert "inventory.json" in bundle.namelist()
     assert inventory["incident_count"] == 100
     assert inventory["scan"] == "passed"
     assert all(item["bytes"] <= support_bundle.MAX_LOG_BYTES for item in inventory["files"]
                if item["name"].startswith("logs/"))
+
+
+def test_incident_collection_excludes_incidents_older_than_seven_days(ctx):
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail,opened_at)"
+               " VALUES ('recent','TESTWP-1','warning','Recent issue','Safe detail',now()-interval '6 days')")
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail,opened_at)"
+               " VALUES ('stale','TESTWP-2','warning','Old issue','Safe detail',now()-interval '8 days')")
+
+    archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        incidents = json.loads(bundle.read("incidents.json"))
+    assert [item["kind"] for item in incidents] == ["recent"]
+
+
+def test_bundle_scrubs_personal_data_and_credentials_before_archive_is_built(ctx):
+    token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    email = "private.person@example.test"
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
+               " VALUES ('test','TESTWP-1','warning','Private incident',%s)",
+               (f"token={token}; contact {email}; phone +1 (415) 555-0134; Jane Doe",))
+
+    archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        contents = {name: bundle.read(name).decode("utf-8") for name in bundle.namelist()}
+    joined = "\n".join(contents.values())
+    assert token not in joined and email not in joined and "415) 555-0134" not in joined and "Jane Doe" not in joined
+    assert all(not support_bundle.sensitive_findings(content) for content in contents.values())
 
 
 def test_scanner_detects_secrets_tokens_keys_and_personal_data_and_blocks_offer(client, ctx, monkeypatch):

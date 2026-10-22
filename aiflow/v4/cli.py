@@ -87,9 +87,11 @@ def build_ctx(s: Settings):
         from .control.github import GitHubApp
         github = GitHubApp(s.github_app_dir, s.github_org)
     repo_cache = RepoCache(s.control_repo)
+    events = Events(db, s.o2_url, s.o2_basic, source=s.o2_source)
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
-              events=Events(db, s.o2_url, s.o2_basic), repo=repo_cache, jira=jira, github=github,
+              events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
+    events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
     return ctx
 

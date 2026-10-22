@@ -34,6 +34,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
+- [OpenObserve event delivery](../../docs/v4/openobserve-delivery.md): lab memtable sizing, bounded event retries and sustained rejection incidents
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 - [Connect Jira from the UI](../../docs/v4/jira-connect.md): owner-only OAuth 2.0 (3LO) or API-token connection on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions

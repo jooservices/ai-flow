@@ -6,7 +6,7 @@ x-app: &app
   image: ${AIFLOW4_IMAGE_REPOSITORY:-aiflow4/control}:${AIFLOW4_IMAGE_TAG:-latest}
   restart: unless-stopped
   env_file: [/etc/aiflow/secrets/control/aiflow4.env]
-  environment:
+  environment: &app-environment
     AIFLOW4_ENV: lab
     AIFLOW4_VERSION: ${AIFLOW4_VERSION:-4.0.0a1}
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
@@ -16,6 +16,7 @@ x-app: &app
     AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR: /var/cache/aiflow4-memory/fastembed
     HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
+    AIFLOW4_O2_SOURCE: control
     AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
     AIFLOW4_SMTP_PORT: "1025"
     OTEL_SERVICE_NAME: aiflow4-control
@@ -34,6 +35,9 @@ services:
   control-api-a: &api
     <<: *app
     container_name: aiflow4-control-api-a
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-api-a
     command: ["control-api", "--port", "8080"]
     mem_limit: 2g
     healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"], interval: 5s, timeout: 5s, retries: 5, start_period: 5s }
@@ -49,10 +53,16 @@ services:
   control-api-b:
     <<: *api
     container_name: aiflow4-control-api-b
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-api-b
 
   control-loops:
     <<: *app
     container_name: aiflow4-control-loops
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-loops
     command: ["control-loops"]
     mem_limit: 2g
 

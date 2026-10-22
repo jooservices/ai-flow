@@ -23,6 +23,7 @@ from urllib.parse import quote
 from . import jira_connect, memory
 from . import projects as project_lifecycle
 from . import rollout
+from . import version_release
 from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
 from .api import Ctx, notify_human_review
@@ -380,9 +381,16 @@ def fleet_rollout(ctx: Ctx) -> dict | None:
     return rollout.tick(ctx, rollout.read_current(control_api.RELEASES))
 
 
+def version_release_scan(ctx: Ctx) -> int:
+    """Refresh live Jira version membership and audit which configured versions are ready or blocked."""
+    from . import api as control_api
+    control_api.github_gateway(ctx)  # merge-back retries for released versions need GitHub
+    return version_release.scan(ctx)
+
+
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -400,6 +408,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
                 last_rollout = now
+            if now - last_release >= 30 and ctx.leases.leader("version_release_scan", OWNER, 60_000):
+                version_release_scan(ctx)
+                last_release = now
             if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
                 written = memory.index(ctx.db)
                 if any(written.values()):

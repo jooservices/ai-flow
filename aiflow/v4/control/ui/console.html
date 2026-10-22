@@ -1021,6 +1021,7 @@ function renderCC() {
     h += '</section>';
   }
 
+  h += toolWaitsPanel(d);
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
   if (!d.nodes.length) h += '<div class="empty">No node has joined. Create a one-use join command below and run it on the new machine.</div>';
@@ -2420,6 +2421,29 @@ function renderFooter() {
   [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
 }
 
+/* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
+function projectChecksCell(c) {
+  if (!c || !c.has_checks) return '<span class="muted">no checks</span>';
+  var current = (c.machines || []).filter(function (m) { return m.current; });
+  if (!current.length) return pill('info', 'not checked yet');
+  var blocked = [];
+  current.forEach(function (m) { (m.cannot_run || []).forEach(function (x) { blocked.push({ node: m.node, x: x }); }); });
+  if (!blocked.length) return pill('ok', 'all can run · ' + current.length + ' machine' + (current.length > 1 ? 's' : ''));
+  var h = pill('crit', blocked.length + ' cannot run');
+  blocked.forEach(function (b) { h += '<div class="small" style="color:var(--crit)"><span class="mono">' + esc(b.x.command) + '</span> on ' + esc(b.node) + ': ' + esc(b.x.detail || ('missing ' + (b.x.tool || 'tool'))) + '</div>'; });
+  return h;
+}
+function toolWaitsPanel(d) {
+  var waits = d.tool_waits || [];
+  if (!waits.length) return '';
+  var h = '<section class="panel" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Tickets waiting for a tool</h2><span class="hint">Parked for a machine that has the tool; the owner is not asked</span></div>';
+  h += '<table><thead><tr><th>Tool</th><th>Waiting tickets</th><th>Projects</th><th>Missing on</th><th>Maintenance ticket</th></tr></thead><tbody>';
+  waits.forEach(function (w) {
+    h += '<tr><td class="mono">' + esc(w.requirement) + '</td><td class="mono" title="' + esc(w.tickets.map(function (t) { return t.key; }).join(', ')) + '">' + esc(w.count) + '</td><td>' + esc((w.projects || []).join(', ')) + '</td><td>' + esc((w.machines || []).join(', ')) + '</td><td class="mono">' + (w.maintenance_ticket ? esc(w.maintenance_ticket) : '<span class="muted">after 24 h without a capable machine</span>') + '</td></tr>';
+  });
+  return h + '</tbody></table></section>';
+}
+
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
   var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
@@ -2430,10 +2454,10 @@ function renderProjects() {
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
   else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
   else {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Actions</th></tr></thead><tbody>';
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';

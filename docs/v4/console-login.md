@@ -1,10 +1,12 @@
 # Console login
 
-People sign in to Command Center with an email and a password. The first role is **Super Administrator**
-(`super_admin`, every permission). Roles live in one mapping, `ROLE_PERMISSIONS` in `control/console_auth.py`; a
-new role is added there without touching call sites, which ask for permission identifiers such as
-`integrations.manage`, `projects.manage` or `nodes.manage`. A Super Administrator passes every owner-only and
-role-aware check.
+People sign in to Command Center with an email and a password. Roles map to permission identifiers in
+`ROLE_PERMISSIONS` in `control/console_auth.py`. The session endpoint returns that permission list, and the UI
+shows each control when the session grants its permission; the API independently checks the same map before
+accepting protected actions. `super_admin` has every permission, including integration, project, node and Knowledge
+management. `owner` has those explicit management grants too, while `lead` can read the console, node operation
+history and Knowledge resources without management controls. To change what a role sees and can do, update its
+permissions in `ROLE_PERMISSIONS`.
 
 ## Installation turns it on
 

@@ -36,7 +36,7 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
-from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, role_satisfies, verify_session
+from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
@@ -572,16 +572,20 @@ def create_app(ctx: Ctx) -> FastAPI:
                                 headers={"WWW-Authenticate": "Bearer"})
         return "reviewer"
 
-    def owner_auth(authorization: str = Header(default="")) -> str:
+    def owner_auth(request: Request, authorization: str = Header(default="")) -> str:
         configured = ctx.settings.owner_token
-        if not configured:
-            raise HTTPException(503, "owner actions are not configured")
         scheme, separator, token = authorization.partition(" ")
-        if (not separator or scheme.lower() != "bearer" or not token.strip()
-                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
-            raise HTTPException(401, "owner authorization required",
-                                headers={"WWW-Authenticate": "Bearer"})
-        return "owner"
+        if (configured and separator and scheme.lower() == "bearer" and token.strip()
+                and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            return ""
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        if user and has_permission(user.role, "knowledge.approve"):
+            return user.subject
+        if not configured and not ctx.settings.console_session_secret:
+            raise HTTPException(503, "owner actions are not configured")
+        if user:
+            raise HTTPException(403, "owner role required")
+        raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
@@ -595,7 +599,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
 
-    def console_user(request: Request, permissions: set[str] | None, target: str = "console", action: str = "read",
+    def console_user(request: Request, permissions: set[str] | str | None, target: str = "console", action: str = "read",
                      node: str = "") -> ConsoleUser:
         """Require a signed, unexpired console session. Role and subject headers are deliberately ignored."""
         secret = ctx.settings.console_session_secret
@@ -608,7 +612,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
-        if permissions is not None and not role_satisfies(user.role, permissions):
+        required = {permissions} if isinstance(permissions, str) else permissions
+        if required is not None and not role_satisfies(user.role, required):
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
@@ -3413,13 +3418,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         return row
 
     @app.get("/v1/knowledge/resources")
-    def knowledge_resources(include_archived: bool = True) -> dict:
+    def knowledge_resources(request: Request, include_archived: bool = True) -> dict:
+        console_user(request, "knowledge.read")
         load_managed_resources()
         return {"resources": knowledge.list_resources(ctx.db, include_archived),
                 "proposals": knowledge.proposals(ctx.db)}
 
     @app.get("/v1/knowledge/resources/{kind}/{resource_id}/history")
-    def knowledge_history(kind: str, resource_id: str) -> dict:
+    def knowledge_history(kind: str, resource_id: str, request: Request) -> dict:
+        console_user(request, "knowledge.read")
         load_managed_resources()
         if kind not in knowledge.KINDS:
             raise HTTPException(404, "unknown resource type")
@@ -3427,7 +3434,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "proposals": knowledge.proposals(ctx.db, kind, resource_id)}
 
     @app.post("/v1/knowledge/resources")
-    def knowledge_save(body: KnowledgeBody) -> dict:
+    def knowledge_save(body: KnowledgeBody, request: Request) -> dict:
+        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
         if not body.id.strip():
             raise HTTPException(400, "resource id is required")
         action = "archive" if body.archived else "save"
@@ -3435,7 +3443,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                                       body.version)
 
     @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
-    def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody) -> dict:
+    def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody, request: Request) -> dict:
+        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
+                     node=resource_id)
         load_managed_resources()
         version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
                              " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
@@ -3456,7 +3466,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not github:
             raise HTTPException(503, "control repo bot is unavailable")
         repo_name = Path(ctx.settings.control_repo).name
-        owner = body.approved_by.strip() or "owner"
+        owner = _owner or body.approved_by.strip() or "owner"
         try:
             merged = github.merge_pr(repo_name, int(proposal["pr_number"]),
                                          f"Policy: {proposal['title']}", "squash")

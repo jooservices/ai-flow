@@ -30,14 +30,15 @@ with its node token; it never accepts a shell command from the browser or API.
 ## Console roles
 
 Node mutations require the signed `aiflow4_session` cookie. `AIFLOW4_CONSOLE_SESSION_SECRET` must be set to a
-random value of at least 32 bytes. The existing console login feature issues an HS256 JWT signed with that
-secret and claims `sub` (user), `role` (`owner` or `lead`) and `exp` (Unix time). Use
+random value of at least 32 bytes. The console login feature issues an HS256 JWT signed with that
+secret and claims `sub` (user), `role` (`super_admin`, `owner` or `lead`) and `exp` (Unix time). The role
+permissions are defined in `aiflow.v4.control.console_auth.ROLE_PERMISSIONS`. Use
 `aiflow.v4.control.console_auth.issue_session` to create the same token. Set the cookie as HttpOnly, Secure,
 SameSite=Strict and Path `/`. The control API ignores user and role headers.
 
-Only `owner` can install, repair or use the per-node join-command action. The Join a node panel authorizes token
-creation with the configured `AIFLOW4_JOIN_TOKEN`. `owner` and `lead` can read the per-node operation log.
-Missing, invalid and expired sessions fail closed; a lead write attempt is rejected and audited.
+Only `super_admin` and `owner` can install, repair or use the per-node join-command action. The Join a node panel
+authorizes token creation with the configured `AIFLOW4_JOIN_TOKEN`. Those roles and `lead` can read the per-node
+operation log. Missing, invalid and expired sessions fail closed; a lead write attempt is rejected and audited.
 
 ## Desired state
 
@@ -103,7 +104,7 @@ from the API or control repo.
 
 `GET /v1/nodes/{name}/operations/next` is node-token protected. The agent claims one queued operation and posts
 its verified result to `/result`. The Command Center log is `GET /v1/nodes/{name}/operations`, available only
-to owner and lead sessions.
+to roles with `node.operations.read` (`super_admin`, `owner` and `lead`).
 
 ## Nodes without an agent
 

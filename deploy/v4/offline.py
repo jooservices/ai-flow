@@ -731,11 +731,21 @@ class OfflineInstaller:
         release_dir = releases / version
         releases.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=releases))
+        release_installed = False
         try:
             safe_extract(release_archive, stage)
             if not (stage / "pyproject.toml").is_file() or not (stage / "deploy/v4/node/systemd/aiflow4-node-agent.service").is_file():
                 raise OfflineError("release archive is missing node runtime files")
-            python_venv = stage / ".venv"
+            (stage / "RELEASE").write_text(version + "\n", encoding="utf-8")
+            if release_dir.exists():
+                shutil.rmtree(release_dir)
+            releases.mkdir(parents=True, exist_ok=True)
+            os.replace(stage, release_dir)
+            release_installed = True
+
+            # uv writes absolute interpreter paths into console-script shebangs. Build the venv only after
+            # placing the release at its permanent path, or those entry points will name the temporary stage.
+            python_venv = release_dir / ".venv"
             self.run([str(uv_path), "venv", "--seed", "--python", str(python_exec), str(python_venv)])
             wheels = self.bundle / "wheels"
             project_wheels = list(wheels.glob("ai_flow-*.whl"))
@@ -743,11 +753,10 @@ class OfflineInstaller:
                 raise OfflineError("bundle must contain exactly one AI Flow wheel")
             self.run([str(uv_path), "pip", "install", "--offline", "--no-index", "--find-links", str(wheels),
                       "--python", str(python_venv / "bin/python"), str(project_wheels[0])])
-            (stage / "RELEASE").write_text(version + "\n", encoding="utf-8")
-            if release_dir.exists():
-                shutil.rmtree(release_dir)
-            releases.mkdir(parents=True, exist_ok=True)
-            os.replace(stage, release_dir)
+        except Exception:
+            if release_installed:
+                shutil.rmtree(release_dir, ignore_errors=True)
+            raise
         finally:
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)

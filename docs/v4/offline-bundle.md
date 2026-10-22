@@ -69,6 +69,32 @@ the agent and assigned worker units with `systemctl status aiflow4-node-agent` a
 `systemctl status 'aiflow4-worker@<account>'`. The node needs only internal control-plane connectivity to report
 healthy. AI-provider credentials can be added later.
 
+## Offline installation smoke test
+
+`deploy/v4/ci/offline-install-smoke.sh` runs a real install on an Ubuntu 24.04 systemd container. It builds the
+test image before starting the target, then places the target on an internal-only Docker network with only the
+supplied control container attached. The installer uses the bundle's `.deb` files, image and wheels; after it
+returns, the smoke checks that the agent and at least one assigned worker unit are active and queries the live
+control API for a fresh online heartbeat and green preflight.
+
+Use a test control container with the same release available, a one-use join token for a node assigned at least
+one account, and a project using a bundled Python or Node stack. The account does not need signed-in AI
+credentials. The control container must have a certificate trusted by the target, or pass its private CA file as
+the optional fifth argument. Run the smoke from a Docker host that can run privileged systemd containers:
+
+```sh
+bash deploy/v4/ci/offline-install-smoke.sh \
+  /path/to/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64 \
+  aiflow4-test-control-api https://control-smoke.internal:8080 \
+  /path/to/one-use-join-token /path/to/private-control-ca.crt
+```
+
+The same check can run from pytest when those inputs are provided through
+`AIFLOW4_OFFLINE_SMOKE_BUNDLE`, `AIFLOW4_OFFLINE_SMOKE_CONTROL_CONTAINER`,
+`AIFLOW4_OFFLINE_SMOKE_CONTROL_URL` and `AIFLOW4_OFFLINE_SMOKE_JOIN_TOKEN_FILE`; set
+`AIFLOW4_OFFLINE_SMOKE_CA_CERTIFICATE` when the control API uses a private CA. The test target has no public
+network route during installation, while the control API remains reachable over the private Docker network.
+
 ## Clean-target apt closure
 
 The builder resolves the apt packages against an empty dpkg status (`Dir::State::status`), so a package that is

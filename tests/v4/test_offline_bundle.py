@@ -340,7 +340,11 @@ def _install(tmp_path, *, inspected_extra=None, health=None, joins=None, control
         if name == "uv" and argv[1:2] == ["venv"]:
             venv = Path(argv[-1])
             (venv / "bin").mkdir(parents=True)
-            (venv / "bin/python").write_text("python", encoding="utf-8")
+            python = venv / "bin/python"
+            python.write_text("python", encoding="utf-8")
+            entry_point = venv / "bin/aiflow4"
+            entry_point.write_text(f"#!{python}\n# generated console entry point\n", encoding="utf-8")
+            entry_point.chmod(0o755)
             return subprocess.CompletedProcess(argv, 0, "", "")
         if name == "uv" and argv[1:2] == ["pip"]:
             assert "--offline" in argv and "--no-index" in argv
@@ -380,6 +384,10 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
     assert health_calls == [("/v1/nodes/offline-node/health", "private-node-token")]
     assert [call[1] for call in joins] == ["/v1/nodes/join-tokens/inspect", "/v1/nodes/join"]
     assert (root / "srv/aiflow/releases/v4.1.0/RELEASE").read_text().strip() == "v4.1.0"
+    release = root / "srv/aiflow/releases/v4.1.0"
+    entry_point = release / ".venv/bin/aiflow4"
+    assert entry_point.read_text(encoding="utf-8").splitlines()[0] == f"#!{release}/.venv/bin/python"
+    assert Path(entry_point.read_text(encoding="utf-8").splitlines()[0][2:]).is_file()
     assert (root / "srv/aiflow/current").is_symlink()
     assert (root / "srv/aiflow/state/node.token").read_text().strip() == "private-node-token"
     assert (root / "etc/aiflow/node.env").read_text().find('AIFLOW4_NODE_NAME="offline-node"') >= 0
@@ -390,6 +398,37 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
     assert any(call[:2] == ["docker", "load"] for call in calls)
     assert any(call[-1:] == ["aiflow4-worker@codex-01.service"] for call in calls)
     assert not any(Path(call[0]).name in {"curl", "npm", "pip", "wget"} for call in calls)
+
+
+def test_offline_install_smoke_uses_internal_network_live_health_and_worker_units():
+    script_path = offline.ROOT / "deploy/v4/ci/offline-install-smoke.sh"
+    script = script_path.read_text(encoding="utf-8")
+    target = (offline.ROOT / "deploy/v4/ci/offline-target.Dockerfile").read_text(encoding="utf-8")
+    subprocess.run(["bash", "-n", str(script_path)], check=True)
+    assert "offline-target.Dockerfile" in script
+    assert "FROM ubuntu:24.04" in target and "systemd" in target
+    assert "docker.io" not in target and "git" not in target and "uv" not in target
+    assert "docker network create --driver bridge --internal" in script
+    assert "docker network inspect --format '{{.Internal}}'" in script
+    assert "installer/aiflow4-offline install" in script
+    assert "aiflow4-node-agent.service" in script and "systemctl is-active" in script
+    assert "aiflow4-worker@*.service" in script
+    assert "/v1/nodes/" in script and "/health" in script
+    assert "preflight_ok" in script and "heartbeat_age_seconds" in script
+
+
+def test_offline_install_smoke_runs_when_real_target_inputs_are_configured():
+    names = ("AIFLOW4_OFFLINE_SMOKE_BUNDLE", "AIFLOW4_OFFLINE_SMOKE_CONTROL_CONTAINER",
+             "AIFLOW4_OFFLINE_SMOKE_CONTROL_URL", "AIFLOW4_OFFLINE_SMOKE_JOIN_TOKEN_FILE")
+    values = [os.environ.get(name) for name in names]
+    if not all(values):
+        pytest.skip("set AIFLOW4_OFFLINE_SMOKE_BUNDLE, _CONTROL_CONTAINER, _CONTROL_URL and _JOIN_TOKEN_FILE "
+                    "to run the Ubuntu 24.04 offline-install smoke")
+    command = ["bash", str(offline.ROOT / "deploy/v4/ci/offline-install-smoke.sh"), *values]
+    ca_certificate = os.environ.get("AIFLOW4_OFFLINE_SMOKE_CA_CERTIFICATE")
+    if ca_certificate:
+        command.append(ca_certificate)
+    subprocess.run(command, check=True)
 
 
 def test_install_fails_when_units_are_active_but_node_never_heartbeats(tmp_path, monkeypatch):

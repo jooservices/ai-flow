@@ -38,6 +38,26 @@ def mount_ui(app: FastAPI, ctx) -> None:
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
+    @app.get("/help", include_in_schema=False)
+    def help_root() -> RedirectResponse:
+        return RedirectResponse("/help/")
+
+    @app.get("/help/{path:path}", include_in_schema=False)
+    def help_site(path: str = "") -> FileResponse:
+        """The documentation site that ships in the release (docs/v4/documentation-site.md); the console Help
+        links open /help/screens/<view>.html."""
+        from ...core.docsite import site_dir
+        root = site_dir()
+        if root is None:
+            raise HTTPException(404, "the documentation site is not installed")
+        root = root.resolve()
+        target = (root / (path or "index.html")).resolve()
+        if target.is_dir():
+            target = target / "index.html"
+        if root not in target.parents or not target.is_file():
+            raise HTTPException(404, "no such documentation page")
+        return FileResponse(target, headers={"Cache-Control": "no-cache"})
+
     @app.get("/v1/tickets/{key}")
     def ticket(key: str) -> dict:
         t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))

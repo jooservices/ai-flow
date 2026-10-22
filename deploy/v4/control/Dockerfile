@@ -15,4 +15,7 @@ COPY prompts prompts
 COPY deploy/v4/bin/aiflow4-bootstrap /app/deploy/v4/bin/aiflow4-bootstrap
 RUN uv sync --frozen --no-dev
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 AIFLOW4_VERSION=$AIFLOW4_VERSION
+# the documentation site that /help serves and the console Help links open
+COPY docs/guide docs/guide
+RUN python -m aiflow.v4.core.docsite build --out /app/docs-site --version "$AIFLOW4_VERSION"
 ENTRYPOINT ["aiflow4"]

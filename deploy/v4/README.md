@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work

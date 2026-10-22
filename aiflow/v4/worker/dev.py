@@ -3,6 +3,7 @@
 Outcomes:
   done     changes committed and pushed, draft PR open, ticket in In Verify
   blocked  the AI reported a requirement conflict: ticket to Needs owner with the question
+  tool_missing  a tool or service is missing on this machine: ticket back to To Do, parked for a capable machine
   quota    the account cannot work now: ticket back to To Do, account cooling down (control API)
   failed   anything else: ticket back to To Do with the reason (the branch keeps the work for the next run)
 """
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
+from ..core.toolchains import parse_missing_requirements
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
@@ -53,6 +55,7 @@ class Claimed:
     triage_question: str = ""
     related: list[dict] = field(default_factory=list)
     project_tickets: list[dict] = field(default_factory=list)
+    machine_tools: dict = field(default_factory=dict)
 
 
 class LeaseLost(Exception):
@@ -98,7 +101,24 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                    " intent is kept; AI Flow commits the merge with your work.\n")
     return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
-                      rework=rework, related=related_block(c.related))
+                      rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools))
+
+
+def machine_block(tools: dict) -> str:
+    """'Tools on this machine' section of the prompt, so the AI does not try what is not installed."""
+    if not tools:
+        return ""
+    available = ", ".join(f"{n} ({v})" if v else n for n, v in (tools.get("available") or {}).items())
+    lines = ["\nTools on this machine (reported by its node agent just now):",
+             f"- available: {available or 'none reported'}"]
+    if tools.get("services"):
+        lines.append(f"- test services running: {', '.join(tools['services'])}")
+    if tools.get("missing"):
+        lines.append(f"- not available: {', '.join(tools['missing'])}")
+    lines.append("Do not try a tool that is not available. If a check of the ticket needs one, stop and report\n"
+                 "`RESULT: BLOCKED: MISSING-TOOL: <tool>[, <tool>] - <what could not run>`; AI Flow then waits for a machine\n"
+                 "that has it. Never ask the owner to install or fix a tool.")
+    return "\n".join(lines) + "\n"
 
 
 RELATED_KIND = {"ticket": "ticket", "run_summary": "run summary", "finding": "verify finding", "answer": "answer"}
@@ -198,6 +218,17 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("comment", body=note(c, "paused", what="The run stopped before finishing",
                                       why=f"{c.account} cannot work now ({res.error_kind}): {res.error_message[:200]}",
                                       result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
+        missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
+        if missing:
+            result["outcome"] = "tool_missing"
+            result["details"]["missing_tools"] = missing
+            jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
+                                      why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
+                                      result="No question goes to the owner; the machine and the tool are recorded",
+                                      next_="Back to To Do; AI Flow offers it again when a machine with the tool is available",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result

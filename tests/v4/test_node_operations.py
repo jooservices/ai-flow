@@ -396,6 +396,51 @@ def test_supporting_tool_installer_routes_are_whitelisted(monkeypatch):
                        "playwright-browser")]
 
 
+def test_playwright_stack_installs_node_playwright_and_chromium_with_system_libraries(monkeypatch):
+    calls = []
+    monkeypatch.setattr(operations.shutil, "which", lambda name: None)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kwargs: (
+        calls.append(command) or SimpleNamespace(returncode=0, stdout="", stderr="")))
+    operations._install_playwright_browser("1.56.1")
+    assert calls[0][-1] == "playwright@1.56.1"
+    assert calls[1] == ["playwright", "install", "--with-deps", "chromium"]
+
+
+def test_prepare_playwright_stack_installs_pinned_tools_and_reports_them(monkeypatch):
+    installed = []
+    state = {"git": "git version 2.45.0", "uv": "uv 0.9.0", "node": "missing", "playwright": "missing",
+             "playwright-browser": "missing"}
+
+    def probe(names=None):
+        return {name: state.get(name, "missing") for name in names or state}
+
+    def install(tool, version, packages):
+        installed.append((tool, version))
+        state[tool] = {"node": "v24.8.0", "playwright": "Version 1.56.1",
+                       "playwright-browser": "Playwright Chromium 1.56.1"}[tool]
+
+    monkeypatch.setattr(agent, "tool_versions", probe)
+    monkeypatch.setattr(operations, "_install_component", install)
+    versions = {"tools": {"node": "24.x", "playwright": "1.56"}}
+    result = operations.prepare_project_toolchains({"JAIF": ["playwright"]}, versions)
+    assert [tool for tool, _ in installed if tool in ("node", "playwright", "playwright-browser")] == [
+        "node", "playwright", "playwright-browser"]
+    assert dict(installed)["node"] == "24.x" and dict(installed)["playwright"] == "1.56"
+    assert result["tools"]["node"] == "v24.8.0"
+    assert result["tools"]["playwright-browser"] == "Playwright Chromium 1.56.1"
+    assert result["gaps"]["JAIF"] == []
+
+
+def test_prepare_reports_a_browser_that_cannot_launch_as_a_tool_gap(monkeypatch):
+    state = {"git": "git version 2.45.0", "uv": "uv 0.9.0", "node": "v24.8.0", "playwright": "Version 1.56.1",
+             "playwright-browser": "broken: missing system library libnss3.so"}
+    monkeypatch.setattr(agent, "tool_versions", lambda names=None: {n: state.get(n, "missing") for n in names or state})
+    monkeypatch.setattr(operations, "_install_component", lambda *a: None)
+    result = operations.prepare_project_toolchains({"JAIF": ["playwright"]},
+                                                   {"tools": {"node": "24.x", "playwright": "1.56"}})
+    assert result["gaps"]["JAIF"] == ["playwright-browser"]
+
+
 def test_node_24_major_line_resolves_to_latest_matching_official_release(monkeypatch):
     monkeypatch.setattr(operations, "_linux_arch", lambda: ("x86_64", "x64"))
     monkeypatch.setattr(operations, "_response", lambda *args, **kwargs: SimpleNamespace(json=lambda: [

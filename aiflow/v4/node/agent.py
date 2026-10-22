@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import BROKEN_PREFIX, STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -38,8 +38,32 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
 
 
+_MISSING_LIBRARY = re.compile(r"error while loading shared libraries:\s*([^\s:]+)", re.IGNORECASE)
+
+
+def _headless_launch_problem(binary: Path) -> str:
+    """Start the browser headless once; return why it cannot start (a machine tool problem), or an empty string."""
+    try:
+        p = subprocess.run([str(binary), "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom", "about:blank"],
+                           capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return ""  # a busy node answers slowly; that says nothing about the browser
+    except OSError as exc:
+        return f"cannot start ({type(exc).__name__})"
+    if p.returncode == 0:
+        return ""
+    library = _MISSING_LIBRARY.search(p.stderr or "")
+    if library:
+        return f"missing system library {library.group(1)}"
+    return f"headless launch failed (exit {p.returncode})"
+
+
 def _playwright_browser_version(dry_run: str, playwright_version: str) -> str:
-    """Report the browser only when this Playwright release's expected Chromium build is installed."""
+    """Report the browser only when this Playwright release's expected Chromium build is installed and starts.
+
+    A build that is installed but cannot start headless (usually a missing system library) is reported as
+    `broken: <reason>`: a problem of this machine's toolchain, not of any ticket.
+    """
     package = re.search(r"\d+(?:\.\d+){1,2}", playwright_version)
     location = re.search(r"^\s*Install location:\s*(.+?)\s*$", dry_run, re.MULTILINE | re.IGNORECASE)
     if not package or not location:
@@ -47,8 +71,12 @@ def _playwright_browser_version(dry_run: str, playwright_version: str) -> str:
     root = Path(location.group(1))
     binaries = (root / "chrome-linux" / "chrome", root / "chrome-linux64" / "chrome",
                 root / "chrome-headless-shell-linux64" / "chrome-headless-shell")
-    if not any(path.is_file() for path in binaries):
+    binary = next((path for path in binaries if path.is_file()), None)
+    if binary is None:
         return "missing"
+    problem = _headless_launch_problem(binary)
+    if problem:
+        return f"{BROKEN_PREFIX} {problem}"[:80]
     return f"Playwright Chromium {package.group(0)}"
 
 

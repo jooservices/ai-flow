@@ -486,7 +486,7 @@ def _install_playwright_browser(version: str) -> None:
     if not shutil.which("playwright"):
         _install_playwright(version)
     try:
-        result = subprocess.run(["playwright", "install", "chromium"], capture_output=True, text=True, timeout=1800)
+        result = subprocess.run(["playwright", "install", "--with-deps", "chromium"], capture_output=True, text=True, timeout=1800)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise OperationError(f"Playwright Chromium installer could not run ({type(exc).__name__})") from exc
     if result.returncode:

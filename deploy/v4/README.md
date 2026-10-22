@@ -40,6 +40,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [OpenObserve event delivery](../../docs/v4/openobserve-delivery.md): lab memtable sizing, bounded event retries and sustained rejection incidents
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 - [Connect Jira from the UI](../../docs/v4/jira-connect.md): owner-only OAuth 2.0 (3LO) or API-token connection on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
+- [Console roles and permissions](../../docs/v4/console-roles.md): UI controls and protected API actions follow the shared role permission map
 - [No CLI for end users](../../docs/v4/no-cli.md): inventory of owner and user operations that still need commands, their replacement tickets, and proposed backlog gaps
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`

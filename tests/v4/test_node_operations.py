@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from aiflow.v4.control import api as control_api
-from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4 import cli
 from aiflow.v4.node import agent, operations
 from conftest import join_node as issue_and_join
@@ -53,7 +53,7 @@ def test_owner_can_queue_missing_tool_install_for_online_agent_and_agent_complet
     ctx.repo().versions["tools"]["codex"] = "0.4.1"
     assert client.post("/v1/nodes/node1/heartbeat", json={"tools": {"codex": "missing"}},
                        headers=headers).status_code == 200
-    sign_in(client, ctx)
+    sign_in(client, ctx, role="super_admin")
 
     queued = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert queued.status_code == 202
@@ -84,7 +84,8 @@ def test_untrusted_identity_headers_and_lead_cannot_install_but_lead_can_read_lo
 
     sign_in(client, ctx, "lead", "lead@example.test")
     assert client.get("/v1/console/session").json() == {
-        "authenticated": True, "user": "lead@example.test", "role": "lead"}
+        "authenticated": True, "user": "lead@example.test", "role": "lead",
+        "permissions": sorted(ROLE_PERMISSIONS["lead"])}
     refused = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert refused.status_code == 403
     assert client.get("/v1/nodes/node1/operations").status_code == 200

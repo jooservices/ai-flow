@@ -39,7 +39,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .console_auth import COOKIE_NAME, verify_session
+from .console_auth import COOKIE_NAME, has_permission, verify_session
 from .db import J
 from .incidents import close_incident, open_incident
 from .jira import JiraError
@@ -513,14 +513,14 @@ def mount(app: FastAPI, ctx) -> None:
         return a
 
     def owner(request: Request, action: str = "read") -> str:
-        """The owner bearer token or a signed console session with role owner; anyone else is refused."""
+        """The owner bearer token or a signed console session with console management permission."""
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         configured = ctx.settings.owner_token
         if scheme.lower() == "bearer" and token.strip() and configured and secrets.compare_digest(
                 token.strip().encode(), configured.encode()):
             return "owner"
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and user.role == "owner":
+        if user and has_permission(user.role, "console.manage"):
             return user.subject
         if action != "read":
             write_audit(ctx, action, user.subject if user else "", False, "owner role required")

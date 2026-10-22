@@ -1,8 +1,8 @@
-"""Verify the signed console session shared by role-aware Command Center endpoints.
+"""Verify signed console sessions and define the permissions shown by the Command Center.
 
-The console login flow lives in a separate feature. It issues this small HS256 JWT contract in the
-``aiflow4_session`` cookie: ``sub`` is the authenticated user, ``role`` is ``owner`` or ``lead``, and ``exp`` is
-the Unix expiry time. We never trust identity or role headers from the request.
+The console login flow issues this small HS256 JWT contract in the ``aiflow4_session`` cookie: ``sub`` is the
+authenticated user, ``role`` is a known role, and ``exp`` is the Unix expiry time. The same role-to-permission
+map drives the UI and API authorization. We never trust identity or role headers from the request.
 """
 from __future__ import annotations
 
@@ -16,13 +16,33 @@ from dataclasses import dataclass
 
 
 COOKIE_NAME = "aiflow4_session"
-ALLOWED_ROLES = {"owner", "lead"}
+ROLE_PERMISSIONS = {
+    "owner": frozenset({
+        "console.read", "console.manage", "node.operations.read", "knowledge.read", "knowledge.manage",
+        "knowledge.approve",
+    }),
+    "lead": frozenset({"console.read", "node.operations.read", "knowledge.read"}),
+    "super_admin": frozenset({
+        "console.read", "console.manage", "node.operations.read", "knowledge.read", "knowledge.manage",
+        "knowledge.approve",
+    }),
+}
+ALLOWED_ROLES = set(ROLE_PERMISSIONS)
+
+
+def has_permission(role: str, permission: str) -> bool:
+    """Return whether a known console role grants a permission."""
+    return permission in ROLE_PERMISSIONS.get(role, ())
 
 
 @dataclass(frozen=True)
 class ConsoleUser:
     subject: str
     role: str
+
+    @property
+    def permissions(self) -> frozenset[str]:
+        return ROLE_PERMISSIONS.get(self.role, frozenset())
 
 
 def _b64(data: bytes) -> str:
@@ -46,7 +66,7 @@ def issue_session(subject: str, role: str, expires_at: int, secret: str) -> str:
 
 
 def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUser | None:
-    """Return claims only for a valid, unexpired owner/lead session signed with the configured key."""
+    """Return claims only for a valid, unexpired session signed with the configured key."""
     if not token or len(secret.encode()) < 32:
         return None
     try:

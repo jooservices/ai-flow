@@ -235,7 +235,8 @@ fi
 echo "deploy of $TARGET unhealthy; rolling back to ${CUR:-none}"
 ROLLED_BACK=no
 if [[ $CUR =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-  aiflow4-deploy "$CUR" && ROLLED_BACK=yes
+  # the pre-upgrade check would refuse the older release: the newer one may have applied migrations it lacks
+  AIFLOW4_SKIP_UPGRADE_CHECK=1 aiflow4-deploy "$CUR" && ROLLED_BACK=yes
 fi
 if [ "$ROLLED_BACK" = yes ]; then
   alert "[CRITICAL] AI Flow: auto-deploy of $TARGET rolled back" "The control plane was unhealthy after promoting $TARGET; it runs $CUR again. Look at the release checks and control logs."

@@ -574,7 +574,19 @@ def _process_node_operation_logged(api: ControlClient, node: str) -> None:
         log.warning("node operation poll failed: %s", type(operation_error).__name__)
 
 
-SERVICE_CHECK_S = 60  # how often declared test services are inspected, recreated when gone and reported
+PROBE_RETRY_S = 900  # a project check probe that did not report is asked for again after this long
+
+
+def _has_worker_user() -> bool:
+    try:
+        import pwd
+        pwd.getpwnam("aiflow-worker")
+        return True
+    except (KeyError, ImportError):
+        return False
+
+
+SERVICE_CHECK_S = 60 # how often declared test services are inspected, recreated when gone and reported
 
 
 def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str, dict]:
@@ -603,6 +615,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     service_names: list[str] = []
     service_at = 0.0
     service_lock = threading.Lock()
+    probe_thread: threading.Thread | None = None
+    probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
     try:
         while not stop.is_set():
             try:
@@ -693,6 +707,23 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 service_at = time.time()
                 service_thread = threading.Thread(target=check_services, name=f"aiflow4-services-{name}", daemon=True)
                 service_thread.start()
+            # check commands of the projects on a clean checkout: once per project and set of commands (control asks)
+            asked = [p for p in desired.get("check_probes") or []
+                     if time.time() - probe_tried.get((p["project"], p["signature"]), 0.0) > PROBE_RETRY_S]
+            if asked and manage_workers and (probe_thread is None or not probe_thread.is_alive()):
+                from .probes import run_check_probes
+                from ..worker.loop import RUN_AS
+                for p in asked:
+                    probe_tried[(p["project"], p["signature"])] = time.time()
+
+                def probe_checks(items=asked):
+                    try:
+                        run_check_probes(api, name, items, "/srv/aiflow", RUN_AS if _has_worker_user() else [])
+                    except Exception as exc:  # noqa: BLE001 - control asks again after PROBE_RETRY_S
+                        log.warning("project check probe failed: %s", type(exc).__name__)
+
+                probe_thread = threading.Thread(target=probe_checks, name=f"aiflow4-check-probe-{name}", daemon=True)
+                probe_thread.start()
             if pending_network_events:
                 try:
                     api.call("POST", "/v1/events", {"events": list(pending_network_events)})

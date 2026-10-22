@@ -146,11 +146,38 @@ def systemctl(*args: str) -> int:
     return subprocess.run(["systemctl", *args], capture_output=True).returncode
 
 
+def ensure_account_home(instance: str, accounts_root: str = "/srv/aiflow/accounts") -> bool:
+    """Create a newly console-assigned account's private home before systemd starts its worker."""
+    account = re.sub(r"\.\d+$", "", instance)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account):
+        return False
+    try:
+        import pwd
+        worker = pwd.getpwnam("aiflow-worker")
+        root = Path(accounts_root)
+        root.mkdir(parents=True, exist_ok=True)
+        root = root.resolve(strict=True)
+        home = root / account
+        if home.is_symlink():
+            return False
+        home.mkdir(mode=0o700, exist_ok=True)
+        info = home.stat(follow_symlinks=False)
+        if not home.is_dir() or home.resolve(strict=True).parent != root:
+            return False
+        if info.st_uid != worker.pw_uid or info.st_gid != worker.pw_gid or info.st_mode & 0o777 != 0o700:
+            os.chown(home, worker.pw_uid, worker.pw_gid)
+            os.chmod(home, 0o700)
+        return True
+    except (OSError, KeyError, ImportError):
+        log.warning("could not prepare account home for %s", account)
+        return False
+
+
 def reconcile(accounts: list[str]) -> None:
     """Start worker instances (account or account.N) whose account has signed-in credentials; stop the others."""
     for a in accounts:
         if systemctl("is-active", "--quiet", f"aiflow4-worker@{a}") != 0:
-            if Path(f"/srv/aiflow/accounts/{a.split('.')[0]}").is_dir():
+            if ensure_account_home(a):
                 systemctl("enable", "--now", f"aiflow4-worker@{a}")
                 log.info("started worker %s", a)
     p = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend", "aiflow4-worker@*"],

@@ -30,7 +30,9 @@ def snapshot(ctx) -> dict[str, Any]:
     assigned: dict[str, int] = {}
     for a in repo.accounts:
         assigned[a.node] = assigned.get(a.node, 0) + 1
-    for n in db.all("SELECT * FROM nodes ORDER BY role DESC, name"):
+    active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
+        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
         age = _age(n["last_heartbeat"])
         status = n["status"]
         if status == "online" and (age is None or age > NODE_OFFLINE_S):
@@ -44,6 +46,8 @@ def snapshot(ctx) -> dict[str, Any]:
                           require_pins=bool(repo.projects[project].stacks))}
         desired_services = [s for s in (configured.services or []) if isinstance(s, dict)] if configured else []
         nodes.append({"name": n["name"], "ip": n["ip"], "role": n["role"], "status": status,
+                      "accepting_work": bool(n["accepting_work"]),
+                      "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"],
                       "has_agent": bool(n["token_hash"]), "required_tools": required,
@@ -69,28 +73,48 @@ def snapshot(ctx) -> dict[str, Any]:
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
+    today_by_account = {row["account_id"]: row for row in db.all(
+        "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
+        "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
+        "GROUP BY account_id")}
+    pending_sign_in = {row["id"] for row in db.all(
+        "SELECT id FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_code<>''")}
     for a in db.all("SELECT * FROM accounts ORDER BY node, provider, id"):
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
         acc = repo.account(a["id"])
+        if not acc:
+            continue
         expiry = a["credential_expires_at"]
         expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
             days=sa_thresholds["credential_expiry_days"]))
-        status = "signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
+        status = "stopped" if acc.paused else ("signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
             "node_offline" if node_status.get(a["node"], "offline") != "online"
-            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"])))
+            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
         probe = (a["worker_state"] or {}).get("probe") or {}
+        windows = (a["quota"] or {}).get("windows") or {}
+        used_windows = [window for window in windows.values()
+                        if isinstance(window, dict) and window.get("utilization") is not None]
+        resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
+        usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": a["roles"],
+            "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": acc.roles,
             "explicit_only": bool(acc and acc.explicit_only),
+            "paused": bool(acc.paused), "jobs": [job for job, role in
+                (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))
+                if role in (acc.roles or [])],
+            "sign_in_pending": a["id"] in pending_sign_in,
             "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
                                                     else "cooldown" if cool else a["status"]),
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
             "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
             "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "last_error": a["last_error"],
+            "quota": a["quota"], "quota_used": max((float(w["utilization"]) for w in used_windows), default=None),
+            "quota_resets_at": min(resets) if resets else None,
+            "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
+            "cost_today": float(usage.get("cost_usd", 0)), "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
             "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],

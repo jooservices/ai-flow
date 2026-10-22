@@ -1,7 +1,18 @@
 import threading
+import os
+import pwd
+import stat
 from types import SimpleNamespace
 
 from aiflow.v4.node import agent
+
+
+def test_reconcile_can_prepare_a_new_console_account_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()))
+    assert agent.ensure_account_home("codex-node-01.2", str(tmp_path)) is True
+    home = tmp_path / "codex-node-01"
+    assert home.is_dir() and stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert agent.ensure_account_home("../../outside", str(tmp_path)) is False
 
 
 def test_node_tool_versions_include_codex_code_mode_host(monkeypatch):

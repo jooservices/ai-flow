@@ -48,6 +48,7 @@ class Account:
     roles: list[str] = field(default_factory=list)
     explicit_only: bool = False
     parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
+    paused: bool = False       # console-managed accounts stay assigned but do not receive new work
 
 
 @dataclass

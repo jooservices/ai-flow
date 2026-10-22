@@ -11,7 +11,7 @@ def test_join_token_migration_upgrades_develop_schema(db, tmp_path, monkeypatch)
     develop_migrations = tmp_path / "develop-migrations"
     develop_migrations.mkdir()
     for migration in current_migrations.glob("*.sql"):
-        if migration.name != "006_node_join_tokens.sql":
+        if migration.name not in {"006_node_join_tokens.sql", "011_machine_account_management.sql"}:
             shutil.copy2(migration, develop_migrations / migration.name)
 
     # Apply the schema already present on develop, including its legacy
@@ -30,7 +30,7 @@ def test_join_token_migration_upgrades_develop_schema(db, tmp_path, monkeypatch)
            " VALUES ('legacy-hash', 'legacy-node', now() + interval '5 minutes')")
 
     monkeypatch.setattr(control_db, "MIGRATIONS", current_migrations)
-    assert db.migrate() == ["006_node_join_tokens"]
+    assert db.migrate() == ["006_node_join_tokens", "011_machine_account_management"]
 
     columns = {row["column_name"] for row in db.all(
         "SELECT column_name FROM information_schema.columns WHERE table_name='node_join_tokens'")}
@@ -40,6 +40,8 @@ def test_join_token_migration_upgrades_develop_schema(db, tmp_path, monkeypatch)
     node_columns = {row["column_name"] for row in db.all(
         "SELECT column_name FROM information_schema.columns WHERE table_name='nodes'")}
     assert {"projects", "dynamic"} <= node_columns
+    assert {"accepting_work", "removed_at"} <= node_columns
+    assert db.one("SELECT to_regclass('managed_ai_accounts') AS table") == {"table": "managed_ai_accounts"}
     index = db.one("SELECT indexdef FROM pg_indexes WHERE tablename='node_join_tokens'"
                    " AND indexname='node_join_tokens_pending_node'")
     assert index and "UNIQUE INDEX" in index["indexdef"] and "WHERE (used_at IS NULL)" in index["indexdef"]

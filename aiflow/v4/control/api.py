@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
-from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
+from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
@@ -593,7 +593,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
 
-    def console_user(request: Request, roles: set[str], target: str = "console", action: str = "read",
+    def console_user(request: Request, permissions: set[str] | None, target: str = "console", action: str = "read",
                      node: str = "") -> ConsoleUser:
         """Require a signed, unexpired console session. Role and subject headers are deliberately ignored."""
         secret = ctx.settings.console_session_secret
@@ -606,7 +606,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
-        if user.role not in roles:
+        if permissions is not None and not role_satisfies(user.role, permissions):
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
@@ -885,8 +885,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/v1/console/session")
     def console_session(request: Request) -> dict:
-        user = console_user(request, {"owner", "lead"})
-        return {"authenticated": True, "user": user.subject, "role": user.role}
+        user = console_user(request, None)
+        return {"authenticated": True, "user": user.subject, "role": user.role,
+                "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -986,7 +987,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/integrations/github")
     def github_connection_status(request: Request) -> dict[str, Any]:
-        user = console_user(request, {"owner"})
+        user = console_user(request, {"integrations.manage"})
         gateway = github_gateway(ctx)
         if not gateway:
             return {"connected": False, "app": None, "account": None, "installation_id": None,
@@ -1013,7 +1014,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/integrations/github/manifest/start", response_class=HTMLResponse)
     def github_manifest_start(organization: str, request: Request) -> HTMLResponse:
-        user = console_user(request, {"owner"}, target="github", action="manifest_start")
+        user = console_user(request, {"integrations.manage"}, target="github", action="manifest_start")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", organization):
             audit("github", "manifest_start", "", "", None, user.subject, False, "invalid GitHub organization")
             raise HTTPException(422, "enter a valid GitHub organization login")
@@ -1108,7 +1109,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/integrations/github/imports")
     async def github_import_app(request: Request) -> dict[str, Any]:
-        user = console_user(request, {"owner"}, target="github", action="import_app")
+        user = console_user(request, {"integrations.manage"}, target="github", action="import_app")
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
@@ -1163,7 +1164,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/integrations/github/imports/{pending_id}/installations")
     def github_import_installations(pending_id: str, request: Request) -> dict[str, Any]:
-        user = console_user(request, {"owner"}, target="github", action="list_import_installations")
+        user = console_user(request, {"integrations.manage"}, target="github", action="list_import_installations")
         store = github_secret_store()
         stage = "load pending App"
         try:
@@ -1190,7 +1191,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/integrations/github/imports/{pending_id}/install")
     def github_import_install(pending_id: str, request: Request) -> RedirectResponse:
-        user = console_user(request, {"owner"}, target="github", action="open_app_install")
+        user = console_user(request, {"integrations.manage"}, target="github", action="open_app_install")
         try:
             record, meta, _ = github_secret_store().read_pending(pending_id)
             if record.get("phase") != "import" or not meta.get("slug"):
@@ -1204,7 +1205,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/integrations/github/imports/{pending_id}/connect")
     def github_import_connect(pending_id: str, body: GitHubInstallationBody, request: Request) -> dict[str, Any]:
-        user = console_user(request, {"owner"}, target="github", action="connect_imported_app")
+        user = console_user(request, {"integrations.manage"}, target="github", action="connect_imported_app")
         try:
             result = complete_github_connection(github_secret_store(), pending_id, body.installation_id,
                                                user.subject, "import")
@@ -1218,7 +1219,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/integrations/github/installation-settings")
     def github_open_installation_settings(request: Request) -> RedirectResponse:
-        user = console_user(request, {"owner"}, target="github", action="open_installation_settings")
+        user = console_user(request, {"integrations.manage"}, target="github", action="open_installation_settings")
         gateway = github_gateway(ctx)
         if not gateway:
             audit("github", "open_installation_settings", "", "", None, user.subject, False,
@@ -1361,7 +1362,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="project_catalog")
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_catalog")
         github = github_gateway(ctx)
         if not ctx.jira or not github:
             raise HTTPException(503, "Jira and GitHub App must be connected before adding a project")
@@ -1405,7 +1406,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/projects/{key}/repositories")
     def project_repositories(key: str, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="project_repositories", node=key)
+        user = console_user(request, {"projects.manage"}, target="aiflow-control",
+                            action="project_repositories", node=key)
         project = ctx.repo().projects.get(key)
         if not project:
             raise HTTPException(404, "project is not configured")
@@ -1430,7 +1432,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.put("/v1/projects/{key}/repositories")
     def save_project_repositories(key: str, body: ProjectRepositoriesBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="save_project_repositories", node=key)
+        user = console_user(request, {"projects.manage"}, target="aiflow-control",
+                            action="save_project_repositories", node=key)
         project = ctx.repo().projects.get(key)
         if not project:
             project_audit("save_project_repositories", key[:32], user.subject, False, "project is not configured")
@@ -1526,12 +1529,12 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/projects/preflight")
     def project_preflight_endpoint(body: ProjectPreflightBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="project_preflight")
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_preflight")
         return project_preflight(body, user.subject)
 
     @app.post("/v1/projects")
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="add_project",
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
         try:
             result = project_preflight(body, user.subject)
@@ -1583,7 +1586,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/projects/{key}/pause")
     def pause_project(key: str, body: ProjectPauseBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="pause_project", node=key)
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="pause_project", node=key)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
             project_audit("pause_project", key[:32], user.subject, False, "project is not configured")
             raise HTTPException(404, "project is not configured")
@@ -1612,7 +1615,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.delete("/v1/projects/{key}")
     def remove_project(key: str, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="aiflow-control", action="remove_project", node=key)
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="remove_project", node=key)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
             project_audit("remove_project", key[:32], user.subject, False, "project is not configured")
             raise HTTPException(404, "project is not configured")
@@ -1856,7 +1859,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/nodes/{name}/join-command")
     def create_join_command(name: str, body: JoinCommandBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="node", action="join_command", node=name)
+        user = console_user(request, {"nodes.manage"}, target="node", action="join_command", node=name)
         if name != body.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             audit("node", "join_command", name, "", None, user.subject, False, "invalid node name")
             raise HTTPException(400, "invalid node name")
@@ -1893,7 +1896,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
-        user = console_user(request, {"owner"}, target="node", action=body.action, node=name)
+        user = console_user(request, {"nodes.manage"}, target="node", action=body.action, node=name)
         node_row = ctx.db.one("SELECT name, status, token_hash, tools, last_heartbeat"
                               " FROM nodes WHERE name=%s", (name,))
         if not node_row:
@@ -1925,7 +1928,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/nodes/{name}/operations")
     def node_operations(name: str, request: Request) -> dict:
-        console_user(request, {"owner", "lead"})
+        console_user(request, {"console.read"})
         rows = ctx.db.all("SELECT id, node, action, actor, status, result, created_at, started_at, completed_at"
                           " FROM node_operations WHERE node=%s ORDER BY created_at DESC LIMIT 50", (name,))
         for row in rows:
@@ -3473,4 +3476,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"merged": True, "sha": merged.get("sha", ""), "resource": resource}
 
     jira_connect.mount(app, ctx)
+    from .login import install_login
+    install_login(app, ctx)
     return app

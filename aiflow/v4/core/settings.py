@@ -56,6 +56,7 @@ class Settings:
     jira_oauth_resources_url: str = "https://api.atlassian.com/oauth/token/accessible-resources"
     jira_api_base: str = "https://api.atlassian.com/ex/jira"
     canary_bug_project: str = "TESTFLOW"
+    maintenance_project: str = "JAIF"  # the AI Flow project: tooling tickets (docs/v4/missing-tools.md)
     github_org: str = "jooservices"
     github_app_dir: str = "/etc/aiflow/secrets/github"
     control_repo: str = "/srv/aiflow/control/repos/aiflow-control"
@@ -103,6 +104,7 @@ class Settings:
         s.jira_oauth_resources_url = _env("JIRA_OAUTH_RESOURCES_URL", s.jira_oauth_resources_url)
         s.jira_api_base = _env("JIRA_API_BASE", s.jira_api_base)
         s.canary_bug_project = _env("CANARY_BUG_PROJECT", s.canary_bug_project)
+        s.maintenance_project = _env("MAINTENANCE_PROJECT", s.maintenance_project)
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)
         s.control_repo = _env("CONTROL_REPO", s.control_repo)

@@ -1,6 +1,6 @@
 # Command Center V2 design prototype
 
-`command-center-v2.html` is a single-file interactive prototype (plain HTML and JavaScript, sample data, no backend) of the
+`design/command-center-v2.html` is a single-file interactive prototype (plain HTML and JavaScript, sample data, no backend) of the
 new Command Center. Open it in a browser. It is the visual and behavioural reference for the tickets that build the new console:
 
 - Warm graphite dark theme; one colour per AI provider, always named in text; status written in words, never colour alone.

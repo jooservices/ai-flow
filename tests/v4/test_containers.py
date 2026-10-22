@@ -66,7 +66,7 @@ volumes:
   vendor: {}
 """)
     monkeypatch.setattr(containers, "_active_containers", lambda: [])
-    monkeypatch.setattr(containers, "_worker_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
     up, _, _ = containers._compose_command(["compose", "up", "-d"], worktree, worktree, tmp_path, "aiflow-run")
     assert up[-3:] == ["-p", "aiflow-run", "up", "-d"][-3:]
     override = Path(up[up.index("-f", 2) + 1])
@@ -164,7 +164,7 @@ def test_cache_ceiling_refuses_new_build_and_old_images_are_pruned(monkeypatch, 
 
     prunes: list[list[str]] = []
     monkeypatch.setattr(containers, "safe_container_runtime_version", lambda: "rootless Podman 5")
-    monkeypatch.setattr(containers, "_run_as_worker", lambda argv, **kwargs:
+    monkeypatch.setattr(containers, "_run_as_engine", lambda argv, **kwargs:
                         prunes.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
     assert containers.prune_image_cache()
     assert prunes == [["podman", "container", "prune", "--filter", "until=24h", "--force"],
@@ -184,7 +184,11 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
             return subprocess.CompletedProcess(argv, 0, "", "")
         return subprocess.CompletedProcess(argv, 0, "podman-compose version 1.2.0", "")
 
-    monkeypatch.setattr(containers, "_run_as_worker", worker)
+    monkeypatch.setattr(containers, "_run_as_engine", worker)
+    monkeypatch.setattr(containers, "_identity",
+                        lambda user: (1001 if user == containers.WORKER_USER else 1002, 1, str(graphroot)))
+    monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: False)
+    monkeypatch.setattr(containers, "_private_to_engine", lambda path: True)
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         subprocess.CompletedProcess(argv, 0, "xfs rw,relatime,pquota", ""))
     monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
@@ -194,6 +198,13 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         subprocess.CompletedProcess(argv, 0, "xfs rw,relatime", ""))
     assert containers.safe_container_runtime_version() == "missing"
+
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 0, "xfs rw,relatime,pquota", ""))
+    assert containers.safe_container_runtime_version().startswith("rootless Podman")
+    monkeypatch.setattr(containers, "_private_to_engine", lambda path: False)
+    assert containers.safe_container_runtime_version() == "missing"
+    monkeypatch.setattr(containers, "_private_to_engine", lambda path: True)
 
     info_data["host"]["security"]["rootless"] = False
     assert containers.safe_container_runtime_version() == "missing"
@@ -274,3 +285,63 @@ def test_compose_cleanup_is_idempotent_and_orphan_watcher_cleans_up(monkeypatch,
     monkeypatch.setattr(containers, "_proc_identity", lambda pid: None)
     containers._watch_run(fake)
     assert fake.cancel_commands.is_set() and fake.cleaned and fake.stopped
+
+
+def test_compose_custom_volume_names_are_rejected(tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    compose = worktree / "compose.yaml"
+    compose.write_text("services:\n  app:\n    image: alpine\n    volumes:\n      - data:/data\n"
+                       "volumes:\n  data:\n    name: another-runs-volume\n")
+    with pytest.raises(containers.ContainerPolicyError, match="custom compose volume names"):
+        containers._compose_command(["compose", "up"], worktree, worktree, tmp_path, "aiflow-test")
+
+
+def test_runtime_is_missing_when_the_run_account_can_execute_podman(monkeypatch, tmp_path):
+    monkeypatch.setattr(containers, "_identity",
+                        lambda user: (1001 if user == containers.WORKER_USER else 1002, 1, str(tmp_path)))
+    monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: True)
+    assert containers.safe_container_runtime_version() == "missing"
+    # The same account for the run and the engine would make the broker pointless.
+    monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: False)
+    monkeypatch.setattr(containers, "_identity", lambda user: (1001, 1, str(tmp_path)))
+    assert containers.safe_container_runtime_version() == "missing"
+
+
+def test_worker_podman_probe_treats_not_executable_as_denied(monkeypatch):
+    monkeypatch.setattr(containers, "_identity", lambda user: (1001, 1, "/"))
+    for code, expected in ((126, False), (127, False), (0, True), (1, True)):
+        monkeypatch.setattr(containers.subprocess, "run", lambda argv, code=code, **kw:
+                            subprocess.CompletedProcess(argv, code, "", ""))
+        assert containers._worker_can_run_podman() is expected
+
+
+def _engine_available() -> bool:
+    import shutil
+    try:
+        return shutil.which("podman") is not None and containers.safe_container_runtime_version() != "missing"
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(os.environ.get("AIFLOW4_TEST_PODMAN") != "1" or not _engine_available(),
+                    reason="opt-in: set AIFLOW4_TEST_PODMAN=1 on a node with the safe container runtime")
+def test_real_podman_builds_runs_worktree_and_rejects_forbidden_mounts(tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (worktree / "Containerfile").write_text("FROM scratch\nCOPY marker /marker\n")
+    (worktree / "marker").write_text("for this checkout")
+    other = tmp_path / "another-account"
+    other.mkdir()
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+
+    def execute(*argv):
+        return containers._execute(list(argv), worktree, worktree, runtime_dir=runtime_dir, project_name="aiflow-it")
+
+    code, _, _ = execute("build", "-t", "aiflow-it:latest", ".")
+    assert code == 0
+    execute("run", "--rm", "-v", f"{worktree}:/workspace:ro", "aiflow-it:latest", "/marker")  # policy accepts it
+    for forbidden in ("/", "/etc/" + "aiflow", str(other)):
+        with pytest.raises(containers.ContainerPolicyError):
+            execute("run", "--rm", "-v", f"{forbidden}:/mnt", "aiflow-it:latest", "true")

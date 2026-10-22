@@ -2,7 +2,10 @@
 
 The AI process never receives Podman's storage or a container-engine socket. Its `docker` shim sends argv to
 this per-run broker, which validates the worktree, Compose inputs, mounts, namespaces and storage limits before
-executing Podman as the unprivileged worker user. Rootless storage is shared on the node for image caching.
+executing Podman. The boundary is enforced by the operating system: Podman and its storage belong to a separate
+unprivileged account (`aiflow-containers`), the AI run and project checks stay `aiflow-worker`, and the preflight
+reports the runtime missing unless that account's storage is private and `aiflow-worker` cannot execute Podman at
+all, so calling the real binary by absolute path fails. Rootless storage is shared on the node for image caching.
 """
 from __future__ import annotations
 
@@ -33,6 +36,7 @@ import yaml
 from ..adapters.base import RunSpec, scratch_root
 
 WORKER_USER = "aiflow-worker"
+ENGINE_USER = "aiflow-containers"
 RUNTIME_TOOL = "safe-container-runtime"
 IMAGE_CACHE_LIMIT = 12 * 1024**3
 TOTAL_STORAGE_LIMIT = 20 * 1024**3
@@ -47,16 +51,46 @@ class ContainerPolicyError(ValueError):
     """A command or compose file requested access outside the run's container policy."""
 
 
-def _worker_identity() -> tuple[int, int, str]:
-    entry = pwd.getpwnam(WORKER_USER)
+def _identity(user: str) -> tuple[int, int, str]:
+    entry = pwd.getpwnam(user)
     return entry.pw_uid, entry.pw_gid, entry.pw_dir
 
 
-def _run_as_worker(argv: list[str], *, timeout: int = 20, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    uid, gid, home = _worker_identity()
-    base = ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--init-groups", "--", *argv]
+def _engine_identity() -> tuple[int, int, str]:
+    """The account that owns Podman and its storage; never the account AI runs execute as."""
+    return _identity(ENGINE_USER)
+
+
+def engine_prefix() -> list[str]:
+    uid, gid, _ = _engine_identity()
+    return ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"]
+
+
+def _worker_can_run_podman() -> bool:
+    """True when the AI run's own account could execute the real Podman (so it could bypass the broker)."""
+    uid, gid, _ = _identity(WORKER_USER)
+    try:
+        probe = subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--",
+                                "podman", "--version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    # 126/127: found but not executable, or not found for that account. Anything else is not proof of denial.
+    return probe.returncode not in {126, 127}
+
+
+def _private_to_engine(path: Path) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    return info.st_uid == _engine_identity()[0] and not info.st_mode & 0o077
+
+
+def _run_as_engine(argv: list[str], *, timeout: int = 20, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    _, _, home = _engine_identity()
+    base = [*engine_prefix(), *argv]
     worker_env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
-                  "USER": WORKER_USER, "LOGNAME": WORKER_USER, "LANG": "C.UTF-8",
+                  "USER": ENGINE_USER, "LOGNAME": ENGINE_USER, "LANG": "C.UTF-8",
                   "TMPDIR": str(Path(home) / ".cache" / "aiflow4" / "tmp")}
     if env:
         worker_env.update(env)
@@ -64,21 +98,25 @@ def _run_as_worker(argv: list[str], *, timeout: int = 20, env: dict[str, str] | 
 
 
 def safe_container_runtime_version() -> str:
-    """Report healthy only when the worker's Podman is rootless and its store has project quotas enabled."""
+    """Report healthy only for rootless, quota-backed Podman whose engine account AI runs cannot reach or execute."""
     try:
-        info = _run_as_worker(["podman", "info", "--format", "json"], timeout=20)
+        if _engine_identity()[0] == _identity(WORKER_USER)[0] or _worker_can_run_podman():
+            return "missing"
+        info = _run_as_engine(["podman", "info", "--format", "json"], timeout=20)
         if info.returncode:
             return "missing"
         data = json.loads(info.stdout)
         host = data.get("host") or {}
         if (host.get("security") or {}).get("rootless") is not True:
             return "missing"
-        namespaces = _run_as_worker(["podman", "unshare", "true"], timeout=20)
+        namespaces = _run_as_engine(["podman", "unshare", "true"], timeout=20)
         if namespaces.returncode:
             return "missing"
         store = data.get("store") or {}
         graphroot = str(store.get("graphRoot") or "")
         if not graphroot or not Path(graphroot).is_dir():
+            return "missing"
+        if not _private_to_engine(Path(graphroot)) or not _private_to_engine(Path(_engine_identity()[2])):
             return "missing"
         quota = subprocess.run(["findmnt", "-T", graphroot, "-n", "-o", "FSTYPE,OPTIONS"], capture_output=True,
                                text=True, timeout=10)
@@ -87,7 +125,7 @@ def safe_container_runtime_version() -> str:
         options = set(options_text.split(","))
         if filesystem not in {"xfs", "ext4"} or not options.intersection({"pquota", "prjquota"}):
             return "missing"
-        provider = _run_as_worker(["podman-compose", "--version"], timeout=15)
+        provider = _run_as_engine(["podman-compose", "--version"], timeout=15)
         if provider.returncode:
             return "missing"
         podman_version = str((data.get("version") or {}).get("Version") or "")
@@ -107,9 +145,9 @@ def prune_image_cache() -> bool:
     if safe_container_runtime_version() == "missing":
         return False
     try:
-        containers = _run_as_worker(["podman", "container", "prune", "--filter", "until=24h", "--force"],
+        containers = _run_as_engine(["podman", "container", "prune", "--filter", "until=24h", "--force"],
                                      timeout=300)
-        images = _run_as_worker(["podman", "image", "prune", "--all", "--filter", f"until={IMAGE_PRUNE_AGE}",
+        images = _run_as_engine(["podman", "image", "prune", "--all", "--filter", f"until={IMAGE_PRUNE_AGE}",
                                  "--force"], timeout=300)
         return containers.returncode == 0 and images.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -314,6 +352,8 @@ def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path,
     for name, volume in raw_volumes.items():
         if not _SAFE_NAME.fullmatch(str(name)) or not isinstance(volume or {}, dict):
             raise ContainerPolicyError("invalid compose volume declaration")
+        if (volume or {}).get("name"):
+            raise ContainerPolicyError("custom compose volume names are not allowed; volumes are named per run")
         if ((volume or {}).get("external") or (volume or {}).get("driver_opts")
                 or (volume or {}).get("driver") not in (None, "", "local")):
             raise ContainerPolicyError("external and host-backed named volumes are not allowed")
@@ -545,8 +585,9 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
         if service.get("build"):
             services_override[name]["build"] = {"storage_opt": {"size": BUILD_LIMIT}}
     override.write_text(yaml.safe_dump({"services": services_override}, sort_keys=False), encoding="utf-8")
-    uid, gid, _ = _worker_identity()
+    uid, gid, _ = _engine_identity()
     os.chown(override, uid, gid)
+    override.chmod(0o600)
     project_args.extend(["-f", str(override), "-p", project_name])
     return [*project_args, subcommand, *tail], files, subcommand
 
@@ -892,7 +933,7 @@ def _broker_main() -> int:
     parser.add_argument("--project", required=True)
     parser.add_argument("--token", required=True)
     args = parser.parse_args()
-    if os.geteuid() != _worker_identity()[0]:
+    if os.geteuid() != _engine_identity()[0] or os.geteuid() == _identity(WORKER_USER)[0]:
         return 125
     worktree = Path(args.worktree).resolve(strict=True)
     if safe_container_runtime_version() == "missing":
@@ -909,50 +950,70 @@ def _broker_main() -> int:
 
 
 class ContainerRuntime(AbstractContextManager):
-    """Install per-run shims and start a rootless broker only for container-enabled dev/verify runs."""
+    """Install per-run shims and start a rootless broker only for container-enabled dev/verify runs.
+
+    The broker runs as the separate engine account. The run keeps `aiflow-worker`, which can reach only the shims
+    and the broker socket, never Podman, its storage, or the broker's private directory.
+    """
     def __init__(self, spec: RunSpec, run_as: list[str]):
         self.spec, self.run_as = spec, run_as
-        self.runtime_dir = scratch_root(spec) / "containers" / secrets.token_hex(16)
-        self.socket_path = self.runtime_dir / "broker.sock"
+        run_id = secrets.token_hex(16)
+        self.public_dir = scratch_root(spec) / "containers" / run_id
+        self.socket_path = self.public_dir / "sock" / "broker.sock"
+        self.runtime_dir = Path(_engine_identity()[2]) / "runs" / run_id
         self.token = secrets.token_urlsafe(32)
         self.project_name = "aiflow-" + secrets.token_hex(8)
         self.process: subprocess.Popen | None = None
         self.previous_env: dict[str, str | None] = {}
+        self.acl_root: Path | None = None
+
+    def _grant_worktree(self, root: Path) -> None:
+        """Let the engine account bind-mount this one worktree; revoked again on exit."""
+        result = subprocess.run(["setfacl", "-R", "-m", f"u:{ENGINE_USER}:rwX", "-m", f"d:u:{ENGINE_USER}:rwX",
+                                 str(root)], capture_output=True, timeout=120)
+        if result.returncode:
+            raise RuntimeError("could not grant the container engine access to the worktree")
+        self.acl_root = root
 
     def __enter__(self):
         root = Path(self.spec.cwd).resolve(strict=True)
         if not self.run_as:
-            raise RuntimeError("the container broker must run as the unprivileged worker user")
+            raise RuntimeError("the container broker must run as the unprivileged engine user")
         if safe_container_runtime_version() == "missing":
             raise RuntimeError("safe-container-runtime is missing or unhealthy on this node")
+        uid, engine_gid, home = _engine_identity()
+        worker_gid = _identity(WORKER_USER)[1]
+        self.public_dir.mkdir(parents=True, exist_ok=False)
+        self.public_dir.chmod(0o755)
+        sock_dir = self.public_dir / "sock"
+        sock_dir.mkdir()
+        os.chown(sock_dir, uid, worker_gid)
+        sock_dir.chmod(0o2770)
         self.runtime_dir.mkdir(parents=True, exist_ok=False)
-        uid, gid, home = _worker_identity()
-        os.chown(self.runtime_dir.parent.parent, uid, gid)
-        os.chown(self.runtime_dir.parent, uid, gid)
-        os.chown(self.runtime_dir, uid, gid)
+        os.chown(self.runtime_dir.parent, uid, engine_gid)
+        os.chown(self.runtime_dir, uid, engine_gid)
         self.runtime_dir.chmod(0o700)
-        wrapper_dir = self.runtime_dir / "bin"
-        wrapper_dir.mkdir(mode=0o700)
+        wrapper_dir = self.public_dir / "bin"
+        wrapper_dir.mkdir()
+        wrapper_dir.chmod(0o755)
         for name in ("docker", "docker-compose"):
             wrapper = wrapper_dir / name
             wrapper.write_text(f"#!{sys.executable}\nfrom aiflow.v4.worker.containers import client_main\nraise SystemExit(client_main())\n",
                                encoding="utf-8")
-            wrapper.chmod(0o700)
-            os.chown(wrapper, uid, gid)
+            wrapper.chmod(0o755)
+        # A friendly message for scripts that call `podman` via PATH; the real boundary is the OS permission check.
         denied = wrapper_dir / "podman"
         denied.write_text(f"#!{sys.executable}\nimport sys\nprint('direct Podman access is disabled for AI runs', file=sys.stderr)\nraise SystemExit(125)\n",
                           encoding="utf-8")
-        denied.chmod(0o700)
-        os.chown(denied, uid, gid)
-        for path in (wrapper_dir,):
-            os.chown(path, uid, gid)
+        denied.chmod(0o755)
+        self._grant_worktree(root)
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
-               "USER": WORKER_USER, "LOGNAME": WORKER_USER, "LANG": "C.UTF-8",
+               "USER": ENGINE_USER, "LOGNAME": ENGINE_USER, "LANG": "C.UTF-8",
                "TMPDIR": str(self.runtime_dir), "PODMAN_COMPOSE_PROVIDER": shutil.which("podman-compose") or "podman-compose"}
         broker_argv = [sys.executable, "-m", "aiflow.v4.worker.containers", "--broker", "--socket", str(self.socket_path),
                        "--worktree", str(root), "--runtime-dir", str(self.runtime_dir), "--project", self.project_name,
                        "--token", self.token]
-        self.process = subprocess.Popen(self.run_as + broker_argv, cwd=str(root), env=env,
+        self.process = subprocess.Popen(engine_prefix() + broker_argv, cwd=str(root), env=env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(100):
@@ -1003,7 +1064,11 @@ class ContainerRuntime(AbstractContextManager):
             else:
                 self.spec.extra_env[key] = value
         self.spec.container_start_hook = None
+        if self.acl_root is not None:
+            subprocess.run(["setfacl", "-R", "-x", f"u:{ENGINE_USER}", "-x", f"d:u:{ENGINE_USER}",
+                            str(self.acl_root)], capture_output=True, timeout=120)
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
+        shutil.rmtree(self.public_dir, ignore_errors=True)
         return False
 
 

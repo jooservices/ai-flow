@@ -9,9 +9,14 @@ The setting is saved as `containers: true` in the project or repository entry in
 ## Node requirements
 
 The node must provide rootless Podman, the `podman-compose` provider, and an XFS or ext4 storage filesystem
-mounted with project quotas (`pquota` or `prjquota`). Podman must run as `aiflow-worker`; the runtime reports
-`safe-container-runtime` as missing unless rootless mode, Compose, project quotas, and sufficient filesystem
-capacity are available. There is no automatic fallback to a host Docker daemon. A node without the safe runtime
+mounted with project quotas (`pquota` or `prjquota`). Podman must belong to a dedicated unprivileged account,
+`aiflow-containers`, with a private (mode 0700) home and storage, subuid/subgid ranges, and a Podman binary that
+`aiflow-worker` cannot execute (for example `dpkg-statoverride --update --add root aiflow-containers 0750
+/usr/bin/podman`). The AI run and project checks stay `aiflow-worker`, so even calling the real Podman by absolute
+path fails at the operating-system level. The runtime reports `safe-container-runtime` as missing unless that
+separation, rootless mode, Compose, project quotas, and sufficient filesystem capacity are all verified.
+Compose volumes may not set a custom `name`; they are always named per run. An opt-in integration test
+(`AIFLOW4_TEST_PODMAN=1`) builds and runs a real container where the runtime exists. There is no automatic fallback to a host Docker daemon. A node without the safe runtime
 reports the missing tool, and work for a project that requires it stays out of that node's candidates.
 
 Reserve at least 24 GiB on the container storage filesystem. AI Flow caps the rootless image and build cache at

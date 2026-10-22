@@ -40,6 +40,8 @@ ENGINE_USER = "aiflow-containers"
 RUNTIME_TOOL = "safe-container-runtime"
 IMAGE_CACHE_LIMIT = 12 * 1024**3
 TOTAL_STORAGE_LIMIT = 20 * 1024**3
+WORKTREE_STORAGE_LIMIT = 4 * 1024**3
+STORAGE_DISK_RESERVE = 4 * 1024**3
 ACTIVE_CONTAINER_LIMIT = 8
 CONTAINER_LAYER_LIMIT = "1g"
 BUILD_LIMIT = "2g"
@@ -261,6 +263,8 @@ def _run_argv(argv: list[str], root: Path, cwd: Path) -> list[str]:
             elif arg in value_options:
                 if i + 1 >= len(argv):
                     raise ContainerPolicyError(f"{arg} needs a value")
+                if arg == "--label" and argv[i + 1].partition("=")[0] == "aiflow4.run":
+                    raise ContainerPolicyError("the aiflow4.run label is reserved for broker cleanup")
                 if arg == "--network" and argv[i + 1] == "host":
                     raise ContainerPolicyError("host networking is not allowed")
                 if arg == "--network" and argv[i + 1] not in {"default", "bridge", "none"}:
@@ -388,6 +392,10 @@ def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path,
         if (service.get("privileged") not in (None, False) or service.get("cap_add") or service.get("devices")
                 or service.get("device_cgroup_rules")):
             raise ContainerPolicyError("privileged containers, added capabilities, and host devices are not allowed")
+        labels = service.get("labels") or {}
+        label_keys = labels.keys() if isinstance(labels, dict) else labels if isinstance(labels, list) else []
+        if any(str(label).partition("=")[0] == "aiflow4.run" for label in label_keys):
+            raise ContainerPolicyError("the aiflow4.run label is reserved for broker cleanup")
         if service.get("volumes_from") or service.get("security_opt") or service.get("runtime"):
             raise ContainerPolicyError("host container controls and inherited mounts are not allowed")
         if service.get("extends") or service.get("develop"):
@@ -602,6 +610,19 @@ def _active_containers() -> list[str]:
         raise ContainerPolicyError("could not check the rootless container limit") from exc
 
 
+def _stop_run_containers(project_name: str) -> None:
+    """Stop any run-owned containers left behind after the broker interrupts a container command."""
+    try:
+        result = subprocess.run(["podman", "ps", "--all", "--quiet", "--filter",
+                                 f"label=aiflow4.run={project_name}"], capture_output=True, text=True, timeout=30)
+        ids = [item for item in result.stdout.splitlines() if item] if result.returncode == 0 else []
+        if ids:
+            subprocess.run(["podman", "stop", "--time", "1", *ids], capture_output=True, timeout=30)
+            subprocess.run(["podman", "rm", "--force", "--volumes", *ids], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _graphroot() -> Path:
     info = subprocess.run(["podman", "info", "--format", "json"], capture_output=True, text=True, timeout=20)
     if info.returncode:
@@ -618,6 +639,49 @@ def _directory_size(path: Path) -> int:
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass
     return TOTAL_STORAGE_LIMIT + 1
+
+
+def _worktree_storage_size(path: Path) -> int:
+    """Return allocated bytes in a worktree, failing closed if its usage cannot be measured."""
+    try:
+        result = subprocess.run(["du", "-s", "--block-size=1", str(path)], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return int(result.stdout.split()[0])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return WORKTREE_STORAGE_LIMIT + 1
+
+
+def _worktree_storage_limit_reached(path: Path) -> bool:
+    try:
+        return (_worktree_storage_size(path) >= WORKTREE_STORAGE_LIMIT
+                or shutil.disk_usage(path).free <= STORAGE_DISK_RESERVE)
+    except OSError:
+        return True
+
+
+def _broker_invocation(worktree: Path, engine_home: str) -> tuple[list[str], str]:
+    """Build an isolated launch for the installed broker, with no import path through a project checkout."""
+    root = worktree.resolve(strict=True)
+    module_file = Path(__file__).resolve(strict=True)
+    if _within(module_file, root):
+        raise RuntimeError("safe-container-runtime broker code must be installed outside the project worktree")
+    trusted_root = module_file.parents[3]
+    home = Path(engine_home).resolve(strict=True)
+    if _within(home, root):
+        raise RuntimeError("safe-container-runtime needs a trusted engine working directory")
+    bootstrap = (
+        "import importlib, os, pathlib, sys; "
+        f"worktree=pathlib.Path({str(root)!r}); expected=pathlib.Path({str(module_file)!r}); "
+        "definitely_under=lambda value: (lambda path: path == worktree or worktree in path.parents)("
+        "pathlib.Path(value or os.getcwd()).resolve()); "
+        "sys.path[:]=[entry for entry in sys.path if not definitely_under(entry)]; "
+        f"sys.path.insert(0, {str(trusted_root)!r}); "
+        "module=importlib.import_module('aiflow.v4.worker.containers'); "
+        "assert pathlib.Path(module.__file__).resolve() == expected; "
+        "raise SystemExit(module._broker_main())"
+    )
+    return [sys.executable, "-I", "-c", bootstrap, "--broker"], str(home)
 
 
 def _execute(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
@@ -650,6 +714,8 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
         backend = "podman-compose"
     else:
         raise ContainerPolicyError("only docker build, compose up/run, and mounted docker run are supported")
+    if argv[0] == "run":
+        podman_argv[1:1] = ["--label", f"aiflow4.run={project_name}"]
     graphroot = _graphroot()
     usage = _directory_size(graphroot)
     if usage >= IMAGE_CACHE_LIMIT:
@@ -664,6 +730,11 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
         usage = _directory_size(graphroot)
         if shutil.disk_usage(graphroot).free < TOTAL_STORAGE_LIMIT - usage + 4 * 1024**3:
             raise ContainerPolicyError("container runtime stopped before its storage limit and disk reserve")
+    worktree_usage = _worktree_storage_size(root)
+    if worktree_usage >= WORKTREE_STORAGE_LIMIT:
+        raise ContainerPolicyError("container worktree reached its enforced storage limit")
+    if shutil.disk_usage(root).free < WORKTREE_STORAGE_LIMIT - worktree_usage + STORAGE_DISK_RESERVE:
+        raise ContainerPolicyError("worktree filesystem cannot preserve its storage limit and disk reserve")
     command = ([backend, *podman_argv] if backend == "podman-compose" else ["podman", *podman_argv])
     proc = subprocess.Popen(command, cwd=str(run_cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             start_new_session=True)
@@ -686,10 +757,11 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
                     except ProcessLookupError:
                         pass
                     proc.wait()
+                _stop_run_containers(project_name)
                 output.extend(b"container command stopped because its AI run ended\n")
                 return 125, output.decode(errors="replace"), ""
             if (_directory_size(graphroot) >= IMAGE_CACHE_LIMIT
-                    or shutil.disk_usage(graphroot).free <= 4 * 1024**3):
+                    or shutil.disk_usage(graphroot).free <= STORAGE_DISK_RESERVE):
                 try:
                     os.killpg(proc.pid, signal.SIGTERM)
                 except ProcessLookupError:
@@ -701,7 +773,25 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
                         os.killpg(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                    proc.wait()
+                _stop_run_containers(project_name)
                 output.extend(b"aiflow container storage cap reached; command stopped\n")
+                return 125, output.decode(errors="replace"), ""
+            if _worktree_storage_limit_reached(root):
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                _stop_run_containers(project_name)
+                output.extend(b"aiflow container worktree storage cap reached; command stopped\n")
                 return 125, output.decode(errors="replace"), ""
             for ready, _ in selector.select(timeout=0.2):
                 chunk = os.read(ready.fd, 65536)
@@ -723,6 +813,7 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
             except ProcessLookupError:
                 pass
             proc.wait()
+            _stop_run_containers(project_name)
 
 
 class _BrokerHandler(socketserver.StreamRequestHandler):
@@ -756,6 +847,8 @@ class _BrokerHandler(socketserver.StreamRequestHandler):
                     raise ContainerPolicyError("container broker token is invalid")
                 if not _is_child_of(peer_pid, server.allowed_root_pid):
                     raise ContainerPolicyError("container command is not from this run")
+                if server.storage_exceeded.is_set():
+                    raise ContainerPolicyError("this run reached its worktree storage limit")
                 argv = request.get("argv")
                 if not isinstance(argv, list) or any(not isinstance(item, str) or "\x00" in item for item in argv):
                     raise ContainerPolicyError("container argv is invalid")
@@ -789,6 +882,7 @@ class _BrokerServer(socketserver.ThreadingUnixStreamServer):
         self.bound_event = threading.Event()
         self.stop_requested = threading.Event()
         self.cancel_commands = threading.Event()
+        self.storage_exceeded = threading.Event()
         self.commands_idle = threading.Event()
         self.commands_idle.set()
         self._commands_lock = threading.Lock()
@@ -853,16 +947,22 @@ def _proc_identity(pid: int) -> int | None:
 
 
 def _watch_run(server: _BrokerServer) -> None:
-    """Clean up Compose resources if the worker or run is killed before its normal context exit."""
+    """Enforce worktree storage limits and clean up if the worker or run exits unexpectedly."""
     while not server.bound_event.wait(0.25):
         if server.stop_requested.is_set():
             return
     pid, start_time = server.allowed_root_pid, server.run_start_time
     if pid is None or start_time is None:
         return
-    while not server.stop_requested.wait(1.0):
+    while not server.stop_requested.wait(0.5):
         if _proc_identity(pid) != start_time:
             break
+        if server.compose_used and not server.storage_exceeded.is_set() \
+                and _worktree_storage_limit_reached(server.worktree):
+            server.storage_exceeded.set()
+            server.cancel_commands.set()
+            server.commands_idle.wait()
+            server.cleanup()
     if server.stop_requested.is_set():
         return
     server.cancel_commands.set()
@@ -982,6 +1082,7 @@ class ContainerRuntime(AbstractContextManager):
         if safe_container_runtime_version() == "missing":
             raise RuntimeError("safe-container-runtime is missing or unhealthy on this node")
         uid, engine_gid, home = _engine_identity()
+        broker_argv, broker_cwd = _broker_invocation(root, home)
         worker_gid = _identity(WORKER_USER)[1]
         self.public_dir.mkdir(parents=True, exist_ok=False)
         self.public_dir.chmod(0o755)
@@ -1010,10 +1111,10 @@ class ContainerRuntime(AbstractContextManager):
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
                "USER": ENGINE_USER, "LOGNAME": ENGINE_USER, "LANG": "C.UTF-8",
                "TMPDIR": str(self.runtime_dir), "PODMAN_COMPOSE_PROVIDER": shutil.which("podman-compose") or "podman-compose"}
-        broker_argv = [sys.executable, "-m", "aiflow.v4.worker.containers", "--broker", "--socket", str(self.socket_path),
-                       "--worktree", str(root), "--runtime-dir", str(self.runtime_dir), "--project", self.project_name,
-                       "--token", self.token]
-        self.process = subprocess.Popen(engine_prefix() + broker_argv, cwd=str(root), env=env,
+        broker_argv.extend(["--socket", str(self.socket_path), "--worktree", str(root),
+                            "--runtime-dir", str(self.runtime_dir), "--project", self.project_name,
+                            "--token", self.token])
+        self.process = subprocess.Popen(engine_prefix() + broker_argv, cwd=broker_cwd, env=env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(100):

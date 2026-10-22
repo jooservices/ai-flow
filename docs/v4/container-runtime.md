@@ -21,16 +21,22 @@ reports the missing tool, and work for a project that requires it stays out of t
 
 Reserve at least 24 GiB on the container storage filesystem. AI Flow caps the rootless image and build cache at
 12 GiB, each writable container layer at 1 GiB, concurrent run containers at eight, and preserves 4 GiB of free
-space before starting container work. Build operations use a 2 GiB storage limit. These limits are enforced by
-the broker and Podman's quota-backed storage options. The node agent removes unused images older than seven days
-daily; images stay cached on that machine between runs.
+space before starting container work. Build operations use a 2 GiB storage limit. Writable worktree mounts have
+a separate 4 GiB allocated-storage ceiling per run: the broker refuses a command if the checkout is already at
+the limit, polls while commands or Compose services are active, and stops them when usage reaches the ceiling
+or the filesystem falls to the 4 GiB reserve. When container storage and worktrees share a filesystem, reserve
+at least 28 GiB total; on separate filesystems, reserve 24 GiB for container storage and 8 GiB for worktrees.
+These limits are enforced by the broker and Podman's quota-backed storage options. The node agent removes unused
+images older than seven days daily; images stay cached on that machine between runs.
 
 ## Run isolation and command policy
 
 AI Flow starts a broker for each enabled dev, verify, or version-release run. The AI sees a run-local `docker`
-shim and broker socket, not Podman's storage or an engine socket. The broker runs Podman as the unprivileged
-worker user, assigns a unique Compose project to the run, and removes that run's containers, networks, and
-volumes when it finishes. Images remain in the node's shared cache.
+shim and broker socket, not Podman's storage or an engine socket. The broker starts from the installed AI Flow
+module with an isolated Python import path and a private working directory, then runs Podman as the separate
+unprivileged `aiflow-containers` account. The AI process and project checks remain `aiflow-worker`. The broker
+assigns a unique Compose project to the run, and removes that run's containers, networks, and volumes when it
+finishes. Images remain in the node's shared cache.
 
 The policy permits builds whose context and Dockerfile resolve inside the worktree, Compose `up` and `run`, and
 direct `docker run` with exactly one bind mount of that worktree. Compose files, build contexts, environment

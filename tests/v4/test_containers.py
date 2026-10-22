@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,7 +49,34 @@ def test_broker_builds_and_runs_through_rootless_podman_with_layer_limits(monkey
     assert code == 0 and "ok" in stdout
     commands = calls.read_text().splitlines()
     assert commands[0].startswith("build --storage-opt size=2g -t sample .")
-    assert commands[1].startswith("run --storage-opt size=1g --rm --volume ")
+    assert commands[1].startswith("run --label aiflow4.run=aiflow-test --storage-opt size=1g --rm --volume ")
+
+
+def test_broker_launch_uses_installed_code_and_excludes_the_worktree_from_imports(tmp_path):
+    worktree = tmp_path / "checkout"
+    engine_home = tmp_path / "engine-home"
+    (worktree / "aiflow" / "v4" / "worker").mkdir(parents=True)
+    engine_home.mkdir()
+    (worktree / "aiflow" / "__init__.py").write_text("raise RuntimeError('untrusted project package imported')\n")
+    expected = Path(containers.__file__).resolve()
+
+    argv, cwd = containers._broker_invocation(worktree, str(engine_home))
+    assert argv[:2] == [sys.executable, "-I"]
+    assert "-m" not in argv
+    assert cwd == str(engine_home.resolve())
+    bootstrap = argv[3].replace("raise SystemExit(module._broker_main())", "print(module.__file__)")
+    result = subprocess.run([*argv[:3], bootstrap], cwd=worktree, capture_output=True, text=True, check=True)
+    assert Path(result.stdout.strip()).resolve() == expected
+
+
+def test_broker_launch_refuses_code_loaded_from_the_project_worktree(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    module_file = worktree / "aiflow" / "v4" / "worker" / "containers.py"
+    module_file.parent.mkdir(parents=True)
+    module_file.write_text("# untrusted\n")
+    monkeypatch.setattr(containers, "__file__", str(module_file))
+    with pytest.raises(RuntimeError, match="installed outside"):
+        containers._broker_invocation(worktree, str(tmp_path))
 
 
 def test_compose_up_and_run_validate_files_and_add_storage_caps(monkeypatch, tmp_path):
@@ -90,6 +118,9 @@ def test_direct_run_cannot_mount_host_paths_or_another_worktree(tmp_path):
         with pytest.raises(containers.ContainerPolicyError):
             containers._run_argv(["run", "--network", network, "-v", f"{worktree}:/worktree",
                                   "alpine", "true"], worktree, worktree)
+    with pytest.raises(containers.ContainerPolicyError, match="label is reserved"):
+        containers._run_argv(["run", "--label", "aiflow4.run=other-run", "-v", f"{worktree}:/worktree",
+                              "alpine", "true"], worktree, worktree)
 
 
 def test_symlinked_worktree_path_cannot_escape_to_another_account(tmp_path):
@@ -115,6 +146,7 @@ def test_compose_cannot_escalate_or_mount_outside_worktree(tmp_path):
               "    volumes:\n      - /:/host\n",
               f"    volumes:\n      - {secrets}:/secrets\n",
               f"    volumes:\n      - {other}:/other\n",
+              "    labels:\n      aiflow4.run: other-run\n",
               "    extends:\n      file: ../other-compose.yaml\n      service: base\n"]
     for service in unsafe:
         compose.write_text("services:\n  test:\n    image: alpine\n" + service)
@@ -241,6 +273,61 @@ def test_runtime_keeps_disk_reserve_when_the_container_filesystem_is_nearly_full
         containers._execute(["build", "."], worktree, worktree, runtime_dir=tmp_path, project_name="aiflow-test")
 
 
+def test_runtime_refuses_a_worktree_that_reached_its_storage_limit(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    monkeypatch.setattr(containers.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_graphroot", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_directory_size", lambda path: 0)
+    monkeypatch.setattr(containers, "_worktree_storage_size", lambda path: containers.WORKTREE_STORAGE_LIMIT)
+    monkeypatch.setattr(containers, "_active_containers", lambda: [])
+    monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(free=100 * 1024**3, total=120 * 1024**3))
+    monkeypatch.setattr(containers.subprocess, "Popen", lambda *args, **kwargs:
+                        pytest.fail("runtime must refuse before starting Podman"))
+    with pytest.raises(containers.ContainerPolicyError, match="worktree reached"):
+        containers._execute(["build", "."], worktree, worktree, runtime_dir=tmp_path, project_name="aiflow-test")
+
+
+def test_runtime_stops_a_container_that_exceeds_its_worktree_storage_limit(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    monkeypatch.setattr(containers.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_graphroot", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_directory_size", lambda path: 0)
+    usage = iter((0, containers.WORKTREE_STORAGE_LIMIT))
+    monkeypatch.setattr(containers, "_worktree_storage_size", lambda path: next(usage))
+    monkeypatch.setattr(containers, "_active_containers", lambda: [])
+    monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(free=100 * 1024**3, total=120 * 1024**3))
+    monkeypatch.setattr(containers.os, "killpg", lambda *args: None)
+    stopped: list[str] = []
+    monkeypatch.setattr(containers, "_stop_run_containers", lambda name: stopped.append(name))
+
+    class RunningProcess:
+        pid = 12345
+        returncode = None
+
+        def __init__(self):
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -15
+            return self.returncode
+
+    monkeypatch.setattr(containers.subprocess, "Popen", lambda *args, **kwargs: RunningProcess())
+    code, output, _ = containers._execute(["build", "."], worktree, worktree,
+                                           runtime_dir=tmp_path, project_name="aiflow-test")
+    assert code == 125
+    assert "worktree storage cap reached" in output
+    assert stopped == ["aiflow-test"]
+
+
 def test_compose_cleanup_is_idempotent_and_orphan_watcher_cleans_up(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
@@ -287,6 +374,73 @@ def test_compose_cleanup_is_idempotent_and_orphan_watcher_cleans_up(monkeypatch,
     assert fake.cancel_commands.is_set() and fake.cleaned and fake.stopped
 
 
+def test_interrupted_direct_run_cleanup_is_scoped_to_its_run_label(monkeypatch):
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        output = "container-one\ncontainer-two\n" if argv[:3] == ["podman", "ps", "--all"] else ""
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(containers.subprocess, "run", run)
+    containers._stop_run_containers("aiflow-test")
+    assert calls == [
+        ["podman", "ps", "--all", "--quiet", "--filter", "label=aiflow4.run=aiflow-test"],
+        ["podman", "stop", "--time", "1", "container-one", "container-two"],
+        ["podman", "rm", "--force", "--volumes", "container-one", "container-two"],
+    ]
+
+
+def test_run_watcher_stops_detached_compose_when_worktree_storage_limit_is_reached(monkeypatch, tmp_path):
+    class ImmediateEvent:
+        def __init__(self, state=False):
+            self.state = state
+
+        def wait(self, timeout=None):
+            return self.state
+
+        def is_set(self):
+            return self.state
+
+        def set(self):
+            self.state = True
+
+    class StopAfterOnePoll(ImmediateEvent):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if self.calls > 1:
+                self.state = True
+            return self.state
+
+    class FakeServer:
+        worktree = tmp_path
+        allowed_root_pid = 77
+        run_start_time = 123
+        compose_used = True
+        bound_event = ImmediateEvent(True)
+        stop_requested = StopAfterOnePoll()
+        cancel_commands = ImmediateEvent()
+        storage_exceeded = ImmediateEvent()
+        commands_idle = ImmediateEvent(True)
+
+        def cleanup(self):
+            self.cleaned = True
+
+        def shutdown(self):
+            self.stopped = True
+
+    fake = FakeServer()
+    monkeypatch.setattr(containers, "_proc_identity", lambda pid: 123)
+    monkeypatch.setattr(containers, "_worktree_storage_limit_reached", lambda path: True)
+    containers._watch_run(fake)
+    assert fake.storage_exceeded.is_set()
+    assert fake.cancel_commands.is_set() and fake.cleaned
+
+
 def test_compose_custom_volume_names_are_rejected(tmp_path):
     worktree = tmp_path / "checkout"
     worktree.mkdir()
@@ -329,7 +483,7 @@ def _engine_available() -> bool:
 def test_real_podman_builds_runs_worktree_and_rejects_forbidden_mounts(tmp_path):
     worktree = tmp_path / "checkout"
     worktree.mkdir()
-    (worktree / "Containerfile").write_text("FROM scratch\nCOPY marker /marker\n")
+    (worktree / "Containerfile").write_text("FROM alpine:3.20\nCOPY marker /marker\n")
     (worktree / "marker").write_text("for this checkout")
     other = tmp_path / "another-account"
     other.mkdir()
@@ -341,7 +495,11 @@ def test_real_podman_builds_runs_worktree_and_rejects_forbidden_mounts(tmp_path)
 
     code, _, _ = execute("build", "-t", "aiflow-it:latest", ".")
     assert code == 0
-    execute("run", "--rm", "-v", f"{worktree}:/workspace:ro", "aiflow-it:latest", "/marker")  # policy accepts it
+    code, stdout, _ = execute("run", "--rm", "-v", f"{worktree}:/workspace:rw", "aiflow-it:latest",
+                              "sh", "-c", "cat /workspace/marker; printf 'written by container\\n' > /workspace/result")
+    assert code == 0
+    assert "for this checkout" in stdout
+    assert (worktree / "result").read_text() == "written by container\n"
     for forbidden in ("/", "/etc/" + "aiflow", str(other)):
         with pytest.raises(containers.ContainerPolicyError):
             execute("run", "--rm", "-v", f"{forbidden}:/mnt", "aiflow-it:latest", "true")

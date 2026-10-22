@@ -51,6 +51,20 @@ def test_codex_and_grok_events_from_spikes():
     assert auth.error_kind == "auth"
 
 
+def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():
+    codex = RunResult()
+    CodexAdapter().parse_event({"type": "token_count", "info": {"rate_limits": {
+        "primary": {"used_percent": 64, "resets_at": "2026-10-22T16:00:00Z", "window_duration_mins": 300},
+        "secondary": {"used_percent": 20, "resets_at": "2026-10-29T12:00:00Z", "window_duration_mins": 10080},
+    }}}, codex)
+    assert codex.quota["windows"]["five_hour"]["utilization"] == .64
+    assert codex.quota["windows"]["seven_day"]["window_duration_minutes"] == 10080
+    grok = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "quota": {"windows": {
+        "weekly": {"used_percent": 0.3, "resets_at": "2026-10-29T12:00:00Z"}}}}, grok)
+    assert grok.quota["windows"]["seven_day"]["utilization"] == 0.3
+
+
 def test_grok_runs_recorded_streaming_json_and_reads_answer_usage_and_cost(tmp_path):
     fixture = Path(__file__).parent / "fixtures" / "grok-streaming-json.jsonl"
     script = tmp_path / "recorded_grok.py"

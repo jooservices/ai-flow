@@ -9,6 +9,7 @@ from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
 from .sa import dashboard_data, thresholds
+from .quota import assessments as quota_assessments
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -82,7 +83,9 @@ def snapshot(ctx) -> dict[str, Any]:
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
-    for a in db.all("SELECT * FROM accounts ORDER BY node, provider, id"):
+    account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
+    quota_by_account = quota_assessments(db, account_rows)
+    for a in account_rows:
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
@@ -103,7 +106,8 @@ def snapshot(ctx) -> dict[str, Any]:
             "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
             "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "last_error": a["last_error"],
+            "quota": a["quota"], "quota_awareness": quota_by_account.get(a["id"], {}),
+            "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
             "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],

@@ -39,6 +39,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
 from . import review_metrics
+from . import quota as quota_reporting
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -375,6 +376,7 @@ class ProbeBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    model: str = ""
     credential_expires_at: datetime | None = None
 
 
@@ -888,6 +890,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     def account_master_paused(account_id: str) -> bool:
         return bool(ctx.db.one("SELECT 1 AS paused FROM master_account_pauses"
                                " WHERE account_id=%s AND paused_until > now()", (account_id,)))
+
+    def account_quota_at_risk(account_id: str) -> bool:
+        account_row = ctx.db.one("SELECT provider, quota FROM accounts WHERE id=%s", (account_id,))
+        return bool(account_row and quota_reporting.account_assessment(
+            ctx.db, account_id, account_row["provider"], account_row["quota"]).get("at_risk"))
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -2264,6 +2271,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         if ctx.leases.cooling(account_id):
             return []
+        if account_quota_at_risk(account_id):
+            return []
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
@@ -2375,6 +2384,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not account or account.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if "master" not in (account.roles or []) or not master_ready(account_id, node):
+            return None
+        if account_quota_at_risk(account_id):
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -2558,6 +2569,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
+        if ctx.leases.cooling(account) or account_quota_at_risk(account):
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
         return {"versions": version_release.candidates(ctx, account, node)}
 
     @app.post("/v1/version-releases/claim")
@@ -2570,6 +2583,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(body.account)
         if account_master_paused(body.account):
             raise HTTPException(409, "account is paused by master monitoring")
+        if ctx.leases.cooling(body.account) or account_quota_at_risk(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
@@ -2729,6 +2744,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                     body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(body.details), run_id))
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
+        sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (run["account_id"], run["provider"], run["model"], J(sample_quota), body.tokens_in,
+                    body.tokens_out, body.cost_usd,
+                    int((utcnow() - run["started_at"]).total_seconds() * 1000)))
         if body.error_kind in ("quota", "auth"):
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
@@ -2858,9 +2879,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
             " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
             " WHERE f.updated_at >= %s ORDER BY f.updated_at DESC LIMIT 50", (week_start,))
+        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+        quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
-                "repeated_failures": current_repeated, "trend": trend}
+                "repeated_failures": current_repeated, "trend": trend,
+                "quota_accounts": [{"id": a["id"], "provider": a["provider"],
+                                    "quota_awareness": quota_state.get(a["id"], {})} for a in quota_accounts]}
 
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
@@ -3663,6 +3688,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (account_id, acc.provider, body.model, J(body.quota), body.tokens_in, body.tokens_out,
+                    body.cost_usd, body.duration_ms))
         ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
         if "credential_expires_at" in body.model_fields_set:
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
@@ -3940,6 +3969,15 @@ def create_app(ctx: Ctx) -> FastAPI:
     def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
         return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
+
+    @app.get("/v1/analytics/usage")
+    def analytics_usage(days: int = Query(7, ge=1, le=90),
+                        group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
+                        project: str = "", ticket: str = "", account: str = "") -> dict:
+        from .analytics import usage
+        return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
+                                                                     "account": account},
+                "rows": usage(ctx.db, days, group_by, project, ticket, account)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")

@@ -480,6 +480,8 @@ def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, c
     assert report.status_code == 200
     body = report.json()
     assert len(body["trend"]) == 4
+    assert {account["id"] for account in body["quota_accounts"]} == {"claude-01", "codex-01", "opencode-01"}
+    assert all(len(account["quota_awareness"]["history"]) == 7 for account in body["quota_accounts"])
     assert any(row["key"] == "TESTWP-250" for row in body["finished_without_person"])
     assert body["needed_person"][0]["reason"] == "The master lacks project context"
     assert body["needed_person"][0]["options"] == ["Ask the project owner", "Leave the ticket waiting"]

@@ -166,6 +166,29 @@ console.log(dashboard.innerHTML);
     return result.stdout
 
 
+def render_machines(state: dict, weekly_report: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Machines and AI view")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machines = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
+S.data = {json.dumps(state)};
+S.services = [];
+S.view = 'machines';
+S.consoleUser = {json.dumps(console_session('owner'))};
+S.autonomy = {{data: {{budget: {{used_minutes: 0, daily_budget_minutes: 60, remaining_minutes: 60}}, report: {json.dumps(weekly_report)}}}, error: '', busy: false}};
+renderCC();
+console.log(machines.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def render_integrations(user: dict, jira: dict | None = None) -> str:
     driver = f"""
 var integrationsView = {{innerHTML: ''}};
@@ -1014,6 +1037,20 @@ console.log(JSON.stringify(roles));
 def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     day = datetime.now(timezone.utc).date().isoformat()
     reset = int(datetime.now(timezone.utc).timestamp()) + 3600
+    awareness = {"source": "reported", "is_estimate": False, "runs_24h": 20, "confidence": "high",
+                 "rate_spread_ratio": .1, "usage_7d": {"tokens_in": 6000, "tokens_out": 1000,
+                                                          "tokens": 7000, "cost_usd": .07},
+                 "largest_run": {"ticket": "ALPHA-3", "tokens": 4000, "cost_usd": .04},
+                 "history": [{"day": day, "tokens": 7000, "cost_usd": .07, "runs": 20}],
+                 "windows": [{"name": "five_hour", "label": "Five hour", "source": "reported",
+                              "used_pct": 40, "left_pct": 60, "used_tokens": 3000, "left_tokens": 4500,
+                              "tokens": 3000, "cost_usd": .03,
+                              "reset_at": datetime.fromtimestamp(reset, timezone.utc).isoformat(),
+                              "reset_source": "reported", "burn_rates": {
+                                  "last_hour": {"tokens_per_hour": 1000}, "last_day": {"tokens_per_hour": 800},
+                                  "whole_window": {"tokens_per_hour": 700}},
+                              "prediction": {"status": "comfortable", "confidence": "high",
+                                             "remaining_at_reset_pct": 50}}]}
     state = {
         "projects": [{"key": "ALPHA", "repo": "jooservices/alpha", "closed": False}],
         "tickets": [
@@ -1028,7 +1065,8 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
         ],
         "nodes": [],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
-                      "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}}}],
+                      "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
+                      "quota_awareness": awareness}],
         "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
                          "provider": "codex", "step": "dev", "elapsed_s": 120}],
         "recent_runs": [], "incidents": [], "events": [],
@@ -1040,13 +1078,34 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     rendered = render_dashboard(state, analytics)
     assert rendered.count('class="dash-kpi"') == 4
     for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
-                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next reported reset:",
+                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next quota reset:",
+                 "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
                  "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
                  "Needs owner", "Human review", "ALPHA-2", "provider-codex"):
         assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
+
+    weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
+              "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
+                                                             "quota_awareness": awareness}]}
+    machines = render_machines(state, weekly)
+    assert "quota-history" in machines and "comfortable" in machines
+    assert "Weekly quota and usage" in machines and "Largest context run" in machines
+
+
+def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():
+    estimate = {"id": "grok-estimate", "provider": "grok", "quota": {}, "quota_awareness": {
+        "is_estimate": True, "confidence": "low", "runs_24h": 0,
+        "usage_7d": {"tokens": 500, "cost_usd": .01}, "history": [], "largest_run": None,
+        "windows": [{"label": "Estimated weekly", "source": "estimate", "used_pct": 20, "left_pct": 80,
+                     "used_tokens": 500, "left_tokens": 2000, "tokens": 500, "cost_usd": .01,
+                     "reset_at": "2026-10-26T00:00:00+00:00", "reset_source": "estimate",
+                     "burn_rates": {}, "prediction": {"status": "comfortable", "confidence": "low"}}]}}
+    rendered = run_script(f"console.log(qwin({json.dumps(estimate)}));")
+    for label in ("Provider quota not reported", "Usage estimate", "Estimated weekly", "80%", "quota-history"):
+        assert label in rendered
 
 
 def test_search_and_work_board_picker_scale_star_and_filter_results():

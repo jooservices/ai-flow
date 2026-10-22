@@ -90,6 +90,65 @@ def _expiry_datetime(value) -> datetime | None:
         return None
 
 
+def quota_from_event(event: dict, provider: str) -> dict:
+    """Normalize quota/rate-limit objects some CLI versions include in their JSON event stream."""
+    keys = {"rate_limits", "ratelimits", "quota", "quota_status", "usage_limits", "usage_limits_info"}
+    found: list[dict] = []
+
+    def visit(value: object, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, dict):
+            return
+        for key, child in value.items():
+            if str(key).lower().replace("-", "_") in keys and isinstance(child, dict):
+                found.append(child)
+            if isinstance(child, dict):
+                visit(child, depth + 1)
+
+    visit(event)
+    if not found:
+        return {}
+    source = found[-1]
+    windows = source.get("windows") if isinstance(source.get("windows"), dict) else source
+    aliases = {"primary": "five_hour", "secondary": "seven_day", "five_hour": "five_hour",
+               "fivehour": "five_hour", "seven_day": "seven_day", "weekly": "seven_day"}
+    normalized: dict[str, dict] = {}
+    for raw_name, raw in windows.items():
+        if not isinstance(raw, dict):
+            continue
+        name = aliases.get(str(raw_name).lower())
+        if not name:
+            continue
+        utilization = next((raw[k] for k in ("utilization", "used_percent", "usedPercent", "utilization_percent")
+                            if raw.get(k) is not None), None)
+        if utilization is None:
+            used, limit = raw.get("used_tokens"), raw.get("limit_tokens") or raw.get("limit") or raw.get("total")
+            try:
+                if used is not None and limit:
+                    utilization = float(used) / float(limit)
+            except (TypeError, ValueError, ZeroDivisionError):
+                utilization = None
+        if utilization is None:
+            continue
+        try:
+            utilization = float(utilization)
+            if utilization > 1:
+                utilization /= 100
+        except (TypeError, ValueError):
+            continue
+        item = {"utilization": utilization}
+        reset = next((raw[k] for k in ("resets_at", "resetsAt", "reset_at", "resetAt") if raw.get(k) is not None), None)
+        if reset is not None:
+            item["resets_at"] = reset
+        for key in ("quota_tokens", "limit_tokens", "total_tokens", "window_duration_minutes", "windowDurationMins"):
+            if raw.get(key) is not None:
+                item[key] = raw[key]
+        duration = raw.get("window_duration_mins")
+        if duration is not None:
+            item["window_duration_minutes"] = duration
+        normalized[name] = item
+    return {"provider": provider, "windows": normalized} if normalized else {}
+
+
 def _credential_expiry(event: dict, res: RunResult, credential_context: bool = False) -> None:
     """Capture only explicit expiry metadata emitted by a CLI's structured event stream."""
     if res.credential_expires_at:

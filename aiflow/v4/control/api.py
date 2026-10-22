@@ -2823,6 +2823,24 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"accepted": n}
 
     # --- state for dashboards ---------------------------------------------------------------------------------
+    @app.get("/v1/projects/{key}/versions")
+    def project_versions(key: str) -> dict:
+        if key not in ctx.repo().projects:
+            raise HTTPException(404, f"unknown project {key}")
+        versions = ctx.db.all(
+            "SELECT v.id, v.name, v.released, v.release_date, count(t.key)::int AS ticket_count,"
+            " count(t.key) FILTER (WHERE t.status='Done')::int AS done_count"
+            " FROM versions v LEFT JOIN ticket_versions tv ON tv.version_id=v.id"
+            " LEFT JOIN tickets t ON t.key=tv.ticket_key WHERE v.project=%s"
+            " GROUP BY v.id, v.name, v.released, v.release_date ORDER BY v.name, v.id", (key,))
+        for version in versions:
+            version["open_tickets"] = ctx.db.all(
+                "SELECT t.key, t.summary, t.status FROM ticket_versions tv"
+                " JOIN tickets t ON t.key=tv.ticket_key"
+                " WHERE tv.version_id=%s AND t.project=%s AND t.status <> 'Done' ORDER BY t.key",
+                (version["id"], key))
+        return {"project": key, "versions": versions}
+
     @app.get("/v1/projects/{key}/report")
     def project_report(key: str, epic: str | None = None, format: str = Query(default="json")):
         if key not in ctx.repo().projects:

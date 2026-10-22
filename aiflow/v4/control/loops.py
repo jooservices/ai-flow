@@ -132,6 +132,13 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     n = 0
     changed_ticket_keys: set[str] = set()
     first_seen_ticket_keys: set[str] = set()
+    for project in keys:
+        for version in ctx.jira.project_versions(project):
+            ctx.db.run(
+                "INSERT INTO versions (id, project, name, released, release_date)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
+                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
+                (version["id"], project, version["name"], version["released"], version["release_date"]))
     preexisting_ticket_keys = {
         row["key"]
         for project in keys
@@ -159,6 +166,14 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
             {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+        # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
+        ctx.db.run(
+            "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
+            " INSERT INTO ticket_versions (ticket_key, version_id)"
+            " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
+            " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
+            " ON CONFLICT (ticket_key, version_id) DO NOTHING",
+            (t["key"], t["key"], t["fix_versions"]))
         if not old:
             project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
         if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):

@@ -119,6 +119,7 @@ class Jira:
                          if f.get("assignee") else None),
             "jira_created": _ts(f.get("created")), "jira_updated": _ts(f.get("updated")),
             "done_at": _ts(f.get("resolutiondate")),
+            "fix_versions": [str(version["id"]) for version in (f.get("fixVersions") or []) if version.get("id")],
         }
 
     def status(self, key: str) -> str:
@@ -142,6 +143,14 @@ class Jira:
         data = self.call("GET", f"/rest/api/3/project/{key}/statuses")
         return sorted({str(status.get("name") or "") for issue_type in data
                        for status in issue_type.get("statuses", []) if status.get("name")})
+
+    def project_versions(self, key: str) -> list[dict[str, Any]]:
+        """List the Jira versions for a project in a compact registry-ready form."""
+        data = self.call("GET", f"/rest/api/3/project/{key}/versions")
+        return [{"id": str(version["id"]), "name": str(version.get("name") or ""),
+                 "released": bool(version.get("released", False)),
+                 "release_date": version.get("releaseDate") or None}
+                for version in data if version.get("id")]
 
     def versions(self, project: str) -> list[dict[str, Any]]:
         """List Jira versions for one project, including their stable ids and Released state."""

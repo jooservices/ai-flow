@@ -121,6 +121,8 @@ class FakeAtlassian:
         if path == "/rest/api/3/myself":
             return httpx.Response(200, json={"accountId": "557058:bot", "displayName": "AI Flow bot",
                                              "emailAddress": "bot@acme.test"})
+        if path == "/rest/api/3/project/TESTWP/versions":
+            return httpx.Response(200, json=[])
         if path == "/rest/api/3/search/jql":
             return httpx.Response(200, json={"issues": self.tickets, "isLast": True})
         if path.startswith("/rest/api/3/issue/"):

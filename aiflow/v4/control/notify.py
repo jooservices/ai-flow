@@ -30,6 +30,7 @@ ALERT_LABELS = {
 }
 MAX_ATTEMPTS = 4
 RETRY_DELAYS_S = (30, 120, 600)
+SENDING_RECOVERY_AFTER_S = 60
 TICKET_KEY = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
 SECRET_FIELDS = {
     "email": ("password",),
@@ -327,6 +328,11 @@ def _deliver_channel(channel: dict, title: str, body: str, recipient: str = "") 
     if kind == "telegram":
         response = httpx.post(f"https://api.telegram.org/bot{config['bot_token']}/sendMessage",
                               json={"chat_id": config["chat_id"], "text": f"{title}\n{body}"[:4000]}, timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("Telegram rejected the message")
+        return
     elif kind in ("slack", "teams"):
         response = httpx.post(config["webhook_url"], json={"text": f"{title}\n{body}"[:4000]}, timeout=10)
     elif kind == "webhook":
@@ -349,18 +355,23 @@ def _attempt(db, channel: dict, delivery: dict, recipient: str = "") -> dict:
     except Exception as exc:  # Credentials and provider URLs are deliberately absent from logs and stored errors.
         error = type(exc).__name__[:80]
         log.warning("notification delivery failed channel_id=%s error=%s", channel["id"], error)
-        if attempts >= int(delivery["max_attempts"]):
-            _record_result(db, channel["id"], delivery["id"], "failed", error, attempts, "failed")
-            _open_delivery_incident(db, channel, delivery, error)
-        else:
-            retry_at = datetime.now(timezone.utc) + timedelta(seconds=RETRY_DELAYS_S[min(attempts - 1,
-                                                                                       len(RETRY_DELAYS_S) - 1)])
-            _record_result(db, channel["id"], delivery["id"], f"retrying ({attempts}/{delivery['max_attempts']})",
-                           error, attempts, "pending", retry_at)
+        _record_attempt_failure(db, channel, delivery, error, attempts)
         return delivery
     _record_result(db, channel["id"], delivery["id"], "sent", "", attempts, "sent")
     _close_delivery_incident(db, delivery)
     return delivery
+
+
+def _record_attempt_failure(db, channel: dict, delivery: dict, error: str, attempts: int) -> None:
+    """Persist retry state or open the incident once this delivery exhausts its attempts."""
+    if attempts >= int(delivery["max_attempts"]):
+        _record_result(db, channel["id"], delivery["id"], "failed", error, attempts, "failed")
+        _open_delivery_incident(db, channel, delivery, error)
+        return
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=RETRY_DELAYS_S[min(attempts - 1,
+                                                                               len(RETRY_DELAYS_S) - 1)])
+    _record_result(db, channel["id"], delivery["id"], f"retrying ({attempts}/{delivery['max_attempts']})",
+                   error, attempts, "pending", retry_at)
 
 
 def _delivery_success(db, delivery_id: int) -> bool:
@@ -450,10 +461,33 @@ def send_test(ctx, channel_id: int) -> dict:
 
 
 def process_retries(ctx, limit: int = 25) -> int:
-    """Retry due deliveries; after four failures open a critical incident in the registry."""
+    """Retry due deliveries and reclaim sends interrupted for at least one minute."""
+    limit = max(1, min(limit, 100))
+    # Claim stale sending rows by refreshing updated_at. This makes recovery single-owner even if two control
+    # loops briefly overlap, while leaving enough time for a normal provider request to finish.
+    interrupted = ctx.db.all(
+        "WITH stale AS (SELECT id FROM notification_deliveries WHERE status='sending'"
+        " AND updated_at<=now()-(%s * interval '1 second') ORDER BY updated_at,id"
+        " FOR UPDATE SKIP LOCKED LIMIT %s)"
+        " UPDATE notification_deliveries AS delivery SET updated_at=now() FROM stale"
+        " WHERE delivery.id=stale.id RETURNING delivery.*",
+        (SENDING_RECOVERY_AFTER_S, limit))
     rows = ctx.db.all("SELECT * FROM notification_deliveries WHERE status='pending' AND next_attempt_at<=now()"
-                      " ORDER BY next_attempt_at,id LIMIT %s", (max(1, min(limit, 100)),))
+                      " ORDER BY next_attempt_at,id LIMIT %s", (max(0, limit - len(interrupted)),))
     processed = 0
+    for delivery in interrupted:
+        channel = _get_channel(ctx.db, int(delivery["channel_id"])) if delivery.get("channel_id") else None
+        if channel:
+            error = "DeliveryInterrupted"
+            attempts = int(delivery["attempts"]) + 1
+            log.warning("notification delivery interrupted channel_id=%s", channel["id"])
+            _record_attempt_failure(ctx.db, channel, delivery, error, attempts)
+        else:
+            missing_channel = {"id": int(delivery.get("channel_id") or 0), "name": delivery["channel_name"]}
+            error = "DeliveryInterrupted"
+            attempts = int(delivery["attempts"]) + 1
+            _record_attempt_failure(ctx.db, missing_channel, delivery, error, attempts)
+        processed += 1
     for delivery in rows:
         channel = _get_channel(ctx.db, int(delivery["channel_id"])) if delivery.get("channel_id") else None
         if not channel:

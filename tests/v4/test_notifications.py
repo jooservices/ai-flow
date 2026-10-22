@@ -33,6 +33,9 @@ def fake_http(monkeypatch, posted):
         def raise_for_status(self):
             return None
 
+        def json(self):
+            return {"ok": True}
+
     def post(url, **kwargs):
         posted.append((url, kwargs))
         return Response()
@@ -166,6 +169,58 @@ def test_repeated_delivery_failure_retries_and_opens_screen_incident(client, ctx
     assert "token-path" not in caplog.text
     screen = client.get("/v1/notifications").json()
     assert screen["incidents"] and screen["incidents"][0]["title"] == "Alert delivery failed: broken webhook"
+
+
+def test_telegram_json_rejection_is_recorded_as_a_failed_attempt(client, ctx, monkeypatch):
+    sign_in(client, ctx)
+    channel = add_channel(client, "telegram", {"bot_token": "telegram-secret", "chat_id": "-10042"})
+    client.put("/v1/notifications/preferences", json={"routes": {"critical_incident": [channel["id"]]}})
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": False, "description": "message rejected"}
+
+    monkeypatch.setattr(notify.httpx, "post", lambda *_args, **_kwargs: Response())
+    assert notify.send("critical", "TESTWP-96 Telegram failure", "Please investigate.", ctx=ctx,
+                       alert_kind="critical_incident") == []
+    delivery = ctx.db.one("SELECT status, attempts, last_error FROM notification_deliveries ORDER BY id DESC LIMIT 1")
+    assert delivery == {"status": "pending", "attempts": 1, "last_error": "RuntimeError"}
+    assert ctx.db.one("SELECT last_delivery_status FROM notification_channels WHERE id=%s", (channel["id"],)) == {
+        "last_delivery_status": "retrying (1/4)"}
+
+
+def test_interrupted_initial_delivery_is_retried_and_eventually_opens_incident(client, ctx, monkeypatch):
+    sign_in(client, ctx)
+    channel = add_channel(client, "webhook", {"url": "https://interrupted.example.test/hook"}, "interrupted webhook")
+    row = ctx.db.one(
+        "INSERT INTO notification_deliveries (channel_id,channel_name,channel_kind,alert_kind,title,body,link,project,"
+        "ticket,needed,status,attempts,max_attempts,updated_at)"
+        " VALUES (%s,'interrupted webhook','webhook','critical_incident','TESTWP-97 interrupted','Details',"
+        "'https://aiflow.example.test/cc','TESTWP','TESTWP-97','Restore delivery','sending',0,4,"
+        "now()-(%s * interval '1 second')) RETURNING id",
+        (channel["id"], notify.SENDING_RECOVERY_AFTER_S + 1))
+    requests = []
+
+    def fail(url, **kwargs):
+        requests.append(url)
+        raise httpx.ConnectError("provider unavailable")
+
+    monkeypatch.setattr(notify.httpx, "post", fail)
+    assert notify.process_retries(ctx) == 1
+    delivery = ctx.db.one("SELECT status, attempts, last_error FROM notification_deliveries WHERE id=%s", (row["id"],))
+    assert delivery == {"status": "pending", "attempts": 1, "last_error": "DeliveryInterrupted"}
+
+    for _ in range(3):
+        ctx.db.run("UPDATE notification_deliveries SET next_attempt_at=now() WHERE id=%s", (row["id"],))
+        assert notify.process_retries(ctx) == 1
+    delivery = ctx.db.one("SELECT status, attempts, last_error FROM notification_deliveries WHERE id=%s", (row["id"],))
+    assert delivery == {"status": "failed", "attempts": 4, "last_error": "ConnectError"}
+    assert ctx.db.one("SELECT severity FROM incidents WHERE kind='notification_delivery' AND closed_at IS NULL") == {
+        "severity": "critical"}
+    assert requests == ["https://interrupted.example.test/hook"] * 3
 
 
 def test_alert_content_has_project_ticket_needed_and_exact_action_link(ctx, monkeypatch):

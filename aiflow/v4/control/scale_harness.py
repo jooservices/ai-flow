@@ -187,7 +187,8 @@ def build_context(db, leases, root: Path, sc: Scenario, jira: Any = None):
     write_control_repo(root, sc)
     snap = ControlRepo.load(root)
     settings = Settings(join_token=JOIN_KEY, join_control_url="https://control.scale.test", reviewer_token="x" * 16,
-                        owner_token="owner-scale-proof", lease_ms=90_000, env="scale-proof")
+                        owner_token="owner-scale-proof", console_session_secret="scale-proof-console-session-secret",
+                        lease_ms=90_000, env="scale-proof")
     return Ctx(settings=settings, db=db, leases=leases, events=Events(db), repo=lambda: snap,
                jira=jira if jira is not None else SimJira())
 
@@ -240,6 +241,11 @@ def run(db, leases, workdir: Path, sc: Scenario = Scenario(), release: str = "",
     app = create_app(ctx)
     mount_ui(app, ctx)
     client = TestClient(app)  # in-process: the same routes, auth and database as a node or a browser reaches
+    # Console page measurements must use the same authenticated read paths as a real console user. Develop gates
+    # the Knowledge data API by role, so give this simulated console an owner session.
+    from .console_auth import COOKIE_NAME, issue_session
+    client.cookies.set(COOKIE_NAME, issue_session("scale-proof", "owner", int(time.time()) + 3600,
+                                                  ctx.settings.console_session_secret))
     app.state.sync_accounts()
     pl = plan(sc)
     sessions = sessions_of(sc)

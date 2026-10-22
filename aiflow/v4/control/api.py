@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import csv
+import io
 import ipaddress
 import re
 import logging
@@ -36,6 +38,7 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import review_metrics
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -398,6 +401,9 @@ class TriageAlertBody(BaseModel):
 
 class ReviewerBody(BaseModel):
     comment: str = ""
+    reason: str = ""
+    question: str = ""
+    answer: str = ""
 
 
 class MasterActionBody(BaseModel):
@@ -671,19 +677,21 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "master run belongs to another node")
         return run
 
-    def reviewer_run(key: str) -> tuple[dict, str, int, int]:
-        ticket = ctx.db.one("SELECT key, project, status, labels, summary FROM tickets WHERE key=%s", (key,))
+    def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",),
+                     allowed_kinds: tuple[str, ...] | None = None) -> tuple[dict, str, int, int]:
+        ticket = ctx.db.one("SELECT key, project, status, labels, summary, blocked_by FROM tickets WHERE key=%s", (key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
-        if ticket["status"] != "Human review":
-            raise HTTPException(409, "ticket is no longer in Human review")
+        if ticket["status"] not in statuses:
+            raise HTTPException(409, "ticket is no longer waiting for this review action")
+        if allowed_kinds is not None and current_review_item_kind(ticket) not in allowed_kinds:
+            raise HTTPException(409, "this action does not apply to the current human review item")
         if not ctx.jira or not github_gateway(ctx):
             raise HTTPException(503, "Jira or GitHub is unavailable")
         pr_run = ctx.db.one("SELECT pr_url,details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                             " ORDER BY started_at DESC LIMIT 1", (key,))
         match = re.search(r"/pull/(\d+)(?:/|$)", (pr_run or {}).get("pr_url", ""))
-        if not match:
-            raise HTTPException(409, "ticket has no pull request to review")
+        number = int(match.group(1)) if match else 0
         run_id = str(uuid.uuid4())
         claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
         if not claim.ok:
@@ -696,7 +704,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception:
             ctx.leases.release(key, run_id, claim.fence)
             raise
-        return ticket, run_id, claim.fence, int(match.group(1))
+        return ticket, run_id, claim.fence, number
 
     def finish_reviewer_run(key: str, run_id: str, fence: int, outcome: str, summary: str) -> None:
         ctx.db.run("UPDATE runs SET status='finished', outcome=%s, summary=%s, ended_at=now() WHERE id=%s",
@@ -705,6 +713,121 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("run.finished", ticket=key, project=key.split("-", 1)[0], step="qa", run_id=run_id,
                         fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
                         reason=summary[:200])
+
+    def reviewer_comment(ticket: str, run_id: str, fence: int, number: int, text: str,
+                         source: str = "human-review") -> None:
+        """Mirror a reviewer action to Jira and, when the ticket has a PR, its PR conversation."""
+        jira_run = fenced(run_id, fence, "jira", "comment", {"chars": len(text)})
+        comment_id = ctx.jira.comment(ticket, text)
+        audit("jira", "comment", ticket, run_id, fence, jira_run["account_id"], True, comment_id,
+              {"source": source, "chars": len(text)})
+        if number:
+            github_run = fenced(run_id, fence, "github", "comment", {"number": number})
+            project = ctx.repo().projects.get(github_run["project"])
+            if not project:
+                raise HTTPException(404, "project is not configured")
+            repository = repository_for_run(github_run, project)
+            gateway = github_gateway(ctx)
+            gateway.comment(repository.split("/", 1)[-1], number, text)
+            audit("github", "comment", ticket, run_id, fence, github_run["account_id"], True, "ok",
+                  {"source": source, "number": number, "repo": repository})
+
+    def reviewer_transition(ticket: str, run_id: str, fence: int, target: str, reason: str) -> str:
+        transition_run = fenced(run_id, fence, "jira", "transition", {"to": target})
+        status = ctx.jira.transition_to(ticket, target)
+        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(done_at,now())"
+                   " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, ticket))
+        audit("jira", "transition", ticket, run_id, fence, transition_run["account_id"], True, status,
+              {"to": target, "source": "human-review"})
+        ctx.events.emit("jira.transition", ticket=ticket, project=transition_run["project"], run_id=run_id,
+                        fence=fence, account="reviewer-console", node="control", outcome=status, reason=reason)
+        return status
+
+    def reviewer_labels(ticket: str, run_id: str, fence: int, add: tuple[str, ...] = (),
+                        remove: tuple[str, ...] = ()) -> None:
+        if not add and not remove:
+            return
+        fields_run = fenced(run_id, fence, "jira", "fields", {"add": list(add), "remove": list(remove)})
+        for label in add:
+            ctx.jira.add_label(ticket, label)
+            ctx.db.run("UPDATE tickets SET labels=CASE WHEN %s=ANY(labels) THEN labels"
+                       " ELSE array_append(labels,%s) END WHERE key=%s", (label, label, ticket))
+        for label in remove:
+            ctx.jira.remove_label(ticket, label)
+            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,%s) WHERE key=%s", (label, ticket))
+        audit("jira", "fields", ticket, run_id, fence, fields_run["account_id"], True, "review labels updated",
+              {"source": "human-review", "add": list(add), "remove": list(remove)})
+
+    def record_reviewer_action(ticket: dict, run_id: str, fence: int, action: str, text: str = "") -> None:
+        latest_dev = ctx.db.one("SELECT step,outcome FROM runs WHERE ticket_key=%s AND step='dev'"
+                                " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
+        kind = review_item_kind(ticket, latest_dev)
+        audit("human-review", action, ticket["key"], run_id, fence, "reviewer-console", True, "accepted",
+              {"kind": kind, "text": text[:4000]})
+        ctx.events.emit("review.action", ticket=ticket["key"], project=ticket["project"], step="qa",
+                        run_id=run_id, fence=fence, account="reviewer-console", node="control", outcome=action,
+                        action=action, kind=kind, text=text[:4000])
+
+    def review_item_kind(ticket: dict, latest_run: dict | None = None) -> str:
+        if ticket["status"] == "Human review":
+            return "review_before_merge"
+        if ticket["status"] == "Needs owner":
+            if ticket.get("_has_open_blocker", bool(ticket.get("blocked_by"))):
+                return "blocked"
+            if "owner-escalated" in (ticket.get("labels") or []):
+                return "decision_needed"
+            asked = ctx.db.one("SELECT ts FROM events WHERE ticket=%s AND type='review.action'"
+                               " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (ticket["key"],))
+            triaged = ctx.db.one("SELECT started_at,status,outcome,ended_at FROM runs WHERE ticket_key=%s AND step='triage'"
+                                 " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
+            if asked and (not triaged or triaged["status"] == "running"
+                          or triaged["outcome"] in ("failed", "timeout", "lost")
+                          or (triaged["ended_at"] and asked["ts"] > triaged["ended_at"])):
+                return "question_from_ai"
+            if latest_run and latest_run.get("step") == "dev" and latest_run.get("outcome") == "blocked":
+                return "question_from_ai"
+            return "decision_needed"
+        return "blocked"
+
+    def current_review_item_kind(ticket: dict) -> str:
+        """Classify a waiting ticket with the same live blocker check used by the review queue."""
+        blockers = [str(blocker) for blocker in (ticket.get("blocked_by") or [])]
+        statuses = {row["key"]: row["status"] for row in ctx.db.all(
+            "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blockers,))} if blockers else {}
+        has_open_blocker = any(statuses.get(blocker) not in ("Done", "Closed") for blocker in blockers)
+        latest = ctx.db.one("SELECT step,outcome FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1",
+                            (ticket["key"],))
+        return review_item_kind({**ticket, "_has_open_blocker": has_open_blocker}, latest)
+
+    def review_thread(key: str) -> list[dict]:
+        thread = []
+        actions = ctx.db.all("SELECT ts, data FROM events WHERE ticket=%s AND type='review.action'"
+                             " ORDER BY ts DESC LIMIT 40", (key,))
+        for row in reversed(actions):
+            data = row.get("data") or {}
+            action = str(data.get("action") or "")
+            text = str(data.get("text") or "")
+            if action in {"ask-ai", "answer"} and text:
+                thread.append({"kind": "question" if action == "ask-ai" else "answer",
+                               "author": "Reviewer", "text": text, "created_at": row["ts"].isoformat()})
+        developer_questions = ctx.db.all("SELECT summary,started_at FROM runs WHERE ticket_key=%s AND step='dev'"
+                                         " AND outcome='blocked' ORDER BY started_at DESC LIMIT 20", (key,))
+        for row in developer_questions:
+            if row.get("summary"):
+                thread.append({"kind": "question", "author": "AI", "text": row["summary"],
+                               "created_at": row["started_at"].isoformat()})
+        answers = ctx.db.all("SELECT summary, details, outcome, started_at FROM runs WHERE ticket_key=%s"
+                             " AND step='triage' AND outcome IN ('answered','escalated')"
+                             " ORDER BY started_at DESC LIMIT 20", (key,))
+        for row in answers:
+            details = row.get("details") or {}
+            answer = str(details.get("answer") or row.get("summary") or "")
+            if row.get("outcome") == "escalated":
+                answer = f"Could not answer safely: {details.get('why') or answer}"
+            if answer:
+                thread.append({"kind": "ai_answer", "author": "AI", "text": answer,
+                               "created_at": row["started_at"].isoformat()})
+        return sorted(thread, key=lambda item: item["created_at"])
 
     def repository_for_run(run: dict[str, Any], project=None) -> str:
         """Use the repository captured when the run was claimed, with a legacy settings fallback."""
@@ -2328,6 +2451,19 @@ def create_app(ctx: Ctx) -> FastAPI:
             triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
                               "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
                               if verify else "", "recent_comments": comments}
+            asked = ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
+                               " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
+            prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
+                                      " ORDER BY started_at DESC LIMIT 1", (t["key"],))
+            if asked and (not prior_triage or asked["ts"] > prior_triage["started_at"]):
+                question = str((asked.get("data") or {}).get("text") or "").strip()
+                if question:
+                    triage_context["last_dev_summary"] = f"Reviewer question: {question}"
+            prior_pr = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
+                                  " ORDER BY started_at DESC LIMIT 1", (t["key"],))
+            prior_pr_match = re.search(r"/pull/(\d+)(?:/|$)", (prior_pr or {}).get("pr_url", ""))
+            if prior_pr_match:
+                triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
         run_id = str(uuid.uuid4())
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:
@@ -2343,7 +2479,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         # Once development starts, verify and rework keep the repository that produced the PR even if
         # the owner changes the epic mapping while that work waits for review.
         prior_repository = str(((prior_dev or {}).get("details") or {}).get("repository") or "")
-        if p and prior_repository and body.step in {"dev", "verify", "qa"}:
+        if p and prior_repository and body.step in {"dev", "verify", "qa", "triage"}:
             prior_settings = ((prior_dev or {}).get("details") or {}).get("repository_settings")
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
@@ -3103,25 +3239,61 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "only a verify run can merge")
         return merge_command(run, body.number, body.title, body.method, node)
 
-    @app.get("/v1/reviews")
-    def human_reviews() -> dict:
-        """Ticket review queue with the latest PR, diff totals, verification result and gated preview link."""
+    def review_data(project_filter: str = "") -> dict:
         repo = ctx.repo()
-        tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key"
-                             " FROM tickets WHERE status='Human review' ORDER BY project, key")
+        configured = sorted(repo.projects)
+        if project_filter and project_filter not in configured:
+            raise HTTPException(400, "unknown project filter")
+        where = " WHERE project=%s" if project_filter else ""
+        params = (project_filter,) if project_filter else ()
+        metrics_tickets = ctx.db.all("SELECT key, project, status, labels, blocked_by, done_at, jira_updated, synced_at"
+                                     " FROM tickets" + where, params)
+        project_where = " AND project=%s" if project_filter else ""
+        project_params = (project_filter,) if project_filter else ()
+        event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
+        events = ctx.db.all("SELECT ts,type,ticket,project,outcome,reason,data FROM events"
+                            " WHERE type IN ('jira.transition','review.action')" + event_filter + " ORDER BY ts",
+                            project_params)
+        runs = ctx.db.all("SELECT ticket_key,project,step,account_id,outcome,summary,details,started_at,ended_at FROM runs"
+                          " WHERE 1=1" + project_where + " ORDER BY started_at", project_params)
+        audit_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
+        audits = ctx.db.all("SELECT ts,ticket,action,target,accepted,result,payload FROM write_audit"
+                            " WHERE (target='human-review' OR (target='jira' AND action='transition'))"
+                            + audit_filter + " ORDER BY ts", project_params)
+        metrics = review_metrics.calculate_review_metrics(metrics_tickets, events, runs, audits)
+        return {"metrics": metrics, "projects": configured}
+
+    @app.get("/v1/reviews")
+    def human_reviews(project: str = Query(default="")) -> dict:
+        """Queue waiting items with their action set and project-filtered human-review metrics."""
+        repo = ctx.repo()
+        metrics_data = review_data(project)
+        where = " AND project=%s" if project else ""
+        params = (project,) if project else ()
+        tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
+                             " FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
+                             " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where
+                             + " ORDER BY project, key", params)
+        all_statuses = {row["key"]: row["status"] for row in ctx.db.all("SELECT key,status FROM tickets")}
         epics = {r["key"]: r["status"] for r in ctx.db.all(
             "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
         out = []
         for ticket in tickets:
+            if ticket["status"] not in ("Human review", "Needs owner") and not any(
+                    str(blocker) not in all_statuses or all_statuses[str(blocker)] not in ("Done", "Closed")
+                    for blocker in (ticket.get("blocked_by") or [])):
+                continue
             dev = ctx.db.one("SELECT pr_url, summary, details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                              " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
+            latest = ctx.db.one("SELECT step,outcome,summary,details,started_at FROM runs"
+                                " WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
             pr_url = (dev or {}).get("pr_url", "")
             match = re.search(r"/pull/(\d+)(?:/|$)", pr_url)
-            project = repo.projects.get(ticket["project"])
-            repository = repository_for_run(dev or {}, project) if project else ""
+            project_config = repo.projects.get(ticket["project"])
+            repository = repository_for_run(dev or {}, project_config) if project_config else ""
             pr_detail: dict[str, Any] = {}
             github = github_gateway(ctx)
-            if project and match and github:
+            if project_config and match and github:
                 try:
                     pr_detail = github.pr(repository.split("/", 1)[-1], int(match.group(1))) or {}
                 except Exception as e:  # noqa: BLE001
@@ -3131,15 +3303,32 @@ def create_app(ctx: Ctx) -> FastAPI:
                                 (ticket["key"],))
             details = (verify or {}).get("details") or {}
             preview_url = ""
-            preview = (project.environments or {}).get("preview") if project else None
+            preview = (project_config.environments or {}).get("preview") if project_config else None
             if isinstance(preview, dict):
                 preview_url = str(preview.get("url") or "")
             elif isinstance(preview, str):
                 preview_url = preview
             if ticket["project"] != "TESTFLOW" or epics.get("TESTFLOW-5") != "Done":
                 preview_url = ""
+            open_blocker = any(str(blocker) not in all_statuses or
+                               all_statuses[str(blocker)] not in ("Done", "Closed")
+                               for blocker in (ticket.get("blocked_by") or []))
+            kind = review_item_kind({**ticket, "_has_open_blocker": open_blocker}, latest)
+            actions = {
+                "review_before_merge": ["approve", "reject", "rework", "ask-ai", "skip-gate"],
+                "question_from_ai": ["answer", "ask-ai"],
+                "decision_needed": ["answer", "ask-ai"],
+                "blocked": ["ask-ai"],
+            }[kind]
+            if not match:
+                actions = [action for action in actions if action not in {"approve", "reject", "skip-gate"}]
+            if kind == "review_before_merge" and "require-human" not in (ticket.get("labels") or []):
+                actions = [action for action in actions if action != "skip-gate"]
             out.append({
                 **ticket,
+                "kind": kind,
+                "actions": actions,
+                "thread": review_thread(ticket["key"]),
                 "repository": repository,
                 "jira_url": f"{ctx.settings.jira_site.rstrip('/')}/browse/{ticket['key']}",
                 "pr": {"url": pr_url, "number": int(match.group(1)) if match else None,
@@ -3152,39 +3341,81 @@ def create_app(ctx: Ctx) -> FastAPI:
                            "findings": details.get("findings", "")},
                 "preview_url": preview_url,
             })
-        return {"tickets": out}
+        thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project else ""
+        thread_run_filter = " AND project=%s" if project else ""
+        thread_dates: dict[str, Any] = {}
+        for row in ctx.db.all("SELECT ticket,max(ts) AS latest FROM events WHERE type='review.action'"
+                              " AND data->>'action'='ask-ai'" + thread_event_filter + " GROUP BY ticket",
+                              (project,) if project else ()):
+            thread_dates[str(row["ticket"])] = row["latest"]
+        for row in ctx.db.all("SELECT ticket_key AS ticket,max(started_at) AS latest FROM runs"
+                              " WHERE step IN ('dev','triage') AND outcome IN ('blocked','answered','escalated')"
+                              + thread_run_filter + " GROUP BY ticket_key", (project,) if project else ()):
+            key = str(row["ticket"])
+            thread_dates[key] = max(thread_dates.get(key, row["latest"]), row["latest"])
+        threads = []
+        for key in sorted(thread_dates, key=lambda k: thread_dates[k], reverse=True)[:50]:
+            ticket = ctx.db.one("SELECT key,project,summary,status FROM tickets WHERE key=%s", (key,))
+            thread = review_thread(key)
+            if ticket and thread:
+                threads.append({**ticket, "thread": thread})
+        return {"tickets": out, "threads": threads, **metrics_data}
+
+    @app.get("/v1/reviews/export.csv")
+    def export_review_metrics(project: str = Query(default="")) -> PlainTextResponse:
+        metrics = review_data(project)["metrics"]
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(("metric", "value", "project"))
+        for name, value in (
+            ("people_needed_this_week", metrics["people_needed_this_week"]),
+            ("people_needed_eight_weeks_ago", metrics["people_needed_eight_weeks_ago"]),
+            ("finished_with_no_person_pct", metrics["finished_with_no_person_pct"]),
+            ("median_wait_minutes", metrics["median_wait_minutes"]),
+            ("approved_first_time_pct", metrics["approved_first_time_pct"]),
+            ("sent_back_or_rejected_pct", metrics["sent_back_or_rejected_pct"]),
+        ):
+            writer.writerow((name, "" if value is None else value, project or "all"))
+        writer.writerow(())
+        writer.writerow(("week", "reason", "count", "project"))
+        for week in metrics["weekly"]:
+            for reason, count in week["by_reason"].items():
+                writer.writerow((week["week"], reason, count, project or "all"))
+        return PlainTextResponse(output.getvalue(), media_type="text/csv",
+                                 headers={"Content-Disposition": "attachment; filename=human-review-metrics.csv"})
 
     @app.post("/v1/reviews/{key}/approve")
     def approve_review(key: str, _reviewer: str = Depends(reviewer_auth)) -> dict:
         ticket, run_id, fence, number = reviewer_run(key)
         try:
+            if not number:
+                raise HTTPException(409, "ticket has no pull request to approve")
             run = fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
             result = merge_command(run, number, f"{key}: {ticket['summary']}",
                                    (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
+                note = f"Human review approval could not merge PR #{number}: {result.get('message', 'merge refused')}"
+                reviewer_comment(key, run_id, fence, number, note)
+                audit("human-review", "approve", key, run_id, fence, "reviewer-console", False,
+                      result.get("message", "merge refused"), {"kind": "review_before_merge"})
                 finish_reviewer_run(key, run_id, fence, "failed", result.get("message", "merge refused"))
                 return {"merged": False, "message": result.get("message", "GitHub refused the merge")}
-            comment_run = fenced(run_id, fence, "jira", "comment", {"chars": len(result.get("sha", ""))})
             note = f"Human review approved in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
-            comment_id = ctx.jira.comment(key, note)
-            audit("jira", "comment", key, run_id, fence, comment_run["account_id"], True, comment_id,
-                  {"source": "human-review", "chars": len(note)})
-            transition_run = fenced(run_id, fence, "jira", "transition", {"to": "Done"})
-            status = ctx.jira.transition_to(key, "Done")
-            ctx.db.run("UPDATE tickets SET status=%s, done_at=coalesce(done_at,now()), synced_at=now() WHERE key=%s",
-                       (status, key))
-            audit("jira", "transition", key, run_id, fence, transition_run["account_id"], True, status,
-                  {"to": "Done", "source": "human-review"})
-            ctx.events.emit("jira.transition", ticket=key, run_id=run_id, fence=fence, account="reviewer-console",
-                            node="control", outcome=status, reason="human review approved")
+            reviewer_comment(key, run_id, fence, number, note)
+            status = reviewer_transition(key, run_id, fence, "Done", "human review approved")
+            record_reviewer_action(ticket, run_id, fence, "approve")
             finish_reviewer_run(key, run_id, fence, "merged", note)
             return {"merged": True, "sha": result.get("sha", ""), "status": status}
         except HTTPException:
+            audit("human-review", "approve", key, run_id, fence, "reviewer-console", False,
+                  "review approval failed", {"kind": "review_before_merge"})
             finish_reviewer_run(key, run_id, fence, "failed", "review approval failed")
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("human review approval failed for %s", key)
+            audit("human-review", "approve", key, run_id, fence, "reviewer-console", False,
+                  "review approval failed", {"kind": "review_before_merge"})
             finish_reviewer_run(key, run_id, fence, "failed", "review approval failed")
             raise HTTPException(502, "could not complete the review approval") from e
 
@@ -3193,34 +3424,154 @@ def create_app(ctx: Ctx) -> FastAPI:
         comment = body.comment.strip()
         if not comment:
             raise HTTPException(400, "a rework comment is required")
-        ticket, run_id, fence, _number = reviewer_run(key)
+        ticket, run_id, fence, number = reviewer_run(key)
         try:
-            comment_run = fenced(run_id, fence, "jira", "comment", {"chars": len(comment)})
-            comment_id = ctx.jira.comment(key, f"Human review requested rework:\n\n{comment}")
-            audit("jira", "comment", key, run_id, fence, comment_run["account_id"], True, comment_id,
-                  {"source": "human-review", "chars": len(comment)})
-            fields_run = fenced(run_id, fence, "jira", "fields", {"add": ["rework"]})
-            ctx.jira.add_label(key, "rework")
-            ctx.db.run("UPDATE tickets SET labels=CASE WHEN 'rework'=ANY(labels) THEN labels"
-                       " ELSE array_append(labels,'rework') END WHERE key=%s", (key,))
-            audit("jira", "fields", key, run_id, fence, fields_run["account_id"], True, "rework label added",
-                  {"source": "human-review", "add": ["rework"]})
-            transition_run = fenced(run_id, fence, "jira", "transition", {"to": "To Do"})
-            status = ctx.jira.transition_to(key, "To Do")
-            ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
-            audit("jira", "transition", key, run_id, fence, transition_run["account_id"], True, status,
-                  {"to": "To Do", "source": "human-review"})
-            ctx.events.emit("jira.transition", ticket=key, run_id=run_id, fence=fence, account="reviewer-console",
-                            node="control", outcome=status, reason="human review requested rework")
+            note = f"Human review requested rework:\n\n{comment}"
+            reviewer_comment(key, run_id, fence, number, note)
+            reviewer_labels(key, run_id, fence, add=("rework",))
+            status = reviewer_transition(key, run_id, fence, "To Do", "human review requested rework")
+            record_reviewer_action(ticket, run_id, fence, "rework", comment)
             finish_reviewer_run(key, run_id, fence, "rework", comment)
-            return {"status": status, "comment_id": comment_id}
+            return {"status": status}
         except HTTPException:
+            audit("human-review", "rework", key, run_id, fence, "reviewer-console", False,
+                  "review rework failed", {"kind": "review_before_merge"})
             finish_reviewer_run(key, run_id, fence, "failed", "review rework failed")
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("human review rework failed for %s", key)
+            audit("human-review", "rework", key, run_id, fence, "reviewer-console", False,
+                  "review rework failed", {"kind": "review_before_merge"})
             finish_reviewer_run(key, run_id, fence, "failed", "review rework failed")
             raise HTTPException(502, "could not return the ticket for rework") from e
+
+    @app.post("/v1/reviews/{key}/reject")
+    def reject_review(key: str, body: ReviewerBody, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        reason = body.reason.strip()
+        if not reason:
+            raise HTTPException(400, "a rejection reason is required")
+        ticket, run_id, fence, number = reviewer_run(key)
+        try:
+            if not number:
+                raise HTTPException(409, "ticket has no pull request to reject")
+            note = f"Human review rejected this change.\n\nReason: {reason}"
+            reviewer_comment(key, run_id, fence, number, note)
+            run = fenced(run_id, fence, "github", "close", {"number": number})
+            project = ctx.repo().projects[ticket["project"]]
+            repository = repository_for_run(run, project)
+            gateway = github_gateway(ctx)
+            closed = gateway.close_pr(repository.split("/", 1)[-1], number)
+            audit("github", "close", key, run_id, fence, run["account_id"], True,
+                  "pull request closed", {"number": number, "repo": repository})
+            reviewer_labels(key, run_id, fence, add=("rejected",), remove=("require-human",))
+            status = reviewer_transition(key, run_id, fence, "Done", "human review rejected")
+            record_reviewer_action(ticket, run_id, fence, "reject", reason)
+            finish_reviewer_run(key, run_id, fence, "rejected", reason)
+            return {"status": status, "closed": bool(closed)}
+        except HTTPException:
+            audit("human-review", "reject", key, run_id, fence, "reviewer-console", False,
+                  "review rejection failed", {"kind": "review_before_merge"})
+            finish_reviewer_run(key, run_id, fence, "failed", "review rejection failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review rejection failed for %s", key)
+            audit("human-review", "reject", key, run_id, fence, "reviewer-console", False,
+                  "review rejection failed", {"kind": "review_before_merge"})
+            finish_reviewer_run(key, run_id, fence, "failed", "review rejection failed")
+            raise HTTPException(502, "could not reject the reviewed change") from e
+
+    @app.post("/v1/reviews/{key}/ask-ai")
+    def ask_review_ai(key: str, body: ReviewerBody, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        question = (body.question or body.comment).strip()
+        if not question:
+            raise HTTPException(400, "a question for the AI is required")
+        ticket, run_id, fence, number = reviewer_run(key, ("Human review", "Needs owner", "To Do", "In Progress", "In Verify"))
+        try:
+            note = f"Human review asked the AI:\n\n{question}"
+            reviewer_comment(key, run_id, fence, number, note)
+            reviewer_labels(key, run_id, fence, remove=("owner-escalated",))
+            status = ticket["status"]
+            if status != "Needs owner":
+                status = reviewer_transition(key, run_id, fence, "Needs owner", "reviewer asked the AI")
+            record_reviewer_action(ticket, run_id, fence, "ask-ai", question)
+            finish_reviewer_run(key, run_id, fence, "question", question)
+            return {"status": status, "thread": review_thread(key)}
+        except HTTPException:
+            audit("human-review", "ask-ai", key, run_id, fence, "reviewer-console", False,
+                  "AI question failed", {"kind": review_item_kind(ticket)})
+            finish_reviewer_run(key, run_id, fence, "failed", "AI question failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review AI question failed for %s", key)
+            audit("human-review", "ask-ai", key, run_id, fence, "reviewer-console", False,
+                  "AI question failed", {"kind": review_item_kind(ticket)})
+            finish_reviewer_run(key, run_id, fence, "failed", "AI question failed")
+            raise HTTPException(502, "could not send the question to the AI") from e
+
+    @app.post("/v1/reviews/{key}/answer")
+    def answer_review_question(key: str, body: ReviewerBody, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        answer = (body.answer or body.comment).strip()
+        if not answer:
+            raise HTTPException(400, "an answer is required")
+        ticket, run_id, fence, number = reviewer_run(
+            key, ("Needs owner",), allowed_kinds=("question_from_ai", "decision_needed"))
+        try:
+            reviewer_comment(key, run_id, fence, number, f"Human answer to the AI:\n\n{answer}")
+            reviewer_labels(key, run_id, fence, remove=("owner-escalated",))
+            status = reviewer_transition(key, run_id, fence, "To Do", "human answered the AI question")
+            record_reviewer_action(ticket, run_id, fence, "answer", answer)
+            finish_reviewer_run(key, run_id, fence, "answered", answer)
+            return {"status": status}
+        except HTTPException:
+            audit("human-review", "answer", key, run_id, fence, "reviewer-console", False,
+                  "human answer failed", {"kind": review_item_kind(ticket)})
+            finish_reviewer_run(key, run_id, fence, "failed", "human answer failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review answer failed for %s", key)
+            audit("human-review", "answer", key, run_id, fence, "reviewer-console", False,
+                  "human answer failed", {"kind": review_item_kind(ticket)})
+            finish_reviewer_run(key, run_id, fence, "failed", "human answer failed")
+            raise HTTPException(502, "could not record the answer") from e
+
+    @app.post("/v1/reviews/{key}/skip-gate")
+    def skip_review_gate(key: str, _reviewer: str = Depends(reviewer_auth)) -> dict:
+        ticket, run_id, fence, number = reviewer_run(key)
+        try:
+            if "require-human" not in (ticket.get("labels") or []):
+                raise HTTPException(409, "this ticket has no human review gate to skip")
+            if not number:
+                raise HTTPException(409, "ticket has no pull request to skip the gate for")
+            run = fenced(run_id, fence, "github", "merge", {"number": number})
+            project = ctx.repo().projects[ticket["project"]]
+            result = merge_command(run, number, f"{key}: {ticket['summary']}",
+                                   (project.merge or {}).get("method", "squash"), "control")
+            if not result.get("merged"):
+                note = f"Human review gate could not be skipped because PR #{number} did not merge: "
+                note += result.get("message", "merge refused")
+                reviewer_comment(key, run_id, fence, number, note)
+                audit("human-review", "skip-gate", key, run_id, fence, "reviewer-console", False,
+                      result.get("message", "merge refused"), {"kind": "review_before_merge"})
+                finish_reviewer_run(key, run_id, fence, "failed", result.get("message", "merge refused"))
+                return {"merged": False, "message": result.get("message", "GitHub refused the merge")}
+            note = f"Human review gate skipped in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
+            reviewer_comment(key, run_id, fence, number, note)
+            reviewer_labels(key, run_id, fence, remove=("require-human",))
+            status = reviewer_transition(key, run_id, fence, "Done", "human review gate skipped")
+            record_reviewer_action(ticket, run_id, fence, "skip-gate")
+            finish_reviewer_run(key, run_id, fence, "skipped_gate", note)
+            return {"merged": True, "sha": result.get("sha", ""), "status": status}
+        except HTTPException:
+            audit("human-review", "skip-gate", key, run_id, fence, "reviewer-console", False,
+                  "review gate skip failed", {"kind": "review_before_merge"})
+            finish_reviewer_run(key, run_id, fence, "failed", "review gate skip failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("human review gate skip failed for %s", key)
+            audit("human-review", "skip-gate", key, run_id, fence, "reviewer-console", False,
+                  "review gate skip failed", {"kind": "review_before_merge"})
+            finish_reviewer_run(key, run_id, fence, "failed", "review gate skip failed")
+            raise HTTPException(502, "could not skip the human review gate") from e
 
     @app.post("/v1/github/update-branch")
     def github_update_branch(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:

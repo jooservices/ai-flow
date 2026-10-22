@@ -14,8 +14,14 @@ Every problem found later in real use gets a case in REGRESSIONS at the end (AC5
 """
 from __future__ import annotations
 
+import io
+import json
+import os
 import re
 import subprocess
+import tarfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -25,12 +31,14 @@ from fastapi.testclient import TestClient
 from conftest import join_node
 from test_control_install import ROOT, FakeHost, installer, machine  # noqa: F401 - `machine` is a fixture
 from test_projects import SITE, prepare_project_control, project_body
-from aiflow.v4.control import api as control_api
+from aiflow.v4 import cli
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.install import backup
 from aiflow.v4.install import secrets as sec
+from aiflow.v4.install.control import Layout
 
 ADMIN = "owner@example.test"
 SESSION_SECRET = "acceptance-session-secret-with-32-bytes"
@@ -69,6 +77,10 @@ class Fresh:
         self.client = TestClient(self.app, follow_redirects=False, client=("127.0.0.1", 50000))
         self.password = login.seed_user(ctx.db, ADMIN, "super_admin", "Owner")  # `console-user seed` of the install
         assert self.password
+        pw_file = self.machine.p("/etc/aiflow/secrets/console/super-admin-password")  # what the seed CLI leaves behind
+        pw_file.parent.mkdir(parents=True, exist_ok=True)
+        pw_file.write_text(self.password + "\n")
+        pw_file.chmod(0o600)
         return self.client
 
     def sign_in(self):
@@ -174,14 +186,30 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
                                                    "title": "NEWAPP-1: x"}, headers=n1).json()
     assert merged["merged"] and ctx.github.merged[-1][1] == pr["number"]
 
-    # the second ticket needs a human: its verification ends in "human" and the Human review screen lists it
-    ctx.db.run("UPDATE tickets SET status='Human review' WHERE key='NEWAPP-2'")
-    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,summary,"
-               "details) VALUES (gen_random_uuid(),'NEWAPP-2','NEWAPP','dev','codex-01','codex','node1',1,'finished','done',"
-               "'https://github.com/jooservices/new-app/pull/9','built',%s)", (control_api.J({}),))
+    # the second ticket (label require-human) travels the same workflow: development, a pull request, verification;
+    # the verifier hands it to a person through the fenced Jira transition, and the Human review screen lists it
+    assert client.get("/v1/reviews").json()["tickets"] == []
+    dev2 = client.post("/v1/work/claim", json={"ticket": "NEWAPP-2", "account": "claude-01"}, headers=cc).json()
+    assert dev2["claimed"], dev2
+    pr2 = client.post("/v1/github/pr", json={"run_id": dev2["run_id"], "fence": dev2["fence"], "repo": "new-app",
+                                             "head": "NEWAPP-2-x", "base": "develop", "title": "NEWAPP-2: x"}, headers=cc).json()
+    client.post(f"/v1/runs/{dev2['run_id']}/result", json={"fence": dev2["fence"], "outcome": "done", "pr_url": pr2["url"],
+                                                           "branch": "NEWAPP-2-x", "summary": "built"}, headers=cc)
+    client.post(f"/v1/runs/{dev2['run_id']}/release", json={"fence": dev2["fence"]}, headers=cc)
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='NEWAPP-2'")  # what the dev outcome moves in Jira
+    v2 = client.post("/v1/work/claim", json={"ticket": "NEWAPP-2", "account": "codex-01", "step": "verify"}, headers=n1).json()
+    assert v2["claimed"]
+    moved = client.post("/v1/jira/NEWAPP-2/transition", json={"run_id": v2["run_id"], "fence": v2["fence"],
+                                                              "to": "Human review"}, headers=n1)
+    assert moved.status_code == 200 and moved.json() == {"status": "Human review"}
+    client.post(f"/v1/runs/{v2['run_id']}/result", json={"fence": v2["fence"], "outcome": "human", "summary": "needs a person"},
+                headers=n1)
+    client.post(f"/v1/runs/{v2['run_id']}/release", json={"fence": v2["fence"]}, headers=n1)
+    assert not [m for m in ctx.github.merged if m[1] == pr2["number"]]  # nothing merged behind the person's back
     review = client.get("/v1/reviews")
     assert review.status_code == 200
-    assert [t["key"] for t in review.json()["tickets"]] == ["NEWAPP-2"]
+    queue = {t["key"]: t for t in review.json()["tickets"]}
+    assert list(queue) == ["NEWAPP-2"] and queue["NEWAPP-2"]["status"] == "Human review"
     assert fresh.machine_client().get("/v1/reviews").status_code == 401  # and only for signed-in users
 
 
@@ -206,18 +234,100 @@ def test_machines_policy_calls_and_heartbeats_work_with_sign_in_on(fresh):
 
 
 # --- AC3: the deploy and canary scripts with sign-in on ---------------------------------------------------------------
-def test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on(fresh):
-    client = fresh.client
+class MockControl:
+    """A control endpoint with sign-in on: /healthz and /cc are open, /v1/state needs the owner token."""
+
+    def __init__(self, token):
+        self.token, self.requests = token, []
+        mock = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                auth = self.headers.get("Authorization", "")
+                mock.requests.append((self.path, auth))
+                if self.path == "/v1/state" and auth != f"Bearer {mock.token}":
+                    code, body = 401, b'{"detail":"sign-in required"}'
+                elif self.path == "/v1/state":
+                    code, body = 200, json.dumps({"nodes": [{"name": "node1", "status": "online"}]}).encode()
+                else:
+                    code, body = 200, b"ok"
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def state_auth(self):
+        return [auth for path, auth in self.requests if path == "/v1/state"]
+
+
+def run_promotion(tmp_path, script, env_file, control, previous="v4.1.0", target="v4.2.0"):
+    """Run a deploy script on a promotable canary with stubs for docker, the deploy helpers and sleep."""
+    root, stubs = tmp_path / "srv", tmp_path / "stubs"
+    (root / "control/releases").mkdir(parents=True)
+    stubs.mkdir()
+    calls = tmp_path / "calls.log"
+    (root / "control/releases/CURRENT").write_text(previous)
+    (root / "control/releases/CANARY.json").write_text(json.dumps({
+        "target": target, "node": "node1", "previous": previous,
+        "started_at": "2026-01-01T00:00:00+00:00", "requested_at": "2026-01-01T00:00:00+00:00"}))
+    for name, body in {"docker": 'case "$*" in *evaluate*) echo \'{"action":"promote","reason":"stable"}\';; *) echo "{}";; esac',
+                       "sleep": "", "aiflow4-deploy": "", "aiflow4-deploy-develop": ""}.items():
+        stub = stubs / name
+        stub.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\n{body}\n')
+        stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "AIFLOW4_ROOT": str(root),
+           "AIFLOW4_CONTROL_URL": control.url, "AIFLOW4_CONTROL_ENV": str(env_file),
+           "AIFLOW4_ALERT_HOST": "127.0.0.1", "AIFLOW4_ALERT_PORT": "1"}
+    done = subprocess.run(["bash", str(ROOT / "deploy/v4/bin" / script)], env=env, capture_output=True, text=True,
+                          timeout=120)
+    return done, calls.read_text().splitlines() if calls.exists() else []
+
+
+@pytest.mark.parametrize("script,deploy", [("aiflow4-autodeploy", "aiflow4-deploy"),
+                                           ("aiflow4-autodeploy-develop", "aiflow4-deploy-develop")])
+def test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on(fresh, tmp_path, script, deploy):
+    env_file = fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env")  # written by the install
     token = fresh.ctx.settings.owner_token
-    assert client.get("/v1/state").status_code == 401  # what the scripts got before: every health check failed
-    assert client.get("/v1/state", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-    assert client.get("/v1/state", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    for name in ("aiflow4-autodeploy", "aiflow4-autodeploy-develop"):
-        script = (ROOT / "deploy/v4/bin" / name).read_text()
-        reads = [line for line in script.splitlines() if "/v1/state" in line and not line.lstrip().startswith("#")]
-        assert reads and all("state_curl" in line for line in reads), name
-        assert "AIFLOW4_OWNER_TOKEN" in script and "Authorization: Bearer" in script
-        assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/bin" / name)]).returncode == 0
+    control = MockControl(token)
+    try:
+        done, calls = run_promotion(tmp_path, script, env_file, control)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "deployed" in done.stdout and "rolling back" not in done.stdout, done.stdout
+        assert control.state_auth() and set(control.state_auth()) == {f"Bearer {token}"}  # every read carried the token
+        assert [c for c in calls if c.startswith(f"{deploy} ")][0].endswith("v4.2.0")
+        assert not [c for c in calls if c.endswith("v4.1.0") and c.startswith(deploy)]  # no rollback
+        assert token not in done.stdout + done.stderr  # the token is never printed
+    finally:
+        control.close()
+
+
+@pytest.mark.parametrize("script,deploy", [("aiflow4-autodeploy", "aiflow4-deploy"),
+                                           ("aiflow4-autodeploy-develop", "aiflow4-deploy-develop")])
+def test_a_failed_state_health_check_rolls_the_deploy_back(fresh, tmp_path, script, deploy):
+    wrong = tmp_path / "wrong.env"
+    wrong.write_text("AIFLOW4_OWNER_TOKEN=not-the-owner-token\n")  # state answers 401: the release counts as unhealthy
+    control = MockControl(fresh.ctx.settings.owner_token)
+    try:
+        done, calls = run_promotion(tmp_path, script, wrong, control)
+        assert done.returncode == 1, done.stdout + done.stderr
+        assert "unhealthy; rolling back to v4.1.0" in done.stdout
+        assert [c for c in calls if c.startswith(f"{deploy} ")][-1].endswith("v4.1.0")  # back on the previous release
+    finally:
+        control.close()
+
+
+def test_every_deploy_script_parses_and_probes_only_open_endpoints():
     for name in ("aiflow4-deploy", "aiflow4-deploy-develop", "aiflow4-node-install", "aiflow4-control-install",
                  "aiflow4-develop-install", "aiflow4-bootstrap"):
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/bin" / name)]).returncode == 0, name
@@ -226,39 +336,56 @@ def test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign
 
 
 # --- AC3: backup and restore ------------------------------------------------------------------------------------------
-def test_backup_and_restore_bring_back_users_projects_and_machines(fresh):
-    ctx = fresh.ctx
+def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fresh, test_database_url, tmp_path):
+    ctx, lay = fresh.ctx, Layout(fresh.machine.root)
     fresh.sign_in()
-    fresh.join("cc")
+    cc, _ = fresh.join("cc")
     ctx.db.run("INSERT INTO tickets (key,project,status,labels,summary,description) VALUES"
                " ('TESTWP-9','TESTWP','To Do',%s,'keep me','d')", (["aiflow-ready"],))
-    tables = [r["tablename"] for r in ctx.db.all(
-        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")]
-    assert {"console_users", "nodes", "tickets"} <= set(tables)
-    dump = {}
-    with ctx.db.pool.connection() as c:  # logical backup: every table as COPY data
-        for t in tables:
-            with c.cursor().copy(f'COPY "{t}" TO STDOUT') as copy:
-                dump[t] = b"".join(bytes(chunk) for chunk in copy)
-    counts = {t: ctx.db.one(f'SELECT count(*) AS n FROM "{t}"')["n"] for t in tables}
+    secret_files = [fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env"),
+                    fresh.machine.p("/etc/aiflow/secrets/console/super-admin-password")]
+    secrets_before = {p: p.read_bytes() for p in secret_files}
 
-    with ctx.db.pool.connection() as c:  # the disaster
-        c.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in tables) + " CASCADE")
+    archive = tmp_path / "aiflow-backup.tar.gz"  # the supported backup artifact: `aiflow4 backup create --out F`
+    made = backup.create(test_database_url, archive, lay)
+    assert archive.stat().st_mode & 0o777 == 0o600
+    assert made["release"] == "v4.1.0" and {"console_users", "nodes", "tickets"} <= set(made["tables"])
+    with tarfile.open(archive) as tar:
+        names = tar.getnames()
+    assert "manifest.json" in names and "db/console_users.copy" in names
+    assert "secrets/console/super-admin-password" in names and "secrets/control/aiflow4.env" in names
+
+    # the disaster: registry wiped, secret files gone
+    with ctx.db.pool.connection() as c:
+        c.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
+    for p in secret_files:
+        p.unlink()
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
 
-    with ctx.db.pool.connection() as c:  # restore into the wiped database (the refused sign-in above left an audit row)
-        c.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in tables) + " CASCADE")
-        for t in tables:
-            with c.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
-                copy.write(dump[t])
-    assert {t: ctx.db.one(f'SELECT count(*) AS n FROM "{t}"')["n"] for t in tables} == counts
+    restored = backup.restore(test_database_url, archive, lay)  # `aiflow4 backup restore F`
+    assert restored["release"] == "v4.1.0"
+    assert {p: p.read_bytes() for p in secret_files} == secrets_before
+    assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
+    assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
     assert ctx.db.one("SELECT summary FROM tickets WHERE key='TESTWP-9'")["summary"] == "keep me"
     again = TestClient(fresh.app, follow_redirects=False, client=("127.0.0.1", 50002))
     assert again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 200
-    # the secrets of the control machine are files the host backup copies; they stay 0600 and out of the output
-    secret_dir = fresh.machine.p("/etc/aiflow/secrets/control")
-    assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_dir.glob("*.env"))
+    # the machine resumes with the node token it already had
+    assert fresh.machine_client().post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
+
+
+def test_restore_refuses_a_file_that_is_not_a_backup_and_the_backup_command_checks_its_usage(fresh, test_database_url, tmp_path):
+    junk = tmp_path / "junk.tar.gz"
+    with tarfile.open(junk, "w:gz") as tar:
+        info = tarfile.TarInfo("etc/passwd")
+        info.size = 0
+        tar.addfile(info, io.BytesIO(b""))
+    with pytest.raises(backup.BackupError, match="not an AI Flow backup"):
+        backup.restore(test_database_url, junk, Layout(fresh.machine.root))
+    assert cli.main(["backup", "create"]) == 2 and cli.main(["backup", "restore"]) == 2  # usage errors, no side effects
+
+
 
 
 # --- AC3: upgrade and rollback ----------------------------------------------------------------------------------------
@@ -328,6 +455,37 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci" / script)]).returncode == 0
 
 
+def test_the_real_machine_run_installs_with_sign_in_and_is_part_of_the_full_run():
+    script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
+    assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
+    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/nodes/join-tokens", "/v1/nodes/join",
+                 "/heartbeat", "backup create", "backup restore", "super-admin-password"):
+        assert step in script, step
+    assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
+    assert "clean-install-containers.sh" in (ROOT / "deploy/v4/ci/clean-install-acceptance.sh").read_text()
+
+
+def test_the_bug_ticket_survives_a_log_longer_than_the_size_limit(tmp_path):
+    logs, stubs = tmp_path / "logs", tmp_path / "stubs"
+    logs.mkdir()
+    stubs.mkdir()
+    for n in range(3):  # 3 x 60 lines of 1000 characters: far beyond the 60000 bytes of the body
+        (logs / f"step{n}.log").write_text("".join(f"{'x' * 1000}\n" for _ in range(60)))
+    gh = stubs / "gh"
+    gh.write_text('#!/bin/sh\necho "$@" >> "$GH_CALLS"\n'
+                  'while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$GH_BODY"; shift; done\n')
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ACCEPTANCE_LOG_DIR": str(logs), "GH_TOKEN": "t",
+           "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GH_CALLS": str(tmp_path / "gh.log"),
+           "GH_BODY": str(tmp_path / "body.md")}
+    done = subprocess.run(["bash", str(ROOT / "deploy/v4/ci/open-bug-ticket.sh"), "nightly failed"], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "issue create" in (tmp_path / "gh.log").read_text()
+    body = (tmp_path / "body.md").read_text()
+    assert len(body) <= 60010 and body.count("```") % 2 == 0 and "actions/runs/7" in body
+
+
 def test_the_topic_is_linked_from_the_deploy_readme():
     assert "(../../docs/v4/clean-install-acceptance.md)" in (ROOT / "deploy/v4/README.md").read_text()
 
@@ -336,6 +494,7 @@ def test_the_topic_is_linked_from_the_deploy_readme():
 REGRESSIONS = {
     "login gate blocked the machines' own calls": "test_machines_policy_calls_and_heartbeats_work_with_sign_in_on",
     "deploy and canary scripts failed with login enabled": "test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on",
+    "the bug ticket was not opened for a long log (broken pipe)": "test_the_bug_ticket_survives_a_log_longer_than_the_size_limit",
 }
 
 

@@ -8,7 +8,8 @@ TITLE=${1:?usage: open-bug-ticket.sh "<title>"}
 LOGS=${ACCEPTANCE_LOG_DIR:-acceptance-logs}
 RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-0}"
 BODY=$(mktemp)
-trap 'rm -f "$BODY"' EXIT
+FULL=$(mktemp)
+trap 'rm -f "$BODY" "$FULL"' EXIT
 
 {
   echo "The clean-install acceptance test failed: $RUN_URL"
@@ -25,7 +26,9 @@ trap 'rm -f "$BODY"' EXIT
       || echo "the run log is not available; open the run above"
   fi
   echo '```'
-} | head -c 60000 > "$BODY"
+} > "$FULL"
+# cut to the size limit from a file: `head` on a pipe would end the writer with SIGPIPE and, with pipefail, abort here
+head -c 60000 "$FULL" > "$BODY"
 # a closing fence cut off by the size limit would hide the end of the issue
 [[ $(grep -c '^```' "$BODY") -eq 2 ]] || echo '```' >> "$BODY"
 

@@ -6,7 +6,8 @@
 #         scripts, backup and restore, upgrade and rollback, adding a machine and an AI account)
 #   full  nightly and before every release: fast, then the whole tests/v4 suite and, when
 #         ACCEPTANCE_PREVIOUS and ACCEPTANCE_TARGET name two published releases, the systemd containers
-#         (control-install-smoke.sh: install, rerun, failed upgrade, upgrade, rollback)
+#         (control-install-smoke.sh: install, rerun, failed upgrade, upgrade, rollback) and the real clean machines
+#         (clean-install-containers.sh: control plane and two machines in containers, sign-in on, backup and restore)
 # The output of every step goes to $ACCEPTANCE_LOG_DIR (default acceptance-logs) for the bug ticket.
 set -Eeuo pipefail
 
@@ -40,6 +41,7 @@ if [[ $MODE == full ]]; then
   pipefail_step v4-suite uv run --frozen pytest tests/v4 -q -p no:warnings
   if [[ -n ${ACCEPTANCE_PREVIOUS:-} && -n ${ACCEPTANCE_TARGET:-} ]]; then
     pipefail_step control-install-systemd bash deploy/v4/ci/control-install-smoke.sh "$ACCEPTANCE_PREVIOUS" "$ACCEPTANCE_TARGET"
+    pipefail_step clean-machines-containers bash deploy/v4/ci/clean-install-containers.sh "$ACCEPTANCE_TARGET"
   else
     echo "no two published releases to install; the systemd containers run in the release workflow" | tee "$LOGS/control-install-systemd.log"
   fi

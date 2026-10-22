@@ -16,24 +16,27 @@ CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
 CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
 CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
 AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
+# the acceptance test points these at a mock control endpoint (docs/v4/clean-install-acceptance.md)
+CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://127.0.0.1}
+CONTROL_ENV=${AIFLOW4_CONTROL_ENV:-/etc/aiflow/secrets/control/aiflow4.env}
 
 mkdir -p "$RELEASES"
 exec 8>"$RELEASES/autodeploy.lock"
 flock -n 8 || { echo "another auto-deploy pass is running"; exit 0; }
 
 alert() { python3 - "$1" "$2" <<'P' || true
-import smtplib, sys
+import os, smtplib, sys
 from email.message import EmailMessage
 m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow4.local"; m["Subject"] = sys.argv[1]; m.set_content(sys.argv[2])
-with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
+with smtplib.SMTP(os.environ.get("AIFLOW4_ALERT_HOST", "10.44.0.10"), int(os.environ.get("AIFLOW4_ALERT_PORT", "11025")), timeout=10) as s: s.send_message(m)
 P
 }
 # With console sign-in on, /v1/state needs the owner token (kept in the control secret file, never printed).
 state_curl() {
-  local token; token=$(sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' /etc/aiflow/secrets/control/aiflow4.env 2>/dev/null | head -n1)
+  local token; token=$(sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' "$CONTROL_ENV" 2>/dev/null | head -n1)
   if [ -n "$token" ]; then curl -fsS -H @- "$@" <<<"Authorization: Bearer $token"; else curl -fsS "$@"; fi
 }
-control_state() { state_curl http://127.0.0.1/v1/state; }
+control_state() { state_curl $CONTROL_URL/v1/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
@@ -129,8 +132,8 @@ P
       echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
       if aiflow4-deploy-develop "" "$TARGET"; then
         sleep 20
-        if curl -fsS http://127.0.0.1/healthz >/dev/null && state_curl http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
-           && curl -fsS -o /dev/null http://127.0.0.1/cc; then
+        if curl -fsS $CONTROL_URL/healthz >/dev/null && state_curl $CONTROL_URL/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+           && curl -fsS -o /dev/null $CONTROL_URL/cc; then
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
           alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
           exit 0

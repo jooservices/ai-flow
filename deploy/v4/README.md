@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
+- [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval

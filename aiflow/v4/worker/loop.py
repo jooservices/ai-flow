@@ -122,6 +122,7 @@ class Worker:
             try:
                 claimed = self.api.call("POST", "/v1/version-releases/claim",
                                         {"project": release["project"], "version_id": release["version_id"],
+                                         "repository": release.get("repository", ""),
                                          "account": self.account})
             except Conflict:
                 continue

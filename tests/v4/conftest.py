@@ -253,6 +253,10 @@ class FakeGitHub:
             if file_repo == repo and file_branch == base:
                 self.files[(repo, branch, path)] = content
 
+    def create_branch_at_sha(self, repo, branch, sha):
+        self.branches.append((repo, branch, sha))
+        self.branch_heads[(repo, branch)] = sha
+
     def repository_files(self, repo, ref):
         return sorted(path for (file_repo, branch, path) in self.files
                       if file_repo == repo and branch == ref)
@@ -304,6 +308,11 @@ class FakeGitHub:
     def release_pr(self, repo, head, base):
         return next((pr for pr in self.prs if pr["repo"] == repo and pr["head"] == head
                      and pr["base"] == base), None)
+
+    def update_pr_body(self, repo, number, body):
+        pr = self.pr_by_number[number]
+        pr["body"] = body
+        return pr
 
     def reopen_pr(self, repo, number):
         pr = self.pr_by_number[number]

@@ -2164,9 +2164,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                            (project.key, version["id"]))
         if state and state["status"] in ("checking", "released"):
             raise HTTPException(409, "version already has an active or completed release run")
-        snapshot = version_release.evaluate(ctx, project, version)
+        snapshot = version_release.post_merge_resume(ctx, project, version)
+        if snapshot is None:
+            snapshot = version_release.evaluate(ctx, project, version)
         if not snapshot["ready"]:
-            version_release.record_gate(ctx, project, version, snapshot)
+            if not snapshot.get("resume_after_merge"):
+                version_release.record_gate(ctx, project, version, snapshot)
             raise HTTPException(409, {"reason": "version release gates are not met", "tickets": snapshot["tickets"],
                                       "missing": snapshot["reasons"]})
         key = version_release.version_identity(project.key, version["id"])
@@ -2179,11 +2182,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             if github is None:
                 raise HTTPException(503, "GitHub App is not connected")
             source_branch = version_release.source_branch(project)
-            source_sha = github.branch_sha(project.repo_name, source_branch)
-            release_branch = version_release.release_branch(project, version["name"], source_sha)
-            branch_created = not github.branch_exists(project.repo_name, release_branch)
-            if branch_created:
-                github.create_branch(project.repo_name, release_branch, source_branch)
+            if snapshot.get("resume_after_merge"):
+                source_sha = snapshot["source_sha"]
+                release_branch = snapshot["release_branch"]
+                branch_created = not github.branch_exists(project.repo_name, release_branch)
+                if branch_created:
+                    github.create_branch_at_sha(project.repo_name, release_branch, snapshot["release_head_sha"])
+            else:
+                source_sha = github.branch_sha(project.repo_name, source_branch)
+                release_branch = version_release.release_branch(project, version["name"], source_sha)
+                branch_created = not github.branch_exists(project.repo_name, release_branch)
+                if branch_created:
+                    github.create_branch(project.repo_name, release_branch, source_branch)
             tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
             ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash)"
                        " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'')",

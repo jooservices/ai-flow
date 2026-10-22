@@ -159,6 +159,11 @@ class GitHubApp:
         return next((pr for pr in prs if (pr.get("head") or {}).get("ref") == head
                      and (pr.get("base") or {}).get("ref") == base), None)
 
+    def update_pr_body(self, repo: str, number: int, body: str) -> dict:
+        """Refresh a release PR's ticket notes after its Jira version membership changes."""
+        return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{number}",
+                        {"body": body[:60000]}, repo=repo)
+
     def pr(self, repo: str, number: int) -> dict:
         return self.api("GET", f"/repos/{self.org}/{repo}/pulls/{number}", repo=repo)
 
@@ -206,6 +211,11 @@ class GitHubApp:
         data = self.api("GET", f"/repos/{self.org}/{repo}/git/ref/{ref}", repo=repo)
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
                  {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
+
+    def create_branch_at_sha(self, repo: str, branch: str, sha: str) -> None:
+        """Restore a deleted release branch at the exact audited commit for a post-merge retry."""
+        self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
+                 {"ref": f"refs/heads/{branch}", "sha": sha}, repo=repo)
 
     def commit_file(self, repo: str, branch: str, path: str, content: str, message: str) -> str:
         """Write one UTF-8 file through the GitHub App; GitHub records the installation bot as committer."""

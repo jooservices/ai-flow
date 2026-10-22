@@ -375,6 +375,106 @@ def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(
                 and "merge-back" in row["labels"]]) == 1
 
 
+def test_retry_after_merge_resumes_from_audited_commit_and_ticket_snapshot(client, ctx, monkeypatch):
+    configure(ctx)
+    evidence(ctx, "TESTWP-47")
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+    run = {"id": "run-before-publish-failure", "fence": 10, "account_id": "claude-01", "node": "cc"}
+    create_tag = ctx.github.create_tag
+
+    def fail_tag_once(repo, tag, sha):
+        monkeypatch.setattr(ctx.github, "create_tag", create_tag)
+        raise RuntimeError("temporary tag API failure")
+
+    monkeypatch.setattr(ctx.github, "create_tag", fail_tag_once)
+    with pytest.raises(RuntimeError, match="temporary tag API failure"):
+        version_release.complete(ctx, project, version, run,
+                                 {"head_sha": "a" * 40, "source_sha": "a" * 40,
+                                  "checks": [{"command": "composer test", "passed": True}]})
+
+    tracker = ctx.db.one("SELECT tracker_key FROM version_releases")["tracker_key"]
+    merge_audit = version_release._release_audit(ctx, tracker, "github-merge")
+    assert merge_audit["result"] == "merged-pr-0001"
+    assert merge_audit["payload"]["checked_sha"] == "a" * 40
+    assert [ticket["key"] for ticket in merge_audit["payload"]["ticket_snapshot"]["tickets"]] == ["TESTWP-47"]
+
+    evidence(ctx, "TESTWP-48", status="To Do")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "b" * 40
+    release_branch = merge_audit["payload"]["source"]
+    ctx.github.branch_heads.pop(("test-aiflow-wp", release_branch))
+    ctx.github.available_branches[("test-aiflow-wp", release_branch)] = False
+    headers = node_headers(client)
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()["versions"]
+    assert [item["version_id"] for item in candidates] == ["101"]
+    claim = claim_release(client, headers)
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    assert run["project"]["release_branch"] == release_branch
+    assert run["project"]["source_sha"] == "a" * 40
+    assert ctx.github.branch_heads[("test-aiflow-wp", release_branch)] == merge_audit["payload"]["release_head_sha"]
+    assert ("test-aiflow-wp", release_branch, merge_audit["payload"]["release_head_sha"]) in ctx.github.branches
+    resumed_response = client.post("/v1/version-releases/101/complete",
+                                   json={"run_id": run["run_id"], "fence": run["fence"],
+                                         "head_sha": merge_audit["payload"]["release_head_sha"],
+                                         "source_sha": run["project"]["source_sha"],
+                                         "checks": [{"command": "composer install", "passed": True},
+                                                    {"command": "vendor/bin/phpunit", "passed": True}]},
+                                   headers=headers)
+    assert resumed_response.status_code == 200, resumed_response.text
+    resumed = resumed_response.json()
+
+    tag = "testwp-core-0.5.0-beta"
+    assert resumed["released"] is True
+    assert ctx.github.tags[("test-aiflow-wp", tag)] == "merged-pr-0001"
+    notes = ctx.github.releases[("test-aiflow-wp", tag)]["body"]
+    assert "TESTWP-47" in notes and "TESTWP-48" not in notes
+    state = ctx.db.one("SELECT checked_develop_sha,master_sha FROM version_releases")
+    assert state == {"checked_develop_sha": "a" * 40, "master_sha": "merged-pr-0001"}
+    assert len(ctx.github.merged) == 1
+
+
+def test_premerge_retry_replaces_changelog_section_and_refreshes_existing_pr_notes(ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-49")
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "c" * 40
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+    run = {"id": "run-pr-first-attempt", "fence": 12, "account_id": "claude-01", "node": "cc"}
+    merge_pr = ctx.github.merge_pr
+
+    def reject_first_merge(repo, number, title="", method="squash"):
+        return {"merged": False, "sha": "", "message": "temporary branch protection"}
+
+    ctx.github.merge_pr = reject_first_merge
+    with pytest.raises(RuntimeError, match="temporary branch protection"):
+        version_release.complete(ctx, project, version, run,
+                                 {"head_sha": "c" * 40, "source_sha": "c" * 40,
+                                  "checks": [{"command": "composer test", "passed": True}]})
+    ctx.github.merge_pr = merge_pr
+    pr = ctx.github.prs[0]
+    assert "TESTWP-49" in pr["body"]
+
+    evidence(ctx, "TESTWP-50")
+    branch = pr["head"]
+    checked_head = ctx.github.branch_sha("test-aiflow-wp", branch)
+    result = version_release.complete(ctx, project, version,
+                                      {"id": "run-pr-second-attempt", "fence": 13,
+                                       "account_id": "claude-01", "node": "cc"},
+                                      {"head_sha": checked_head, "source_sha": "c" * 40,
+                                       "checks": [{"command": "composer test", "passed": True}]})
+
+    changelog = ctx.github.files[("test-aiflow-wp", branch, "CHANGELOG.md")]
+    assert result["released"] is True
+    assert changelog.count("## WordPress Core 0\\.5\\.0\\-beta -") == 1
+    assert "TESTWP-49" in changelog and "TESTWP-50" in changelog
+    assert "TESTWP-49" in pr["body"] and "TESTWP-50" in pr["body"]
+    assert ctx.github.releases[("test-aiflow-wp", "testwp-core-0.5.0-beta")]["body"] == pr["body"]
+
+
 def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_back(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-50")

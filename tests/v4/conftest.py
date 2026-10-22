@@ -322,6 +322,11 @@ class FakeGitHub:
         pr.update({"state": "open", "merged": False})
         return pr
 
+    def close_pr(self, repo, number):
+        pr = self.pr_by_number.setdefault(number, {"number": number})
+        pr.update({"state": "closed", "merged": False})
+        return pr
+
     def enable_merge_commit(self, repo):
         if not self.merge_commit_enabled:
             self.merge_commit_enable_calls.append(repo)

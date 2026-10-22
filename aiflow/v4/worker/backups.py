@@ -89,7 +89,7 @@ def restore_test(ctx, source: str, now: datetime | None = None, config: dict | N
             result = backups.restore_archive(source, key, scratch_url, ctx.settings,
                                              s3_endpoint=str((config or {}).get("s3_endpoint") or ""),
                                              s3_region=str((config or {}).get("s3_region") or "us-east-1"),
-                                             restore_roots=roots, install_backup_key=False)
+                                             restore_roots=roots, install_backup_key=False, scratch_mode=True)
     except Exception as exc:  # noqa: BLE001
         result = {"ok": False, "components": {"database": {"status": "failed", "detail": "scratch restore failed"},
                                                  "stored_secrets": {"status": "not_run", "detail": "scratch restore failed"},

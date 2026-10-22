@@ -18,6 +18,7 @@ import subprocess
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
@@ -25,6 +26,7 @@ from cryptography.exceptions import InvalidTag
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg import sql
 
@@ -210,11 +212,51 @@ def _knowledge_bytes(database_url: str) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
-def _run_db_command(command: list[str], label: str, timeout: int = 3600) -> None:
+def _run_db_command(command: list[str], label: str, timeout: int = 3600,
+                    env: dict[str, str] | None = None) -> None:
     try:
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout,
+                       env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise BackupError(f"{label} failed") from exc
+
+
+def _pgpass_field(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise BackupError("database credentials cannot be passed to PostgreSQL tools")
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
+@contextmanager
+def _database_cli_connection(database_url: str):
+    """Yield a password-free libpq connection string and a private PGPASSFILE environment when needed."""
+    try:
+        fields = conninfo_to_dict(database_url)
+        password = fields.pop("password", None)
+        safe_conninfo = make_conninfo(**fields)
+    except (psycopg.Error, TypeError, ValueError) as exc:
+        raise BackupError("database connection settings are invalid") from exc
+    if not password:
+        yield safe_conninfo, None
+        return
+
+    host = fields.get("host") or "localhost"
+    port = fields.get("port") or "*"
+    database = fields.get("dbname") or "*"
+    user = fields.get("user") or "*"
+    passfile_fd, passfile_name = tempfile.mkstemp(prefix="aiflow4-pgpass-")
+    os.close(passfile_fd)
+    passfile = Path(passfile_name)
+    try:
+        os.chmod(passfile, 0o600)
+        passfile.write_text(":".join(_pgpass_field(str(value)) for value in
+                                     (host, port, database, user, password)) + "\n", encoding="utf-8")
+        env = os.environ.copy()
+        env.pop("PGPASSWORD", None)
+        env["PGPASSFILE"] = str(passfile)
+        yield safe_conninfo, env
+    finally:
+        passfile.unlink(missing_ok=True)
 
 
 def create_archive(database_url: str, repo_root: str | Path, settings, target: Path,
@@ -224,8 +266,9 @@ def create_archive(database_url: str, repo_root: str | Path, settings, target: P
     with tempfile.TemporaryDirectory(prefix="aiflow4-backup-") as tmp:
         tmpdir = Path(tmp)
         database = tmpdir / "database.dump"
-        _run_db_command(["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--file", str(database),
-                         "--dbname", database_url], "database backup")
+        with _database_cli_connection(database_url) as (safe_conninfo, env):
+            _run_db_command(["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--file", str(database),
+                             "--dbname", safe_conninfo], "database backup", env=env)
         repo_archive = tmpdir / "control-repository.tar.gz"
         with tarfile.open(repo_archive, "w:gz") as tar:
             _add_tree(tar, Path(repo_root), "repository")
@@ -618,7 +661,7 @@ def _validate_knowledge(database_url: str, knowledge_file: Path) -> bool:
 
 def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_endpoint: str = "",
                     s3_region: str = "us-east-1", restore_roots: dict[str, Path] | None = None,
-                    install_backup_key: bool = True) -> dict:
+                    install_backup_key: bool = True, scratch_mode: bool = False) -> dict:
     """Restore all four named components and return an outcome for each one."""
     backup = _download_source(source, key, s3_endpoint, s3_region)
     remove_source = urlsplit(source).scheme == "s3"
@@ -629,9 +672,10 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
             workspace = Path(temp)
             manifest, files = _read_bundle(backup, key, workspace)
             try:
-                _run_db_command(["pg_restore", "--clean", "--if-exists", "--no-owner", "--no-acl",
-                                 "--exit-on-error", "--dbname", database_url, str(files["database"])],
-                                "database restore")
+                with _database_cli_connection(database_url) as (safe_conninfo, env):
+                    _run_db_command(["pg_restore", "--clean", "--if-exists", "--no-owner", "--no-acl",
+                                     "--exit-on-error", "--dbname", safe_conninfo, str(files["database"])],
+                                    "database restore", env=env)
                 outcomes["database"] = {"status": "restored", "detail": "database dump applied"}
             except BackupError as exc:
                 outcomes["database"] = {"status": "failed", "detail": str(exc)}
@@ -639,7 +683,7 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
                 roots = restore_roots or {name: Path(path) for name, path in {
                     "control": settings.control_secrets_dir, "console": settings.console_secrets_dir,
                     "jira": settings.jira_secret_dir, "github": settings.github_app_dir}.items()}
-                if outcomes.get("database", {}).get("status") == "restored":
+                if outcomes.get("database", {}).get("status") == "restored" and not scratch_mode:
                     restored_database_url = _restore_database_password(database_url, files["stored_secrets"])
                 _extract_archive(files["stored_secrets"], roots)
                 if install_backup_key:

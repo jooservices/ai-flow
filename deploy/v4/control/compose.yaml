@@ -75,7 +75,14 @@ services:
     <<: *app
     profiles: ["restore"]
     volumes:
+      - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
+      - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
+      - /etc/aiflow/secrets/control:/etc/aiflow/secrets/control
+      - /etc/aiflow/secrets/console:/etc/aiflow/secrets/console
+      - /srv/aiflow/control/backups:/srv/aiflow/backups
       - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore
+      - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
+      - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
     command: ["version"]
 
 networks:

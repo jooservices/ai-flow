@@ -3545,6 +3545,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     raise HTTPException(400, "local backups must be stored under the durable local backup folder")
             protected = [Path(ctx.settings.control_repo).resolve(strict=False),
                          Path(ctx.settings.control_secrets_dir).resolve(strict=False),
+                         Path(ctx.settings.console_secrets_dir).resolve(strict=False),
                          Path(ctx.settings.github_app_dir).resolve(strict=False),
                          Path(ctx.settings.jira_secret_dir).resolve(strict=False)]
             if any(destination == root or destination.is_relative_to(root) or root.is_relative_to(destination)

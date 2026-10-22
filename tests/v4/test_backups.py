@@ -8,6 +8,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+import yaml
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
@@ -72,6 +73,14 @@ def test_backup_screen_and_owner_settings_api(client, ctx, tmp_path):
     assert saved.json()["destination_path"] == str(destination)
     assert saved.json()["retention_days"] == 45
     assert client.put("/v1/backups/config", json={"destination_kind": "local", "destination_path": "/"}).status_code == 400
+
+    console_base = tmp_path / "protected-console-root"
+    ctx.settings.console_secrets_dir = str(console_base / "console")
+    for forbidden in (console_base / "console" / "nested-backups", console_base):
+        rejected = client.put("/v1/backups/config", json={"destination_kind": "mounted",
+                                                            "destination_path": str(forbidden),
+                                                            "retention_days": 45})
+        assert rejected.status_code == 400, rejected.text
 
     mounted = client.put("/v1/backups/config", json={"destination_kind": "mounted",
                                                        "destination_path": str(tmp_path / "mounted"),
@@ -145,10 +154,9 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     key = secrets.token_bytes(32)
     backups.install_key(ctx.settings.backup_key_file, key)
 
-    def fake_pg(command, label, timeout=3600):
+    def fake_pg(command, label, timeout=3600, env=None):
         if label == "database backup":
-            source_url = command[-1]
-            with psycopg.connect(source_url, row_factory=dict_row) as conn:
+            with psycopg.connect(test_database_url, row_factory=dict_row) as conn:
                 snapshot = {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table} WHERE " +
                                    ("key='SAMPLE-229'" if table == "tickets" else "true") + " ORDER BY 1").fetchall()]
                             for table in ("tickets", "managed_resources", "memory")}
@@ -156,7 +164,6 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
             path.write_text(json.dumps(snapshot, default=lambda value: value.isoformat() if hasattr(value, "isoformat") else str(value)))
         else:
             dump = Path(command[-1])
-            target_url = command[command.index("--dbname") + 1]
             _restore_database_snapshot(dump, target_url)
 
     monkeypatch.setattr(backups, "_run_db_command", fake_pg)
@@ -214,6 +221,98 @@ def test_wrong_and_missing_encryption_key_are_rejected(tmp_path):
         backups.read_key(tmp_path / "missing-key")
     with pytest.raises(backups.BackupError, match="incorrect"):
         backups.restore_archive(str(source), wrong, "unused", object())
+
+
+def test_postgres_tool_arguments_keep_database_password_out_of_argv(monkeypatch):
+    password = "argv-must-not-contain-this-password"
+    database_url = f"postgresql://backup_user:{password}@db.example.test:5432/aiflow"
+    calls = []
+
+    def capture(command, **kwargs):
+        passfile = Path(kwargs["env"]["PGPASSFILE"])
+        calls.append((command, passfile.read_text(), passfile.stat().st_mode & 0o777, passfile))
+
+    monkeypatch.setattr(backups.subprocess, "run", capture)
+    for tool in ("pg_dump", "pg_restore"):
+        with backups._database_cli_connection(database_url) as (safe_conninfo, env):
+            backups._run_db_command([tool, "--dbname", safe_conninfo], f"{tool} test", env=env)
+
+    assert len(calls) == 2
+    for command, contents, mode, passfile in calls:
+        assert password not in " ".join(command)
+        assert mode == 0o600
+        assert contents == f"db.example.test:5432:aiflow:backup_user:{password}\n"
+        assert not passfile.exists()  # the temporary credential file is removed after the process exits
+
+
+def test_scratch_restore_keeps_scratch_database_and_live_credentials_untouched(
+        ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
+    live_url = test_database_url
+    with psycopg.connect(live_url) as live:
+        live.execute("INSERT INTO memory (project,kind,ref,text) VALUES ('LIVE','answer','live-only','keep this data')")
+    with psycopg.connect(live_url) as live:
+        assert live.execute("SELECT count(*) FROM memory WHERE ref='live-only'").fetchone()[0] == 1
+
+    scratch_name = "aiflow4_scratch_test_" + secrets.token_hex(6)
+    admin_url = make_conninfo(live_url, dbname="postgres")
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch_name)))
+    scratch_url = make_conninfo(live_url, dbname=scratch_name)
+    try:
+        scratch_db = DB(scratch_url)
+        scratch_db.migrate()
+        scratch_db.close()
+
+        source_roots = configure_paths(ctx, tmp_path / "scratch-source", control_repo)
+        (source_roots["control"] / "postgres.env").write_text(
+            "POSTGRES_USER=archive-user\nPOSTGRES_PASSWORD=archived-password\n")
+        (source_roots["control"] / "aiflow4.env").write_text(f"AIFLOW4_DATABASE_URL={live_url}\n")
+        key = secrets.token_bytes(32)
+        backups.install_key(ctx.settings.backup_key_file, key)
+
+        def fake_pg(command, label, timeout=3600, env=None):
+            if label == "database backup":
+                Path(command[command.index("--file") + 1]).write_bytes(b"scratch database dump")
+            else:
+                assert label == "database restore"
+
+        monkeypatch.setattr(backups, "_run_db_command", fake_pg)
+        config = {"destination_kind": "local", "destination_path": str(tmp_path / "scratch-backups"),
+                  "retention_days": 30}
+        made = backups.create_backup(scratch_url, control_repo, ctx.settings, config, key)
+
+        def reject_password_restore(*args, **kwargs):
+            raise AssertionError("scratch restore tried to change the cluster role password")
+
+        monkeypatch.setattr(backups, "_restore_database_password", reject_password_restore)
+        restore_roots = {name: tmp_path / "scratch-restore" / name
+                         for name in ("control", "console", "jira", "github", "repository")}
+        for path in restore_roots.values():
+            path.mkdir(parents=True)
+        outcome = backups.restore_archive(str(Path(config["destination_path"]) / made["name"]), key, scratch_url,
+                                          ctx.settings, restore_roots=restore_roots,
+                                          install_backup_key=False, scratch_mode=True)
+        assert outcome["ok"] is True, outcome
+        assert outcome["components"]["knowledge"]["status"] == "restored"
+
+        # The archive's database URL points at the live installation; scratch validation must stay on scratch_url.
+        with psycopg.connect(live_url) as live:
+            assert live.execute("SELECT count(*) FROM memory WHERE ref='live-only'").fetchone()[0] == 1
+            assert live.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(scratch_name)))
+
+
+def test_control_restore_service_keeps_backup_and_secret_mounts():
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
+    mounts = compose["services"]["control-restore"]["volumes"]
+    assert "/srv/aiflow/control/backups:/srv/aiflow/backups" in mounts
+    for secret in ("github", "jira", "control", "console"):
+        assert f"/etc/aiflow/secrets/{secret}:/etc/aiflow/secrets/{secret}" in mounts
+    repository = next(mount for mount in mounts if "/aiflow-control:/" in mount)
+    assert repository == "/srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore"
 
 
 def test_retention_removes_only_expired_backups(tmp_path):

@@ -1,0 +1,100 @@
+#!/bin/bash
+# Install the AI Flow v4 control plane on a new Ubuntu 22.04/24.04 machine with one command:
+#   curl -fsSL https://raw.githubusercontent.com/jooservices/ai-flow/vX.Y.Z/deploy/v4/bin/aiflow4-control-install \
+#     | sudo bash -s -- --version vX.Y.Z --domain D [more `aiflow4 install control` options]
+# It verifies the signed release (SHA256SUMS and cosign identity), installs that release's `aiflow4` command as
+# /usr/local/sbin/aiflow4 and runs `aiflow4 install control` with the same arguments (docs/v4/control-install.md).
+#   aiflow4-control-install --cli-only vX.Y.Z   point `aiflow4` at a release staged by aiflow4-deploy
+set -euo pipefail
+
+COSIGN_VERSION=v3.1.4  # same pin and digests as aiflow4-bootstrap
+UV_VERSION=0.13.4      # same as deploy/v4/control/Dockerfile
+CONTROL=/srv/aiflow/control
+CLI_ROOT=$CONTROL/cli
+RELEASE_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+usage() {
+  echo "usage: aiflow4-control-install --version vX.Y.Z --domain D [aiflow4 install control options]" >&2
+  echo "       aiflow4-control-install --cli-only vX.Y.Z" >&2
+  exit 2
+}
+
+CLI_ONLY=no
+VERSION=
+if [ "${1:-}" = --cli-only ]; then
+  CLI_ONLY=yes; VERSION=${2:-}; [ $# -eq 2 ] || usage
+else
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --version) VERSION=${args[i + 1]:-} ;;
+      --version=*) VERSION=${args[i]#--version=} ;;
+    esac
+  done
+fi
+[[ $VERSION =~ $RELEASE_RE ]] || usage
+[ "$(id -u)" -eq 0 ] || { echo "run as root: sudo bash -s -- --version $VERSION ..." >&2; exit 2; }
+
+WORK=$(mktemp -d /tmp/aiflow4-control-install.XXXXXX)
+chmod 700 "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+
+missing=()
+for pkg in ca-certificates curl git tar python3; do
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+done
+if ((${#missing[@]})); then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq "${missing[@]}" >/dev/null
+fi
+
+if ! command -v cosign >/dev/null 2>&1; then
+  case "$(uname -m)" in
+    x86_64) COSIGN_ARCH=amd64; COSIGN_SHA256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa ;;
+    aarch64) COSIGN_ARCH=arm64; COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2 ;;
+    *) echo "unsupported architecture for signed release verification: $(uname -m)" >&2; exit 1 ;;
+  esac
+  curl -fsSL --max-time 120 -o "$WORK/cosign" \
+    "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${COSIGN_ARCH}"
+  echo "$COSIGN_SHA256  $WORK/cosign" | sha256sum --check --status || { echo "cosign checksum verification failed" >&2; exit 1; }
+  install -m 0755 "$WORK/cosign" /usr/local/bin/cosign
+fi
+if ! command -v uv >/dev/null 2>&1; then
+  curl -fsSL --max-time 120 "https://astral.sh/uv/$UV_VERSION/install.sh" -o "$WORK/uv-install.sh"
+  UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "$WORK/uv-install.sh" >/dev/null
+fi
+
+CLI=$CLI_ROOT/$VERSION
+if [ ! -x "$CLI/.venv/bin/aiflow4" ]; then
+  TAR=aiflow4-$VERSION.tar.gz
+  STAGED=$CONTROL/releases/$VERSION
+  if [ -f "$STAGED/$TAR" ] && [ -f "$STAGED/$TAR.sigstore.json" ] && [ -f "$STAGED/SHA256SUMS" ]; then
+    cp "$STAGED/$TAR" "$STAGED/$TAR.sigstore.json" "$STAGED/SHA256SUMS" "$WORK/"
+  elif [ "$CLI_ONLY" = yes ]; then
+    echo "release $VERSION is not staged in $STAGED" >&2; exit 2
+  else
+    for asset in "$TAR" "$TAR.sigstore.json" SHA256SUMS; do
+      curl -fsSL --max-time 600 -o "$WORK/$asset" \
+        "https://github.com/jooservices/ai-flow/releases/download/$VERSION/$asset"
+    done
+  fi
+  (cd "$WORK" && sha256sum --check --status SHA256SUMS) || { echo "release $VERSION checksum verification failed" >&2; exit 1; }
+  cosign verify-blob "$WORK/$TAR" --bundle "$WORK/$TAR.sigstore.json" \
+    --certificate-identity "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  install -d -m 0755 "$CLI_ROOT"
+  NEW=$(mktemp -d "$CLI_ROOT/.$VERSION.XXXXXX")
+  tar -xzf "$WORK/$TAR" -C "$NEW"
+  (cd "$NEW" && UV_PYTHON_INSTALL_DIR=/opt/aiflow/python UV_LINK_MODE=copy uv sync --frozen --no-dev -q --python 3.12)
+  rm -rf "$CLI"
+  mv "$NEW" "$CLI"
+fi
+ln -sfn "$CLI" "$CLI_ROOT/current.new" && mv -T "$CLI_ROOT/current.new" "$CLI_ROOT/current"
+printf '#!/bin/sh\nexec %s/current/.venv/bin/aiflow4 "$@"\n' "$CLI_ROOT" > /usr/local/sbin/aiflow4.new
+chmod 0755 /usr/local/sbin/aiflow4.new && mv -f /usr/local/sbin/aiflow4.new /usr/local/sbin/aiflow4
+# Keep the newest five CLI copies, and always the one in use.
+ls -1dt "$CLI_ROOT"/v[0-9]*.[0-9]*.[0-9]*/ 2>/dev/null | grep -vxF "$CLI/" | tail -n +5 | xargs -r rm -rf
+[ "$CLI_ONLY" = no ] || { echo "aiflow4 now runs $VERSION"; exit 0; }
+
+exec /usr/local/sbin/aiflow4 install control "$@"

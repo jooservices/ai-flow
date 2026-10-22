@@ -199,7 +199,7 @@ def github_gateway(ctx: Ctx) -> GitHubApp | None:
 def validate_github_app_permissions(details: dict[str, Any]) -> None:
     permissions = details.get("permissions") or {}
     required = {"contents": "write", "pull_requests": "write", "workflows": "write",
-                "checks": "read", "statuses": "read"}
+                "checks": "read", "statuses": "read", "administration": "write"}
     missing = [name for name, level in required.items() if permissions.get(name) != level]
     if missing:
         raise ValueError("GitHub App does not have the permissions AI Flow requires")
@@ -270,6 +270,7 @@ class VersionReleaseCompleteBody(BaseModel):
     run_id: str
     fence: int
     head_sha: str = ""
+    source_sha: str = ""
     checks: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
 
@@ -990,7 +991,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                     "redirect_url": callback, "setup_url": setup, "setup_on_update": False, "public": False,
                     "default_events": [],
                     "default_permissions": {"contents": "write", "pull_requests": "write", "metadata": "read",
-                                            "checks": "read", "statuses": "read", "workflows": "write"}}
+                                            "checks": "read", "statuses": "read", "workflows": "write",
+                                            "administration": "write"}}
         action = f"https://github.com/organizations/{quote(organization, safe='-')}/settings/apps/new?state={state}"
         encoded = html.escape(json.dumps(manifest, separators=(",", ":")), quote=True)
         action_attr = html.escape(action, quote=True)
@@ -2162,9 +2164,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                            (project.key, version["id"]))
         if state and state["status"] in ("checking", "released"):
             raise HTTPException(409, "version already has an active or completed release run")
-        snapshot = version_release.evaluate(ctx, project, version)
+        snapshot = version_release.post_merge_resume(ctx, project, version)
+        if snapshot is None:
+            snapshot = version_release.evaluate(ctx, project, version)
         if not snapshot["ready"]:
-            version_release.record_gate(ctx, project, version, snapshot)
+            if not snapshot.get("resume_after_merge"):
+                version_release.record_gate(ctx, project, version, snapshot)
             raise HTTPException(409, {"reason": "version release gates are not met", "tickets": snapshot["tickets"],
                                       "missing": snapshot["reasons"]})
         key = version_release.version_identity(project.key, version["id"])
@@ -2173,6 +2178,22 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not lease.ok:
             raise HTTPException(409, "version release is already claimed")
         try:
+            github = github_gateway(ctx)
+            if github is None:
+                raise HTTPException(503, "GitHub App is not connected")
+            source_branch = version_release.source_branch(project)
+            if snapshot.get("resume_after_merge"):
+                source_sha = snapshot["source_sha"]
+                release_branch = snapshot["release_branch"]
+                branch_created = not github.branch_exists(project.repo_name, release_branch)
+                if branch_created:
+                    github.create_branch_at_sha(project.repo_name, release_branch, snapshot["release_head_sha"])
+            else:
+                source_sha = github.branch_sha(project.repo_name, source_branch)
+                release_branch = version_release.release_branch(project, version["name"], source_sha)
+                branch_created = not github.branch_exists(project.repo_name, release_branch)
+                if branch_created:
+                    github.create_branch(project.repo_name, release_branch, source_branch)
             tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
             ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash)"
                        " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'')",
@@ -2182,6 +2203,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " version_name=EXCLUDED.version_name,tracker_key=EXCLUDED.tracker_key,status='checking',"
                        " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
                        (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"])) )
+            version_release._audit(ctx, project, tracker,
+                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id},
+                                   "github-release-branch", "created" if branch_created else "existing",
+                                   {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
         except Exception:
             ctx.leases.release(key, run_id, lease.fence)
             raise
@@ -2194,9 +2219,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_data = {"key": project.key, "repo": project.repo, "base": project.base,
                         "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
                         "target_branch": version_release.target_branch(project),
+                        "release_branch": release_branch, "source_sha": source_sha,
                         "work_minutes": project.work_minutes()}
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
-                  "description": "Run full configured project checks on the current develop branch.",
+                  "description": f"Run full configured project checks on {release_branch}, cut from {source_branch}.",
                   "labels": [], "priority": "Highest", "type": "Release"}
         return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": lease.fence,
                 "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
@@ -2225,7 +2251,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         reported = [str(item.get("command") or "") for item in body.checks]
         if not commands or any(command not in reported for command in commands):
             body.error = body.error or "Worker did not report every configured full project check."
-        report = {"head_sha": body.head_sha, "checks": body.checks, "error": body.error}
+        report = {"head_sha": body.head_sha, "source_sha": body.source_sha or body.head_sha,
+                  "checks": body.checks, "error": body.error}
         github_gateway(ctx)
         try:
             result = version_release.complete(ctx, project, version, run, report)

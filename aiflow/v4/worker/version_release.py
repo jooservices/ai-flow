@@ -1,4 +1,4 @@
-"""Run configured full project checks on a detached checkout of a Jira release's develop branch."""
+"""Run configured full project checks on a version-and-source-specific release branch."""
 from __future__ import annotations
 
 import logging
@@ -30,18 +30,19 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
     hb = Heartbeat(api, c, heartbeat_s)
     hb.start()
     started = time.monotonic()
-    report: dict = {"head_sha": "", "checks": [], "error": ""}
+    report: dict = {"head_sha": "", "source_sha": str(project.get("source_sha") or ""), "checks": [], "error": ""}
     env = project_env(project["key"])
     try:
         token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                         "repo": project["repo"]})["token"]
         mirror = git.mirror(project["repo"], token)
-        branch = project["source_branch"]
+        branch = project.get("release_branch") or project["source_branch"]
         if not git.remote_branch_exists(mirror, branch):
-            raise RuntimeError(f"configured source branch {branch} does not exist")
+            raise RuntimeError(f"configured release branch {branch} does not exist")
         wt = Path(srv_root) / "work" / project["key"] / f"version-release-{version['id']}"
         head = git.detached(mirror, wt, f"origin/{branch}")
         report["head_sha"] = head
+        report["source_sha"] = report["source_sha"] or head
         commands = list(project.get("checks") or [])
         if not commands:
             raise RuntimeError("no full project checks are configured for this release")

@@ -39,6 +39,8 @@ class Project:
     stack: str | list[str] = ""
     databases: list[str] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
+    release_check: list[str] = field(default_factory=list)
+    tag_prefix: str = ""
     environments: dict[str, Any] = field(default_factory=dict)
     urls: dict[str, str] = field(default_factory=dict)
     merge: dict[str, Any] = field(default_factory=dict)

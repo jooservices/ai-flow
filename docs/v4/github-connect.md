@@ -27,8 +27,10 @@ AIFLOW4_PUBLIC_URL=https://control.example.com
 5. Select the account or organization and the repositories the App can access. GitHub returns to AI Flow after
    installation.
 
-The manifest requests repository contents write, pull requests write, workflow write, checks read, statuses read
-and metadata read permissions. It subscribes to no webhook events. The App registration belongs to the GitHub
+The manifest requests repository contents write, pull requests write, workflow write, checks read, statuses read,
+metadata read and administration write permissions. Administration write lets a release run turn on merge commits
+when a repository currently permits only squash or rebase; it does not change branch protection. The App subscribes
+to no webhook events. The App registration belongs to the GitHub
 organization selected in step 2. GitHub's manifest registration and callback contract is documented in
 [Registering a GitHub App from a manifest](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
 The setup callback includes an installation id; AI Flow verifies it against the App's signed JWT before saving it,
@@ -37,7 +39,8 @@ as recommended in [About the setup URL](https://docs.github.com/en/apps/creating
 ## Connect an existing App
 
 The existing App must have these repository permissions: contents write, pull requests write, workflows write,
-checks read and statuses read. Metadata read is always granted by GitHub. In **Integrations**, expand **Use an
+checks read, statuses read and administration write. Metadata read is always granted by GitHub. Administration
+write is used only when a project release needs to enable merge commits. In **Integrations**, expand **Use an
 existing GitHub App**, enter its App ID and select its PEM private key file. The control plane verifies the key
 with GitHub and returns only the App name and its current installations. The key content is not rendered in the UI.
 

@@ -8,6 +8,7 @@ repo-and-version preset for the trial.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import string
@@ -28,6 +29,10 @@ TESTWP_DEFAULT = {
     "versions": ["WordPress Core 0.5.0-beta", "WordPress Theme 0.5.0-beta"],
     "source_branch": "develop",
     "target_branch": "master",
+    "tag_prefixes": {
+        "WordPress Core 0.5.0-beta": "core-v",
+        "WordPress Theme 0.5.0-beta": "theme-v",
+    },
 }
 
 
@@ -66,7 +71,8 @@ def target_branch(project: Any) -> str:
 
 def check_commands(project: Any) -> list[str]:
     release = config(project)
-    commands = release.get("checks") or project.checks or []
+    commands = (release.get("release_check") or project.release_check or release.get("checks")
+                or project.checks or [])
     return [str(command).strip() for command in commands if str(command).strip()]
 
 
@@ -74,13 +80,213 @@ def release_tag(project: Any, version_name: str) -> str:
     release = config(project)
     prefixes = release.get("tag_prefixes") or {}
     safe_name = re.sub(r"[^a-z0-9.-]+", "-", version_name.lower()).strip("-.")
-    prefix = str(prefixes.get(version_name) or "").strip()
+    prefix = str(prefixes.get(version_name) or release.get("tag_prefix") or project.tag_prefix or "").strip()
     if prefix:
-        safe_prefix = re.sub(r"[^a-z0-9.-]+", "-", prefix.lower()).strip("-.")
         version = re.search(r"\d+(?:\.\d+)+(?:-[0-9a-z.-]+)?", version_name.lower())
         suffix = version.group(0) if version else safe_name
-        return f"{safe_prefix}-{suffix}"
+        return f"{prefix}{suffix}"
     return f"{project.key.lower()}-{safe_name}"
+
+
+def release_branch(project: Any, version_name: str, source_sha: str) -> str:
+    """Use one branch per checked source commit so retries never mix releases from different develop heads."""
+    version = re.sub(r"[^a-z0-9.-]+", "-", version_name.lower()).strip("-.")[:72] or "version"
+    return f"release/{version}-{source_sha[:10].lower()}"
+
+
+def release_version_number(version_name: str) -> str:
+    match = re.search(r"\d+(?:\.\d+)+(?:-[0-9a-z.-]+)?", version_name.lower())
+    if not match:
+        raise ValueError(f"Jira version {version_name!r} does not contain a numeric release version")
+    return match.group(0)
+
+
+def _readme_with_version(content: str, snapshot: dict[str, Any]) -> str:
+    version_name = str(snapshot["version"])
+    number = release_version_number(version_name)
+    start, end = "<!-- aiflow-release-version -->", "<!-- /aiflow-release-version -->"
+    lines = [start, "## Current release", f"Current version: `{number}` ({_markdown_text(version_name)}).",
+             f"Released: {time.strftime('%Y-%m-%d', time.gmtime())}", "", "Included tickets:"]
+    lines.extend(f"- [{ticket['key']}] {_markdown_text(ticket['summary'])}" for ticket in snapshot["tickets"])
+    lines.append(end)
+    block = "\n".join(lines)
+    pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
+    if pattern.search(content):
+        return pattern.sub(block, content, count=1)
+    heading = re.search(r"(?m)^# .+$", content)
+    if heading:
+        at = heading.end()
+        return content[:at] + "\n\n" + block + content[at:].lstrip("\n")
+    return block + ("\n\n" + content if content else "\n")
+
+
+def _update_manifest(path: str, content: str, version_name: str) -> str:
+    """Update an existing top-level version value in a supported project manifest, preserving other data."""
+    number = release_version_number(version_name)
+    basename = path.rsplit("/", 1)[-1].lower()
+    if basename in {"package.json", "composer.json", "package-lock.json"}:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+        changed = False
+        if isinstance(data, dict) and "version" in data:
+            data["version"] = number
+            changed = True
+        if (basename == "package-lock.json" and isinstance(data, dict)
+                and isinstance(data.get("packages"), dict) and isinstance(data["packages"].get(""), dict)
+                and "version" in data["packages"][""]):
+            data["packages"][""]["version"] = number
+            changed = True
+        if changed:
+            indent = 4 if re.search(r"\n {4}\"", content) else 2
+            return json.dumps(data, ensure_ascii=False, indent=indent) + "\n"
+        return content
+
+    if basename in {"pyproject.toml", "cargo.toml", "setup.cfg", "chart.yaml"}:
+        lines = content.splitlines(keepends=True)
+        section = ""
+        changed = False
+        for index, line in enumerate(lines):
+            match = re.match(r"\s*\[([^]]+)\]", line)
+            if match:
+                section = match.group(1).strip().lower()
+            should_update = (basename == "pyproject.toml" and section in {"project", "tool.poetry"}
+                             and re.match(r"\s*version\s*=", line)
+                             or basename == "cargo.toml" and section in {"package", "workspace.package"}
+                             and re.match(r"\s*version\s*=", line)
+                             or basename == "setup.cfg" and section == "metadata"
+                             and re.match(r"\s*version\s*=", line)
+                             or basename == "chart.yaml" and re.match(r"(version|appVersion)\s*:", line))
+            if should_update:
+                key = "version|appVersion" if basename == "chart.yaml" else "version"
+                quoted = re.sub(r"(?m)^(\s*(?:" + key + r")\s*(?:=|:)\s*)([^\s#]+)(.*)$",
+                                lambda m: f"{m.group(1)}{json.dumps(number)}{m.group(3)}", line)
+                if quoted != line:
+                    lines[index] = quoted
+                    changed = True
+                    if basename != "chart.yaml":
+                        break
+        return "".join(lines) if changed else content
+
+    if basename.endswith((".csproj", ".xml")):
+        return re.sub(r"(?is)(<Version>)[^<]+(</Version>)",
+                      lambda match: f"{match.group(1)}{number}{match.group(2)}", content, count=1)
+    return content
+
+
+def _manifest_paths(ctx, project: Any, repo: str, branch: str) -> list[str]:
+    configured = config(project).get("manifest_files")
+    if configured is not None:
+        return sorted({str(path).strip("/") for path in configured if str(path).strip("/")})
+    names = {"package.json", "composer.json", "package-lock.json", "pyproject.toml", "cargo.toml",
+             "setup.cfg", "chart.yaml"}
+    return [path for path in ctx.github.repository_files(repo, branch)
+            if path.rsplit("/", 1)[-1].lower() in names or path.lower().endswith(".csproj")]
+
+
+def _prepare_release_files(ctx, project: Any, repo: str, branch: str, snapshot: dict[str, Any],
+                           sha: str, checks: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+    """Prepare idempotent release files on the release branch; callers commit only changed content."""
+    notes = _changelog(snapshot, sha, checks)
+    changelog_path = str(config(project).get("changelog_file") or "CHANGELOG.md")
+    readme_path = str(config(project).get("readme_file") or "README.md")
+    current = ctx.github.file_content(repo, branch, changelog_path) or ""
+    heading = f"## {_markdown_text(snapshot['version'])}"
+    existing = re.search(r"(?m)^" + re.escape(heading) + r"(?: - .*)?$", current)
+    if existing:
+        next_heading = re.search(r"(?m)^## ", current[existing.end():])
+        end = existing.end() + next_heading.start() if next_heading else len(current)
+        before = current[:existing.start()].rstrip()
+        after = current[end:].lstrip("\n")
+        changelog = "\n\n".join(part for part in (before, notes.rstrip(), after) if part) + "\n"
+    elif current:
+        changelog = current.rstrip() + "\n\n" + notes
+    else:
+        changelog = notes
+    readme = ctx.github.file_content(repo, branch, readme_path) or ""
+    files = {changelog_path: changelog, readme_path: _readme_with_version(readme, snapshot)}
+    for path in _manifest_paths(ctx, project, repo, branch):
+        content = ctx.github.file_content(repo, branch, path)
+        if content is None:
+            continue
+        updated = _update_manifest(path, content, snapshot["version"])
+        if updated != content:
+            files[path] = updated
+    return notes, files
+
+
+def _release_file_audit(ctx, tracker: str, branch: str) -> dict | None:
+    rows = ctx.db.all("SELECT result,payload FROM write_audit WHERE ticket=%s AND action='github-release-files'"
+                      " ORDER BY id DESC", (tracker,))
+    return next((row for row in rows if (row.get("payload") or {}).get("branch") == branch), None)
+
+
+def _resumed_release_data(ctx, project: Any, tracker: str, version: dict[str, Any],
+                          merge: dict) -> tuple[dict[str, Any], str]:
+    """Recover the exact pre-merge ticket snapshot and notes for post-merge retries."""
+    payload = merge.get("payload") or {}
+    snapshot = payload.get("ticket_snapshot")
+    notes = payload.get("notes")
+    branch = str(payload.get("source") or "")
+    if not (snapshot and notes) and branch:
+        files_audit = _release_file_audit(ctx, tracker, branch)
+        files_payload = (files_audit or {}).get("payload") or {}
+        snapshot = snapshot or files_payload.get("ticket_snapshot")
+        notes = notes or files_payload.get("notes")
+
+    if not (snapshot and notes) and branch and ctx.github is not None:
+        changelog_path = str(config(project).get("changelog_file") or "CHANGELOG.md")
+        changelog = ctx.github.file_content(project.repo_name, branch, changelog_path) or ""
+        heading = re.compile(r"(?m)^## " + re.escape(_markdown_text(version["name"])) + r"(?: - .*)?$")
+        match = heading.search(changelog)
+        if match:
+            next_heading = re.search(r"(?m)^## ", changelog[match.end():])
+            end = match.end() + next_heading.start() if next_heading else len(changelog)
+            notes = changelog[match.start():end].strip() + "\n"
+            tickets = []
+            for key, summary in re.findall(r"(?m)^- \[([A-Z][A-Z0-9_]*-\d+)\] (.+)$", notes):
+                tickets.append({"key": key, "summary": summary, "type": "Bug" if "### Fixed" in notes else "Story"})
+            snapshot = {"version": version["name"], "tickets": tickets}
+
+    if not (snapshot and notes):
+        raise RuntimeError("cannot resume release safely: merge audit has no original release notes")
+    if snapshot.get("version") != version["name"] or not isinstance(snapshot.get("tickets"), list):
+        raise RuntimeError("cannot resume release safely: merge audit has an invalid ticket snapshot")
+    return snapshot, str(notes)
+
+
+def post_merge_resume(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any] | None:
+    """Offer a retry for a durable merge without reopening the already-completed ticket gate."""
+    state = _tracker_row(ctx, project.key, version["id"])
+    if not state or not state.get("tracker_key"):
+        return None
+    tracker = str(state["tracker_key"])
+    merge = _release_audit(ctx, tracker, "github-merge")
+    if not merge or not merge.get("result"):
+        return None
+    blockers = _failure_reasons(ctx, project, version, [])
+    result = {"project": project.key, "version_id": version["id"], "version": version["name"],
+              "tracker_key": tracker, "tickets": [], "ready": not blockers, "reasons": blockers,
+              "resume_after_merge": True}
+    if blockers:
+        return result
+    payload = merge.get("payload") or {}
+    result.update({"release_branch": str(payload.get("source") or ""),
+                   "source_sha": str(payload.get("checked_sha") or ""),
+                   "release_head_sha": str(payload.get("release_head_sha") or "")})
+    if not all(result[key] for key in ("release_branch", "source_sha", "release_head_sha")):
+        result["ready"] = False
+        result["reasons"] = ["merge audit is missing the original checked release branch and commit"]
+        return result
+    try:
+        snapshot, _ = _resumed_release_data(ctx, project, tracker, version, merge)
+    except RuntimeError as exc:
+        result["ready"] = False
+        result["reasons"] = [str(exc)]
+        return result
+    result["tickets"] = snapshot["tickets"]
+    return result
 
 
 def _tracker_row(ctx, project: str, version_id: str) -> dict | None:
@@ -96,7 +302,7 @@ def ensure_tracker(ctx, project: Any, version: dict[str, Any]) -> str:
     key = ctx.jira.create_issue(project.key, f"Release: {version['name']}",
                                 f"AI-managed release tracker for Jira version {version['name']} "
                                 f"(version id {version['id']}).", issuetype=issue_type,
-                                labels=["aiflow-version-release"])
+                                labels=["aiflow-version-release"], version_field=version["name"])
     ctx.db.run("INSERT INTO version_releases (project, version_id, version_name, tracker_key)"
                " VALUES (%s,%s,%s,%s) ON CONFLICT (project,version_id) DO UPDATE SET"
                " version_name=EXCLUDED.version_name, tracker_key=CASE WHEN version_releases.tracker_key='' "
@@ -155,7 +361,8 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
             missing.append("QA merge")
         if not qc:
             missing.append("QC checks")
-        tickets.append({"key": key, "summary": str(fields.get("summary") or key), "status": status,
+        tickets.append({"key": key, "summary": str(fields.get("summary") or key),
+                        "type": str((fields.get("issuetype") or {}).get("name") or "Story"), "status": status,
                         "reviewer_passed": reviewer, "qa_passed": qa, "qc_passed": qc, "missing": missing})
     if not tickets:
         reasons = ["no tickets are currently assigned to this Jira version"]
@@ -176,9 +383,9 @@ def _last_failure(ctx, tracker: str) -> dict | None:
 def _failure_reasons(ctx, project: Any, version: dict[str, Any], tickets: list[dict[str, Any]]) -> list[str]:
     """Keep a `failed` version out of release until the blockers recorded by its last failure are resolved.
 
-    The live Jira search can lag behind issue creation, so a release-check Bug must appear in the version's
-    member list (where the member gate requires it Done with evidence) before the version is ready again. A
-    publication follow-up Task stays outside the version and only has to reach Done.
+    Release-check Bugs are deliberately kept out of the Jira version membership: they remain in Backlog and
+    only their own status must reach Done before the full release checks are retried. Publication follow-up
+    Tasks also stay outside the version and only have to reach Done.
     """
     row = _tracker_row(ctx, project.key, version["id"])
     if not row or row["status"] != "failed" or not row["tracker_key"]:
@@ -187,12 +394,16 @@ def _failure_reasons(ctx, project: Any, version: dict[str, Any], tickets: list[d
     if not last:
         return []
     payload = last["payload"] or {}
-    members = {t["key"]: t["status"] for t in tickets}
     reasons = []
     for bug in payload.get("bugs") or []:
         key = str(bug.get("key") or "")
-        if key and key not in members:
-            reasons.append(f"{key}: release-check Bug is not yet listed in Jira version {version['name']}")
+        if key:
+            try:
+                status = ctx.jira.status(key)
+            except Exception:  # noqa: BLE001 - an unreadable release Bug keeps publication blocked
+                status = "unknown"
+            if status != "Done":
+                reasons.append(f"{key}: release-check Bug is {status}, not Done")
     for blocker in payload.get("blockers") or []:
         key = str(blocker.get("key") or "")
         try:
@@ -377,6 +588,11 @@ def candidates(ctx, account: str, node: str) -> list[dict[str, Any]]:
                 if running:
                     continue
                 _set_state(ctx, project.key, version["id"], status="pending")
+            resumed = post_merge_resume(ctx, project, version)
+            if resumed:
+                if resumed["ready"]:
+                    out.append(resumed)
+                continue
             snapshot = evaluate(ctx, project, version)
             if snapshot["ready"]:
                 out.append({**snapshot, "tracker_key": state["tracker_key"] if state else ""})
@@ -391,9 +607,17 @@ def tracker_for(ctx, project: Any, version_id: str, version_name: str) -> str:
 
 
 def _changelog(snapshot: dict[str, Any], sha: str, checks: list[dict[str, Any]]) -> str:
-    lines = [f"## {_markdown_text(snapshot['version'])}", "", "### Included tickets"]
-    lines.extend(f"- [{ticket['key']}] {_markdown_text(ticket['summary'])}" for ticket in snapshot["tickets"])
-    lines.extend(("", "### Release checks", f"- Passed on `{sha}`"))
+    date = time.strftime("%Y-%m-%d", time.gmtime())
+    lines = [f"## {_markdown_text(snapshot['version'])} - {date}", ""]
+    groups = {"Added": [], "Changed": [], "Fixed": []}
+    for ticket in snapshot["tickets"]:
+        kind = str(ticket.get("type") or "Story").lower()
+        section = "Fixed" if kind == "bug" else "Added" if kind in {"story", "feature", "new feature", "epic"} else "Changed"
+        groups[section].append(f"- [{ticket['key']}] {_markdown_text(ticket['summary'])}")
+    for section in ("Added", "Changed", "Fixed"):
+        if groups[section]:
+            lines.extend((f"### {section}", *groups[section], ""))
+    lines.extend(("### Release checks", f"- Passed on `{sha}`"))
     lines.extend(f"- `{item['command']}`: passed" for item in checks)
     return "\n".join(lines) + "\n"
 
@@ -419,27 +643,31 @@ def _set_state(ctx, project: str, version_id: str, **values: Any) -> None:
 
 def _failed_checks(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
                    failures: list[dict[str, Any]]) -> dict[str, Any]:
+    prior = ctx.db.one("SELECT payload FROM write_audit WHERE ticket=%s AND action='jira-release-check-failed'"
+                       " AND run_id=%s ORDER BY id DESC LIMIT 1", (tracker, str(run["id"])))
+    if prior:
+        payload = prior["payload"] or {}
+        return {"released": False, "status": "failed", "bugs": payload.get("bugs") or []}
     bugs = []
     issue_type = str(config(project).get("bug_issue_type") or "Bug")
     for failure in failures:
         command = str(failure.get("command") or "release check")
         output = str(failure.get("output") or "")[-5000:]
         summary = f"Release check failed: {command}"[:250]
-        description = (f"The automatic release check for {version['name']} failed on develop.\n\n"
+        description = (f"The automatic release check for {version['name']} failed on its release branch.\n\n"
                        f"Command: {command}\nExit code: {failure.get('exit_code', 'unknown')}\n\n"
                        f"Output:\n{output or '(no output)'}\n\nThis Bug blocks Jira release {version['name']}.")
         key = ctx.jira.create_issue(project.key, summary, description, issuetype=issue_type,
-                                    labels=["aiflow-version-release", "release-check", "aiflow-ready"],
-                                    fix_version=version["id"])
-        ctx.jira.transition_to(key, "To Do")
+                                    labels=["aiflow-version-release", "release-check", "release-qa", "aiflow-ready"])
+        ctx.jira.transition_to(key, "Backlog")
         ctx.jira.link_issues(key, tracker, "Blocks")
         bugs.append({"key": key, "command": command})
         ctx.events.emit("version_release.bug_created", ticket=key, project=project.key, step="version_release",
                         run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
-                        outcome="To Do", reason=f"{command} failed; blocks release {tracker}",
+                        outcome="Backlog", reason=f"{command} failed; blocks release {tracker}",
                         data={"version_id": version["id"], "release": tracker})
-    text = (f"Automatic release check failed on develop. Created {len(bugs)} Bug(s), each in Jira version "
-            f"{version['name']} and linked to block this Release: "
+    text = (f"Automatic release check failed on release branch. Created {len(bugs)} Bug(s) in Backlog, each "
+            f"labelled release-qa and linked to block this Release: "
             + ", ".join(bug["key"] for bug in bugs))
     ctx.jira.comment(tracker, text)
     ctx.db.run("UPDATE version_releases SET status='failed', checked_develop_sha=%s, gate_detail=%s,"
@@ -516,9 +744,94 @@ def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: E
     return {"released": False, "status": "failed", "reason": message, "blockers": payload.get("blockers", [])}
 
 
+def _publish_after_merge(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
+                         snapshot: dict[str, Any], notes: str, source_sha: str, master_sha: str,
+                         pr: dict) -> dict[str, Any]:
+    repo = project.repo_name
+    source, target = source_branch(project), target_branch(project)
+    tag = release_tag(project, version["name"])
+    existing_tag_sha = ctx.github.tag_sha(repo, tag)
+    if existing_tag_sha and existing_tag_sha.lower() != master_sha.lower():
+        raise RuntimeError(f"release tag {tag} already points to {existing_tag_sha}, expected {master_sha}")
+    tag_created = not existing_tag_sha
+    if tag_created:
+        ctx.github.create_tag(repo, tag, master_sha)
+    _audit(ctx, project, tracker, run, "github-tag", "created" if tag_created else "existing",
+           {"tag": tag, "sha": master_sha, "repo": project.repo})
+    ctx.events.emit("version_release.tag", ticket=tracker, project=project.key, step="version_release",
+                    run_id=str(run["id"]), fence=run["fence"], outcome="created" if tag_created else "existing",
+                    reason=tag, data={"sha": master_sha, "version_id": version["id"]})
+    release = ctx.github.release_by_tag(repo, tag)
+    release_created = not release
+    if release_created:
+        release = ctx.github.create_release(repo, tag, version["name"], notes)
+    release_url = str(release.get("html_url") or "")
+    _audit(ctx, project, tracker, run, "github-release", release_url or tag,
+           {"tag": tag, "sha": master_sha, "state": "created" if release_created else "existing"})
+    ctx.events.emit("version_release.github_release", ticket=tracker, project=project.key, step="version_release",
+                    run_id=str(run["id"]), fence=run["fence"], outcome="created" if release_created else "existing",
+                    reason=release_url or tag, data={"tag": tag, "sha": master_sha, "url": release_url})
+    latest_version = next((v for v in ctx.jira.versions(project.key) if v["id"] == version["id"]), version)
+    if not latest_version.get("released") or not latest_version.get("release_date"):
+        ctx.jira.release_version(version["id"])
+    try:
+        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=source_sha,
+                   master_sha=master_sha, tag=tag, github_release_url=release_url,
+                   gate_detail=f"Released at {tag} ({master_sha}).")
+        _audit(ctx, project, tracker, run, "jira-version-released", "Released",
+               {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
+                "tickets": snapshot["tickets"]})
+        ctx.events.emit("version_release.jira_version", ticket=tracker, project=project.key, step="version_release",
+                        run_id=str(run["id"]), fence=run["fence"], outcome="Released", reason=version["name"],
+                        data={"version_id": version["id"], "tag": tag, "master_sha": master_sha,
+                              "release_url": release_url})
+        ctx.jira.comment(tracker, f"Version released.\nChecked tickets: {', '.join(t['key'] for t in snapshot['tickets'])}\n"
+                         f"Checks passed on {source} commit: {source_sha}\nCommit on {target}: {master_sha}\n"
+                         f"Pull request: {pr.get('html_url', '')}\nTag: {tag}\nGitHub Release: {release_url or tag}\n"
+                         "Jira version: Released")
+        ctx.events.emit("version_release.completed", ticket=tracker, project=project.key, step="version_release",
+                        run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
+                        outcome="released", reason=f"{tag} {release_url}",
+                        data={"tickets": snapshot["tickets"], "checked_sha": source_sha, "master_sha": master_sha,
+                              "tag": tag, "release_url": release_url, "jira_version": "Released"})
+    finally:
+        merge_back(ctx, project, tracker, version["name"], tag, run)
+    return {"released": True, "status": "released", "tag": tag, "sha": master_sha,
+            "release_url": release_url}
+
+
 def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict[str, Any]) -> dict[str, Any]:
-    """Accept a fenced worker's check report and perform an idempotent release if it still passes live gates."""
+    """Accept a fenced check report and finish publication from the checked snapshot that produced its merge."""
     tracker = tracker_for(ctx, project, version["id"], version["name"])
+    saved = _tracker_row(ctx, project.key, version["id"])
+    if saved and saved["status"] == "released" and saved.get("tag") and saved.get("master_sha"):
+        if ctx.github is not None:
+            merge_back(ctx, project, tracker, version["name"], saved["tag"], run)
+        return {"released": True, "status": "released", "tag": saved["tag"], "sha": saved["master_sha"],
+                "release_url": saved.get("github_release_url") or ""}
+    prior_failure = ctx.db.one("SELECT payload FROM write_audit WHERE ticket=%s AND action='jira-release-check-failed'"
+                               " AND run_id=%s ORDER BY id DESC LIMIT 1", (tracker, str(run["id"])))
+    if prior_failure:
+        return {"released": False, "status": "failed",
+                "bugs": (prior_failure["payload"] or {}).get("bugs") or []}
+    if ctx.github is None:
+        raise RuntimeError("GitHub App is not connected")
+
+    # A merged release is immutable input to retries. The worker may have checked a newer develop head, and Jira
+    # membership may have changed since the merge, so resume the tag/Release/Jira writes from the merge audit.
+    previous_merge = _release_audit(ctx, tracker, "github-merge")
+    if previous_merge:
+        master_sha = str(previous_merge.get("result") or "")
+        if not master_sha:
+            raise RuntimeError("cannot resume release safely: merge audit has no target commit SHA")
+        snapshot, notes = _resumed_release_data(ctx, project, tracker, version, previous_merge)
+        payload = previous_merge.get("payload") or {}
+        checked_sha = str(payload.get("checked_sha") or saved.get("checked_develop_sha") or "")
+        if not checked_sha:
+            raise RuntimeError("cannot resume release safely: merge audit has no checked source SHA")
+        pr = {"number": payload.get("pr_number"), "html_url": payload.get("pr_url", "")}
+        return _publish_after_merge(ctx, project, version, tracker, run, snapshot, notes, checked_sha, master_sha, pr)
+
     snapshot = evaluate(ctx, project, version)
     if not snapshot["ready"]:
         detail = _snapshot_text(snapshot)
@@ -535,86 +848,89 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     if failures:
         return _failed_checks(ctx, project, version, tracker, run, failures)
 
-    sha = str(report.get("head_sha") or "")
-    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+    checked_head = str(report.get("head_sha") or "")
+    source_sha = str(report.get("source_sha") or checked_head)
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", checked_head):
         return _failed_checks(ctx, project, version, tracker, run,
                               [{"command": "resolve checked develop commit", "exit_code": -1,
                                 "output": "The release worker did not report a valid checked commit SHA."}])
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", source_sha):
+        return _failed_checks(ctx, project, version, tracker, run,
+                              [{"command": "resolve release branch source commit", "exit_code": -1,
+                                "output": "The release worker did not report a valid source commit SHA."}])
     repo = project.repo_name
     source, target = source_branch(project), target_branch(project)
-    if ctx.github is None:
-        raise RuntimeError("GitHub App is not connected")
-    current_source =ctx.github.branch_sha(repo, source)
-    if current_source.lower() != sha.lower():
-        detail = f"develop moved during the full check ({sha[:12]} checked, {current_source[:12]} now); retrying."
-        _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=sha, gate_detail=detail)
+    current_source = ctx.github.branch_sha(repo, source)
+    if current_source.lower() != source_sha.lower():
+        detail = f"{source} moved during the full check ({source_sha[:12]} checked, {current_source[:12]} now); retrying."
+        _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=source_sha, gate_detail=detail)
         ctx.jira.comment(tracker, f"Full checks passed but publication stopped: {detail}")
         ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
                         run_id=str(run["id"]), fence=run["fence"], outcome="stale", reason=detail,
-                        data={"version_id": version["id"], "checked_sha": sha, "current_sha": current_source})
+                        data={"version_id": version["id"], "checked_sha": source_sha, "current_sha": current_source})
         return {"released": False, "status": "stale", "reason": detail}
 
-    message = f"release: {version['name']} ({project.key})"
-    merge = ctx.github.merge_branch(repo, target, source, message)
-    master_sha = str(merge.get("sha") or ctx.github.branch_sha(repo, target))
-    _audit(ctx, project, tracker, run, "github-merge", master_sha,
-           {"source": source, "target": target, "checked_sha": sha})
+    branch = release_branch(project, version["name"], source_sha)
+    if not ctx.github.branch_exists(repo, branch):
+        ctx.github.create_branch(repo, branch, source)
+    current_release_head = ctx.github.branch_sha(repo, branch)
+    if current_release_head.lower() != checked_head.lower():
+        detail = f"release branch {branch} moved during the full check; retrying."
+        _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=source_sha,
+                   gate_detail=detail)
+        return {"released": False, "status": "stale", "reason": detail}
+
+    notes, release_files = _prepare_release_files(ctx, project, repo, branch, snapshot, source_sha,
+                                                  report.get("checks", []))
+    changed_files = []
+    for path, content in release_files.items():
+        old = ctx.github.file_content(repo, branch, path)
+        if old == content:
+            continue
+        file_sha = ctx.github.commit_file(repo, branch, path, content,
+                                          f"release: update {path} for {version['name']}")
+        changed_files.append(path)
+        if not file_sha:
+            log.info("GitHub did not return a commit SHA while updating release file %s", path)
+    release_head = ctx.github.branch_sha(repo, branch)
+    _audit(ctx, project, tracker, run, "github-release-files", release_head,
+           {"branch": branch, "source_sha": source_sha, "files": list(release_files),
+            "changed_files": changed_files, "ticket_snapshot": snapshot, "notes": notes,
+            "checks": report.get("checks", [])})
+
+    pr = ctx.github.release_pr(repo, branch, target)
+    if pr and pr.get("merged"):
+        # Recover a merge that succeeded immediately before the process stopped writing its merge audit.
+        master_sha = str(pr.get("merge_commit_sha") or "")
+        if not master_sha:
+            raise RuntimeError(f"merged release PR #{pr.get('number')} has no merge commit SHA")
+    else:
+        if pr and pr.get("state") == "closed":
+            pr = ctx.github.reopen_pr(repo, int(pr["number"]))
+        if not pr:
+            pr = ctx.github.create_pr(repo, branch, target, f"Release {version['name']} ({project.key})",
+                                      notes, draft=False)
+        ctx.github.update_pr_body(repo, int(pr["number"]), notes)
+        ctx.github.enable_merge_commit(repo)
+        merged = ctx.github.merge_pr(repo, int(pr["number"]), f"Release {version['name']}", method="merge")
+        if not merged.get("merged") or not merged.get("sha"):
+            raise RuntimeError(f"release PR #{pr['number']} could not be merged without squash: "
+                               f"{merged.get('message') or 'GitHub refused merge'}")
+        master_sha = str(merged["sha"])
+        pr = {**pr, "merge_commit_sha": master_sha, "merged": True}
+    if not master_sha:
+        master_sha = ctx.github.branch_sha(repo, target)
+    pr = pr or {}
+    merge_payload = {"source": branch, "develop_source": source, "target": target, "checked_sha": source_sha,
+                     "release_head_sha": release_head, "pr_number": pr.get("number"),
+                     "pr_url": pr.get("html_url", ""), "method": "merge",
+                     "ticket_snapshot": snapshot, "notes": notes}
+    _audit(ctx, project, tracker, run, "github-merge", master_sha, merge_payload)
     ctx.events.emit("version_release.merge", ticket=tracker, project=project.key, step="version_release",
                     run_id=str(run["id"]), fence=run["fence"], outcome="merged", reason=master_sha,
-                    data={"source": source, "target": target, "checked_sha": sha})
-    tag = release_tag(project, version["name"])
-    existing_tag_sha = ctx.github.tag_sha(repo, tag)
-    if existing_tag_sha and existing_tag_sha.lower() != master_sha.lower():
-        raise RuntimeError(f"release tag {tag} already points to {existing_tag_sha}, expected {master_sha}")
-    tag_created = not existing_tag_sha
-    if tag_created:
-        ctx.github.create_tag(repo, tag, master_sha)
-    _audit(ctx, project, tracker, run, "github-tag", "created" if tag_created else "existing",
-           {"tag": tag, "sha": master_sha, "repo": project.repo})
-    ctx.events.emit("version_release.tag", ticket=tracker, project=project.key, step="version_release",
-                    run_id=str(run["id"]), fence=run["fence"], outcome="created" if tag_created else "existing",
-                    reason=tag, data={"sha": master_sha, "version_id": version["id"]})
-    release = ctx.github.release_by_tag(repo, tag)
-    notes = _changelog(snapshot, master_sha, report.get("checks", []))
-    release_created = not release
-    if release_created:
-        release = ctx.github.create_release(repo, tag, version["name"], notes)
-        _audit(ctx, project, tracker, run, "github-release", str(release.get("html_url") or tag),
-               {"tag": tag, "sha": master_sha})
-    release_url = str(release.get("html_url") or "")
-    ctx.events.emit("version_release.github_release", ticket=tracker, project=project.key, step="version_release",
-                    run_id=str(run["id"]), fence=run["fence"], outcome="created" if release_created else "existing",
-                    reason=release_url or tag, data={"tag": tag, "sha": master_sha, "url": release_url})
-    # Jira version Released is last among publication steps; retries reconcile the same merge/tag/release.
-    latest_version = next((v for v in ctx.jira.versions(project.key) if v["id"] == version["id"]), version)
-    if not latest_version.get("released"):
-        ctx.jira.release_version(version["id"])
-    # Merge-back runs even when a post-release write below fails; it audits itself, and the scan retries it for
-    # any released version without a merge-back record (`reconcile_merge_backs`). Keep the registry write inside
-    # this block so a failure there cannot skip merge-back.
-    try:
-        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=sha,
-                   master_sha=master_sha, tag=tag, github_release_url=release_url,
-                   gate_detail=f"Released at {tag} ({master_sha}).")
-        _audit(ctx, project, tracker, run, "jira-version-released", "Released",
-               {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
-                "tickets": snapshot["tickets"]})
-        ctx.events.emit("version_release.jira_version", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="Released", reason=version["name"],
-                        data={"version_id": version["id"], "tag": tag, "master_sha": master_sha,
-                              "release_url": release_url})
-        ctx.jira.comment(tracker, f"Version released.\nChecked tickets: {', '.join(t['key'] for t in snapshot['tickets'])}\n"
-                         f"Checks passed on develop commit: {sha}\nCommit on {target}: {master_sha}\nTag: {tag}\n"
-                         f"GitHub Release: {release_url or tag}\nJira version: Released")
-        ctx.events.emit("version_release.completed", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
-                        outcome="released", reason=f"{tag} {release_url}",
-                        data={"tickets": snapshot["tickets"], "checked_sha": sha, "master_sha": master_sha,
-                              "tag": tag, "release_url": release_url, "jira_version": "Released"})
-    finally:
-        merge_back(ctx, project, tracker, version["name"], tag, run)
-    return {"released": True, "status": "released", "tag": tag, "sha": master_sha,
-            "release_url": release_url}
+                    data={"source": branch, "target": target, "checked_sha": source_sha,
+                          "pr_number": pr.get("number"), "method": "merge"})
+    return _publish_after_merge(ctx, project, version, tracker, run, snapshot, notes, source_sha, master_sha, pr)
 
 
 def _merge_back_recorded(ctx, tracker: str) -> bool:
@@ -630,38 +946,39 @@ def _best_effort(what: str, fn, *args: Any, **kwargs: Any) -> None:
 
 
 def merge_back(ctx, project: Any, tracker: str, version_name: str, tag: str, run: dict) -> None:
-    """Merge the destination back into the source once per release, or leave one ready Jira follow-up Task.
-
-    The audit row is written right after the GitHub merge or the Task creation, so a failing comment or event
-    afterwards never causes a second merge-back or a duplicate Task.
-    """
+    """Create one ready Jira merge-back Task only when the destination has commits missing from the source."""
     if _merge_back_recorded(ctx, tracker):
         return
     repo = project.repo_name
     source, target = source_branch(project), target_branch(project)
     try:
-        back = ctx.github.merge_branch(repo, source, target, f"chore: merge {target} back after {tag}")
-        back_sha = str(back.get("sha") or ctx.github.branch_sha(repo, source))
-    except Exception as exc:  # noqa: BLE001 - published release remains valid; leave an actionable Jira task
-        task = ctx.jira.create_issue(project.key, f"Merge {target} back after {version_name}",
-                                     f"Release {tag} is published. Merge {target} into {source} and resolve any conflicts.\n"
-                                     f"Error: {str(exc)[:2000]}", issuetype="Task",
-                                     labels=["aiflow-version-release", "merge-back", "aiflow-ready"])
-        _audit(ctx, project, tracker, run, "jira-merge-back-task", task,
-               {"source": target, "target": source, "tag": tag, "error": str(exc)[:2000]})
-        _best_effort("merge-back task transition", ctx.jira.transition_to, task, "To Do")
-        _best_effort("merge-back comment", ctx.jira.comment, tracker,
-                     f"Merge-back failed; follow-up ticket {task} created. {str(exc)[:500]}")
+        comparison = ctx.github.compare_branches(repo, source, target)
+    except Exception:  # noqa: BLE001 - an unavailable comparison must not invent a merge-back ticket
+        log.exception("version release merge-back comparison failed for %s %s", project.key, version_name)
+        return
+    if int(comparison.get("ahead_by", 0)) <= 0:
+        _audit(ctx, project, tracker, run, "github-merge-back", "not-needed",
+               {"source": target, "target": source, "tag": tag, "reason": "master has no commits missing from develop"})
         _best_effort("merge-back event", ctx.events.emit, "version_release.merge_back", ticket=tracker,
                      project=project.key, step="version_release", run_id=str(run["id"]), fence=run["fence"],
-                     outcome="ticket_created", reason=task, data={"error": str(exc)[:2000]})
+                     outcome="not_needed", reason="master is already in develop", data={"source": target, "target": source})
         return
-    _audit(ctx, project, tracker, run, "github-merge-back", back_sha, {"source": target, "target": source, "tag": tag})
+    master_sha = ctx.github.branch_sha(repo, target)
+    develop_sha = ctx.github.branch_sha(repo, source)
+    task = ctx.jira.create_issue(project.key, f"Merge {target} back after {version_name}",
+                                 f"Release {tag} is published on {target} at {master_sha}, while {source} is at "
+                                 f"{develop_sha}. Merge {target} into {source} and resolve any conflicts.",
+                                 issuetype="Task", labels=["aiflow-version-release", "merge-back", "aiflow-ready"])
+    _audit(ctx, project, tracker, run, "jira-merge-back-task", task,
+           {"source": target, "target": source, "tag": tag, "master_sha": master_sha,
+            "develop_sha": develop_sha, "ahead_by": comparison.get("ahead_by")})
+    _best_effort("merge-back task transition", ctx.jira.transition_to, task, "To Do")
     _best_effort("merge-back comment", ctx.jira.comment, tracker,
-                 f"Merge-back complete: {target} into {source} at {back_sha}.")
+                 f"Master has commits not yet in develop; merge-back ticket {task} created.")
     _best_effort("merge-back event", ctx.events.emit, "version_release.merge_back", ticket=tracker,
                  project=project.key, step="version_release", run_id=str(run["id"]), fence=run["fence"],
-                 outcome="merged", reason=back_sha, data={"source": target, "target": source})
+                 outcome="ticket_created", reason=task,
+                 data={"source": target, "target": source, "master_sha": master_sha, "develop_sha": develop_sha})
 
 
 def version_identity(project: str, version_id: str) -> str:

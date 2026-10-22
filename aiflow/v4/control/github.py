@@ -152,8 +152,24 @@ class GitHubApp:
         return self.api("POST", f"/repos/{self.org}/{repo}/pulls",
                         {"title": title, "head": head, "base": base, "body": body, "draft": draft}, repo=repo)
 
+    def release_pr(self, repo: str, head: str, base: str) -> dict | None:
+        """Find an open or merged release PR by its exact head and base branches."""
+        prs = self.api("GET", f"/repos/{self.org}/{repo}/pulls?state=all&head={self.org}:{head}&base={base}",
+                       repo=repo)
+        return next((pr for pr in prs if (pr.get("head") or {}).get("ref") == head
+                     and (pr.get("base") or {}).get("ref") == base), None)
+
+    def update_pr_body(self, repo: str, number: int, body: str) -> dict:
+        """Refresh a release PR's ticket notes after its Jira version membership changes."""
+        return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{number}",
+                        {"body": body[:60000]}, repo=repo)
+
     def pr(self, repo: str, number: int) -> dict:
         return self.api("GET", f"/repos/{self.org}/{repo}/pulls/{number}", repo=repo)
+
+    def reopen_pr(self, repo: str, number: int) -> dict:
+        """Reopen the existing release PR after a prior merge attempt was blocked by repository policy."""
+        return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{number}", {"state": "open"}, repo=repo)
 
     def comment(self, repo: str, number: int, body: str) -> None:
         self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
@@ -196,6 +212,11 @@ class GitHubApp:
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
                  {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
 
+    def create_branch_at_sha(self, repo: str, branch: str, sha: str) -> None:
+        """Restore a deleted release branch at the exact audited commit for a post-merge retry."""
+        self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
+                 {"ref": f"refs/heads/{branch}", "sha": sha}, repo=repo)
+
     def commit_file(self, repo: str, branch: str, path: str, content: str, message: str) -> str:
         """Write one UTF-8 file through the GitHub App; GitHub records the installation bot as committer."""
         encoded_path = quote(path, safe="/")
@@ -213,6 +234,27 @@ class GitHubApp:
             body["sha"] = sha
         result = self.api("PUT", f"/repos/{self.org}/{repo}/contents/{encoded_path}", body, repo=repo)
         return str((result.get("commit") or {}).get("sha") or "")
+
+    def file_content(self, repo: str, branch: str, path: str) -> str | None:
+        """Read a small UTF-8 repository file from one branch; a missing file returns None."""
+        encoded_path = quote(path, safe="/")
+        branch_q = quote(branch, safe="")
+        try:
+            item = self.api("GET", f"/repos/{self.org}/{repo}/contents/{encoded_path}?ref={branch_q}", repo=repo)
+        except GitHubError as exc:
+            if "-> 404:" in str(exc):
+                return None
+            raise
+        if item.get("type") != "file" or not item.get("content"):
+            return None
+        return base64.b64decode(item["content"]).decode("utf-8")
+
+    def repository_files(self, repo: str, ref: str) -> list[str]:
+        """List paths in a branch tree so version-bearing manifests can be found recursively."""
+        sha = self.branch_sha(repo, ref)
+        tree = self.api("GET", f"/repos/{self.org}/{repo}/git/trees/{sha}?recursive=1", repo=repo)
+        return [str(row["path"]) for row in tree.get("tree", [])
+                if row.get("type") == "blob" and row.get("path")]
 
     def delete_file(self, repo: str, branch: str, path: str, message: str) -> str:
         """Delete one control-repo file through the App, recording the removal as a bot commit."""
@@ -318,6 +360,19 @@ class GitHubApp:
                         {"tag_name": tag, "name": name, "body": notes, "draft": False,
                          "prerelease": "-alpha" in name or "-beta" in name}, repo=repo, ok=(201,),
                         permissions={"contents": "write", "metadata": "read", "workflows": "write"})
+
+    def compare_branches(self, repo: str, base: str, head: str) -> dict:
+        """Return GitHub's comparison for `head` relative to `base` (including `ahead_by`)."""
+        return self.api("GET", f"/repos/{self.org}/{repo}/compare/{quote(base, safe='')}...{quote(head, safe='')}",
+                        repo=repo)
+
+    def enable_merge_commit(self, repo: str) -> None:
+        """Allow merge commits for release PRs when repository settings currently permit only squash/rebase."""
+        settings = self.api("GET", f"/repos/{self.org}/{repo}", repo=repo)
+        if settings.get("allow_merge_commit") is True:
+            return
+        self.api("PATCH", f"/repos/{self.org}/{repo}", {"allow_merge_commit": True}, repo=repo,
+                 permissions={"administration": "write", "metadata": "read"})
 
     def bot_identity(self) -> tuple[str, str]:
         slug = self.meta["slug"]

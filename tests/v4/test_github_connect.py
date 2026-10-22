@@ -14,7 +14,7 @@ from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 SESSION_SECRET = "github-connect-console-session-secret-over-32-bytes"
 PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\n" + ("x" * 160) + "\n-----END RSA PRIVATE KEY-----\n"
 REQUIRED_PERMISSIONS = {"contents": "write", "pull_requests": "write", "workflows": "write",
-                        "checks": "read", "statuses": "read", "metadata": "read"}
+                        "checks": "read", "statuses": "read", "metadata": "read", "administration": "write"}
 
 
 class FakeConnectGitHub:
@@ -166,6 +166,7 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
     assert "https://github.com/organizations/acme/settings/apps/new" in start.text
     assert '&quot;contents&quot;:&quot;write&quot;' in start.text
     assert '&quot;pull_requests&quot;:&quot;write&quot;' in start.text
+    assert '&quot;administration&quot;:&quot;write&quot;' in start.text
     state = re.search(r"\?state=([a-f0-9]{64})", start.text).group(1)
     callback = client.get(f"/v1/integrations/github/manifest/callback?code=oneTimeCode&state={state}",
                           follow_redirects=False)

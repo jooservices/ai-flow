@@ -112,6 +112,9 @@ def test_every_role_can_open_its_views_and_is_refused_for_other_views_and_apis(c
                                " AND action='access_denied' AND actor=%s ORDER BY id DESC LIMIT 1", (subject,))
             assert audit and not audit["accepted"] and audit["result"] == "not available for your role"
             assert audit["payload"]["path"] == missing[1]
+        assert client.get("/dashboard").status_code == 200
+        assert client.get("/work").status_code == 200
+        assert client.get("/").status_code == 200
 
 
 def test_multi_role_landing_priority_matches_the_ticket():
@@ -256,6 +259,13 @@ def test_administrator_view_as_is_signed_and_server_enforced_without_sign_out(ct
                         " ORDER BY id")
     assert [row["action"] for row in audits] == ["view_as", "view_as_stop"]
     assert all(row["actor"] == "view-admin@example.test" for row in audits)
+
+
+def test_console_has_screen_paths_for_people_management_and_view_as():
+    page = (Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui/console.html").read_text()
+    assert page.count("function renderUsers()") == 1
+    assert "data-user-add" in page and "data-user-save" in page and "data-user-toggle" in page
+    assert "id=\"view-as-role\"" in page and "/v1/console/view-as" in page
 
 
 def test_legacy_role_migration_maps_existing_owner_lead_and_super_admin_rows(db):

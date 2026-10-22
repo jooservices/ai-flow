@@ -114,7 +114,8 @@ ROLE_VIEW_IDS = {
     "projects": "projects.manage",
 }
 PAGE_VIEWS = {
-    "/": "dashboard", "/cc": "dashboard", "/board": "work_board", "/delivery": "delivery",
+    "/": "dashboard", "/cc": "dashboard", "/dashboard": "dashboard",
+    "/board": "work_board", "/work": "work_board", "/delivery": "delivery",
     "/sa": "sa", "/lead": "team_lead", "/business": "business", "/review": "human_review",
     "/stakeholder": "stakeholder", "/knowledge": "knowledge", "/integrations": "integrations",
     "/machines": "machines_ai", "/projects": "projects", "/users": "users",

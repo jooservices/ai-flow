@@ -50,7 +50,7 @@ VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # Project stacks whose tools ship inside the bundle (Python and Node.js runtimes). The node agent installs every
 # other stack's tools (PHP, Composer, WP-CLI, Playwright) from public registries, so such nodes are refused.
 OFFLINE_STACKS = frozenset({"python-3.12", "node-24"})
-APT_PACKAGES = ["git", "docker.io", "ca-certificates", "passwd", "util-linux"]
+APT_PACKAGES = ["systemd", "git", "docker.io", "ca-certificates", "passwd", "util-linux"]
 SAFE_NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@\[\]-]+\Z")
 

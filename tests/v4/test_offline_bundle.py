@@ -254,8 +254,9 @@ def test_deb_packages_install_agent_and_worker_units_user_and_directories(tmp_pa
     worker = packages / "aiflow4-worker_4.1.0_all.deb"
     assert subprocess.run(["dpkg-deb", "-f", str(agent), "Architecture"], check=True,
                           capture_output=True, text=True).stdout.strip() == "all"
-    assert "passwd" in subprocess.run(["dpkg-deb", "-f", str(agent), "Depends"], check=True,
-                                      capture_output=True, text=True).stdout
+    agent_depends = subprocess.run(["dpkg-deb", "-f", str(agent), "Depends"], check=True,
+                                   capture_output=True, text=True).stdout
+    assert "passwd" in agent_depends
     assert subprocess.run(["dpkg-deb", "-f", str(worker), "Depends"], check=True,
                           capture_output=True, text=True).stdout.strip() == "aiflow4-node-agent"
     agent_contents = subprocess.run(["dpkg-deb", "-c", str(agent)], check=True,
@@ -384,4 +385,18 @@ def test_apt_closure_rejects_dependency_missing_from_bundle(tmp_path):
     records = {"a.deb": {"Package": "a", "Depends": "libc6 (>= 2.35), git", "Pre-Depends": "", "Provides": ""}}
     with pytest.raises(offline.OfflineError, match="libc6"):
         offline.verify_apt_closure([tmp_path / "a.deb"], [], _control(records))
+
+
+def test_generated_agent_package_systemd_dependency_is_requested_for_offline_closure(tmp_path):
+    packages = tmp_path / "packages"
+    packages.mkdir()
+    offline._build_debs(packages, "v4.1.0")
+    agent = packages / "aiflow4-node-agent_4.1.0_all.deb"
+
+    generated_metadata = offline._deb_control(agent)
+    direct_dependencies = {dependency.strip().split("(", 1)[0]
+                           for dependency in generated_metadata["Depends"].split(",")}
+
+    assert "systemd" in generated_metadata["Depends"]
+    assert direct_dependencies <= set(offline.APT_PACKAGES)
 

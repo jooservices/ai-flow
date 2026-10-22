@@ -37,7 +37,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, tooling, version_release
+from . import business, jira_connect, knowledge, memory, role_health, rollout, tooling, version_release
 from . import review_metrics
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
@@ -376,6 +376,11 @@ class PRBody(BaseModel):
     draft: bool = True
 
 
+class RoleHealthSettingsBody(BaseModel):
+    window_runs: int
+    failure_percent: int
+
+
 class ProbeBody(BaseModel):
     ok: bool
     error_kind: str = ""
@@ -488,6 +493,26 @@ class KnowledgeApprovalBody(BaseModel):
 class KnowledgeRestoreBody(BaseModel):
     version: int
     actor: str
+
+
+class KnowledgeItemBody(BaseModel):
+    project: str = Field(default="", max_length=32)
+    scope: str = Field(default="project", max_length=16)
+    epic: str = Field(default="", max_length=100)
+    kind: str
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=30_000)
+    actor: str = Field(default="", max_length=200)
+
+
+class KnowledgeItemActionBody(BaseModel):
+    actor: str = Field(default="", max_length=200)
+    project: str = Field(default="", max_length=32)
+    scope: str = Field(default="", max_length=16)
+    epic: str = Field(default="", max_length=100)
+    title: str = Field(default="", max_length=200)
+    content: str = Field(default="", max_length=30_000)
+    duplicate_id: int | None = None
 
 
 class StakeholderVerdictBody(BaseModel):
@@ -787,6 +812,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     def finish_reviewer_run(key: str, run_id: str, fence: int, outcome: str, summary: str) -> None:
         ctx.db.run("UPDATE runs SET status='finished', outcome=%s, summary=%s, ended_at=now() WHERE id=%s",
                    (outcome, summary[:2000], run_id))
+        try:
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+        except Exception as exc:  # noqa: BLE001 - learning must not block a review action
+            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         ctx.leases.release(key, run_id, fence)
         ctx.events.emit("run.finished", ticket=key, project=key.split("-", 1)[0], step="qa", run_id=run_id,
                         fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
@@ -2697,6 +2727,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
+        # a role switched off for this account (docs/v4/role-health.md) takes only its daily probation ticket
+        modes = role_health.modes(ctx.db, acc.id, sorted(roles))
+
+        def allowed(role: str, t: dict) -> bool:
+            return modes.get(role) == "on" or (modes.get(role) == "probation" and role_health.probation_ticket(t))
+
+        def probation(role: str) -> bool:
+            return modes.get(role) == "probation"
+
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
         if not projects:
@@ -2715,7 +2754,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "verify"})
+                if not allowed("verify", t):
+                    continue
+                out.append({**t, "step": "verify", "probation": probation("verify")})
         if "master" in roles:
             triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
@@ -2728,7 +2769,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "triage"})
+                if not allowed("master", t):
+                    continue
+                out.append({**t, "step": "triage", "probation": probation("master")})
         if "intake_refiner" in roles:
             def backoff(step: str) -> set[str]:
                 return {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL, {"step": step})
@@ -2742,7 +2785,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "intake"})
+                if not allowed("intake_refiner", t):
+                    continue
+                out.append({**t, "step": "intake", "probation": probation("intake_refiner")})
             # change requests from the Business view: assess the impact once, while they wait in Backlog
             waiting = backoff("impact")
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
@@ -2754,7 +2799,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "impact"})
+                if not allowed("intake_refiner", t):
+                    continue
+                out.append({**t, "step": "impact", "probation": probation("intake_refiner")})
         out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
@@ -2770,7 +2817,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in labels:
                     continue
-                dev_rows.append({**t, "step": "dev"})
+                if not allowed("dev", t):
+                    continue
+                dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
@@ -2791,6 +2840,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not account or account.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
+            return None
+        if (account_id, "master") in role_health.disabled_roles(ctx.db):  # no ticket to try on: probation uses triage
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -2881,8 +2932,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             if prior_pr_match:
                 triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
         run_id = str(uuid.uuid4())
+        probation_id = None
+        if t.get("probation"):  # the one easy ticket a day of a switched-off role
+            probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
+            if probation_id is None:
+                return JSONResponse({"claimed": False, "reason": "today's probation ticket is already assigned"},
+                                    status_code=409)
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:
+            if probation_id is not None:
+                role_health.drop_probation(ctx.db, probation_id)
             return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
         model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
         run_token = secrets.token_urlsafe(32)
@@ -2905,6 +2964,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
+        if probation_id is not None:
+            role_health.attach_probation_run(ctx.db, probation_id, run_id)
+            ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
+                            account=acc.id, outcome="assigned",
+                            reason=f"probation ticket for role {role_health.role_of(body.step)}")
         ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
                    (acc.id,))
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -2953,6 +3017,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             extra["master_scope"] = "global"
         else:
             extra["related"] = related_hits(t)
+        try:
+            ticket_context = f"{t.get('summary', '')}\n{t.get('description', '')}"[:12_000]
+            extra["context_pack"] = knowledge.context_pack(ctx.db, project=t.get("project", ""), ticket=t["key"],
+                                                           epic=epic or "", query=ticket_context, run_id=run_id)
+        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
+            log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
+            extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
         project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
                          "node": node,
                          "work_minutes": {"target": 30, "warn": 45, "hard": 60},
@@ -3076,10 +3147,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
                   "description": f"Run full configured project checks on {release_branch}, cut from {source_branch}.",
                   "labels": [], "priority": "Highest", "type": "Release"}
+        try:
+            context_pack = knowledge.context_pack(ctx.db, project=project.key, ticket=key,
+                                                  query=f"{ticket['summary']}\n{ticket['description']}", run_id=run_id)
+        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
+            log.warning("knowledge context pack for release %s failed: %s", version["name"], type(exc).__name__)
+            context_pack = {"project": project.key, "ticket": key, "items": []}
         return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": lease.fence,
                 "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
                 "provider": acc.provider, "model": "", "effort": "", "account": acc.id,
-                "identity": bot_identity(), "ticket": ticket, "project": project_data,
+                "identity": bot_identity(), "ticket": ticket, "project": project_data, "context_pack": context_pack,
                 "version": version, "tracker_key": tracker, "tickets": snapshot["tickets"]}
 
     @app.post("/v1/version-releases/{version_id}/complete")
@@ -3164,6 +3241,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         if body.outcome == "tool_missing" and run["step"] == "dev":
             tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []], body.summary)
+        try:
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+        except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
+            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
@@ -3178,6 +3260,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                         node=node, duration_ms=dur, outcome=body.outcome, reason=body.error_kind or body.summary[:200],
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
+        try:  # quality by role: this result may switch the role off or settle a probation ticket
+            role_health.evaluate(ctx, run["account_id"])
+            if run["step"] == "verify":  # a verdict also decides the dev run it judged
+                dev = last_dev(run["ticket_key"])
+                if dev and dev["account_id"] != run["account_id"]:
+                    role_health.evaluate(ctx, dev["account_id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("role health after run %s failed: %s", run_id, e)
         return {"ok": True, "still_owner": still_owner}
 
     @app.post("/v1/runs/{run_id}/release")
@@ -4358,6 +4448,24 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(404, "unknown ticket")
         return tl
 
+    @app.get("/v1/role-health")
+    def role_health_state() -> dict:
+        return role_health.summary(ctx)
+
+    @app.put("/v1/role-health/settings")
+    def role_health_settings(body: RoleHealthSettingsBody, request: Request) -> dict:
+        user = console_user(request, {"console.manage"}, target="aiflow-control", action="role_health_settings")
+        try:
+            role_health.set_settings(ctx.db, body.window_runs, body.failure_percent, user.subject)
+        except ValueError as e:
+            audit("aiflow-control", "role_health_settings", "", "", None, user.subject, False, str(e), body.model_dump())
+            raise HTTPException(422, str(e)) from e
+        audit("aiflow-control", "role_health_settings", "", "", None, user.subject, True, "saved", body.model_dump())
+        ctx.events.emit("role.settings", account=user.subject, outcome="saved",
+                        reason=f"window {body.window_runs} runs, failure score above {body.failure_percent}%")
+        role_health.evaluate(ctx)
+        return role_health.summary(ctx)
+
     @app.get("/v1/analytics/daily")
     def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
@@ -4371,6 +4479,35 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/memory/study-cases")
     def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
         return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
+
+    # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------
+    @app.get("/v1/knowledge/items")
+    def knowledge_items(request: Request, project: str = "", q: str = "", include_retired: bool = True) -> dict:
+        console_user(request, "knowledge.read")
+        return knowledge.dashboard(ctx.db, project, q, include_retired)
+
+    @app.post("/v1/knowledge/items")
+    def knowledge_item_save(body: KnowledgeItemBody, request: Request) -> dict:
+        user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
+        try:
+            item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
+                                       title=body.title, content=body.content, actor=body.actor or user.subject)
+        except knowledge.Invalid as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return knowledge._pack_item(item)
+
+    @app.post("/v1/knowledge/items/{item_id}/{action}")
+    def knowledge_item_action(item_id: int, action: str, body: KnowledgeItemActionBody, request: Request) -> dict:
+        user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
+                            node=str(item_id))
+        try:
+            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=body.actor or user.subject,
+                                           content=body.content, title=body.title,
+                                           duplicate_id=body.duplicate_id, project=body.project,
+                                           scope=body.scope or None, epic=body.epic)
+        except knowledge.Invalid as exc:
+            raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
+        return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
     def load_managed_resources() -> None:

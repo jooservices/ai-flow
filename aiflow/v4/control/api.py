@@ -2924,6 +2924,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = business_project(key)
         return {"project": project, "versions": business.release_readiness(ctx.db, project)}
 
+    @app.get("/v1/business/{key}/release-progress")
+    def business_release_progress(key: str) -> dict:
+        project = business_project(key)
+        return {"project": project, "versions": business.release_progress_of(ctx.db, project)}
+
     @app.post("/v1/business/{key}/change-requests")
     def business_change_request(key: str, body: ChangeRequestBody) -> dict:
         project = business_project(key)

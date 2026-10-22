@@ -20,7 +20,7 @@ def _iso(ts: datetime | None) -> str | None:
 
 
 def snapshot(ctx) -> dict[str, Any]:
-    from . import api as control_api, release_readiness, rollout
+    from . import api as control_api, release_progress, release_readiness, rollout
     db = ctx.db
     repo = ctx.repo()
     releases = control_api.RELEASES
@@ -158,7 +158,8 @@ def snapshot(ctx) -> dict[str, Any]:
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
-        "release_readiness": release_readiness.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
+        "release_readiness": release_readiness.all_versions(db, repo.projects),
+        "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},

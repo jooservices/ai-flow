@@ -139,6 +139,9 @@ class FakeJira:
         self.search_queries.append(jql)
         return iter(self.search_data)
 
+    def search_history(self, jql: str):
+        return self.search(jql)
+
     def versions(self, project: str) -> list[dict]:
         return list(self.version_data.get(project, []))
 

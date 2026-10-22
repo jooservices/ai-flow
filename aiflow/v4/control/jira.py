@@ -13,7 +13,7 @@ retry. With a source, the gateway is falsy while no credential is usable, so `if
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import httpx
@@ -84,10 +84,13 @@ class Jira:
         return self.field_ids.get(name)
 
     # --- reads ----------------------------------------------------------------------------------------------
-    def search(self, jql: str, fields: list[str] | None = None, page: int = 100) -> Iterator[dict]:
+    def search(self, jql: str, fields: list[str] | None = None, page: int = 100,
+               expand: str = "") -> Iterator[dict]:
         token = None
         while True:
             body: dict[str, Any] = {"jql": jql, "maxResults": page, "fields": fields or FIELDS}
+            if expand:
+                body["expand"] = expand
             if token:
                 body["nextPageToken"] = token
             data = self.call("POST", "/rest/api/3/search/jql", body)
@@ -95,6 +98,28 @@ class Jira:
             token = data.get("nextPageToken")
             if data.get("isLast", True) or not token:
                 return
+
+    def search_history(self, jql: str) -> Iterator[dict]:
+        """`search` with each issue's change history, for the registry sync."""
+        return self.search(jql, expand="changelog")
+
+    @staticmethod
+    def history(issue: dict) -> dict[str, Any]:
+        """From an issue read with expand=changelog: when each Fix version was last attached and when the ticket
+        first moved to In Progress. Empty values when the issue carries no changelog."""
+        added: dict[str, datetime] = {}
+        first_in_progress: datetime | None = None
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        histories = sorted(((_ts(h.get("created")), h) for h in (issue.get("changelog") or {}).get("histories") or []),
+                           key=lambda pair: pair[0] or floor)
+        for at, h in histories:
+            for item in h.get("items") or []:
+                field = str(item.get("field") or "").lower()
+                if field in ("fix version", "fixversions") and item.get("to") and at:
+                    added[str(item["to"])] = at
+                elif field == "status" and item.get("toString") == "In Progress" and at and not first_in_progress:
+                    first_in_progress = at
+        return {"fix_version_added": added, "first_in_progress": first_in_progress}
 
     @staticmethod
     def normalize(issue: dict) -> dict:
@@ -120,6 +145,7 @@ class Jira:
             "jira_created": _ts(f.get("created")), "jira_updated": _ts(f.get("updated")),
             "done_at": _ts(f.get("resolutiondate")),
             "fix_versions": [str(version["id"]) for version in (f.get("fixVersions") or []) if version.get("id")],
+            **Jira.history(issue),
         }
 
     def status(self, key: str) -> str:

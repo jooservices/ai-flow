@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import release_readiness as readiness
+from . import release_progress, release_readiness as readiness
 from .projects import reopen_for_new_ticket
 
 LABEL = "change-request"
@@ -47,6 +47,10 @@ def change_requests(db, project: str, jira_site: str = "") -> list[dict[str, Any
                     "assessment": "done" if impact else "assessing", "impact": impact or None,
                     "assessed_at": a["ended_at"].isoformat() if impact and a["ended_at"] else None})
     return out
+
+
+def release_progress_of(db, project: str) -> list[dict[str, Any]]:
+    return release_progress.project_versions(db, project)
 
 
 def release_readiness(db, project: str) -> list[dict[str, Any]]:

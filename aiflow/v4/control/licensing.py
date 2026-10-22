@@ -187,6 +187,7 @@ def save_limits(db, plan: str, limits: dict[str, Any], public_key: str) -> dict[
     if set(limits) != set(PLAN_DEFAULTS[plan]):
         raise LicenseError("Provide machine, AI account, project and user limits.")
     cleaned = {key: _bounded_limit(limits[key]) for key in PLAN_DEFAULTS[plan]}
+    require_writable(db, public_key)
     row = _row(db)
     all_limits = _key_map(row.get("plan_limits"))
     all_limits[plan] = cleaned
@@ -235,7 +236,10 @@ def enforce_account_entitlement(ctx, account_id: str, *, public_key: str) -> Non
     """Keep excess configured accounts from starting new runs while leaving their running work alone."""
     state = require_writable(ctx.db, public_key)
     limit = state["limits"]["ai_accounts"]
-    account_ids = [str(row["id"]) for row in ctx.db.all("SELECT id FROM accounts ORDER BY id")]
+    # A configured account can be intentionally absent from the database when startup sync skipped it at
+    # capacity. Count the union so that this resource still cannot claim work through the node API.
+    account_ids = sorted({str(row["id"]) for row in ctx.db.all("SELECT id FROM accounts ORDER BY id")}
+                         | {str(account.id) for account in ctx.repo().accounts})
     if account_id in account_ids and account_ids.index(account_id) >= limit:
         raise LicenseError(f"AI accounts limit of {limit} reached ({len(account_ids)}/{limit}). Disable or remove extra AI accounts or raise the limit in the Licence screen.")
 

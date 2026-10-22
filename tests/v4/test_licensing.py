@@ -79,6 +79,7 @@ def test_plan_defaults_and_console_licence_usage_export_path(client, ctx):
     page = PAGE.read_text()
     assert 'data-view="licensing">Licence</button>' in page
     assert 'id="license-warning"' in page and "14-day grace period" in page
+    assert "state.sync_warnings" in page
     for path in ("/v1/licensing/status", "/v1/licensing/activate", "/v1/licensing/offline", "/v1/licensing/limits",
                  "/v1/licensing/usage.csv", "Export spreadsheet"):
         assert path in page
@@ -183,6 +184,36 @@ def test_limits_are_editable_and_project_machine_account_and_user_caps_are_enfor
         login.seed_user(ctx.db, "second@example.test", "lead")
 
 
+def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(client, ctx):
+    sign_in(client, ctx)
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["ai_accounts"] = 2
+    limits["free"]["machines"] = 1
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+    ctx.db.run("DELETE FROM accounts")
+    ctx.db.run("DELETE FROM nodes")
+
+    warnings = client.app.state.sync_accounts()
+
+    assert ctx.db.one("SELECT count(*) AS count FROM accounts")["count"] == 2
+    assert ctx.db.one("SELECT id FROM accounts WHERE id='opencode-01'") is None
+    assert ctx.db.one("SELECT count(*) AS count FROM nodes")["count"] == 1
+    assert ctx.db.one("SELECT name FROM nodes WHERE name='node1'") is None
+    assert any("AI accounts limit of 2 reached" in message and "Licence screen" in message
+               for message in warnings)
+    assert any("Machines limit of 1 reached" in message and "Licence screen" in message
+               for message in warnings)
+    assert client.get("/v1/licensing").json()["sync_warnings"] == warnings
+
+    # A configured account omitted from the registry still cannot claim new work by name.
+    with pytest.raises(licensing.LicenseError, match="AI accounts limit of 2 reached"):
+        licensing.enforce_account_entitlement(ctx, "opencode-01", public_key=ctx.settings.license_public_key)
+    ctx.settings.join_token = "join-secret"
+    refused = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node1",
+                                                         "role": "worker", "project": "TESTWP"})
+    assert refused.status_code == 409 and "Machines limit of 1" in refused.json()["detail"]
+
+
 def test_running_work_survives_account_limit_refusal(client, ctx):
     sign_in(client, ctx)
     joined = join_node(client, "cc")
@@ -230,6 +261,12 @@ def test_expired_and_first_detected_invalid_licences_use_their_correct_grace_clo
         "merge_method": "squash",
     })
     assert readonly.status_code == 423 and "read-only" in readonly.json()["detail"]
+    limits_before = ctx.db.one("SELECT plan_limits FROM licensing_state WHERE id=1")["plan_limits"]
+    limits_refused = client.put("/v1/licensing/limits", json={
+        "plan": "free", "limits": {"machines": 10, "ai_accounts": 10, "projects": 10, "users": 10},
+    })
+    assert limits_refused.status_code == 423 and "read-only" in limits_refused.json()["detail"]
+    assert ctx.db.one("SELECT plan_limits FROM licensing_state WHERE id=1")["plan_limits"] == limits_before
     assert ctx.db.one("SELECT count(*) AS count FROM tickets")["count"] == before_tickets
     restored = client.post("/v1/licensing/offline", json={"license_file": renewal})
     assert restored.status_code == 200 and restored.json()["status"] == "active"

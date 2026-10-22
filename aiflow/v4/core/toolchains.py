@@ -49,6 +49,10 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "playwright-browser": ("playwright_browser", "playwright-browser", "playwright"),
 }
 
+# A tool that is installed but cannot work on this machine (e.g. Chromium without a system library) is reported
+# as `broken: <reason>`; it is a gap of the machine's toolchain, never a ticket failure.
+BROKEN_PREFIX = "broken:"
+
 _VERSION = re.compile(r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){0,2})(?![A-Za-z0-9])")
 
 
@@ -132,7 +136,8 @@ def tools_for_stacks(stacks: Iterable[str]) -> list[str]:
 def missing_tools(tools: dict[str, object] | None, required: Iterable[str]) -> list[str]:
     """Required tools whose reported value is absent or exactly `missing`."""
     reported = tools or {}
-    return [tool for tool in required if str(reported.get(tool, "missing")) == "missing"]
+    return [tool for tool in required if str(reported.get(tool, "missing")) == "missing"
+            or str(reported.get(tool)).startswith(BROKEN_PREFIX)]
 
 
 def version_matches(actual: object, expected: str) -> bool:
@@ -142,7 +147,7 @@ def version_matches(actual: object, expected: str) -> bool:
     numeric components check an exact release. A missing pin means presence is checked separately.
     """
     value = str(actual or "")
-    if value in {"", "missing", "timeout"}:
+    if value in {"", "missing", "timeout"} or value.startswith(BROKEN_PREFIX):
         return False
     if not expected:
         return True
@@ -172,7 +177,7 @@ def toolchain_gaps(tools: dict[str, object] | None, required: Iterable[str],
             gaps.append(tool)
             continue
         actual = reported.get(tool, "missing")
-        if str(actual) in {"", "missing", "timeout"}:
+        if str(actual) in {"", "missing", "timeout"} or str(actual).startswith(BROKEN_PREFIX):
             gaps.append(tool)
             continue
         expected = pinned_version(versions, tool, stacks)

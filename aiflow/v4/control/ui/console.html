@@ -2760,6 +2760,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'system-check-run') {
     S.systemCheckBusy = true; renderSystemCheck();
     fetch('/v1/system-check/run', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
+      .then(function () { return fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); }); })
       .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
       .catch(function (err) { S.systemCheckError = String(err.message || err); })
       .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });

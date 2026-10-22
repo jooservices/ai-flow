@@ -240,9 +240,7 @@ def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[st
 
 
 def _credential_conditions(states: list[dict]) -> dict[str, dict]:
-    """Publish credential presence/validity only; never copy provider output or credential material."""
-    from ..core.system_check import condition
-
+    """Publish only validated credential presence/validity state, never provider output or display text."""
     checks: dict[str, dict] = {}
     for worker in states:
         account = str(worker.get("account") or "")
@@ -250,17 +248,14 @@ def _credential_conditions(states: list[dict]) -> dict[str, dict]:
             continue
         probe = worker.get("probe") or {}
         if isinstance(probe, dict) and probe.get("ok"):
-            item = condition(f"credential:{account}", f"Credentials · {account}", "ready",
-                             "Credential is present and valid.")
-        elif not worker.get("alive", True) or worker.get("state") == "signed_out" or \
-                (isinstance(probe, dict) and probe.get("error_kind") == "auth"):
-            item = condition(f"credential:{account}", f"Credentials · {account}", "needs_action",
-                             "Credential is missing or invalid.", f"Sign in again to AI account {account} on this machine.")
+            status = {"present": True, "valid": True}
+        elif worker.get("state") == "signed_out" or (isinstance(probe, dict) and probe.get("error_kind") == "auth"):
+            status = {"present": True, "valid": False}
+        elif not worker.get("alive", True):
+            status = {"present": False, "valid": None}
         else:
-            item = condition(f"credential:{account}", f"Credentials · {account}", "needs_action",
-                             "Credential validity has not been confirmed.",
-                             f"Sign in to AI account {account} on this machine.")
-        checks[account] = item
+            status = {"present": True, "valid": None}
+        checks[account] = status
     return checks
 
 

@@ -73,8 +73,7 @@ def test_all_four_results_and_action_text_are_reported_per_project(client, ctx):
     node_headers = {"Authorization": f"Bearer {headers['node_token']}"}
     tools = ctx.db.one("SELECT tools FROM nodes WHERE name='cc'")["tools"]
     tools["composer"] = "missing"
-    credentials = {account.id: condition(f"credential:{account.id}", f"Credentials · {account.id}", "ready",
-                                         "Credential is present and valid.")
+    credentials = {account.id: {"present": True, "valid": True}
                    for account in ctx.repo().accounts_on("cc")}
     response = client.post("/v1/nodes/cc/heartbeat", headers=node_headers, json={
         "tools": tools, "metrics": {"disk_free": 10 * 1024 ** 3},
@@ -172,6 +171,10 @@ def test_system_check_screen_and_clean_install_acceptance_include_results():
     assert "Ready" in page and "Fixed automatically" in page and "Needs an action" in page
     assert "Not possible on this machine" in page and "/v1/support-bundle" in page
     assert "c.name + ' — ' + (c.action || c.detail)" in page
+    run_handler = page.split("else if (act === 'system-check-run') {", 1)[1].split("\n  else if", 1)[0]
+    assert "fetch('/v1/system-check/run'" in run_handler
+    assert "fetch('/v1/system-check', { cache: 'no-store' })" in run_handler
+    assert "S.systemCheck = d" in run_handler
     smoke = (root / "deploy/v4/ci/install-smoke.sh").read_text(encoding="utf-8")
     assert "/v1/system-check" in smoke and "/v1/support-bundle" in smoke
 
@@ -188,5 +191,62 @@ def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, t
                                             "probe": {"ok": False, "error_kind": "auth",
                                                       "summary": "SECRET-CREDENTIAL-VALUE"}}])
     encoded = json.dumps(checks)
-    assert checks["codex-01"]["result"] == "needs_action"
+    assert checks["codex-01"] == {"present": True, "valid": False}
     assert "SECRET-CREDENTIAL-VALUE" not in encoded
+
+
+def test_credential_heartbeat_is_rebuilt_from_boolean_status_fields_and_bundle_is_scrubbed(client, ctx):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    account_id = ctx.repo().accounts_on("cc")[0].id
+    payload_secret = "SECRET-CREDENTIAL-FIELD"
+    client.post("/v1/nodes/cc/heartbeat", headers=headers, json={
+        "credential_checks": {
+            account_id: {"present": True, "valid": False, "detail": payload_secret,
+                         "action": payload_secret, "provider_output": payload_secret},
+            "unassigned-secret-account": {"present": True, "valid": True, "detail": payload_secret},
+        },
+    })
+
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    credential = next(item for item in readiness["projects"]["TESTWP"]
+                      if item["id"] == f"credential:{account_id}")
+    assert credential["result"] == "needs_action"
+    assert credential["detail"] == "Credential is invalid."
+    assert credential["action"] == f"Sign in again to AI account {account_id} on this machine."
+    assert readiness["credential_statuses"] == {account_id: {"present": True, "valid": False}}
+    assert "credential_inputs" not in readiness
+    assert payload_secret not in json.dumps(readiness)
+
+    bundle = client.get("/v1/support-bundle").json()
+    assert payload_secret not in json.dumps(bundle)
+    assert bundle["system_check"]["nodes"][0]["readiness"]["credential_statuses"] == {
+        account_id: {"present": True, "valid": False}}
+
+
+def test_legacy_credential_rows_are_scrubbed_from_report_and_bundle(client, ctx):
+    join_node(client, "cc")
+    account_id = ctx.repo().accounts_on("cc")[0].id
+    secret = "LEGACY-STORED-CREDENTIAL-OUTPUT"
+    from aiflow.v4.control.db import J
+
+    ctx.db.run("UPDATE nodes SET readiness=%s WHERE name='cc'", (J({
+        "machine": [],
+        "projects": {"TESTWP": [{"id": secret, "name": secret,
+                                 "result": "needs_action", "detail": secret, "action": secret,
+                                 "provider_output": secret}]},
+        "credential_inputs": {account_id: {"detail": secret}},
+        "checked_at": "2026-10-22T00:00:00+00:00",
+    }),))
+
+    report = client.get("/v1/system-check").json()
+    bundle = client.get("/v1/support-bundle").json()
+    for payload in (report, bundle):
+        encoded = json.dumps(payload)
+        assert secret not in encoded
+        readiness = (payload["nodes"][0]["readiness"] if payload is report
+                     else payload["system_check"]["nodes"][0]["readiness"])
+        credential = readiness["projects"]["TESTWP"][0]
+        assert credential["detail"] == "Credential status has not been confirmed."
+        assert credential["action"] == f"Sign in to AI account {account_id} on this machine."
+        assert "credential_inputs" not in readiness

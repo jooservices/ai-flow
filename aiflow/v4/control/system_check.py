@@ -12,6 +12,21 @@ from . import notify
 BLOCKING = {"needs_action", "not_possible_on_this_machine"}
 
 
+def _credential_condition(account_id: str, status: dict[str, bool | None]) -> dict[str, object]:
+    """Build a credential row from status booleans, never from agent-supplied display text."""
+    name = f"Credentials · {account_id}"
+    action = f"Sign in again to AI account {account_id} on this machine."
+    if status.get("present") is False:
+        return condition(f"credential:{account_id}", name, "needs_action", "Credential is missing.", action)
+    if status.get("present") is True and status.get("valid") is False:
+        return condition(f"credential:{account_id}", name, "needs_action", "Credential is invalid.", action)
+    if status.get("present") is True and status.get("valid") is True:
+        return condition(f"credential:{account_id}", name, "ready", "Credential is present and valid.")
+    return condition(f"credential:{account_id}", name, "needs_action",
+                     "Credential status has not been confirmed.",
+                     f"Sign in to AI account {account_id} on this machine.", affects_work=False)
+
+
 def _account_condition(row: dict | None, account_id: str) -> dict[str, object]:
     if not row:
         return condition(f"credential:{account_id}", f"Credentials · {account_id}",
@@ -19,12 +34,11 @@ def _account_condition(row: dict | None, account_id: str) -> dict[str, object]:
                          f"Sign in to AI account {account_id} on this machine.")
     state = row.get("worker_state") or {}
     probe = state.get("probe") if isinstance(state, dict) else None
-    if isinstance(probe, dict) and probe.get("ok"):
+    if isinstance(probe, dict) and probe.get("ok") is True:
         return condition(f"credential:{account_id}", f"Credentials · {account_id}", "ready",
                          "Credential is present and valid.")
     if row.get("status") == "signed_out" or (isinstance(probe, dict) and probe.get("error_kind") == "auth"):
-        return condition(f"credential:{account_id}", f"Credentials · {account_id}", "needs_action",
-                         "Credential is invalid.", f"Sign in again to AI account {account_id} on this machine.")
+        return _credential_condition(account_id, {"present": True, "valid": False})
     return condition(f"credential:{account_id}", f"Credentials · {account_id}", "needs_action",
                      "Credential validity has not been confirmed.",
                      f"Sign in to AI account {account_id} on this machine.", affects_work=False)
@@ -160,7 +174,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
 
 def _condition_map(readiness: dict) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
-    for item in readiness.get("machine", []):
+    for item in readiness.get("machine", []) or []:
         if isinstance(item, dict):
             out[("machine", str(item.get("id")))] = item
     for project, items in (readiness.get("projects") or {}).items():
@@ -168,6 +182,82 @@ def _condition_map(readiness: dict) -> dict[tuple[str, str], dict]:
             if isinstance(item, dict):
                 out[(str(project), str(item.get("id")))] = item
     return out
+
+
+def _validated_credential_statuses(raw: object, account_ids: list[str]) -> dict[str, dict[str, bool | None]]:
+    """Keep only expected account IDs and explicit boolean presence/validity fields."""
+    if not isinstance(raw, dict):
+        return {}
+    statuses: dict[str, dict[str, bool | None]] = {}
+    for account_id in account_ids:
+        value = raw.get(account_id)
+        if not isinstance(value, dict) or "present" not in value or "valid" not in value:
+            continue
+        present, valid = value.get("present"), value.get("valid")
+        if (present is not None and type(present) is not bool) or (valid is not None and type(valid) is not bool):
+            continue
+        statuses[account_id] = {"present": present, "valid": valid}
+    return statuses
+
+
+def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> dict:
+    """Remove pre-fix credential input and rebuild credential rows in stored results."""
+    if not isinstance(readiness, dict):
+        return {}
+    has_credential_snapshot = any(key in readiness for key in
+                                  ("credential_inputs", "credential_checks", "credential_statuses"))
+    safe = {key: value for key, value in readiness.items()
+            if key not in {"credential_inputs", "credential_checks"}}
+    credential_statuses = _validated_credential_statuses(safe.get("credential_statuses"), account_ids or [])
+
+    def clean_rows(rows: object) -> object:
+        if not isinstance(rows, list):
+            return rows
+        cleaned = []
+        for item in rows:
+            if not isinstance(item, dict) or not str(item.get("id", "")).startswith("credential:"):
+                cleaned.append(item)
+                continue
+            account_id = str(item["id"]).removeprefix("credential:")
+            if account_id in credential_statuses:
+                cleaned.append(_credential_condition(account_id, credential_statuses[account_id]))
+            elif item.get("result") == "ready":
+                cleaned.append(_credential_condition(account_id, {"present": True, "valid": True}))
+            else:
+                # Older snapshots did not retain normalized status. Recheck until a fresh node report arrives.
+                cleaned.append(condition(f"credential:{account_id}", f"Credentials · {account_id}", "needs_action",
+                                         "Credential status has not been confirmed.",
+                                         f"Sign in to AI account {account_id} on this machine."))
+        return cleaned
+
+    if "machine" in safe:
+        safe["machine"] = clean_rows(safe.get("machine"))
+    if isinstance(safe.get("projects"), dict):
+        clean_projects = {}
+        for project, rows in safe["projects"].items():
+            if not isinstance(rows, list):
+                clean_projects[project] = rows
+                continue
+            if account_ids and has_credential_snapshot:
+                existing = rows[-len(account_ids):] if len(rows) >= len(account_ids) else rows
+                base = rows[:-len(account_ids)] if len(rows) >= len(account_ids) else []
+                rebuilt = []
+                for index, account_id in enumerate(account_ids):
+                    old = existing[index] if index < len(existing) else {}
+                    if account_id in credential_statuses:
+                        rebuilt.append(_credential_condition(account_id, credential_statuses[account_id]))
+                    elif isinstance(old, dict) and old.get("result") == "ready":
+                        rebuilt.append(_credential_condition(account_id, {"present": True, "valid": True}))
+                    else:
+                        rebuilt.append(condition(f"credential:{account_id}", f"Credentials · {account_id}",
+                                                 "needs_action", "Credential status has not been confirmed.",
+                                                 f"Sign in to AI account {account_id} on this machine."))
+                clean_projects[project] = base + rebuilt
+            else:
+                clean_projects[project] = clean_rows(rows)
+        safe["projects"] = clean_projects
+    safe["credential_statuses"] = credential_statuses
+    return safe
 
 
 def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions: list[dict] | None = None,
@@ -181,14 +271,24 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     if not row:
         return {"node": node, "machine": [], "projects": {}, "checked_at": "", "trigger": trigger}
     repo = ctx.repo()
-    stored = row.get("readiness") or {}
+    assigned_accounts = [account.id for account in repo.accounts_on(node)]
+    stored = _safe_readiness(row.get("readiness") or {}, assigned_accounts)
     raw_machine = machine_conditions if machine_conditions is not None else stored.get("machine_inputs", [])
-    credentials = credential_checks if credential_checks is not None else stored.get("credential_inputs", {})
+    credential_statuses = _validated_credential_statuses(
+        credential_checks if credential_checks is not None else stored.get("credential_statuses"),
+        assigned_accounts)
     auto_fixed = set(auto_fixed_tools if auto_fixed_tools is not None else stored.get("auto_fixed_tools", []))
     auto_fixed_condition_ids = set(auto_fixed_conditions if auto_fixed_conditions is not None
                                    else stored.get("auto_fixed_conditions", []))
     machine = _machine_conditions(raw_machine, row.get("metrics") or {}, auto_fixed_condition_ids,
                                   str(row.get("status") or "joined"))
+    account_rows = {item["id"]: item for item in ctx.db.all(
+        "SELECT id,status,worker_state FROM accounts WHERE node=%s ORDER BY id", (node,))}
+    credentials = {
+        account_id: _credential_condition(account_id, credential_statuses[account_id])
+        if account_id in credential_statuses else _account_condition(account_rows.get(account_id), account_id)
+        for account_id in assigned_accounts
+    }
     project_keys = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
     project_results = {
         key: _project_conditions(ctx, node, key, repo, row.get("tools") or {}, row.get("metrics") or {},
@@ -198,7 +298,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     checked_at = datetime.now(timezone.utc).isoformat()
     result = {"node": node, "machine": machine, "projects": project_results,
               "checked_at": checked_at, "trigger": trigger,
-              "machine_inputs": raw_machine, "credential_inputs": credentials,
+              "machine_inputs": raw_machine, "credential_statuses": credential_statuses,
               "auto_fixed_tools": sorted(auto_fixed),
               "auto_fixed_conditions": sorted(auto_fixed_condition_ids)}
 
@@ -243,14 +343,16 @@ def blocking_reasons(readiness: dict | None, project: str, account: str = "") ->
 
 
 def support_bundle(ctx) -> dict:
-    """Safe, compact support snapshot; readiness data is already scrubbed of credential values."""
+    """Safe, compact support snapshot with credential rows rebuilt from allowlisted status only."""
     nodes = ctx.db.all("SELECT name,status,release_version,tools,metrics,readiness,readiness_checked_at"
                        " FROM nodes ORDER BY name")
+    repo = ctx.repo()
     return {"generated_at": datetime.now(timezone.utc).isoformat(),
             "system_check": {"nodes": [
                 {"name": row["name"], "status": row["status"], "release": row["release_version"],
                  "tools": row["tools"] or {}, "metrics": row["metrics"] or {},
-                 "readiness": row["readiness"] or {},
+                 "readiness": _safe_readiness(row["readiness"] or {},
+                                              [account.id for account in repo.accounts_on(row["name"])]),
                  "checked_at": row["readiness_checked_at"].isoformat() if row["readiness_checked_at"] else None}
                 for row in nodes]},
-            "projects": sorted(ctx.repo().projects)}
+            "projects": sorted(repo.projects)}

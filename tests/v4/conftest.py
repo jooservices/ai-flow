@@ -422,9 +422,7 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
                       "playwright-browser": "Playwright Chromium 1.56.0"})
         services = {name: {"state": "running", "healthy": True, "detail": "healthy"}
                     for name in repo.projects[project_key].required_services}
-        credentials = {account.id: condition(f"credential:{account.id}", f"Credentials · {account.id}", "ready",
-                                             "Credential is present and valid.")
-                       for account in repo.accounts_on(name)}
+        credentials = {account.id: {"present": True, "valid": True} for account in repo.accounts_on(name)}
         from aiflow.v4.control.db import J
         from aiflow.v4.control.system_check import refresh_node
 

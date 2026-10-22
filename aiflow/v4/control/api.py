@@ -3959,8 +3959,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/system-check")
     def system_check_report() -> dict:
         nodes = ctx.db.all("SELECT name,status,readiness,readiness_checked_at FROM nodes ORDER BY name")
+        repo = ctx.repo()
         return {"nodes": [{"name": row["name"], "status": row["status"],
-                            "readiness": row["readiness"] or {},
+                            "readiness": system_check._safe_readiness(
+                                row["readiness"] or {},
+                                [account.id for account in repo.accounts_on(row["name"])]),
                             "checked_at": row["readiness_checked_at"].isoformat()
                             if row["readiness_checked_at"] else None} for row in nodes]}
 

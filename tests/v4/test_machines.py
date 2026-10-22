@@ -105,6 +105,32 @@ def test_machine_join_command_waits_for_join_and_expires_after_five_minutes(clie
         "SELECT action FROM write_audit WHERE target='node' AND ticket='new-console-machine'")} >= {"join_command"}
 
 
+def test_stopped_live_machine_cannot_be_reenrolled_with_the_same_name(client, ctx, monkeypatch, tmp_path):
+    release_fixture(monkeypatch, tmp_path)
+    owner_session(client, ctx)
+    joined = join_node(client, "screen-stopped-machine")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    heartbeat = client.post("/v1/nodes/screen-stopped-machine/heartbeat", json={"slots_total": 8}, headers=headers)
+    assert heartbeat.status_code == 200
+
+    stopped = client.put("/v1/nodes/screen-stopped-machine/work-acceptance?accepting_work=false",
+                         json={"confirm": True})
+    assert stopped.status_code == 200 and stopped.json()["accepting_work"] is False
+    before = ctx.db.one("SELECT token_hash,status,accepting_work FROM nodes WHERE name=%s",
+                        ("screen-stopped-machine",))
+    assert before["status"] == "draining" and before["accepting_work"] is False
+
+    reenroll = client.post("/v1/nodes/screen-stopped-machine/join-command", json={
+        "name": "screen-stopped-machine", "role": "worker", "project": "TESTWP"})
+
+    assert reenroll.status_code == 409
+    after = ctx.db.one("SELECT token_hash,status,accepting_work FROM nodes WHERE name=%s",
+                       ("screen-stopped-machine",))
+    assert after == before
+    assert ctx.db.one("SELECT count(*) AS n FROM node_join_tokens WHERE node_name=%s AND used_at IS NULL",
+                      ("screen-stopped-machine",))["n"] == 0
+
+
 def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, ctx, monkeypatch, tmp_path):
     owner_session(client, ctx)
     node_auth = {"Authorization": f"Bearer {join_node(client, 'node1').json()['node_token']}"}

@@ -1943,9 +1943,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         dynamic = name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
-        existing = ctx.db.one("SELECT name,status,removed_at FROM nodes WHERE name=%s", (name,))
-        if existing and not existing["removed_at"] and dynamic and existing["status"] == "online":
-            raise HTTPException(409, "an online node already uses this name")
+        existing = ctx.db.one("SELECT name,removed_at FROM nodes WHERE name=%s AND token_hash<>''"
+                              " AND last_heartbeat > now()-interval '75 seconds'", (name,))
+        if existing and not existing["removed_at"]:
+            raise HTTPException(409, "a live node already uses this name")
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
@@ -3047,6 +3048,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
+        node_row = ctx.db.one("SELECT accepting_work FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
+        if not node_row or not node_row["accepting_work"]:
+            return {"versions": [], "reason": "machine is not accepting new work"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
         return {"versions": version_release.candidates(ctx, account, node)}
@@ -3066,7 +3070,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "project is not enabled for version releases")
         if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
-        node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}
+        if not node_row.get("accepting_work", False):
+            raise HTTPException(409, "machine is not accepting new work")
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
             raise HTTPException(403, "project is not assigned to this node")
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)

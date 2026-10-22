@@ -537,7 +537,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
@@ -2218,6 +2218,13 @@ function drawerNode(name) {
   missingTools.forEach(function (k) { if (!(n.tools || {})[k]) b += '<span class="vk">' + esc(k) + '</span><span class="vv bad">missing</span>'; });
   b += '</div>';
   if (missingTools.length) b += '<div class="small" style="color:var(--crit);margin-top:6px">Missing for this node\'s project stacks: ' + esc(missingTools.join(', ')) + '. Install them on the node; the watchdog warns until a heartbeat reports them.</div>';
+  b += '</div><div class="dsec"><h4>Test services</h4>';
+  var nodeServices = n.services || [];
+  if (!nodeServices.length) b += '<div class="empty">No project served by this node declares test services.</div>';
+  nodeServices.forEach(function (svc) {
+    b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + (svc.healthy ? 'ok' : 'crit') + '"></span><span class="who">' + esc(svc.name) + ' <span class="mono small">' + esc(svc.endpoint) + '</span></span><span class="what">' + esc(svc.healthy ? svc.state : 'unhealthy') + ' · ' + esc(svc.detail || '') + (svc.projects && svc.projects.length ? ' · ' + esc(svc.projects.join(', ')) : '') + '</span></div>';
+    if (!svc.healthy) b += '<div class="small" style="color:var(--crit)">This node takes no work for ' + esc((svc.projects || []).join(', ') || 'its projects') + ' until ' + esc(svc.name) + ' is healthy.</div>';
+  });
   b += '</div><div class="dsec"><h4>Workers</h4>';
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
@@ -2286,6 +2293,7 @@ function drawerInc(id) {
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
+    node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
     ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';

@@ -660,12 +660,15 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "master run belongs to another node")
         return run
 
-    def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",)) -> tuple[dict, str, int, int]:
+    def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",),
+                     allowed_kinds: tuple[str, ...] | None = None) -> tuple[dict, str, int, int]:
         ticket = ctx.db.one("SELECT key, project, status, labels, summary, blocked_by FROM tickets WHERE key=%s", (key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
         if ticket["status"] not in statuses:
             raise HTTPException(409, "ticket is no longer waiting for this review action")
+        if allowed_kinds is not None and current_review_item_kind(ticket) not in allowed_kinds:
+            raise HTTPException(409, "this action does not apply to the current human review item")
         if not ctx.jira or not github_gateway(ctx):
             raise HTTPException(503, "Jira or GitHub is unavailable")
         pr_run = ctx.db.one("SELECT pr_url,details FROM runs WHERE ticket_key=%s AND pr_url<>''"
@@ -768,6 +771,16 @@ def create_app(ctx: Ctx) -> FastAPI:
                 return "question_from_ai"
             return "decision_needed"
         return "blocked"
+
+    def current_review_item_kind(ticket: dict) -> str:
+        """Classify a waiting ticket with the same live blocker check used by the review queue."""
+        blockers = [str(blocker) for blocker in (ticket.get("blocked_by") or [])]
+        statuses = {row["key"]: row["status"] for row in ctx.db.all(
+            "SELECT key,status FROM tickets WHERE key=ANY(%s)", (blockers,))} if blockers else {}
+        has_open_blocker = any(statuses.get(blocker) not in ("Done", "Closed") for blocker in blockers)
+        latest = ctx.db.one("SELECT step,outcome FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1",
+                            (ticket["key"],))
+        return review_item_kind({**ticket, "_has_open_blocker": has_open_blocker}, latest)
 
     def review_thread(key: str) -> list[dict]:
         thread = []
@@ -3065,6 +3078,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "decision_needed": ["answer", "ask-ai"],
                 "blocked": ["ask-ai"],
             }[kind]
+            if not match:
+                actions = [action for action in actions if action not in {"approve", "reject", "skip-gate"}]
             if kind == "review_before_merge" and "require-human" not in (ticket.get("labels") or []):
                 actions = [action for action in actions if action != "skip-gate"]
             out.append({
@@ -3256,7 +3271,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         answer = (body.answer or body.comment).strip()
         if not answer:
             raise HTTPException(400, "an answer is required")
-        ticket, run_id, fence, number = reviewer_run(key, ("Needs owner",))
+        ticket, run_id, fence, number = reviewer_run(
+            key, ("Needs owner",), allowed_kinds=("question_from_ai", "decision_needed"))
         try:
             reviewer_comment(key, run_id, fence, number, f"Human answer to the AI:\n\n{answer}")
             reviewer_labels(key, run_id, fence, remove=("owner-escalated",))

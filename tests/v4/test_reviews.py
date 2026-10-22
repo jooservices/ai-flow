@@ -320,6 +320,27 @@ def test_reviewer_answer_clears_owner_escalation_and_writes_to_jira_pr_and_audit
                       (key,)) == {"action": "answer", "accepted": True}
 
 
+def test_reviewer_answer_rejects_blocked_item_before_claiming_run(client, ctx):
+    key = "TESTWP-103"
+    blocker = "TESTWP-104"
+    add_ticket(ctx.db, blocker, status="In Progress")
+    add_ticket(ctx.db, key, status="Needs owner", labels=("owner-escalated",), blocked_by=(blocker,))
+    add_review_run(ctx, key)
+
+    response = client.post(f"/v1/reviews/{key}/answer", json={"answer": "Use the shared cache."},
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 409
+    assert "current human review item" in response.json()["detail"]
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["owner-escalated"]}
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'",
+                      (key,))["n"] == 0
+    assert ctx.leases.holder(key) is None
+    assert ctx.jira.comments == []
+    assert getattr(ctx.github, "comments", []) == []
+
+
 def test_reviewer_skip_gate_merges_and_removes_the_gate_label(client, ctx):
     key = "TESTWP-92"
     add_review_ticket(ctx, key)
@@ -352,6 +373,17 @@ def test_review_queue_offers_actions_by_waiting_item_kind(client, ctx):
     assert items["TESTWP-98"]["actions"] == ["answer", "ask-ai"]
     assert items["TESTWP-100"]["kind"] == "blocked"
     assert items["TESTWP-100"]["actions"] == ["ask-ai"]
+
+
+def test_review_queue_hides_pull_request_actions_when_no_pr_exists(client, ctx):
+    key = "TESTWP-105"
+    add_ticket(ctx.db, key, status="Human review", labels=("require-human",))
+    add_review_run(ctx, key, pr_url="")
+
+    item = next(ticket for ticket in client.get("/v1/reviews").json()["tickets"] if ticket["key"] == key)
+
+    assert item["pr"]["number"] is None
+    assert item["actions"] == ["rework", "ask-ai"]
 
 
 def test_reviewer_action_required_text_is_validated_before_claiming_a_fenced_run(client, ctx):

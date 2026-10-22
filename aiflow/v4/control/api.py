@@ -4212,9 +4212,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             from urllib.parse import urlsplit
             parsed = urlsplit(body.s3_endpoint.strip())
-            if (parsed.scheme not in {"https", "http"} or not parsed.netloc or parsed.username or parsed.password
+            if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
                     or parsed.query or parsed.fragment or not body.s3_bucket.strip()):
-                raise HTTPException(400, "enter a valid S3-compatible endpoint and bucket")
+                raise HTTPException(400, "enter an HTTPS S3-compatible endpoint and bucket")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,62}", body.s3_bucket.strip()):
                 raise HTTPException(400, "S3 bucket name is invalid")
             endpoint, bucket = body.s3_endpoint.strip().rstrip("/"), body.s3_bucket.strip()

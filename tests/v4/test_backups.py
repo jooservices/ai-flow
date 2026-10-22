@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import io
 import json
 import os
 import secrets
 import shutil
+import tarfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psycopg
 import pytest
@@ -102,6 +108,10 @@ def test_backup_screen_and_owner_settings_api(client, ctx, tmp_path):
     assert s3.status_code == 200, s3.text
     assert s3.json()["destination_kind"] == "s3"
     assert s3.json()["s3_bucket"] == "backup-bucket"
+    cleartext_s3 = client.put("/v1/backups/config", json={"destination_kind": "s3",
+                                                            "s3_endpoint": "http://s3.example.test",
+                                                            "s3_bucket": "backup-bucket"})
+    assert cleartext_s3.status_code == 400
 
 
 def test_encryption_key_download_is_one_time_and_private(client, ctx, tmp_path):
@@ -148,7 +158,8 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
            (fixed,))
     (control_repo / "knowledge").mkdir(exist_ok=True)
     (control_repo / "knowledge" / "sample-data.md").write_text("repository knowledge content\n")
-    (source_roots["control"] / "aiflow4.env").write_text("DATABASE_PASSWORD=encrypted in backup\n")
+    (source_roots["control"] / "aiflow4.env").write_text(
+        f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={test_database_url}\n")
     (source_roots["jira"] / "jira.env").write_text("JIRA_API_TOKEN=encrypted in backup\n")
     (source_roots["github"] / "app.pem").write_text("github app key\n")
     (source_roots["console"] / "admin-password").write_text("admin secret\n")
@@ -174,12 +185,17 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     archive = destination / made["name"]
     assert archive.is_file()
     assert not archive.read_bytes().startswith(b"SAMPLE")
+    # The archived URL points to the source installation. Its knowledge changes after the backup,
+    # so restore verification must query the distinct target database after applying the dump.
+    with psycopg.connect(test_database_url) as source:
+        source.execute("UPDATE managed_resources SET content='changed after backup' WHERE resource_id='sample-data'")
 
     target_name = "aiflow4_restore_" + secrets.token_hex(6)
     admin_url = make_conninfo(test_database_url, dbname="postgres")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
     target_url = make_conninfo(test_database_url, dbname=target_name)
+    assert target_url != test_database_url
     target_db = DB(target_url)
     target_db.migrate()
     target_db.close()
@@ -200,7 +216,8 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
         assert ticket == {"summary": "Original ticket", "description": "Original database data"}
         assert managed == {"title": "Sample knowledge", "content": "Original knowledge"}
         assert memory == {"text": "Original indexed knowledge"}
-        assert (restore_roots["control"] / "aiflow4.env").read_text() == "DATABASE_PASSWORD=encrypted in backup\n"
+        assert (restore_roots["control"] / "aiflow4.env").read_text() == (
+            f"DATABASE_PASSWORD=encrypted in backup\nAIFLOW4_DATABASE_URL={test_database_url}\n")
         assert (restore_roots["jira"] / "jira.env").read_text() == "JIRA_API_TOKEN=encrypted in backup\n"
         assert (restore_roots["github"] / "app.pem").read_text() == "github app key\n"
         assert (restore_roots["console"] / "admin-password").read_text() == "admin secret\n"
@@ -388,11 +405,18 @@ def test_control_restore_service_keeps_backup_and_secret_mounts():
     root = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
     mounts = compose["services"]["control-restore"]["volumes"]
+    shared_mounts = compose["x-app"]["volumes"]
+    assert mounts == shared_mounts
+    custom = "/mnt/customer-backups:/mnt/customer-backups"
+    shared_mounts.append(custom)
+    assert custom in compose["services"]["control-restore"]["volumes"]
     assert "/srv/aiflow/control/backups:/srv/aiflow/backups" in mounts
     for secret in ("github", "jira", "control", "console"):
         assert f"/etc/aiflow/secrets/{secret}:/etc/aiflow/secrets/{secret}" in mounts
     repository = next(mount for mount in mounts if "/aiflow-control:/" in mount)
-    assert repository == "/srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore"
+    assert repository == "/srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro"
+    ui = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    assert "-v /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore" in ui
 
 
 def test_retention_removes_only_expired_backups(tmp_path):
@@ -409,6 +433,180 @@ def test_retention_removes_only_expired_backups(tmp_path):
     assert not old.exists()
     assert inside.exists()
     assert (root / "not-a-backup.aiflow4").exists()
+
+
+def test_s3_compatible_store_signs_and_runs_object_operations(tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "test-session-token")
+    with pytest.raises(backups.BackupError, match="endpoint is invalid"):
+        backups.S3CompatibleStore("http://s3.example.test", "backup-bucket")
+
+    store = backups.S3CompatibleStore("https://s3.example.test/gateway", "backup-bucket", "us-east-2")
+    object_name = "aiflow4-20261020T000000Z-11111111.aiflow4"
+    payload = b"encrypted backup bytes"
+    source = tmp_path / object_name
+    source.write_bytes(payload)
+    requests = []
+    listing = ("<ListBucketResult><Contents><Key>cc/daily/" + object_name +
+               "</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>").encode()
+
+    class Response:
+        def __init__(self, content=b""):
+            self.content = content
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self, chunk_size):
+            yield self.content
+
+    def assert_signature(method, url, headers, body_hash):
+        parsed = urlsplit(url)
+        authorization = headers["authorization"]
+        assert authorization.startswith("AWS4-HMAC-SHA256 Credential=test-access-key/")
+        auth_parts = dict(part.strip().split("=", 1) for part in authorization.split(" ", 1)[1].split(","))
+        credential = auth_parts["Credential"].split("/")
+        signed_headers = auth_parts["SignedHeaders"]
+        names = signed_headers.split(";")
+        assert "x-amz-security-token" in names
+        assert headers["x-amz-security-token"] == "test-session-token"
+        canonical_headers = "".join(
+            f"{name}:{parsed.netloc if name == 'host' else headers[name]}\n" for name in names)
+        canonical = "\n".join((method, parsed.path, parsed.query, canonical_headers, signed_headers, body_hash))
+        scope = "/".join(credential[1:])
+        string_to_sign = "\n".join(("AWS4-HMAC-SHA256", headers["x-amz-date"], scope,
+                                     hashlib.sha256(canonical.encode()).hexdigest()))
+
+        def sign(key, value):
+            return hmac.new(key, value.encode(), hashlib.sha256).digest()
+
+        signing_key = sign(sign(sign(sign(("AWS4test-secret-key").encode(), credential[1]), credential[2]), "s3"),
+                           "aws4_request")
+        expected = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+        assert auth_parts["Signature"] == expected
+
+    def fake_put(url, *, content, headers, timeout):
+        body = content.read()
+        requests.append(("PUT", url, headers, body))
+        assert_signature("PUT", url, headers, hashlib.sha256(payload).hexdigest())
+        assert body == payload
+        return Response()
+
+    def fake_get(url, *, headers, timeout):
+        requests.append(("GET", url, headers, b""))
+        assert_signature("GET", url, headers, hashlib.sha256(b"").hexdigest())
+        return Response(listing)
+
+    download_payload = b"downloaded encrypted backup"
+
+    @contextmanager
+    def fake_stream(method, url, *, headers, timeout):
+        requests.append((method, url, headers, b""))
+        assert method == "GET"
+        assert_signature("GET", url, headers, hashlib.sha256(b"").hexdigest())
+        yield Response(download_payload)
+
+    def fake_delete(url, *, headers, timeout):
+        requests.append(("DELETE", url, headers, b""))
+        assert_signature("DELETE", url, headers, hashlib.sha256(b"").hexdigest())
+        return Response()
+
+    monkeypatch.setattr(backups.httpx, "put", fake_put)
+    monkeypatch.setattr(backups.httpx, "get", fake_get)
+    monkeypatch.setattr(backups.httpx, "stream", fake_stream)
+    monkeypatch.setattr(backups.httpx, "delete", fake_delete)
+
+    store.put(f"cc/daily/{object_name}", source)
+    config = {"destination_kind": "s3", "s3_endpoint": "https://s3.example.test/gateway",
+              "s3_bucket": "backup-bucket", "s3_prefix": "cc/daily", "s3_region": "us-east-2"}
+    found = backups.list_backups(config)
+    assert found == [{"name": object_name, "source": f"s3://backup-bucket/cc/daily/{object_name}",
+                      "created_at": "2026-10-20T00:00:00+00:00"}]
+
+    downloaded = tmp_path / "downloaded.aiflow4"
+    store.get(f"cc/daily/{object_name}", downloaded)
+    assert downloaded.read_bytes() == download_payload
+    store.delete(f"cc/daily/{object_name}")
+    assert [request[0] for request in requests] == ["PUT", "GET", "GET", "DELETE"]
+    assert all(url.startswith("https://s3.example.test/gateway/") for _, url, _, _ in requests)
+
+
+def test_s3_uri_restore_downloads_and_restores_backup_with_mocked_http(ctx, tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+    key = secrets.token_bytes(32)
+    object_name = "aiflow4-20261020T000000Z-11111111.aiflow4"
+    members = {
+        "database.dump": b"database dump bytes",
+        "stored-secrets.tar.gz": b"",
+        "control-repository.tar.gz": b"",
+        "knowledge.json": b"{}",
+    }
+    for name in ("stored-secrets.tar.gz", "control-repository.tar.gz"):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz"):
+            pass
+        members[name] = buffer.getvalue()
+    file_names = {"database": "database.dump", "stored_secrets": "stored-secrets.tar.gz",
+                  "control_repository": "control-repository.tar.gz", "knowledge": "knowledge.json"}
+    components = {component: {"file": name, "sha256": hashlib.sha256(members[name]).hexdigest(),
+                              "bytes": len(members[name])} for component, name in file_names.items()}
+    manifest = {"format": 1, "created_at": "2026-10-20T00:00:00+00:00", "components": components}
+    plain = tmp_path / "bundle.tar.gz"
+    with tarfile.open(plain, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        raw_manifest = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(raw_manifest)
+        tar.addfile(info, io.BytesIO(raw_manifest))
+    encrypted = tmp_path / object_name
+    backups.encrypt_file(plain, encrypted, key)
+    encrypted_payload = encrypted.read_bytes()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self, chunk_size):
+            yield encrypted_payload
+
+    captured = []
+
+    @contextmanager
+    def fake_stream(method, url, *, headers, timeout):
+        captured.append((method, url, headers))
+        yield Response()
+
+    monkeypatch.setattr(backups.httpx, "stream", fake_stream)
+    monkeypatch.setattr(backups, "_run_db_command", lambda command, label, timeout=3600, env=None: None)
+    verified_urls = []
+
+    def verify_target(database_url, knowledge_file):
+        verified_urls.append(database_url)
+        return True
+
+    monkeypatch.setattr(backups, "_validate_knowledge", verify_target)
+    restore_roots = {name: tmp_path / "restored" / name
+                     for name in ("control", "console", "jira", "github", "repository")}
+    for path in restore_roots.values():
+        path.mkdir(parents=True)
+    target_url = "postgresql://restore-target.example.test/aiflow"
+    result = backups.restore_archive(f"s3://backup-bucket/cc/daily/{object_name}", key, target_url, ctx.settings,
+                                     s3_endpoint="https://s3.example.test", restore_roots=restore_roots,
+                                     install_backup_key=False, scratch_mode=True)
+
+    assert result["ok"] is True, result
+    assert {name: item["status"] for name, item in result["components"].items()} == {
+        "database": "restored", "stored_secrets": "restored", "control_repository": "restored",
+        "knowledge": "restored"}
+    assert verified_urls == [target_url]
+    assert captured[0][0] == "GET"
+    assert captured[0][1] == f"https://s3.example.test/backup-bucket/cc/daily/{object_name}"
+    assert captured[0][2]["authorization"].startswith("AWS4-HMAC-SHA256 Credential=test-access-key/")
 
 
 def test_missing_key_weekly_restore_test_records_failure_and_opens_incident(ctx, db, tmp_path):

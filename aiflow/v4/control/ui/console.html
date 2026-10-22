@@ -2031,7 +2031,7 @@ function backupSourceCommand(source, config) {
     'docker compose -f "$COMPOSE" stop control-api-a control-api-b control-loops',
     'stop_status=$?',
     'if [ "$stop_status" -ne 0 ]; then AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" up -d --no-deps --force-recreate control-api-a control-api-b control-loops; exit "$stop_status"; fi',
-    'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" run --rm --no-deps -v "$1:/run/aiflow4-backup-key:ro" -e AIFLOW4_CONTROL_REPO=/srv/aiflow/control/repos/aiflow-control-restore control-restore backup restore --from "$2" --key-file /run/aiflow4-backup-key --s3-endpoint "$3" --s3-region "$4"',
+    'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" run --rm --no-deps -v "$1:/run/aiflow4-backup-key:ro" -v /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore -e AIFLOW4_CONTROL_REPO=/srv/aiflow/control/repos/aiflow-control-restore control-restore backup restore --from "$2" --key-file /run/aiflow4-backup-key --s3-endpoint "$3" --s3-region "$4"',
     'restore_status=$?',
     'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" up -d --no-deps --force-recreate control-api-a control-api-b control-loops',
     'start_status=$?',

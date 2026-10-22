@@ -320,7 +320,7 @@ class S3CompatibleStore:
 
     def __init__(self, endpoint: str, bucket: str, region: str = "us-east-1") -> None:
         parsed = urlsplit(endpoint.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise BackupError("the S3 endpoint is invalid")
         self.endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
         self.bucket = bucket.strip()
@@ -652,10 +652,9 @@ def _archive_env(archive: Path, name: str) -> dict[str, str]:
     return result
 
 
-def _restore_database_password(database_url: str, secrets_archive: Path) -> str:
+def _restore_database_password(database_url: str, secrets_archive: Path) -> None:
     """Make a fresh control database's login match the restored secret files without exposing its password."""
     postgres = _archive_env(secrets_archive, "control/postgres.env")
-    app = _archive_env(secrets_archive, "control/aiflow4.env")
     password = postgres.get("POSTGRES_PASSWORD", "")
     user = postgres.get("POSTGRES_USER", "aiflow")
     if password and user:
@@ -664,8 +663,6 @@ def _restore_database_password(database_url: str, secrets_archive: Path) -> str:
                 connection.execute(sql.SQL("ALTER ROLE {} WITH PASSWORD %s").format(sql.Identifier(user)), (password,))
         except psycopg.Error as exc:
             raise BackupError("the restored database password could not be applied") from exc
-    # The database hostname/user are usually unchanged, but retain the source's exact URL when it was stored.
-    return app.get("AIFLOW4_DATABASE_URL") or database_url
 
 
 def _validate_knowledge(database_url: str, knowledge_file: Path) -> bool:
@@ -681,7 +678,6 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
     backup = _download_source(source, key, s3_endpoint, s3_region)
     remove_source = urlsplit(source).scheme == "s3"
     outcomes: dict[str, dict] = {}
-    restored_database_url = database_url
     try:
         with tempfile.TemporaryDirectory(prefix="aiflow4-restore-unpack-") as temp:
             workspace = Path(temp)
@@ -699,7 +695,7 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
                     "control": settings.control_secrets_dir, "console": settings.console_secrets_dir,
                     "jira": settings.jira_secret_dir, "github": settings.github_app_dir}.items()}
                 if outcomes.get("database", {}).get("status") == "restored" and not scratch_mode:
-                    restored_database_url = _restore_database_password(database_url, files["stored_secrets"])
+                    _restore_database_password(database_url, files["stored_secrets"])
                 _extract_archive(files["stored_secrets"], roots)
                 if install_backup_key:
                     install_key(settings.backup_key_file, key)
@@ -713,7 +709,7 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
             except Exception:
                 outcomes["control_repository"] = {"status": "failed", "detail": "control repository settings could not be applied"}
             try:
-                if outcomes.get("database", {}).get("status") != "restored" or not _validate_knowledge(restored_database_url, files["knowledge"]):
+                if outcomes.get("database", {}).get("status") != "restored" or not _validate_knowledge(database_url, files["knowledge"]):
                     raise BackupError("knowledge data does not match the backup snapshot")
                 outcomes["knowledge"] = {"status": "restored", "detail": "knowledge snapshot verified in the restored database"}
             except Exception as exc:  # noqa: BLE001

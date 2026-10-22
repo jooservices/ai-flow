@@ -31,10 +31,10 @@ Choose a local folder, a mounted path, or S3-compatible storage:
 
 - **Local folder** defaults to `/srv/aiflow/backups` inside the control containers. Local folders must stay below
   that mounted path; the deployment maps it to the durable host folder `/srv/aiflow/control/backups`.
-- **Mounted path** must be mounted into the control API containers and control-loops container at the same path.
+- **Mounted path** must be mounted into the control API containers, control-loops and control-restore at the same path.
   Add the host bind mount to the shared `x-app.volumes` section in the installed `deploy/v4/control/compose.yaml`
   before selecting that path in the screen.
-- **S3-compatible storage** uses a path-style S3 endpoint, bucket, optional prefix and region. The control process
+- **S3-compatible storage** uses an HTTPS path-style S3 endpoint, bucket, optional prefix and region. The control process
   reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` from its environment. For the
   standard deployment, put these variables in `/etc/aiflow/secrets/control/aiflow4.env` and recreate the app
   containers. Credentials are not saved in the backup configuration or displayed in Command Center. The client

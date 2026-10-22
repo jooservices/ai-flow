@@ -69,20 +69,12 @@ services:
     command: ["control-loops"]
     mem_limit: 2g
 
-  # Only `docker compose run control-restore ...` uses this profile. Its second repository mount is writable so a
-  # restore can replace settings while the normal API containers keep their control-repo mount read-only.
+  # The UI restore command uses this profile; it inherits shared mounts and adds a writable repository bind.
   control-restore:
     <<: *app
     profiles: ["restore"]
-    volumes:
-      - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
-      - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
-      - /etc/aiflow/secrets/control:/etc/aiflow/secrets/control
-      - /etc/aiflow/secrets/console:/etc/aiflow/secrets/console
-      - /srv/aiflow/control/backups:/srv/aiflow/backups
-      - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore
-      - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
-      - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
+    # Inherit x-app.volumes so operator-added mounted backup destinations are available during restore.
+    # The UI restore command adds a writable repository mount at an alternate path.
     command: ["version"]
 
 networks:

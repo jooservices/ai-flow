@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
-from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
+from .console_auth import ConsoleUser, COOKIE_NAME, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
@@ -593,7 +593,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
-        if user.role not in roles:
+        if not role_satisfies(user.role, roles):
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
@@ -3224,4 +3224,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"merged": True, "sha": merged.get("sha", ""), "resource": resource}
 
     jira_connect.mount(app, ctx)
+    from .login import install_login
+    install_login(app, ctx)
     return app

@@ -173,7 +173,8 @@ def machine(tmp_path):
 
 
 def installer(host: FakeHost, out: list[str], **opts) -> ci.ControlInstaller:
-    opts = {"version": "v4.1.0", "domain": "aiflow.example.com", "health_timeout": 30} | opts
+    opts = {"version": "v4.1.0", "domain": "aiflow.example.com", "health_timeout": 30,
+            "admin_email": "jooservices@gmail.com"} | opts
     return ci.ControlInstaller(ci.Options(**opts), host=host, layout=ci.Layout(host.root),
                                out=out.append, err=out.append, source=ROOT)
 
@@ -215,7 +216,7 @@ def test_clean_install_runs_every_step_in_order_and_brings_the_control_plane_up(
     # the control host does not run a node agent until it is joined
     assert sec.read_env(machine.p("/etc/aiflow/control.env")) == {
         "AIFLOW4_DOMAIN": "aiflow.example.com", "AIFLOW4_JOIN_CONTROL_URL": "http://aiflow.example.com",
-        "AIFLOW4_DEPLOY_NODE_AGENT": "0"}
+        "AIFLOW4_DEPLOY_NODE_AGENT": "0", "AIFLOW4_CONSOLE_ADMIN_EMAIL": "jooservices@gmail.com"}
     assert machine.p("/srv/aiflow/control/cli/current").resolve().name == "v4.1.0"
     for name in ("postgres", "redis", "openobserve"):
         assert machine.p(f"/srv/aiflow/control/data/{name}").is_dir()
@@ -297,6 +298,59 @@ def test_second_run_keeps_secrets_data_and_containers(machine):
     assert "secrets in " in "\n".join(out) and "(0600): unchanged" in "\n".join(out)
     assert not [a for a in rerun if "--force-recreate" in a]
     assert second.steps == list(ci.STEPS)
+
+
+def console_seeds(host: FakeHost) -> list[list[str]]:
+    return [argv for argv, _, _ in host.calls if argv[:2] == ["docker", "run"] and "console-user" in argv]
+
+
+def test_install_creates_the_first_super_administrator_and_turns_console_login_on(machine):
+    out: list[str] = []
+    assert installer(machine, out).run() == 0
+    [seed] = console_seeds(machine)
+    image_at = next(i for i, a in enumerate(seed) if a.startswith(IMAGE + ":"))
+    assert seed[image_at:] == [f"{IMAGE}:v4.1.0", "console-user", "seed", "--email", "jooservices@gmail.com",
+                               "--role", "super_admin", "--password-file", "/run/aiflow4-console/super-admin-password"]
+    console_dir = machine.p("/etc/aiflow/secrets/console")
+    assert f"{console_dir}:/run/aiflow4-console" in seed and stat.S_IMODE(console_dir.stat().st_mode) == 0o700
+    # after the migration (the table exists) and before the deploy (the gate starts with a user to sign in)
+    assert (index(machine, lambda a: a[:2] == ["docker", "run"] and a[-1] == "migrate")
+            < index(machine, lambda a: "console-user" in a)
+            < index(machine, lambda a: Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"]))
+    assert sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))["AIFLOW4_CONSOLE_LOGIN"] == "1"
+    assert any("Super Administrator jooservices@gmail.com" in line and "super-admin-password" in line for line in out)
+
+
+def test_rerun_remembers_the_admin_email_and_keeps_an_owner_choice_for_login(machine):
+    assert installer(machine, []).run() == 0
+    app_env = machine.p("/etc/aiflow/secrets/control/aiflow4.env")
+    sec.update_env(app_env, force={"AIFLOW4_CONSOLE_LOGIN": "0"})
+    assert installer(machine, [], admin_email="").run() == 0  # no --admin-email on a rerun
+    assert [s[s.index("--email") + 1] for s in console_seeds(machine)] == ["jooservices@gmail.com"] * 2
+    assert sec.read_env(app_env)["AIFLOW4_CONSOLE_LOGIN"] == "0"
+
+
+def test_first_install_without_an_admin_email_stops_before_any_change(machine):
+    out: list[str] = []
+    assert installer(machine, out, admin_email="").run() == ci.EXIT_USAGE
+    assert "--admin-email is required" in "\n".join(out) and machine.calls == []
+    assert installer(machine, out, admin_email="not an email").run() == ci.EXIT_USAGE
+
+
+def test_a_failed_admin_seed_stops_before_the_deploy(machine, monkeypatch):
+    real = machine.run
+
+    def run(argv, **kw):
+        if "console-user" in argv:
+            machine.calls.append((list(argv), {}, None))
+            return subprocess.CompletedProcess(argv, 2, "", "cannot open the password file")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(machine, "run", run)
+    out: list[str] = []
+    assert installer(machine, out).run() == ci.EXIT_UNHEALTHY
+    assert not [a for a, _, _ in machine.calls if Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"]]
+    assert "could not create the first Super Administrator" in "\n".join(out)
 
 
 def test_rerun_with_a_new_domain_keeps_secrets_but_updates_the_urls(machine):

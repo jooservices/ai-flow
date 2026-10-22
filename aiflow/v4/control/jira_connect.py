@@ -39,7 +39,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .console_auth import COOKIE_NAME, verify_session
+from .console_auth import COOKIE_NAME, checks_bearer, role_satisfies, verify_session
 from .db import J
 from .incidents import close_incident, open_incident
 from .jira import JiraError
@@ -520,7 +520,7 @@ def mount(app: FastAPI, ctx) -> None:
                 token.strip().encode(), configured.encode()):
             return "owner"
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and user.role == "owner":
+        if user and role_satisfies(user.role, {"owner"}):
             return user.subject
         if action != "read":
             write_audit(ctx, action, user.subject if user else "", False, "owner role required")
@@ -539,11 +539,13 @@ def mount(app: FastAPI, ctx) -> None:
         return data
 
     @app.get("/v1/integrations/jira")
+    @checks_bearer
     def jira_status(request: Request) -> dict:
         owner(request)
         return auth().status()
 
     @app.post("/v1/integrations/jira/oauth/start")
+    @checks_bearer
     async def jira_oauth_start(request: Request):
         actor = owner(request, "connect")
         a = auth()
@@ -605,6 +607,7 @@ def mount(app: FastAPI, ctx) -> None:
         return back("connected")
 
     @app.post("/v1/integrations/jira/api-token")
+    @checks_bearer
     async def jira_api_token(request: Request) -> dict:
         actor = owner(request, "connect")
         a = auth()
@@ -626,6 +629,7 @@ def mount(app: FastAPI, ctx) -> None:
         return a.status()
 
     @app.post("/v1/integrations/jira/disconnect")
+    @checks_bearer
     def jira_disconnect(request: Request) -> dict:
         actor = owner(request, "disconnect")
         result = auth().disconnect(actor)

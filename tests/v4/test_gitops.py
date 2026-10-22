@@ -97,3 +97,40 @@ def test_conflict_markers_are_found_only_at_line_starts():
     from aiflow.v4.worker.dev import CONFLICT_MARKER
     assert CONFLICT_MARKER.search("a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> origin/develop\n")
     assert not CONFLICT_MARKER.search('text = "conflict markers (<<<<<<<, =======, >>>>>>>)"\n')
+
+
+def test_repository_change_between_runs_replaces_the_old_worktree(tmp_path):
+    """JAIF-250: a worktree made for the old repository is never reused after the ticket's repository changes."""
+    old_origin = make_origin(tmp_path)
+    new_origin = tmp_path / "new_origin"
+    new_origin.mkdir()
+    sh(new_origin, "init", "-q", "-b", "develop")
+    (new_origin / "app.txt").write_text("new repo\n")
+    sh(new_origin, "add", "-A"); sh(new_origin, "commit", "-q", "-m", "init")
+    g = Git(str(tmp_path / "srv"))
+    mirrors = {}
+    for name, origin in (("old__repo", old_origin), ("new__repo", new_origin)):
+        m = tmp_path / "srv" / "mirrors" / f"{name}.git"
+        m.parent.mkdir(parents=True, exist_ok=True)
+        g.run("clone", "--bare", "-q", str(origin), str(m))
+        g.run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=m)
+        g.run("fetch", "-q", "origin", cwd=m)
+        mirrors[name] = m
+    wt = tmp_path / "srv" / "work" / "TESTWP" / "TESTWP-2-y"
+    # run 1: old repository, the AI commits work that is not pushed
+    assert g.foreign_worktree(mirrors["old__repo"], wt, "TESTWP-2-y") is None
+    g.worktree(mirrors["old__repo"], wt, "TESTWP-2-y", "develop")
+    (wt / "work.txt").write_text("unpushed\n")
+    g.commit_all(wt, "old repo work", ID)
+    assert g.foreign_worktree(mirrors["old__repo"], wt, "TESTWP-2-y") is None  # same repository: reused
+    # run 2: the repository changed
+    moved = g.foreign_worktree(mirrors["new__repo"], wt, "TESTWP-2-y")
+    assert moved and moved["old_repo"] == "old/repo" and not moved["pushed"]
+    assert [x.split(" ", 1)[1] for x in moved["commits"]] == ["old repo work"]
+    g.drop_foreign_worktree(wt, "TESTWP-2-y", Path(moved["old_mirror"]))
+    assert not wt.exists()
+    assert g.run("branch", "--list", "TESTWP-2-y", cwd=mirrors["old__repo"]).strip() == ""
+    start = g.worktree(mirrors["new__repo"], wt, "TESTWP-2-y", "develop")
+    assert start == "origin/develop"
+    assert (wt / "app.txt").read_text() == "new repo\n" and not (wt / "work.txt").exists()
+    assert g.worktree_mirror(wt) == mirrors["new__repo"]

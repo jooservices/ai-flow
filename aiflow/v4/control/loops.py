@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, memory
+from . import jira_connect, memory, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -276,6 +276,8 @@ def watchdog(ctx: Ctx) -> None:
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_services' AND closed_at IS NULL"):
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
+    # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
+    tooling.sweep(ctx)
     # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {a.node for a in repo.accounts}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
@@ -387,9 +389,14 @@ def watchdog(ctx: Ctx) -> None:
     # every role the flow needs must have at least two ready accounts (no single AI the flow depends on)
     ready = {r["id"] for r in ctx.db.all("SELECT a.id FROM accounts a JOIN nodes n ON n.name = a.node"
                                          " WHERE a.status IN ('idle','working','probing') AND n.status = 'online'")}
+    try:  # quality by role: switch roles off and back on, settle probation tickets (role_health.py)
+        role_health.evaluate(ctx)
+    except Exception as e:  # noqa: BLE001
+        log.warning("role health evaluation failed: %s", e)
+    switched_off = role_health.disabled_roles(ctx.db)
     for role in ("master", "intake_refiner", "verify", "dev"):
         holders = [a for a in repo.accounts if role in (a.roles or [])]
-        ok = [a.id for a in holders if a.id in ready]
+        ok = [a.id for a in holders if a.id in ready and (a.id, role) not in switched_off]
         if not holders:
             continue
         if len(ok) < 2:

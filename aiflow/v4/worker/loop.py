@@ -172,7 +172,8 @@ class Worker:
                         last_dev_summary=r.get("last_dev_summary") or "",
                         verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
-                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [])
+                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
+                        machine_tools=r.get("machine_tools") or {})
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":

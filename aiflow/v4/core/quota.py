@@ -67,11 +67,12 @@ def _run_duration(run: dict) -> float:
 
 def _confidence(runs: list[dict], now: datetime) -> tuple[str, int, float | None]:
     recent = [r for r in runs if (started := _run_time(r)) and now - timedelta(hours=24) <= started <= now]
-    ranked = sorted(zip(recent, [(_run_usage(r)[0] / _run_duration(r) if _run_duration(r) > 0 else 0)
-                                 for r in recent]), key=lambda pair: _run_usage(pair[0])[2])
+    measured = [(r, _run_usage(r)[0] / duration) for r in recent
+                if (duration := _run_duration(r)) > 0]
+    ranked = sorted(measured, key=lambda pair: _run_usage(pair[0])[2])
     trim = int(len(ranked) * .05)
-    steady_rates = [rate * 3600 for _, rate in ranked[:len(ranked) - trim or None] if rate > 0]
-    if len(recent) < 8 or not steady_rates:
+    steady_rates = [rate * 3600 for _, rate in ranked[:len(ranked) - trim or None]]
+    if len(recent) < 8 or len(measured) != len(recent) or not steady_rates:
         return "low", len(recent), None
     center = mean(steady_rates)
     spread = pstdev(steady_rates) if len(steady_rates) > 1 else 0.0

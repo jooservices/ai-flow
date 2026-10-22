@@ -34,7 +34,7 @@ from ..core.controlrepo import ControlRepo, epic_for_ticket
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, scale_proof, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -258,6 +258,12 @@ class ClaimBody(BaseModel):
     ticket: str
     account: str
     step: str = "dev"
+
+
+class ScaleProofBody(BaseModel):
+    release: str = Field("", max_length=200)
+    source: str = Field("ci", max_length=60)
+    report: dict[str, Any]
 
 
 class VersionReleaseClaimBody(BaseModel):
@@ -3320,6 +3326,26 @@ def create_app(ctx: Ctx) -> FastAPI:
     def state() -> dict:
         from .state import snapshot
         return snapshot(ctx)
+
+    # --- scale proof: budgets, runs attached to releases, tickets for findings (docs/v4/scale-proof.md) ---------
+    @app.get("/v1/scale-proof")
+    def scale_proof_summary() -> dict:
+        return scale_proof.summary(ctx.db)
+
+    @app.post("/v1/scale-proof/results")
+    def scale_proof_results(body: ScaleProofBody, actor: str = Depends(owner_auth)) -> dict:
+        """CI submits a run: it is attached to the release, judged against the budgets here (the submitted verdict
+        is ignored) and every finding becomes a ticket."""
+        report = body.report
+        if not isinstance(report.get("measurements"), dict) or not report["measurements"]:
+            raise HTTPException(422, "the report has no measurements")
+        run_id = scale_proof.record(ctx, report, body.release, body.source)
+        tickets = scale_proof.file_tickets(ctx, run_id)
+        run = ctx.db.one("SELECT release, passed, report FROM scale_proof_runs WHERE id=%s", (run_id,))
+        audit("aiflow-control", "scale-proof-result", "", "", None, actor, True,
+              "passed" if run["passed"] else "failed", {"run_id": run_id, "release": run["release"]})
+        return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
+                "failures": run["report"]["failures"], "tickets": tickets}
 
     @app.get("/v1/tickets/{key}/timeline")
     def ticket_timeline(key: str) -> dict:

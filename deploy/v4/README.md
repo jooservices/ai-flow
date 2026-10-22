@@ -47,6 +47,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
+- [Scale proof](../../docs/v4/scale-proof.md): 100 projects, 50 machines and 200 simulated AI sessions measured against written performance budgets on every release; a regression blocks the release and files tickets
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 
 ## Tools on a node

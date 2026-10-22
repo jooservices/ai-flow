@@ -14,6 +14,7 @@
   aiflow4 install control --version vX.Y.Z --domain D [--admin-email E]   install, re-run or upgrade the control plane (root)
   aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)
   aiflow4 install control --rollback    return the control plane to the previous release (root)
+  aiflow4 scale-proof --release vX.Y.Z [--out F] [--submit URL]   run the 100/50/200 scale proof (CI); exit 1: a budget is exceeded
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
   aiflow4 version
 """
@@ -135,6 +136,47 @@ def _console_user(a, s) -> int:
         db.close()
 
 
+def _scale_proof(a: argparse.Namespace) -> int:
+    """Run the scenario in a scratch database, print every budget, write and submit the report.
+
+    Exit 0: within every budget. 1: a budget is exceeded or behaviour was incorrect (the release must not ship).
+    2: the scenario could not run. 3: the result could not be attached on the control plane."""
+    import tempfile
+    from .control import scale_harness
+    if not a.database_url or not a.redis_url:
+        print("scale-proof needs --database-url and --redis-url (or AIFLOW4_TEST_DATABASE_URL / AIFLOW4_TEST_REDIS_URL): "
+              "it creates and drops a database of its own", file=sys.stderr)
+        return 2
+    try:
+        with scale_harness.scratch(a.database_url, a.redis_url) as (db, leases), \
+                tempfile.TemporaryDirectory(prefix="aiflow4-scale-") as workdir:
+            report, _ctx = scale_harness.run(db, leases, Path(workdir), release=a.release,
+                                             log=lambda m: print(m, flush=True))
+    except Exception as exc:  # noqa: BLE001
+        print(f"scale proof could not run: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    for b in report["budgets"]:
+        print(("ok      " if b["passed"] else "EXCEEDED") + " " + b["message"])
+    for failure in report["failures"]:
+        print("FAILED  " + failure)
+    if a.out:
+        Path(a.out).write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
+    code = 0 if report["passed"] else 1
+    if a.submit:
+        import httpx
+        try:
+            r = httpx.post(a.submit.rstrip("/") + "/v1/scale-proof/results", timeout=60,
+                           headers={"Authorization": f"Bearer {os.environ.get('AIFLOW4_OWNER_TOKEN', '')}"},
+                           json={"release": a.release, "source": "ci", "report": report})
+            r.raise_for_status()
+            print(f"attached to release {a.release} as run #{r.json().get('run_id')}; tickets: "
+                  + (", ".join(t["ticket"] for t in r.json().get("tickets", []) if t.get("ticket")) or "none"))
+        except Exception as exc:  # noqa: BLE001 - never print the request: it carries the token
+            print(f"could not attach the result to {a.submit}: {type(exc).__name__}", file=sys.stderr)
+            code = code or 3
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=os.environ.get("AIFLOW4_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -199,6 +241,13 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--otel-collector", action="store_true")
     pi.add_argument("--health-timeout", type=int, default=300)
     pi.add_argument("--admin-email", default="", help="the first Super Administrator of Command Center (first install)")
+    psp = sub.add_parser("scale-proof", help="run the scale proof scenario against the budgets (docs/v4/scale-proof.md)")
+    psp.add_argument("--release", required=True, help="the release the result is attached to, e.g. v4.3.0")
+    psp.add_argument("--out", default="", help="write the JSON report here")
+    psp.add_argument("--submit", default="", metavar="CONTROL_URL",
+                     help="attach the result to the release on this control plane (token: AIFLOW4_OWNER_TOKEN)")
+    psp.add_argument("--database-url", default=os.environ.get("AIFLOW4_TEST_DATABASE_URL", ""))
+    psp.add_argument("--redis-url", default=os.environ.get("AIFLOW4_TEST_REDIS_URL", ""))
     ps = sub.add_parser("secret")
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
@@ -216,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         return ControlInstaller(Options(version=a.release, domain=a.domain, rollback=a.rollback, stack=a.stack,
                                         si=a.si, vpn=a.vpn, otel_collector=a.otel_collector,
                                         health_timeout=a.health_timeout, admin_email=a.admin_email)).run()
+    if a.cmd == "scale-proof":
+        return _scale_proof(a)
     if a.cmd == "secret":
         from .install.control import secret_command
         return secret_command(a.action, a.name, a.stdin)

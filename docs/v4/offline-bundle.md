@@ -87,7 +87,9 @@ refuses a project with any other stack, before redeeming the token, so the token
 
 After the systemd units are active, `install` polls the node-authenticated `GET /v1/nodes/<name>/health`. It
 returns success only when the node is `online`, its last heartbeat is at most 60 seconds old and
-`preflight_ok` is true (no required tool missing or off its `versions.lock` pin). Otherwise it exits with an
+`preflight_ok` is true (no required tool missing or off its `versions.lock` pin, and every test service a project
+declares — PostgreSQL, Redis — reported healthy; the bundle carries their images in `image/services.tar` and the
+installer loads them, because the node agent cannot pull on an offline host). Otherwise it exits with an
 error that names the missing tools, or says that no healthy heartbeat arrived.
 
 The bundle checksum manifest detects damaged or incomplete transfers. Transfer the checksum file through the

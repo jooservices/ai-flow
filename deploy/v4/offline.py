@@ -25,6 +25,11 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+# Test-service images the node agent runs for projects declaring `services:` (kept equal to aiflow/v4/core/services.py;
+# a test checks they match). The installer must not depend on the aiflow package, so they are repeated here.
+PG_IMAGE = "pgvector/pgvector:0.8.7-pg16"
+REDIS_IMAGE = "redis:7-alpine"
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHES = {"x86_64": "amd64", "aarch64": "arm64"}
@@ -226,7 +231,7 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     sums_expected = expected
     if set(sums) != sums_expected or any(sha256(bundle / _safe_relative(name)) != digest for name, digest in sums.items()):
         raise OfflineError("bundle SHA256SUMS verification failed")
-    required = {"release", "image", "wheels", "python", "node", "cli", "packages", "apt", "metadata/versions.lock", "installer"}
+    required = {"release", "image", "image/services.tar", "wheels", "python", "node", "cli", "packages", "apt", "metadata/versions.lock", "installer"}
     paths = set(files)
     for top in required:
         if not any(name == top or name.startswith(top + "/") for name in paths):
@@ -583,6 +588,12 @@ def _build_bundle(args: argparse.Namespace) -> Path:
     if inspect != f"linux/{'amd64' if image_arch == 'amd64' else 'arm64'} {version}":
         raise OfflineError("control image platform or version label does not match the bundle")
     _run(["docker", "save", "--output", str(bundle / "image/control-api.tar"), image_ref])
+    # Projects may declare PostgreSQL/Redis test services; the node agent starts them with `docker run`, which
+    # cannot pull on an offline host, so their images travel in the bundle too.
+    service_images = [PG_IMAGE, REDIS_IMAGE]
+    for service_image in service_images:
+        _run(["docker", "pull", "--platform", f"linux/{image_arch}", service_image])
+    _run(["docker", "save", "--output", str(bundle / "image/services.tar"), *service_images])
 
     _build_debs(bundle / "packages", version)
     apt_cache = bundle / "apt"
@@ -666,6 +677,7 @@ class OfflineInstaller:
         self.run(["apt-get", "--no-download", "--yes", "install", *[str(p) for p in apt_debs + package_debs]])
         image_archive = self.bundle / "image/control-api.tar"
         self.run(["docker", "load", "--input", str(image_archive)])
+        self.run(["docker", "load", "--input", str(self.bundle / "image/services.tar")])
 
         py_dir = self.path("/opt/aiflow/python")
         self._copy_tree(self.bundle / "python/runtime", py_dir)
@@ -849,8 +861,11 @@ class OfflineInstaller:
         age = health.get("heartbeat_age_seconds")
         if health.get("status") != "online" or not isinstance(age, (int, float)) or age > 60:
             raise OfflineError("node agent is running but has not reported a healthy heartbeat to the control API")
-        missing = ", ".join(str(t) for t in health.get("missing_tools", [])) or "unknown"
-        raise OfflineError(f"node is online but project preflight is not green; missing or mismatched tools: {missing}")
+        missing = ", ".join(str(t) for t in health.get("missing_tools", [])) or "none"
+        services = health.get("missing_services")
+        unhealthy = ", ".join(f"{k} ({v})" for k, v in services.items()) if isinstance(services, dict) and services else "none"
+        raise OfflineError("node is online but project preflight is not green; "
+                           f"missing or mismatched tools: {missing}; unhealthy test services: {unhealthy}")
 
 
 def _get_json(base_url: str, path: str, token: str) -> dict[str, Any]:

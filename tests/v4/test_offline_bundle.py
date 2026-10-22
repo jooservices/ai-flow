@@ -38,6 +38,7 @@ def _bundle(tmp_path: Path) -> Path:
         archive.add(release_source / "deploy", arcname="deploy")
 
     (bundle / "image/control-api.tar").write_bytes(b"docker image archive")
+    (bundle / "image/services.tar").write_bytes(b"postgres and redis images")
     (bundle / "wheels/ai_flow-4.1.0-py3-none-any.whl").write_bytes(b"wheel")
     bundled_python = bundle / "python/runtime/cpython-3.12.3/bin/python3.12"
     bundled_python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@"\n', encoding="utf-8")
@@ -402,6 +403,21 @@ def test_install_fails_when_heartbeat_is_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(offline, "time_sleep", lambda _s: None)
     with pytest.raises(offline.OfflineError, match="healthy heartbeat"):
         _install(tmp_path, health={**HEALTHY, "heartbeat_age_seconds": 600})
+
+
+def test_install_reports_unhealthy_test_services_when_preflight_is_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "time_sleep", lambda _s: None)
+    with pytest.raises(offline.OfflineError, match="preflight is not green.*postgres.*image not found"):
+        _install(tmp_path, health={**HEALTHY, "preflight_ok": False, "missing_services": {"postgres": "image not found"}})
+
+
+def test_bundle_carries_the_test_service_images_and_install_loads_them(tmp_path):
+    from aiflow.v4.core.services import PG_IMAGE, REDIS_IMAGE
+
+    assert (offline.PG_IMAGE, offline.REDIS_IMAGE) == (PG_IMAGE, REDIS_IMAGE)
+    _node, calls, _joins, _root, _health = _install(tmp_path)
+    loads = [c for c in calls if c[:2] == ["docker", "load"]]
+    assert any(c[-1].endswith("image/services.tar") for c in loads)
 
 
 def test_install_fails_when_node_is_online_but_preflight_is_red(tmp_path, monkeypatch):

@@ -1971,7 +1971,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         """What an installer needs to call a new node healthy: a fresh heartbeat and a green project preflight."""
         if name != node:
             raise HTTPException(403, "token belongs to another node")
-        row = ctx.db.one("SELECT status,tools,projects,dynamic,"
+        row = ctx.db.one("SELECT status,tools,projects,dynamic,metrics,"
                          " extract(epoch FROM now()-last_heartbeat) AS age FROM nodes WHERE name=%s", (node,)) or {}
         repo = ctx.repo()
         node_projects = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
@@ -1982,10 +1982,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             if project and project.stacks:
                 gaps += toolchain_gaps(tools, project.tools, repo.versions, project.stacks, require_pins=True)
         gaps = list(dict.fromkeys(gaps))
+        # Declared test services (PostgreSQL, Redis) must be healthy too, or the node can claim no work.
+        needed_services = list(dict.fromkeys(s for key in node_projects if key in repo.projects
+                                             for s in repo.projects[key].required_services))
+        reported_services = (row.get("metrics") or {}).get("services")
+        unhealthy = service_gaps(reported_services, needed_services)
         age = row.get("age")
         return {"node": node, "status": row.get("status", "unknown"),
                 "heartbeat_age_seconds": None if age is None else float(age),
-                "projects": node_projects, "missing_tools": gaps, "preflight_ok": not gaps}
+                "projects": node_projects, "missing_tools": gaps, "missing_services": unhealthy,
+                "preflight_ok": not gaps and not unhealthy}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
     def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:

@@ -28,7 +28,8 @@ MAX_INCIDENTS = 100
 
 _SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization)[A-Za-z0-9_-]*)"
 _SECRET_ASSIGNMENT = re.compile(
-    rf"(?i)(\b{_SECRET_NAME}\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)([^\s\\\"',;]+)"
+    rf"(?i)(?P<prefix>\b{_SECRET_NAME}\b\s*\\?[\"']?\s*[:=]\s*)"
+    r"(?P<value>\\?\"(?:\\.|[^\"\\])*?\\?\"|\\?'(?:\\.|[^'\\])*?\\?'|[^\s,;}]+)"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _KNOWN_TOKEN = re.compile(
@@ -39,7 +40,16 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _PHONE = re.compile(r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(\d{2,4}\)|\d{2,4})[ .-]\d{3,4}[ .-]\d{4}(?!\w)")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b")
+_NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b", re.I)
+_COMMON_LOWER_NAME_WORDS = frozenset({
+    "account", "accounts", "active", "api", "available", "background", "bundle", "cache", "captured",
+    "closed", "control", "current", "data", "default", "detail", "enabled", "entry", "error", "event",
+    "failed", "file", "flow", "found", "general", "health", "incident", "info", "issue", "key", "last",
+    "latest", "level", "log", "logs", "machine", "memory", "message", "no", "node", "not", "offline",
+    "online", "open", "owner", "private", "process", "project", "recent", "report", "retry", "run",
+    "service", "settings", "state", "status", "support", "system", "test", "ticket", "token", "updated",
+    "version", "worker",
+})
 _ADDRESS = re.compile(r"(?i)\b\d{1,6}\s+(?:[A-Z0-9.'-]+\s+){1,5}(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd|court|ct|way)\b")
 _HOME_PATH = re.compile(r"(?i)(/(?:home|users)/)[^/\s]+")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
@@ -60,7 +70,7 @@ _IP = re.compile(r"(?<![A-Fa-f0-9])(?:\d{1,3}\.){3}\d{1,3}(?![A-Fa-f0-9])|(?<![A
 def sanitize_text(text: str) -> str:
     """Remove recognizable credentials and personal identifiers before writing bundle files."""
     text = _PRIVATE_KEY.sub("[REDACTED_PRIVATE_KEY]", text)
-    text = _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", text)
+    text = _SECRET_ASSIGNMENT.sub(_redact_secret_assignment, text)
     text = _BEARER.sub("Bearer [REDACTED]", text)
     text = _KNOWN_TOKEN.sub("[REDACTED_TOKEN]", text)
     text = _JWT.sub("[REDACTED_TOKEN]", text)
@@ -70,22 +80,51 @@ def sanitize_text(text: str) -> str:
     text = _ADDRESS.sub("[REDACTED_ADDRESS]", text)
     text = _IP.sub(_redact_ip, text)
     text = _HOME_PATH.sub(r"\1[REDACTED_USER]", text)
-    return _NAME.sub("[REDACTED_NAME]", text)
+    return _NAME.sub(_redact_name, text)
+
+
+def _redact_name(match: re.Match[str]) -> str:
+    value = match.group(0)
+    words = value.casefold().split()
+    if value.islower() and all(word in _COMMON_LOWER_NAME_WORDS for word in words):
+        return value
+    return "[REDACTED_NAME]"
+
+
+def _redact_secret_assignment(match: re.Match[str]) -> str:
+    """Keep assignment syntax valid while replacing the complete quoted or unquoted value."""
+    value = match.group("value")
+    if value.startswith('\\"') and value.endswith('\\"'):
+        redacted = '\\"[REDACTED]\\"'
+    elif value.startswith("\\'") and value.endswith("\\'"):
+        redacted = "\\'[REDACTED]\\'"
+    elif value.startswith('"') and value.endswith('"'):
+        redacted = '"[REDACTED]"'
+    elif value.startswith("'") and value.endswith("'"):
+        redacted = "'[REDACTED]'"
+    else:
+        redacted = "[REDACTED]"
+    return match.group("prefix") + redacted
 
 
 def sensitive_findings(text: str) -> list[str]:
     """Return names of sensitive-data classes still present after sanitization."""
     findings = []
-    secret_scan = re.sub(rf"(\b{_SECRET_NAME}\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)\[REDACTED\]", "", text,
-                         flags=re.IGNORECASE)
-    if _PRIVATE_KEY.search(text) or _SECRET_ASSIGNMENT.search(secret_scan) or _BEARER.search(text):
+    if (_PRIVATE_KEY.search(text) or _BEARER.search(text)
+            or any(not _redacted_secret_value(match.group("value")) for match in _SECRET_ASSIGNMENT.finditer(text))):
         findings.append("credential")
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    if _EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _ADDRESS.search(text) or has_ip or _NAME.search(text):
+    has_name = any(_redact_name(match) != match.group(0) for match in _NAME.finditer(text))
+    if _EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _ADDRESS.search(text) or has_ip or has_name:
         findings.append("personal_data")
     return findings
+
+
+def _redacted_secret_value(value: str) -> bool:
+    """Recognize only a complete redaction marker, optionally surrounded by quote syntax."""
+    return value == "[REDACTED]" or bool(re.fullmatch(r"\\?[\"']\[REDACTED\]\\?[\"']", value))
 
 
 def _is_valid_ip(value: str) -> bool:

@@ -4,9 +4,11 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from aiflow.v4.control import support_bundle
 from aiflow.v4.control.console_auth import issue_session
@@ -118,6 +120,34 @@ def test_scanner_detects_secrets_tokens_keys_and_personal_data_and_blocks_offer(
     assert not list(ctx.leases.r.scan_iter(match=ctx.leases.p + "support_bundle:*"))
 
 
+def test_secret_scanner_redacts_and_rejects_the_full_quoted_value():
+    raw = 'password: "my secret phrase"'
+    clean = support_bundle.sanitize_text(raw)
+
+    assert "credential" in support_bundle.sensitive_findings(raw)
+    assert clean == 'password: "[REDACTED]"'
+    assert "my secret phrase" not in clean
+    assert not support_bundle.sensitive_findings(clean)
+    assert "credential" in support_bundle.sensitive_findings('password: "[REDACTED] secret phrase"')
+
+
+def test_personal_data_scan_redacts_lowercase_names():
+    raw = "alice johnson"
+    clean = support_bundle.sanitize_text(raw)
+
+    assert "personal_data" in support_bundle.sensitive_findings(raw)
+    assert "alice johnson" not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+
+def test_standard_deployment_routes_support_screen_to_control_api():
+    compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
+    rule = next(line for line in compose.read_text(encoding="utf-8").splitlines()
+                if "traefik.http.routers.api.rule:" in line)
+
+    assert "PathPrefix(`/support`)" in rule
+
+
 def test_owner_reviews_inventory_before_download_and_lead_cannot_build(client, ctx):
     sign_in_owner(client, ctx)
     created = client.post("/v1/support/bundles", json={})
@@ -158,6 +188,30 @@ def test_persistent_control_logs_are_filtered_to_the_last_24_hours(tmp_path, ctx
         log_text = bundle.read("logs/control-service.log").decode()
     assert "recent entry" in log_text
     assert "old entry" not in log_text
+
+
+def test_control_loops_installs_support_log_capture(tmp_path, ctx, monkeypatch):
+    from aiflow.v4.control import loops
+
+    ctx.settings.support_log_dir = str(tmp_path / "logs")
+    ctx.settings.o2_source = "control-loops"
+    monkeypatch.setattr(ctx.events, "start", lambda: None)
+    installed = []
+    install_capture = support_bundle.control_log_buffer
+
+    def tracked_capture(log_dir, source):
+        installed.append((log_dir, source))
+        return install_capture(log_dir, source)
+
+    monkeypatch.setattr(support_bundle, "control_log_buffer", tracked_capture)
+    stop = threading.Event()
+    stop.set()
+    loops.run_loops(ctx, stop)
+
+    message = f"loop capture regression {uuid.uuid4()}"
+    logging.getLogger("aiflow4.loops").warning(message)
+    assert installed == [(str(tmp_path / "logs"), "control-loops")]
+    assert message in install_capture().text()
 
 
 def test_ticket_bundle_includes_only_selected_ticket_runs_from_last_24_hours_and_caps_each_log(ctx):

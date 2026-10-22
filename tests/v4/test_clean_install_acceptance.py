@@ -342,6 +342,9 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
     cc, _ = fresh.join("cc")
     ctx.db.run("INSERT INTO tickets (key,project,status,labels,summary,description) VALUES"
                " ('TESTWP-9','TESTWP','To Do',%s,'keep me','d')", (["aiflow-ready"],))
+    # Ensure a restored serial value collides with a newly initialized sequence unless restore advances it.
+    ctx.db.run("TRUNCATE events RESTART IDENTITY")
+    ctx.db.run("INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.test','TESTWP-9','saved','{}')")
     secret_files = [fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env"),
                     fresh.machine.p("/etc/aiflow/secrets/console/super-admin-password")]
     secrets_before = {p: p.read_bytes() for p in secret_files}
@@ -355,9 +358,10 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
     assert "manifest.json" in names and "db/console_users.copy" in names
     assert "secrets/console/super-admin-password" in names and "secrets/control/aiflow4.env" in names
 
-    # the disaster: registry wiped, secret files gone
+    # the disaster: a fresh install has recreated the registry schema and its sequences start at 1.
     with ctx.db.pool.connection() as c:
-        c.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
+        c.execute("DROP TABLE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
+    ctx.db.migrate()
     for p in secret_files:
         p.unlink()
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
@@ -369,6 +373,11 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
     assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
     assert ctx.db.one("SELECT summary FROM tickets WHERE key='TESTWP-9'")["summary"] == "keep me"
+    inserted = ctx.db.one(
+        "INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.after_restore','TESTWP-9','new','{}') "
+        "RETURNING id"
+    )
+    assert inserted["id"] > 1  # restored id 1 was not reused by the fresh sequence
     again = TestClient(fresh.app, follow_redirects=False, client=("127.0.0.1", 50002))
     assert again.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 200
     # the machine resumes with the node token it already had
@@ -448,6 +457,10 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     gate = release["jobs"]["acceptance"]
     assert "clean-install-acceptance.sh full" in "".join(s.get("run", "") for s in gate["steps"])
     assert set(release["jobs"]["release"]["needs"]) == {"v4-tests", "acceptance"}  # a failure blocks the release
+    release_steps = "".join(s.get("run", "") for s in release["jobs"]["release"]["steps"])
+    assert "install-smoke.sh \"$VERSION\"" in release_steps  # the signed candidate is tested before publication
+    doc = DOC.read_text().lower()
+    assert "release relies on the signed install smoke" in doc
     bug = release["jobs"]["release-bug"]
     assert set(bug["needs"]) == {"v4-tests", "acceptance", "release"} and "failure()" in bug["if"]
     assert (ROOT / "deploy/v4/ci/open-bug-ticket.sh").is_file()

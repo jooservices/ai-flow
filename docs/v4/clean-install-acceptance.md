@@ -30,7 +30,7 @@ Further cases in the same file:
 | `test_machines_policy_calls_and_heartbeats_work_with_sign_in_on` | policy decisions (`/v1/policy/decide`), claims and heartbeats from a client without the console cookie |
 | `test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on` | `aiflow4-autodeploy` and `aiflow4-autodeploy-develop` are run against a mock control endpoint with sign-in on: every `/v1/state` read carries the owner token from the installed secret file, the promoted release is kept, the token is never printed |
 | `test_a_failed_state_health_check_rolls_the_deploy_back` | the same scripts with a refused `/v1/state` call the release unhealthy and deploy the previous release again |
-| `test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation` | `aiflow4 backup create` / `restore` (below): after a wipe of the registry and the secret files, the Super Administrator signs in again and a machine's heartbeat works with its old node token |
+| `test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation` | `aiflow4 backup create` / `restore` (below): after restoring onto freshly migrated tables, the Super Administrator signs in again, a machine's heartbeat works with its old node token, and the restored event sequence generates a new id |
 | `test_upgrade_keeps_sign_in_and_data_and_rollback_returns_to_the_previous_release` | upgrade keeps secrets and the sign-in setting, rollback returns to the previous release, an unhealthy upgrade undoes itself (exit 5) |
 | `test_adding_a_machine_and_an_ai_account_while_sign_in_is_on` | a third machine joins and its new AI account is assigned by the next heartbeat |
 | `test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug` | the CI wiring below |
@@ -64,8 +64,9 @@ aiflow4 backup restore /root/aiflow-backup.tar.gz          # after installing th
 The archive holds every registry table (users, projects, machines and their tokens, tickets, runs), the secret files
 of `/etc/aiflow/secrets/control` and `/etc/aiflow/secrets/console`, and the release (`CURRENT`) it was taken on. The
 restore needs the release installed (so the tables exist; `aiflow4-control-install --version vX.Y.Z ...`), replaces
-the registry content, writes the secret files back (directory `0700`, files `0600`) and prints the release to run.
-Restart the control containers afterwards. Secret values are never printed. Keep the archive as private as the secrets.
+the registry content, resets each sequence owned by a restored table to its restored maximum, writes the secret files
+back (directory `0700`, files `0600`) and prints the release to run. Restart the control containers afterwards.
+Secret values are never printed. Keep the archive as private as the secrets.
 It does not contain the PostgreSQL/Redis/OpenObserve data directories of the host; Redis holds only leases and
 caches that are rebuilt.
 
@@ -77,8 +78,14 @@ caches that are rebuilt.
 | Run | Trigger | Content |
 |---|---|---|
 | fast | every pull request that changes `aiflow/v4/install`, `aiflow/v4/control`, `aiflow/v4/node`, `deploy/v4` or the workflows (`acceptance-fast` in `ci.yml`) | syntax check of every deploy script and the acceptance cases |
-| full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast, the whole `tests/v4` suite, and the systemd control install, upgrade and rollback between the two newest published releases |
-| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; the signed-tarball systemd install smoke of the release job follows |
+| full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast and the whole `tests/v4` suite; when two published releases are available, the sign-in-enabled clean control and two-machine container run against the newer release, plus systemd control install, upgrade and rollback between them |
+| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; the release relies on the signed install smoke against the exact candidate tarball before publishing |
+
+`clean-install-containers.sh` installs a published release, so the release acceptance job cannot pass it the tag being
+released before that tag is published. The release job instead runs `install-smoke.sh` with the signed candidate
+tarball and its signature bundle in clean Ubuntu systemd containers, including a control plane and two machines,
+before it creates the GitHub Release or pushes the control image. The sign-in-enabled `clean-install-containers.sh`
+run is part of the nightly full test when two published releases are available, against the newer release.
 
 The release job `needs` the `acceptance` job, so a failure blocks the GHCR image and the GitHub Release. When a
 nightly or release run fails, `deploy/v4/ci/open-bug-ticket.sh` opens a bug ticket (a GitHub issue labelled `bug`)

@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 from .control import Layout
 
@@ -49,6 +50,29 @@ def _tables(conn: psycopg.Connection) -> list[str]:
             ordered.append(n)
             del parents[n]
     return ordered
+
+
+def _reset_owned_sequences(conn: psycopg.Connection, tables: list[str]) -> None:
+    """Advance each sequence owned by a restored column past the restored data."""
+    for table in tables:
+        relation = sql.Identifier("public", table).as_string(conn)
+        sequences = conn.execute(
+            "SELECT a.attname, pg_get_serial_sequence(%s, a.attname) "
+            "FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid=t.oid "
+            "WHERE n.nspname='public' AND t.relname=%s AND a.attnum>0 AND NOT a.attisdropped "
+            "AND pg_get_serial_sequence(%s, a.attname) IS NOT NULL",
+            (relation, table, relation),
+        ).fetchall()
+        for column, sequence in sequences:
+            maximum = conn.execute(
+                sql.SQL("SELECT max({}) FROM {}")
+                .format(sql.Identifier(column), sql.Identifier("public", table))
+            ).fetchone()[0]
+            conn.execute(
+                "SELECT setval(%s::regclass, COALESCE(%s::bigint, 1), %s)",
+                (sequence, maximum, maximum is not None),
+            )
 
 
 def _add(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o600) -> None:
@@ -106,6 +130,7 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
             for t in manifest["tables"]:
                 with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
                     copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+            _reset_owned_sequences(conn, manifest["tables"])
         for name, m in members.items():
             if name.startswith("secrets/"):
                 _, d, fname = name.split("/", 2)

@@ -310,6 +310,21 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
 
 
+def test_support_screen_shows_ticket_picker_and_review_inventory_before_download():
+    rendered = run_script(f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-support' ? root : null; }};
+S.view = 'support'; S.consoleUser = {json.dumps(console_session_user('owner'))};
+S.data = {{tickets: [{{key: 'TESTWP-7', type: 'Bug', summary: 'Example issue'}}]}};
+S.support = {{ticketKey: 'TESTWP-7', busy: false, error: '', bundle: {{download_url: '/v1/support/bundles/random/download',
+  inventory: {{created_at: '2026-10-22T10:00:00+00:00', scan: 'passed', files: [{{name: 'incidents.json', bytes: 90}}]}}}}}};
+renderSupport(); console.log(root.innerHTML);
+""")
+    assert 'id="support-ticket"' in rendered and "TESTWP-7" in rendered
+    assert "Review bundle inventory" in rendered and "Sensitive data scan passed" in rendered
+    assert "Download reviewed bundle" in rendered and "/v1/support/bundles/random/download" in rendered
+
+
 def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve_link():
     state = {
         "nodes": [{"name": "node1", "ip": "192.0.2.1", "status": "online", "slots_total": 4,
@@ -452,9 +467,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects']"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects"
+    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -463,7 +478,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'support']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():

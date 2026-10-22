@@ -26,7 +26,7 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, support_bundle, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -305,6 +305,10 @@ class ProjectRepositoriesBody(BaseModel):
     epic_repositories: dict[str, str] = Field(default_factory=dict, max_length=500)
 
 
+class SupportBundleBody(BaseModel):
+    ticket_key: str = Field(default="", max_length=40)
+
+
 class GitHubInstallationBody(BaseModel):
     installation_id: int = Field(ge=1)
 
@@ -514,6 +518,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+    support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
 
     def sync_accounts() -> None:
         repo = ctx.repo()
@@ -895,6 +900,47 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, None)
         return {"authenticated": True, "user": user.subject, "role": user.role,
                 "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
+
+    @app.post("/v1/support/bundles")
+    def create_support_bundle(body: SupportBundleBody, request: Request) -> dict:
+        console_user(request, {"console.manage"}, target="support_bundle", action="create")
+        ticket_key = body.ticket_key.strip().upper() or None
+        try:
+            archive, inventory = support_bundle.build_support_bundle(ctx, ticket_key)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown ticket") from exc
+        except ValueError as exc:
+            log.warning("support bundle scan blocked; sensitive content remained after sanitization")
+            raise HTTPException(422, "bundle scan failed; no bundle was offered") from exc
+        bundle_id = secrets.token_urlsafe(24)
+        key = ctx.leases._k("support_bundle", bundle_id)
+        payload = json.dumps({"archive": base64.b64encode(archive).decode("ascii"), "inventory": inventory},
+                             separators=(",", ":"))
+        try:
+            ctx.leases.r.set(key, payload, ex=600)
+        except Exception as exc:  # noqa: BLE001 - do not return an unreviewable or non-shared in-memory bundle
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        return {"bundle_id": bundle_id, "inventory": inventory, "download_url": f"/v1/support/bundles/{bundle_id}/download"}
+
+    @app.get("/v1/support/bundles/{bundle_id}/download")
+    def download_support_bundle(bundle_id: str, request: Request) -> Response:
+        console_user(request, {"console.manage"})
+        key = ctx.leases._k("support_bundle", bundle_id)
+        try:
+            stored = ctx.leases.r.get(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        if not stored:
+            raise HTTPException(404, "bundle expired or unknown")
+        item = json.loads(stored)
+        ticket_key = item["inventory"].get("ticket_key")
+        filename = f"support-bundle-{ticket_key}.zip" if ticket_key else "support-bundle.zip"
+        archive = base64.b64decode(item["archive"], validate=True)
+        return Response(archive, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                 "Cache-Control": "no-store"})
 
     @app.get("/healthz")
     def healthz() -> dict:

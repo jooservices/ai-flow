@@ -413,6 +413,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-support" aria-controls="view-support" aria-selected="false" data-act="view" data-view="support" hidden>Support</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -444,6 +445,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -523,7 +525,9 @@ var S = {
   knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' },
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
+S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 function viewOf(path) {
+  if (path.indexOf('/support') === 0) return 'support';
   if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/integrations') === 0) return 'integrations';
   if (path.indexOf('/sa') === 0) return 'sa';
@@ -2510,6 +2514,46 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function renderSupport() {
+  var root = $('#view-support'); if (!root) return;
+  if (!consoleCan('console.manage')) {
+    root.innerHTML = '<section class="panel"><div class="panel-h"><h2>Support</h2></div><p class="hint">Owner or Super Administrator access is required to build a support bundle.</p></section>';
+    return;
+  }
+  var support = S.support, tickets = D().tickets || [];
+  var h = '<div class="dhead"><div><div class="eyebrow">Owner tools</div><h1>Support</h1><p class="hint">Build a private diagnostic bundle, review its inventory, then download it to inspect before sharing.</p></div></div>';
+  h += '<section class="panel"><div class="panel-h"><h2>Build a bundle</h2><span class="hint">Logs are capped at 5 MB per file.</span></div>';
+  h += '<div class="project-form"><label>Ticket (optional)<select id="support-ticket"><option value="">All recent incidents and control logs</option>';
+  h += tickets.filter(function (ticket) { return ticket.type !== 'Epic'; }).map(function (ticket) {
+    return '<option value="' + esc(ticket.key) + '"' + (support.ticketKey === ticket.key ? ' selected' : '') + '>' + esc(ticket.key + ' · ' + ticket.summary) + '</option>';
+  }).join('');
+  h += '</select></label><div class="wide project-actions"><button class="btn primary" data-act="support-build"' + (support.busy ? ' disabled' : '') + '>' + (support.busy ? 'Scanning bundle…' : 'Build support bundle') + '</button>';
+  h += '<span class="hint">Includes versions, safe settings, machine and account states, up to 100 incidents from 7 days, and control service logs from 24 hours.</span></div></div>';
+  if (support.error) h += '<p class="error" role="alert">' + esc(support.error) + '</p>';
+  h += '</section>';
+  if (support.bundle) {
+    var inv = support.bundle.inventory || {};
+    h += '<section class="panel" aria-labelledby="support-inventory"><div class="panel-h"><h2 id="support-inventory">Review bundle inventory</h2><span class="badge ok">Sensitive data scan passed</span></div>';
+    h += '<p class="hint">Created ' + esc(when(inv.created_at)) + '. Review these files before you share the downloaded bundle.</p><ul class="plain-list">';
+    h += (inv.files || []).map(function (file) { return '<li><span class="mono">' + esc(file.name) + '</span><span class="hint">' + Number(file.bytes || 0).toLocaleString() + ' bytes</span></li>'; }).join('');
+    h += '</ul><div class="project-actions"><a class="btn primary" href="' + esc(support.bundle.download_url) + '">Download reviewed bundle</a><button class="btn" data-act="support-clear">Build another</button><span class="hint">The download stays available for 10 minutes.</span></div></section>';
+  }
+  root.innerHTML = h;
+}
+
+function buildSupportBundle() {
+  if (S.support.busy || !consoleCan('console.manage')) return;
+  var select = $('#support-ticket');
+  S.support.ticketKey = select ? select.value : S.support.ticketKey;
+  S.support.busy = true; S.support.error = ''; S.support.bundle = null; renderSupport();
+  fetch('/v1/support/bundles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket_key: S.support.ticketKey }) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { S.support.bundle = d; S.support.error = ''; })
+    .catch(function (e) { S.support.error = String(e.message || e); })
+    .then(function () { S.support.busy = false; renderSupport(); });
+}
+
 function render() {
   renderLive();
   renderFooter();
@@ -2523,6 +2567,7 @@ function render() {
   else if (S.view === 'knowledge') renderKnowledge();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
+  else if (S.view === 'support') renderSupport();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2542,7 +2587,8 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'support'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  var supportTab = $('#tab-support'); if (supportTab) supportTab.hidden = !consoleCan('console.manage');
 }
 function setView(v) {
   if (S.view === v) return;
@@ -2551,6 +2597,7 @@ function setView(v) {
   showView();
   try { history.pushState(null, '', v === 'cc' ? '/cc' : '/' + v); } catch (e) { /* file preview */ }
   render();
+  if (v === 'support') renderSupport();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'integrations') loadIntegrations();
@@ -2565,6 +2612,8 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'support-build') buildSupportBundle();
+  else if (act === 'support-clear') { S.support.bundle = null; S.support.error = ''; renderSupport(); }
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }

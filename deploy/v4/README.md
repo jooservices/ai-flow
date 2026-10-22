@@ -50,6 +50,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 - [Command Center V2 design](../../docs/v4/command-center-v2.md): interactive prototype of the new console: dark theme, one Dashboard, Work board with a project picker, role views, machines and AI, users and roles, human review metrics
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
+- [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 
 ## Tools on a node

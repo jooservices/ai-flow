@@ -86,6 +86,10 @@ class Worker:
         adapter.argv = lambda sp: self.run_as + base_argv(sp)
         self.publish(state="probing")
         res = adapter.run(spec)
+        if not (res.final_text or "").strip() and not res.error_kind:
+            # A clean process exit without an answer is a provider failure, not evidence of sign-out.
+            res.error_kind = "provider"
+            res.error_message = "no answer"
         ok = not res.error_kind and bool((res.final_text or "").strip())
         detail = (res.error_message or res.final_text or "").strip()
         summary = (res.final_text or "").strip()[:300] if ok else f"{res.error_kind or 'no answer'}: {detail[:250]}"

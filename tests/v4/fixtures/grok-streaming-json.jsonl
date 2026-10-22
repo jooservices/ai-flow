@@ -1,0 +1,5 @@
+{"type":"available_commands","tools":[],"commands":[]}
+{"type":"thought","data":"The user asked for a short answer."}
+{"type":"text","data":"OK"}
+{"type":"usage","messageId":"response-1","stopReason":"end_turn","usage":{"input_tokens":4,"output_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":0,"reasoning_tokens":0},"signature":"recorded-signature"}
+{"type":"end","stopReason":"end_turn","sessionId":"recorded-session","requestId":"recorded-request","usage":{"input_tokens":7,"output_tokens":1,"cache_read_input_tokens":3,"cache_creation_input_tokens":0,"reasoning_tokens":0,"total_tokens":11},"num_turns":1,"total_cost_usd":0.00123}

@@ -46,6 +46,49 @@ def test_codex_and_grok_events_from_spikes():
     GrokAdapter().parse_event({"type": "error", "message": "Internal error: { \"message\": \"API error (status 402 Payment Required):"
                                                             " Grok Build usage balance exhausted\" }"}, g)
     assert g.error_kind == "quota"
+    auth = RunResult()
+    GrokAdapter().parse_event({"type": "error", "message": "You are not signed in. Please run /login."}, auth)
+    assert auth.error_kind == "auth"
+
+
+def test_grok_runs_recorded_streaming_json_and_reads_answer_usage_and_cost(tmp_path):
+    fixture = Path(__file__).parent / "fixtures" / "grok-streaming-json.jsonl"
+    script = tmp_path / "recorded_grok.py"
+    script.write_text(f"from pathlib import Path\nprint(Path({str(fixture)!r}).read_text(), end='')\n")
+    adapter = GrokAdapter()
+    adapter.argv = lambda _spec: [sys.executable, str(script)]
+
+    result = adapter.run(RunSpec(prompt="Reply OK", cwd=str(tmp_path), account_home=str(tmp_path)))
+
+    assert result.exit_code == 0 and result.error_kind == ""
+    assert result.final_text == "OK"
+    assert result.tokens_in == 10 and result.tokens_out == 1 and result.cost_usd == 0.00123
+
+
+def test_worker_probe_classifies_empty_success_as_provider_failure(tmp_path, monkeypatch):
+    from aiflow.v4.worker import loop as worker_loop
+
+    work = tmp_path / "work" / ".probe" / "grok-01"
+    (work / ".git").mkdir(parents=True)
+    adapter = GrokAdapter()
+    adapter.argv = lambda _spec: []
+    adapter.run = lambda _spec: RunResult(exit_code=0)
+    monkeypatch.setattr(worker_loop, "get_adapter", lambda _provider: adapter)
+    monkeypatch.setattr(worker_loop.Worker, "publish", lambda self, **fields: self.state.update(fields))
+    worker = worker_loop.Worker("grok-01", "http://control", "token", "node1", str(tmp_path), run_as=[])
+    posted = []
+
+    def api_call(method, path, json=None, params=None):
+        if method == "GET" and path.endswith("/spec"):
+            return {"provider": "grok", "model": ""}
+        posted.append(json)
+        return {"ok": True}
+
+    worker.api.call = api_call
+
+    assert worker.probe() is False
+    assert posted[0]["error_kind"] == "provider"
+    assert posted[0]["summary"] == "provider: no answer"
 
 
 def fake_cli(tmp_path: Path, lines: list[dict], exit_code: int = 0, sleep: float = 0) -> list[str]:

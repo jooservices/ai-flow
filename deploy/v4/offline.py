@@ -394,6 +394,9 @@ fi
 exit 0
 """, encoding="utf-8")
         postinst.chmod(0o755)
+        for directory in [tree, *(d for d in tree.rglob("*") if d.is_dir())]:
+            directory.chmod(0o755)  # dpkg-deb rejects group-writable or setgid control directories
+        unit_path.chmod(0o644)
         output = packages_dir / f"{name}_{deb_version}_all.deb"
         _run(["dpkg-deb", "--build", "--root-owner-group", str(tree), str(output)])
         shutil.rmtree(tree)

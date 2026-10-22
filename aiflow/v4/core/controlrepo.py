@@ -42,6 +42,7 @@ class Project:
     environments: dict[str, Any] = field(default_factory=dict)
     urls: dict[str, str] = field(default_factory=dict)
     merge: dict[str, Any] = field(default_factory=dict)
+    version_release: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     priority: int = 5          # lower first: workers serve the projects in this order

@@ -1,0 +1,38 @@
+# Gatus status page of the AI Flow v4 control plane (port 8081 through Traefik). No secrets: every check runs
+# inside the aiflow4-control and aiflow4-edge networks.
+endpoints:
+  - name: control-api-a
+    group: control
+    url: http://aiflow4-control-api-a:8080/healthz
+    interval: 30s
+    conditions: ["[STATUS] == 200"]
+  - name: control-api-b
+    group: control
+    url: http://aiflow4-control-api-b:8080/healthz
+    interval: 30s
+    conditions: ["[STATUS] == 200"]
+  - name: command-center
+    group: control
+    url: http://aiflow4-traefik/cc
+    interval: 60s
+    conditions: ["[STATUS] == 200"]
+  - name: traefik
+    group: services
+    url: http://aiflow4-traefik/ping
+    interval: 30s
+    conditions: ["[STATUS] == 200"]
+  - name: postgres
+    group: services
+    url: tcp://aiflow4-postgres:5432
+    interval: 30s
+    conditions: ["[CONNECTED] == true"]
+  - name: redis
+    group: services
+    url: tcp://aiflow4-redis:6379
+    interval: 30s
+    conditions: ["[CONNECTED] == true"]
+  - name: openobserve
+    group: services
+    url: http://aiflow4-openobserve:5080/o2/healthz
+    interval: 30s
+    conditions: ["[STATUS] == 200"]

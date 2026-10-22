@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,14 @@ def parse_plan(text: str) -> dict[str, Any] | None:
     return {"summary": plan["summary"][:1000], "actions": actions}
 
 
+def needs_model_review(snapshot: dict[str, Any]) -> bool:
+    """Skip paid model calls when the control plane has no item that needs a decision."""
+    if any(snapshot.get(key) for key in ("open_incidents", "needs_owner", "offline_nodes", "quota_accounts",
+                                         "quota_incidents", "flow_bug_reports")):
+        return True
+    return any("hard" in (clock.get("passed") or []) for clock in snapshot.get("running_clocks", []))
+
+
 def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,
                run_as: list[str]) -> dict:
     """Run one account-backed, fenced master pass. All effects are dispatched through /v1/master/actions."""
@@ -68,9 +78,17 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                        "needs_owner": len(snapshot.get("needs_owner", [])),
                        "running": len(snapshot.get("running_clocks", [])),
                        "flow_bugs": len(snapshot["flow_bug_reports"])}
+        if not needs_model_review(snapshot):
+            result.update(outcome="done", summary="no incidents, owner decisions, failures or overdue runs need review",
+                          details={"no_watch": True, "model_time_s": 0,
+                                   "duration_s": int(time.time() - t0), "log": ""})
+            return result
+        budget = snapshot.get("autonomy") or {}
+        remaining = budget.get("remaining_seconds")
+        timeout_s = 600 if remaining is None else max(1, min(600, int(remaining)))
         spec = RunSpec(prompt=build_prompt(c, snapshot), cwd=str(work),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=600, control_url=control_url, run_token=c.run_token,
+                       timeout_s=timeout_s, control_url=control_url, run_token=c.run_token,
                        log_path=str(logs / f"master-{c.run_id}.jsonl"), sandbox="read-only")
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
@@ -82,24 +100,63 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             hb.progress = {"phase": "master-ai", "events": events["n"],
                            "last": str(event.get("type", ""))[:40], "elapsed_s": int(time.time() - t0)}
 
+        model_started = time.monotonic()
         response = adapter.run(spec, on_progress, stop=hb.lost)
-        result.update(tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
-                      quota=response.quota, error_kind=response.error_kind,
-                      reset_at=response.reset_at.isoformat() if response.reset_at else None)
+        responses = [response]
         if hb.lost.is_set():
             raise LeaseLost()
         if response.error_kind in ("quota", "auth"):
             result.update(outcome="quota", error_kind=response.error_kind,
-                          summary=f"master account {c.account} cannot work now ({response.error_kind})")
+                          summary=f"master account {c.account} cannot work now ({response.error_kind})",
+                          tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                          details={"model_time_s": math.ceil(time.monotonic() - model_started)})
             return result
         if response.error_kind:
             result.update(outcome="timeout" if response.error_kind == "timeout" else "failed",
-                          error_kind=response.error_kind, summary=f"master cycle failed: {response.error_message[:400]}")
+                          error_kind=response.error_kind, summary=f"master cycle failed: {response.error_message[:400]}",
+                          tokens_in=response.tokens_in, tokens_out=response.tokens_out, cost_usd=response.cost_usd,
+                          details={"model_time_s": math.ceil(time.monotonic() - model_started)})
             return result
         plan = parse_plan(response.final_text or "")
         if not plan:
-            result["summary"] = "master returned no valid JSON action plan"
-            result["details"] = {"output": (response.final_text or "")[-1000:], "log": response.log_path}
+            retry_budget = timeout_s - math.ceil(time.monotonic() - model_started)
+            if retry_budget > 0:
+                reminder = ("\n\nSTRICT FORMAT RETRY: Your previous response was invalid. Return only one JSON object with exactly "
+                            "the required summary and actions fields. Every action must be an object with action and intent. "
+                            "Use an empty actions array if no safe action is needed. Do not include markdown or prose.")
+                retry_spec = replace(spec, prompt=spec.prompt + reminder, timeout_s=min(600, retry_budget))
+                response = adapter.run(retry_spec, on_progress, stop=hb.lost)
+                responses.append(response)
+                if hb.lost.is_set():
+                    raise LeaseLost()
+                if response.error_kind:
+                    result.update(tokens_in=sum(r.tokens_in for r in responses),
+                                  tokens_out=sum(r.tokens_out for r in responses),
+                                  cost_usd=sum(r.cost_usd for r in responses), quota=response.quota,
+                                  error_kind=response.error_kind,
+                                  reset_at=response.reset_at.isoformat() if response.reset_at else None)
+                    if response.error_kind in ("quota", "auth"):
+                        result.update(outcome="quota", summary=f"master account {c.account} cannot work now ({response.error_kind})")
+                    else:
+                        result.update(outcome="timeout" if response.error_kind == "timeout" else "failed",
+                                      summary=f"master cycle failed during strict-format retry: {response.error_message[:400]}")
+                    result["details"] = {"plan_attempts": len(responses),
+                                          "model_time_s": math.ceil(time.monotonic() - model_started)}
+                    return result
+                plan = parse_plan(response.final_text or "")
+
+        result.update(tokens_in=sum(r.tokens_in for r in responses), tokens_out=sum(r.tokens_out for r in responses),
+                      cost_usd=sum(r.cost_usd for r in responses), quota=response.quota,
+                      error_kind=response.error_kind,
+                      reset_at=response.reset_at.isoformat() if response.reset_at else None)
+        model_time_s = math.ceil(time.monotonic() - model_started)
+        api.call("POST", "/v1/master/plan-outcome", {"run_id": c.run_id, "fence": c.fence,
+                                                       "valid": bool(plan)})
+        if not plan:
+            result["summary"] = "master returned no valid JSON action plan after the strict-format retry"
+            result["details"] = {"plan_attempts": len(responses), "invalid_plan": True,
+                                 "model_time_s": model_time_s, "output": (response.final_text or "")[-1000:],
+                                 "log": response.log_path}
             return result
 
         completed, escalated, denied = 0, 0, 0
@@ -108,7 +165,8 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                 raise LeaseLost()
             payload = {key: value for key, value in action.items() if key in {
                 "action", "ticket", "intent", "category", "headline", "what", "why", "result", "next", "fields",
-                "add_labels", "remove_labels", "kind", "subject", "severity", "title", "detail", "target_status"}}
+                "add_labels", "remove_labels", "kind", "subject", "severity", "title", "detail", "target_status",
+                "options", "observation_key", "account_id", "pause_minutes", "target_run_id", "signature"}}
             payload.update(run_id=c.run_id, fence=c.fence)
             try:
                 answer = api.call("POST", "/v1/master/actions", payload)
@@ -122,6 +180,7 @@ def run_master(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         result.update(outcome="done", summary=plan["summary"], details={"actions": len(plan["actions"]),
                                                                          "completed": completed,
                                                                          "escalated": escalated, "refused": denied,
+                                                                         "model_time_s": model_time_s,
                                                                          "duration_s": int(time.time() - t0),
                                                                          "log": response.log_path})
         return result

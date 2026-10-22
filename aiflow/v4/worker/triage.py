@@ -121,19 +121,29 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
                              "duration_s": int(res.duration_s), "log": res.log_path,
                              "base": project["base"], "head_sha": head}
         if decision["decision"] == "ANSWER":
-            jira("comment", body=note(c, "answered developer question",
-                                       what=f"The developer asked: {c.last_dev_summary or 'See the last dev run'}",
-                                       why=decision["why"], result=decision["answer"],
-                                       next_="Back to To Do; development can continue with this answer",
-                                       t0=t0, node=api_node(api)))
-            jira("transition", to="To Do")
+            reviewer_question = c.last_dev_summary.startswith("Reviewer question:")
+            answer_note = note(c, "answered reviewer question" if reviewer_question else "answered developer question",
+                               what=f"The question was: {c.last_dev_summary or 'See the last dev run'}",
+                               why=decision["why"], result=decision["answer"],
+                               next_=("Back to Human review; the reviewer can continue with the answer" if reviewer_question
+                                      else "Back to To Do; development can continue with this answer"),
+                               t0=t0, node=api_node(api))
+            jira("comment", body=answer_note)
+            if c.pr and c.pr.get("number"):
+                api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
+                                                          "number": c.pr["number"], "body": answer_note})
+            jira("transition", to="Human review" if reviewer_question else "To Do")
             result.update(outcome="answered", summary=decision["answer"][:1000])
         else:
-            jira("comment", body=note(c, "owner decision required",
-                                       what=f"The developer asked: {c.last_dev_summary or 'See the last dev run'}",
-                                       why=decision["why"], result="No safe answer was found in the ticket, spec, or code.",
-                                       next_="The owner must decide and comment on the ticket",
-                                       t0=t0, node=api_node(api)))
+            escalation_note = note(c, "owner decision required",
+                                   what=f"The question was: {c.last_dev_summary or 'See the last dev run'}",
+                                   why=decision["why"], result="No safe answer was found in the ticket, spec, or code.",
+                                   next_="The owner must decide and comment on the ticket",
+                                   t0=t0, node=api_node(api))
+            jira("comment", body=escalation_note)
+            if c.pr and c.pr.get("number"):
+                api.call("POST", "/v1/github/comment", {"run_id": c.run_id, "fence": c.fence,
+                                                          "number": c.pr["number"], "body": escalation_note})
             api.call("POST", "/v1/notify/triage", {"run_id": c.run_id, "fence": c.fence,
                                                      "detail": decision["why"]})
             jira("fields", add_labels=["owner-escalated"])

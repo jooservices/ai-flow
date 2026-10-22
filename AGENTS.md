@@ -4,6 +4,7 @@ This repository holds two generations of AI Flow. The current work is **v4**, a 
 
 - Change only `aiflow/v4/`, `prompts/v4/`, `deploy/v4/`, `tests/v4/` and `docs/v4/`, unless the ticket says
   otherwise. The old flow (everything else) keeps running for other projects; never edit it by accident.
+- Every new feature for end users must have a UI path. CLI is only for developers and CI.
 - v4 is Python 3.12 with uv: FastAPI control API (`aiflow/v4/control`), workers and adapters
   (`aiflow/v4/worker`, `aiflow/v4/adapters`), node agent (`aiflow/v4/node`), shared core (`aiflow/v4/core`).
   Read the module docstrings first; they explain the design (leases and fencing, policy hook, verify, watchdog).

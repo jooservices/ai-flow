@@ -613,6 +613,7 @@ var S = {
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
+  rh: { window: null, percent: null, busy: false, error: '', sig: '' },
   reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
@@ -646,7 +647,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
   { view: 'cc', label: 'Dashboard' },
@@ -1573,6 +1574,8 @@ function renderCC() {
   });
   h += '</tbody></table></div></section>';
 
+  h += roleHealthPanel(d.role_health || { roles: [], settings: {} });
+
   h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
 
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
@@ -1605,13 +1608,66 @@ function renderCC() {
   var focusId = oldJoin && oldJoin.contains(document.activeElement) ? document.activeElement.id : '';
   var focusStart = focusId && document.activeElement.selectionStart;
   var focusEnd = focusId && document.activeElement.selectionEnd;
+  var oldRh = $('#rh-settings');
+  var rhFocus = oldRh && oldRh.contains(document.activeElement) ? document.activeElement.id : '';
   $('#view-machines').innerHTML = h;
+  if (oldRh && $('#rh-settings')) $('#rh-settings').replaceWith(oldRh);
+  if (rhFocus && $('#' + rhFocus)) $('#' + rhFocus).focus();
+  renderRoleHealthSettings();
   if (oldJoin) $('#node-onboarding').replaceWith(oldJoin);
   if (focusId) {
     var focusTarget = $('#' + focusId);
     if (focusTarget) { focusTarget.focus(); if (focusTarget.setSelectionRange && focusStart != null) focusTarget.setSelectionRange(focusStart, focusEnd); }
   }
   renderNodeJoin();
+}
+
+/* ---------- role health: quality by AI account and role ---------- */
+var RH_ROLE = { dev: 'Developer', verify: 'Verifier', master: 'Master', intake_refiner: 'Intake' };
+function roleHealthPanel(rh) {
+  var s = rh.settings || {}, rows = rh.roles || [];
+  var h = '<section class="panel" id="p-role-health" aria-labelledby="h-rh"><div class="panel-h"><h2 id="h-rh">AI quality by role</h2><span class="hint">Success rate over the last ' + esc(s.window_runs || 10) + ' scored runs · cost and rework over ' + esc(rh.metrics_days || 30) + ' days · a role is switched off above ' + esc(s.failure_percent == null ? 60 : s.failure_percent) + '% failure score</span></div>';
+  if (!rows.length) return h + '<div class="empty">No AI account has a role yet.</div><div id="rh-settings"></div></section>';
+  h += '<div class="tablebox"><table style="min-width:900px"><thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">State</th><th scope="col">Success rate</th><th scope="col">Cost per finished ticket</th><th scope="col">Rework rounds</th><th scope="col">Note</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    var tone = r.mode === 'on' ? 'ok' : r.mode === 'probation' ? 'warn' : 'crit';
+    var label = r.mode === 'on' ? 'On' : r.mode === 'probation' ? 'Off · probation ticket available' : 'Off · probation done today';
+    var note = r.note || '';
+    if (r.probation) note += (note ? ' ' : '') + 'Probation: ' + r.probation.streak + ' of ' + r.probation.needed + ' in a row succeeded' + (r.probation.open_ticket ? ' · working on ' + r.probation.open_ticket : '') + '.';
+    h += '<tr><td class="mono">' + esc(r.account) + '</td><td>' + esc(RH_ROLE[r.role] || r.role) + '</td><td>' + pill(tone, label) + '</td>';
+    h += '<td class="mono" data-rh="rate">' + (r.success_rate == null ? '—' : esc(r.success_rate) + '% <span class="muted">(' + r.scored_runs + ' runs)</span>') + '</td>';
+    h += '<td class="mono" data-rh="cost">' + (r.cost_per_finished_ticket == null ? '—' : esc(usd(r.cost_per_finished_ticket))) + '</td>';
+    h += '<td class="mono" data-rh="rework">' + esc(r.rework_rounds) + '</td><td class="small">' + esc(note) + '</td></tr>';
+  });
+  return h + '</tbody></table></div><div id="rh-settings"></div></section>';
+}
+function renderRoleHealthSettings() {
+  var host = $('#rh-settings'); if (!host) return;
+  var s = (D().role_health || {}).settings || {};
+  if (S.rh.window === null) { S.rh.window = String(s.window_runs == null ? 10 : s.window_runs); S.rh.percent = String(s.failure_percent == null ? 60 : s.failure_percent); }
+  var canEdit = consoleCan('console.manage');
+  var sig = [S.rh.window, S.rh.percent, S.rh.busy, S.rh.error, canEdit, s.window_runs, s.failure_percent].join('|');
+  if (sig === S.rh.sig && host.firstChild) return;
+  S.rh.sig = sig;
+  var h = '<form class="crform" id="rh-form" novalidate style="padding:12px 0 0"><div class="small">Thresholds: when the latest runs of one account and role reach the failure score below, that role is switched off for that account. Defaults: 10 runs, above 60%.</div>';
+  h += '<label for="rh-window">Runs in the window<input id="rh-window" type="number" min="1" max="100" step="1" value="' + esc(S.rh.window) + '"' + (canEdit ? '' : ' disabled') + '></label>';
+  h += '<label for="rh-percent">Switch the role off above this failure score (%)<input id="rh-percent" type="number" min="0" max="99" step="1" value="' + esc(S.rh.percent) + '"' + (canEdit ? '' : ' disabled') + '></label>';
+  if (canEdit) h += '<div><button class="btn primary" type="submit"' + (S.rh.busy ? ' disabled' : '') + '>' + (S.rh.busy ? 'Saving…' : 'Save thresholds') + '</button></div>';
+  else h += '<div class="small">Only an owner can change these thresholds.</div>';
+  if (s.updated_by) h += '<div class="small">Last changed by ' + esc(s.updated_by) + ' at ' + esc(when(s.updated_at)) + '.</div>';
+  if (S.rh.error) h += '<div class="err" role="alert">' + esc(S.rh.error) + '</div>';
+  host.innerHTML = h + '</form>';
+}
+function saveRoleHealth() {
+  if (S.rh.busy) return;
+  S.rh.busy = true; S.rh.error = ''; renderRoleHealthSettings();
+  fetch('/v1/role-health/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ window_runs: Number(S.rh.window), failure_percent: Number(S.rh.percent) }) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'HTTP ' + r.status); return d; }); })
+    .then(function (d) {
+      D().role_health = d; S.rh.window = null; toast('Thresholds saved', 'Window ' + d.settings.window_runs + ' runs, failure score above ' + d.settings.failure_percent + '%.', 'ok');
+    }).catch(function (e) { S.rh.error = String(e.message || e); })
+    .then(function () { S.rh.busy = false; if (S.view === 'cc') renderCC(); });
 }
 
 function renderNodeJoin(force) {
@@ -2920,6 +2976,7 @@ function drawerInc(id) {
     quota_high: 'Informational until 100%; then the account pauses until the reset time.',
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
+    role_health: 'This AI account failed too many of its latest runs in this role, so the role is switched off for it; its other roles keep working. AI Flow gives the role one easy probation ticket a day and switches it back on after two in a row succeed. Thresholds are on the Command Center, under AI quality by role.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
@@ -3492,6 +3549,8 @@ var CR_FIELDS = { 'cr-title': 'title', 'cr-desc': 'description', 'cr-epic': 'epi
 var JOIN_FIELDS = { 'join-name': 'name', 'join-key': 'provision_key' };
 document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
+  if (e.target.id === 'rh-window') S.rh.window = e.target.value;
+  if (e.target.id === 'rh-percent') S.rh.percent = e.target.value;
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (JOIN_FIELDS[e.target.id]) S.join[JOIN_FIELDS[e.target.id]] = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key') && e.target.getAttribute('data-sh-field') !== 'screenshot') {
@@ -3525,6 +3584,7 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
+  if (e.target.id === 'rh-form') { e.preventDefault(); saveRoleHealth(); }
 });
 window.addEventListener('popstate', function () {
   S.view = viewOf(location.pathname);

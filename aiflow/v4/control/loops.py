@@ -275,7 +275,7 @@ def watchdog(ctx: Ctx) -> None:
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # nodes that joined but have no AI account: they add slots, never work
-    with_accounts = {a.node for a in repo.accounts}
+    with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
             where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
@@ -383,8 +383,10 @@ def watchdog(ctx: Ctx) -> None:
     for a in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working')"):
         close_incident(ctx, "account_quota", a["id"], "account works again")
     # every role the flow needs must have at least two ready accounts (no single AI the flow depends on)
-    ready = {r["id"] for r in ctx.db.all("SELECT a.id FROM accounts a JOIN nodes n ON n.name = a.node"
-                                         " WHERE a.status IN ('idle','working','probing') AND n.status = 'online'")}
+    online = {r["name"] for r in ctx.db.all("SELECT name FROM nodes WHERE status = 'online'")}
+    by_id = {a.id: a for a in repo.accounts}
+    ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")
+             if r["id"] in by_id and online.intersection(by_id[r["id"]].machines)}
     for role in ("master", "intake_refiner", "verify", "dev"):
         holders = [a for a in repo.accounts if role in (a.roles or [])]
         ok = [a.id for a in holders if a.id in ready]

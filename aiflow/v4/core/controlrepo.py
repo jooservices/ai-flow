@@ -49,6 +49,21 @@ class Account:
     roles: list[str] = field(default_factory=list)
     explicit_only: bool = False
     parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
+    session_limit: int = 0     # total concurrent sessions across all machines; 0 = `parallel`
+    extra_machines: list[str] = field(default_factory=list)  # machines added beyond `node` (docs/v4/shared-accounts.md)
+
+    @property
+    def machines(self) -> list[str]:
+        """Every machine the account is enabled on, its control-repo node first."""
+        return list(dict.fromkeys(([self.node] if self.node else []) + list(self.extra_machines)))
+
+    def runs_on(self, node: str) -> bool:
+        return bool(node) and node in self.machines
+
+    @property
+    def sessions(self) -> int:
+        """Concurrent sessions the account may have in total, however many machines use it."""
+        return max(1, int(self.session_limit or self.parallel or 1))
 
 
 @dataclass
@@ -219,7 +234,7 @@ class ControlRepo:
                    projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref)
 
     def accounts_on(self, node: str) -> list[Account]:
-        return [a for a in self.accounts if a.node == node]
+        return [a for a in self.accounts if a.runs_on(node)]
 
     def tools_for_node(self, node: str, projects: list[str] | None = None) -> list[str]:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""

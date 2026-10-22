@@ -37,7 +37,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, shared_accounts, version_release
 from . import review_metrics
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
@@ -520,6 +520,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+    if not getattr(ctx, "_shared_accounts", False):  # accounts managed in Command Center join the control repo view
+        base_repo = ctx.repo
+        ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
+        ctx._shared_accounts = True
 
     def sync_accounts() -> None:
         repo = ctx.repo()
@@ -1872,9 +1876,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
                     body.release_protocol, body.slots_used, node))
+        repo = ctx.repo()
         for account_id, expires_at in body.credential_expiries.items():
-            ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
+            # the account row keeps the earliest expiry of its machines; each machine's own date is kept beside it
+            reported = repo.account(account_id)
+            if not reported or not reported.runs_on(node):
+                continue
+            ctx.db.run("UPDATE account_machines SET credential_expires_at=%s WHERE account_id=%s AND node=%s",
                        (expires_at, account_id, node))
+            ctx.db.run("UPDATE accounts SET credential_expires_at=(SELECT min(m.v) FROM (SELECT %s::timestamptz AS v"
+                       " UNION ALL SELECT credential_expires_at FROM account_machines WHERE account_id=%s"
+                       " AND node<>%s AND credential_expires_at IS NOT NULL) m) WHERE id=%s",
+                       (expires_at, account_id, node, account_id))
         from .sa import update_slot_pressure
         update_slot_pressure(ctx)
         ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
@@ -1896,18 +1909,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             else:
                 cur["instances"] = cur.get("instances", 1) + 1
         for acc, w in merged.items():
+            member = repo.account(acc)
+            if not member or not member.runs_on(node):
+                continue
             state = w.pop("_state")
             # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
             ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN status='signed_out' THEN status"
                        " WHEN cooldown_until > now() THEN 'cooldown' WHEN %s = 'unavailable' THEN status"
                        " WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
-                       " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, state, state, acc, node))
+                       " updated_at=now() WHERE id=%s", (J(w), state, state, state, acc))
+            ctx.db.run("UPDATE account_machines SET worker_state=%s WHERE account_id=%s AND node=%s",
+                       (J({**w, "state": state}), acc, node))
             ctx.db.run("UPDATE accounts SET idle_since=CASE WHEN status='idle' THEN coalesce(idle_since,now()) ELSE NULL END,"
                        " cooldown_since=CASE WHEN status='cooldown' THEN coalesce(cooldown_since,now()) ELSE NULL END"
-                       " WHERE id=%s AND node=%s", (acc, node))
-        repo = ctx.repo()
+                       " WHERE id=%s", (acc,))
+
         instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
-                     for i in range(1, max(1, int(a.parallel or 1)) + 1)]
+                     for i in range(1, a.sessions + 1)]
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
         # Signed-release agents follow the fleet rollout (canary, waves, rollback: docs/v4/fleet-upgrade.md).
@@ -1917,7 +1935,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
-        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+        signin = [r["account_id"] for r in ctx.db.all(
+            "SELECT account_id FROM account_machines WHERE node=%s AND status='pending' ORDER BY account_id", (node,))]
+        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances, "signin": signin,
                             "release": release,
                             "projects": node_projects,
                             "project_stacks": project_stacks,
@@ -2217,9 +2237,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if ctx.leases.cooling(account_id):
+            return []
+        if not shared_accounts.may_take(ctx.db, acc, node)[0]:  # total session limit and this machine's share
             return []
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
@@ -2322,16 +2344,18 @@ def create_app(ctx: Ctx) -> FastAPI:
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id):
             return False
-        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a JOIN nodes n ON n.name=a.node"
-                           " WHERE a.id=%s AND a.node=%s", (account_id, node))
+        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a, nodes n"
+                           " WHERE a.id=%s AND n.name=%s", (account_id, node))
         return bool(ready) and ready["status"] in ("idle", "working", "probing") and ready["node_status"] == "online"
 
     def master_candidate(account_id: str, node: str) -> dict | None:
         repo = ctx.repo()
         account = repo.account(account_id)
-        if not account or account.node != node:
+        if not account or not account.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if "master" not in (account.roles or []) or not master_ready(account_id, node):
+            return None
+        if not shared_accounts.may_take(ctx.db, account, node)[0]:
             return None
         held = set(ctx.leases.held_keys())
         if MASTER_SCOPE in held:
@@ -2350,7 +2374,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if (failed_over and recent["provider"] == account.provider
                     and failed_at > utcnow() - timedelta(seconds=MASTER_CYCLE_S)
                     and any(a.provider != account.provider and "master" in (a.roles or [])
-                            and master_ready(a.id, a.node) for a in repo.accounts)):
+                            and any(master_ready(a.id, m) for m in a.machines) for a in repo.accounts)):
                 return None
             # A lost or quota-stopped holder is an account failure, not a failing cycle: no scope backoff.
             failover = failed_over
@@ -2439,9 +2463,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
                         "repository_settings": selected_repo} if selected_repo else {})
-        ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence, token_hash)"
-                   " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
+        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
+                                                       model, node, c.fence, h(run_token))):
+            ctx.leases.release(t["key"], run_id, c.fence)
+            return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
+                                 " concurrent sessions"}, status_code=409)
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
@@ -2524,7 +2550,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
-        if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
+        if not acc or not acc.runs_on(node) or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
         node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
@@ -3403,13 +3429,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                         command=str((payload.get("tool_input") or {}).get("command", ""))[:300])
         return d.hook_output()
 
-    # --- events from nodes ------------------------------------------------------------------------------------
+    # --- shared accounts: enable an account on machines, remove it, report the sign-in prompt ----------------------
+    shared_accounts.install(app, ctx, console_user, audit, node_auth)
+
     # --- account probes: a tiny prompt tells whether an account can work and how much quota is left -------------
     @app.get("/v1/accounts/{account_id}/spec")
     def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
         repo = ctx.repo()
         acc = repo.account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         model, effort = repo.model_for(acc.provider, acc.tier)
         return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
@@ -3417,7 +3445,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/accounts/{account_id}/probe")
     def account_probe(account_id: str, body: ProbeBody, node: str = Depends(node_auth)) -> dict:
         acc = ctx.repo().account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
@@ -3435,6 +3463,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                        ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300],
                         body.error_kind, account_id))
         elif body.ok:
+            shared_accounts.mark_signed_in(ctx.db, account_id, node)  # the probe ran with this machine's own credentials
             ctx.leases.uncool(account_id)
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'idle' END,"
                        " cooldown_until=NULL, last_error='', cooldown_since=NULL,"

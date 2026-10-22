@@ -9,6 +9,7 @@ from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
 from .sa import dashboard_data, thresholds
+from .shared_accounts import machines_view
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -30,7 +31,8 @@ def snapshot(ctx) -> dict[str, Any]:
     nodes = []
     assigned: dict[str, int] = {}
     for a in repo.accounts:
-        assigned[a.node] = assigned.get(a.node, 0) + 1
+        for machine in a.machines:
+            assigned[machine] = assigned.get(machine, 0) + 1
     for n in db.all("SELECT * FROM nodes ORDER BY role DESC, name"):
         age = _age(n["last_heartbeat"])
         status = n["status"]
@@ -91,11 +93,14 @@ def snapshot(ctx) -> dict[str, Any]:
         expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
             days=sa_thresholds["credential_expiry_days"]))
         status = "signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
-            "node_offline" if node_status.get(a["node"], "offline") != "online"
+            "node_offline" if not any(node_status.get(m) == "online" for m in (acc.machines if acc else [a["node"]]))
             and a["status"] not in ("signed_out", "error", "cooldown") else a["status"])))
         probe = (a["worker_state"] or {}).get("probe") or {}
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": a["roles"],
+            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc and acc.machines else a["node"]),
+            "tier": a["tier"], "roles": a["roles"],
+            "machines": machines_view(db, acc, node_status), "session_limit": acc.sessions if acc else 1,
+            "shared": bool(acc and len(acc.machines) > 1),
             "explicit_only": bool(acc and acc.explicit_only),
             "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
                                                     else "cooldown" if cool else a["status"]),
@@ -105,7 +110,7 @@ def snapshot(ctx) -> dict[str, Any]:
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
             "quota": a["quota"], "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
-            "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
+            "runs_active": runs_per_account.get(a["id"], 0), "parallel": acc.sessions if acc else 1,
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
                                         "step": r["step"], "elapsed_s": _age(r["started_at"]), "fence": r["fence"],
                                         "progress": r["progress"]},

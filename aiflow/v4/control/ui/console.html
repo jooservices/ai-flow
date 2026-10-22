@@ -307,6 +307,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .drawer-h h3{margin:2px 0 0; font-family:var(--f-cond); font-size:20px; font-weight:600; text-wrap:balance}
 .drawer-b{padding:16px 18px 28px; overflow:auto; display:flex; flex-direction:column; gap:18px}
 .report-md{margin:0; padding:12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.55 var(--f-mono); color:var(--text)}
+.flexrow{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
 .dsec{display:flex; flex-direction:column; gap:8px}
 .dsec h4{margin:0; font-family:var(--f-cond); font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:600}
 .facts{display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:10px}
@@ -850,6 +851,64 @@ function setProjectPaused(key, paused) {
     .then(function (d) { toast(paused ? 'Project paused' : 'Project resumed', d.project, 'ok'); loadProjectList(); poll(); })
     .catch(function (e) { toast('Could not update project', String(e.message || e), 'warn'); });
 }
+function sharedAccountRequest(method, url, body, title) {
+  return fetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast(title, 'Done.', 'ok'); poll(); return d; })
+    .catch(function (e) { toast('Could not update the account', String(e.message || e), 'warn'); });
+}
+function createSharedAccount() {
+  var id = ($('#sa-new-id') || {}).value || '', provider = ($('#sa-new-provider') || {}).value || 'claude';
+  var limit = parseInt(($('#sa-new-limit') || {}).value || '1', 10) || 1;
+  sharedAccountRequest('POST', '/v1/shared-accounts', { id: id.trim().toLowerCase(), provider: provider, session_limit: limit }, 'Account created');
+}
+function enableAccountMachine(account) {
+  var node = ($('#sa-machine-' + account) || {}).value;
+  if (!node) return;
+  sharedAccountRequest('POST', '/v1/shared-accounts/' + encodeURIComponent(account) + '/machines', { node: node }, 'Account enabled on ' + node);
+}
+function saveAccountLimit(account) {
+  var limit = parseInt(($('#sa-limit-' + account) || {}).value || '0', 10);
+  if (limit > 0) sharedAccountRequest('PUT', '/v1/shared-accounts/' + encodeURIComponent(account) + '/session-limit', { session_limit: limit }, 'Session limit saved');
+}
+function removeAccountMachine(account, node, last) {
+  var text = last ? node + ' is the last machine using ' + account + '. Removing it removes the account from every machine. Credentials stay on the machine until you sign out there. Continue?'
+    : 'Remove ' + account + ' from ' + node + '? Other machines keep using it.';
+  if (!window.confirm(text)) return;
+  sharedAccountRequest('DELETE', '/v1/shared-accounts/' + encodeURIComponent(account) + '/machines/' + encodeURIComponent(node) + (last ? '?confirm=true' : ''), null, 'Account removed from ' + node);
+}
+function removeAccountEverywhere(account, count) {
+  if (!window.confirm('Remove ' + account + ' from all ' + count + ' machines? Running sessions finish; no new ones start. Credentials stay on the machines until you sign out there.')) return;
+  sharedAccountRequest('DELETE', '/v1/shared-accounts/' + encodeURIComponent(account) + '?confirm=true', null, 'Account removed');
+}
+function accountMachinesSection(a) {
+  var manage = consoleCan('nodes.manage'), ms = a.machines || [];
+  var b = '<div class="dsec"><h4>Machines · ' + a.runs_active + ' of ' + a.session_limit + ' sessions in use</h4>';
+  b += '<div class="small">Quota, sessions and predictions above are for the whole account. Each machine signs in once; credentials stay on the machine.</div>';
+  if (!ms.length) b += '<div class="empty">Not enabled on any machine yet.</div>';
+  else {
+    b += '<div class="tablebox"><table><thead><tr><th scope="col">Machine</th><th scope="col">Status</th><th scope="col">Sessions now</th><th scope="col">Last 24 h</th><th scope="col"></th></tr></thead><tbody>';
+    ms.forEach(function (m) {
+      var st = !m.signed_in ? pill('warn', 'Sign-in needed') : m.node_status === 'online' ? pill('ok', 'Online') : pill('crit', 'Offline');
+      b += '<tr><td class="mono">' + esc(m.node) + '</td><td>' + st + '</td><td>' + m.runs_active + '</td><td>' + m.runs_24h + '</td><td>';
+      if (manage && m.removable) b += '<button class="btn sm" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(m.node) + '" data-last="' + (ms.length === 1 ? '1' : '') + '">Remove</button>';
+      b += '</td></tr>';
+      if (m.signin) b += '<tr><td colspan="5" class="small">Sign in on <b>' + esc(m.node) + '</b>: open <a href="' + esc(m.signin.link) + '" target="_blank" rel="noopener noreferrer">' + esc(m.signin.link) + '</a> and enter the code <code>' + esc(m.signin.code) + '</code>.</td></tr>';
+      else if (!m.signed_in) b += '<tr><td colspan="5" class="small">Waiting for ' + esc(m.node) + ' to show its sign-in link and code.</td></tr>';
+    });
+    b += '</tbody></table></div>';
+  }
+  if (manage) {
+    var free = (D().nodes || []).filter(function (n) { return ms.every(function (m) { return m.node !== n.name; }); });
+    if (free.length) {
+      b += '<div class="flexrow"><label for="sa-machine-' + esc(a.id) + '" class="small">Enable on</label> <select id="sa-machine-' + esc(a.id) + '">' + free.map(function (n) { return '<option>' + esc(n.name) + '</option>'; }).join('') + '</select> <button class="btn sm" data-act="acc-enable" data-account="' + esc(a.id) + '">Enable</button></div>';
+    }
+    b += '<div class="flexrow"><label for="sa-limit-' + esc(a.id) + '" class="small">Total sessions</label> <input id="sa-limit-' + esc(a.id) + '" type="number" min="1" max="50" value="' + a.session_limit + '" style="width:5em"> <button class="btn sm" data-act="acc-limit" data-account="' + esc(a.id) + '">Save</button>';
+    if (ms.length > 1) b += ' <button class="btn sm" data-act="acc-remove-all" data-account="' + esc(a.id) + '" data-count="' + ms.length + '">Remove from all machines</button>';
+    b += '</div>';
+  }
+  return b + '</div>';
+}
 function removeManagedProject(key) {
   if (!window.confirm('Remove ' + key + ' from AI Flow? Jira and GitHub data will be kept.')) return;
   fetch('/v1/projects/' + encodeURIComponent(key), { method: 'DELETE' })
@@ -1087,12 +1146,18 @@ function renderCC() {
   h += '</div></div><div class="tablebox"><table><thead><tr><th scope="col">Account</th><th scope="col">Provider · tier</th><th scope="col">Node</th><th scope="col">Status</th><th scope="col">Quota used</th><th scope="col">Model</th><th scope="col">Last check</th><th scope="col">Now</th></tr></thead><tbody>';
   d.accounts.filter(function (a) { return accMatch(a, S.accFilter); }).forEach(function (a) {
     var pr = (a.worker && a.worker.probe) || null;
-    h += '<tr tabindex="0" data-act="open-acc" data-id="' + esc(a.id) + '"><td class="mono">' + esc(a.id) + '</td><td>' + esc(PROVIDER[a.provider] || a.provider) + ' <span class="muted">· ' + esc(a.tier) + (a.explicit_only ? ' · on request' : '') + '</span></td><td class="mono">' + esc(a.node) + '</td>';
+    h += '<tr tabindex="0" data-act="open-acc" data-id="' + esc(a.id) + '"><td class="mono">' + esc(a.id) + '</td><td>' + esc(PROVIDER[a.provider] || a.provider) + ' <span class="muted">· ' + esc(a.tier) + (a.explicit_only ? ' · on request' : '') + '</span></td><td class="mono">' + (a.shared ? esc(a.machines.length + ' machines') + ' <span class="muted">· ' + a.runs_active + '/' + a.session_limit + ' sessions</span>' : esc(a.node || '—')) + '</td>';
     h += '<td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '</td><td class="mono">' + esc(a.model || '—') + (a.effort ? ' · ' + esc(a.effort) : '') + '</td>';
     h += '<td class="mono">' + (pr && pr.at ? '<span title="' + (pr.ok ? 'passed' : 'failed') + '">' + (pr.ok ? '✓ ' : '✗ ') + when(new Date(pr.at * 1000).toISOString()) + '</span>' : '—') + '</td>';
     h += '<td><span class="muted">' + esc(doing(a)) + '</span></td></tr>';
   });
-  h += '</tbody></table></div></section>';
+  h += '</tbody></table></div>';
+  if (consoleCan('nodes.manage')) {
+    h += '<div id="sa-create" class="flexrow" style="padding:8px 12px"><label for="sa-new-id" class="small">New shared account</label> <input id="sa-new-id" placeholder="claude-02" maxlength="40" style="width:9em"> <select id="sa-new-provider" aria-label="Provider">' +
+      Object.keys(PROVIDER).map(function (k) { return '<option value="' + k + '">' + PROVIDER[k] + '</option>'; }).join('') +
+      '</select> <label for="sa-new-limit" class="small">Total sessions</label> <input id="sa-new-limit" type="number" min="1" max="50" value="1" style="width:5em"> <button class="btn sm" data-act="acc-create">Create</button> <span class="hint">Then open the account to enable it on machines.</span></div>';
+  }
+  h += '</section>';
 
   h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
 
@@ -1122,12 +1187,13 @@ function renderCC() {
 
   h += '<section class="panel" aria-labelledby="h-ver"><div class="panel-h"><h2 id="h-ver">Versions</h2><span class="hint">Pinned in aiflow-control/versions.lock, reported by each node</span></div>' + versionsBox() + '</section></div></div>';
 
-  var oldJoin = $('#node-onboarding');
+  var oldJoin = $('#node-onboarding'), oldCreate = $('#sa-create');
   var focusId = oldJoin && oldJoin.contains(document.activeElement) ? document.activeElement.id : '';
   var focusStart = focusId && document.activeElement.selectionStart;
   var focusEnd = focusId && document.activeElement.selectionEnd;
   $('#view-cc').innerHTML = h;
   if (oldJoin) $('#node-onboarding').replaceWith(oldJoin);
+  if (oldCreate && $('#sa-create')) $('#sa-create').replaceWith(oldCreate);
   if (focusId) {
     var focusTarget = $('#' + focusId);
     if (focusTarget) { focusTarget.focus(); if (focusTarget.setSelectionRange && focusStart != null) focusTarget.setSelectionRange(focusStart, focusEnd); }
@@ -2380,6 +2446,7 @@ function drawerAcc(id) {
   b += '<div class="dsec"><h4>Now</h4><div style="font-size:13px">' + esc(doing(a)) + '</div></div>';
   var runs = D().recent_runs.filter(function (r) { return r.account === a.id; });
   b += '<div class="dsec"><h4>Recent runs</h4>' + runsTable(runs, 10) + '</div>';
+  b += accountMachinesSection(a);
   b += '<div class="dsec"><h4>Config directory</h4><div class="codeline"><code>/srv/aiflow/accounts/' + esc(a.id) + '</code></div></div>';
   return drawerShell('account · ' + esc(PROVIDER[a.provider] || a.provider), esc(a.id), pill(accTone(a), accLabel(a)), b);
 }
@@ -2741,6 +2808,11 @@ document.addEventListener('click', function (e) {
     }
   }
   else if (act === 'close') closeAll();
+  else if (act === 'acc-create') createSharedAccount();
+  else if (act === 'acc-enable') enableAccountMachine(el.getAttribute('data-account'));
+  else if (act === 'acc-limit') saveAccountLimit(el.getAttribute('data-account'));
+  else if (act === 'acc-remove-machine') removeAccountMachine(el.getAttribute('data-account'), el.getAttribute('data-node'), !!el.getAttribute('data-last'));
+  else if (act === 'acc-remove-all') removeAccountEverywhere(el.getAttribute('data-account'), el.getAttribute('data-count'));
   else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; S.sh.renderKey = ''; savePrefs(); render(); }
   else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); savePrefs(); renderDHead(); renderDBody(); tick(); }

@@ -1,7 +1,14 @@
-"""Jira gateway: the only component that talks to Jira (REST v3, basic auth with an API token).
+"""Jira gateway: the only component that talks to Jira (REST v3).
 
 Reads keep the registry's ticket mirror fresh; writes (transition, comment, fields) are issued only after the
 control API has checked the caller's fencing token. 429 answers are retried after Retry-After.
+
+Credentials: either a fixed (email, API token) pair against the site (basic auth), or an `auth` source
+(jira_connect.JiraAuth) asked before every request. The source returns the credential connected on the
+Integrations screen (OAuth 2.0 bearer through https://api.atlassian.com/ex/jira/<cloud id>, or basic auth with
+an API token) or the owner.env fallback; it refreshes an expiring OAuth token, and a 401 forces one refresh and a
+retry. With a source, the gateway is falsy while no credential is usable, so `if ctx.jira:` keeps meaning
+"Jira is connected".
 """
 from __future__ import annotations
 
@@ -15,7 +22,7 @@ from ..core.text import adf_to_text, text_to_adf
 
 ORDER = ["Backlog", "Intake", "To Do", "In Progress", "In Verify", "Human review", "Done"]
 FIELDS = ["summary", "status", "issuetype", "priority", "labels", "description", "parent", "issuelinks", "assignee",
-          "created", "updated", "resolutiondate"]
+          "created", "updated", "resolutiondate", "fixVersions"]
 
 
 class JiraError(RuntimeError):
@@ -29,19 +36,40 @@ def _ts(value: str | None) -> datetime | None:
 
 
 class Jira:
-    def __init__(self, site: str, email: str, token: str, timeout: float = 30.0, client: httpx.Client | None = None):
+    def __init__(self, site: str, email: str = "", token: str = "", timeout: float = 30.0,
+                 client: httpx.Client | None = None, auth: Any = None):
         self.site = site.rstrip("/")
-        self.c = client or httpx.Client(base_url=self.site, auth=(email, token), timeout=timeout,
-                                        headers={"Accept": "application/json"})
+        self.auth = auth
+        if auth is None:
+            self.c = client or httpx.Client(base_url=self.site, auth=(email, token), timeout=timeout,
+                                            headers={"Accept": "application/json"})
+        else:
+            self.c = client or httpx.Client(timeout=timeout, headers={"Accept": "application/json"})
         self.field_ids: dict[str, str] = {}
         self.last_limits: dict[str, str] = {}
+        self._base = ""
+
+    def __bool__(self) -> bool:
+        return self.auth is None or self.auth.available()
 
     # --- plumbing -------------------------------------------------------------------------------------------
     def call(self, method: str, path: str, json: Any = None, ok: tuple[int, ...] = (200, 201, 204),
              files: Any = None, headers: dict[str, str] | None = None) -> Any:
+        refreshed = False
         for attempt in range(6):
-            r = self.c.request(method, path, json=json, files=files, headers=headers)
+            url, send_headers, cred = path, headers, None
+            if self.auth is not None:
+                cred = self.auth.credential()
+                if cred.base_url != self._base:  # another site or credential: custom field ids may differ
+                    self._base, self.field_ids = cred.base_url, {}
+                url = cred.base_url + path
+                send_headers = {**(headers or {}), **cred.headers()}
+            r = self.c.request(method, url, json=json, files=files, headers=send_headers)
             self.last_limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-ratelimit")}
+            if r.status_code == 401 and cred is not None and cred.kind == "oauth" and not refreshed:
+                refreshed = True  # the access token was revoked or expired early: refresh once and retry
+                self.auth.credential(force_refresh=True, stale=cred)
+                continue
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(min(30, int(r.headers.get("Retry-After", "0") or 0) or 2 ** attempt))
                 continue
@@ -91,6 +119,7 @@ class Jira:
                          if f.get("assignee") else None),
             "jira_created": _ts(f.get("created")), "jira_updated": _ts(f.get("updated")),
             "done_at": _ts(f.get("resolutiondate")),
+            "fix_versions": [str(version["id"]) for version in (f.get("fixVersions") or []) if version.get("id")],
         }
 
     def status(self, key: str) -> str:
@@ -115,6 +144,36 @@ class Jira:
         return sorted({str(status.get("name") or "") for issue_type in data
                        for status in issue_type.get("statuses", []) if status.get("name")})
 
+    def project_versions(self, key: str) -> list[dict[str, Any]]:
+        """List the Jira versions for a project in a compact registry-ready form."""
+        data = self.call("GET", f"/rest/api/3/project/{key}/versions")
+        return [{"id": str(version["id"]), "name": str(version.get("name") or ""),
+                 "released": bool(version.get("released", False)),
+                 "release_date": version.get("releaseDate") or None}
+                for version in data if version.get("id")]
+
+    def versions(self, project: str) -> list[dict[str, Any]]:
+        """List Jira versions for one project, including their stable ids and Released state."""
+        data = self.call("GET", f"/rest/api/3/project/{project}/versions")
+        return [{"id": str(v.get("id") or ""), "name": str(v.get("name") or ""),
+                 "released": bool(v.get("released")), "archived": bool(v.get("archived"))}
+                for v in data if v.get("id") and v.get("name")]
+
+    def version_issues(self, project: str, version_id: str) -> list[dict]:
+        """Read current project membership for a Jira version; callers must not use a cached ticket snapshot."""
+        if not str(version_id).isdigit():
+            raise JiraError("Jira version id must be numeric")
+        return list(self.search(f'project = "{project}" AND fixVersion = {version_id} ORDER BY key'))
+
+    def release_version(self, version_id: str, released: bool = True) -> None:
+        """Set a Jira version's Released flag."""
+        from datetime import date
+
+        values: dict[str, Any] = {"released": bool(released)}
+        if released:
+            values["releaseDate"] = date.today().isoformat()
+        self.call("PUT", f"/rest/api/3/version/{version_id}", values)
+
     def recent_comments(self, key: str, limit: int = 10) -> list[dict[str, str]]:
         """Return the newest Jira comments in a compact, prompt-safe form."""
         data = self.call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={limit}")
@@ -125,13 +184,21 @@ class Jira:
 
     # --- writes ---------------------------------------------------------------------------------------------
     def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Story",
-                     labels: list[str] | None = None, parent: str = "") -> str:
+                     labels: list[str] | None = None, parent: str = "", fix_version: str = "") -> str:
         """Create an issue and return its key; `parent` links it to an epic (team-managed and company-managed)."""
         fields: dict[str, Any] = {"project": {"key": project}, "summary": summary, "issuetype": {"name": issuetype},
                                   "description": text_to_adf(description), "labels": list(labels or [])}
         if parent:
             fields["parent"] = {"key": parent}
+        if fix_version:
+            fields["fixVersions"] = [{"id": str(fix_version)}]
         return self.call("POST", "/rest/api/3/issue", {"fields": fields})["key"]
+
+    def link_issues(self, blocker: str, blocked: str, link_type: str = "Blocks") -> None:
+        """Create a Jira issue link where `blocker` blocks `blocked`."""
+        self.call("POST", "/rest/api/3/issueLink", {
+            "type": {"name": link_type}, "outwardIssue": {"key": blocker}, "inwardIssue": {"key": blocked},
+        })
 
     def add_attachment(self, key: str, filename: str, content: bytes, content_type: str) -> None:
         """Attach a stakeholder screenshot to an issue."""

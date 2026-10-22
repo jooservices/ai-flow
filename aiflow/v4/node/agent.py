@@ -214,6 +214,43 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
     return removed
 
 
+_last_testdb_sweep = 0.0
+
+
+def _test_database_urls(projects_dir: str = "/etc/aiflow/projects") -> list[str]:
+    """Test database URLs from the project env files on this node (never logged: they carry a password)."""
+    urls: list[str] = []
+    for f in sorted(Path(projects_dir).glob("*.env")):
+        try:
+            for line in f.read_text().splitlines():
+                key, _, value = line.partition("=")
+                value = value.strip().strip("'\"")
+                if key.strip() == "AIFLOW4_TEST_DATABASE_URL" and value and value not in urls:
+                    urls.append(value)
+        except OSError:
+            continue
+    return urls
+
+
+def sweep_test_databases(projects_dir: str = "/etc/aiflow/projects", every_s: int = 600) -> int:
+    """Drop `aiflow4_t_*` test databases that no connection uses and that are over two hours old, at most every
+    ten minutes. Returns how many were dropped."""
+    global _last_testdb_sweep
+    if time.time() - _last_testdb_sweep < every_s:
+        return 0
+    _last_testdb_sweep = time.time()
+    from ..core import testdb
+    dropped = 0
+    for url in _test_database_urls(projects_dir):
+        try:
+            dropped += len(testdb.sweep(url))
+        except Exception as e:  # noqa: BLE001 - the test server may be down; try again next time
+            log.warning("test database sweep failed: %s", type(e).__name__)
+    if dropped:
+        log.info("dropped %s leftover test databases", dropped)
+    return dropped
+
+
 def clean_scratch(max_age_s: int = 6 * 3600) -> int:
     """Remove the AI user's temp files older than six hours from /tmp (RAM on the lab machines) and from the
     scratch tmp on disk. Runs at most once an hour; returns how many entries were removed."""
@@ -504,6 +541,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()
                     clean_worktrees(api, name)
+                    sweep_test_databases()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

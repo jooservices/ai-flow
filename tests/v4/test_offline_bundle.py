@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -400,8 +401,11 @@ def _fixture_bundle(tmp_path, *, real_runtime=False):
         assert uv, "the offline install integration test requires the project's uv executable"
         shutil.copy2(uv, root / "payload/bin/uv")
         (root / "payload/bin/uv").chmod(0o755)
+        # Run the test interpreter from its own installation tree. Copying the bare binary breaks
+        # relocatable runtimes (uv-managed or toolcache Python find stdlib/libpython relative to the
+        # executable), which is what CI runners without a system Python 3.12 use.
         python = root / "payload/python/bin/python3.12"
-        shutil.copy2(sys.executable, python)
+        python.write_text(f"#!/bin/sh\nexec {shlex.quote(str(Path(sys.executable).resolve()))} \"$@\"\n")
         python.chmod(0o755)
         for wheel in (root / "payload/wheelhouse").glob("*.whl"):
             wheel.unlink()

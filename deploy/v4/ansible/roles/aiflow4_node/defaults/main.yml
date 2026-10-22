@@ -1,0 +1,18 @@
+---
+aiflow4_node_server_installer_tag: v1.1.0
+aiflow4_node_name: '{{ inventory_hostname }}'
+aiflow4_node_role: worker
+aiflow4_node_project: ''
+aiflow4_node_slots: 2
+aiflow4_node_cpu_limit: 2
+aiflow4_node_memory_limit: 4G
+aiflow4_node_server_installer_modules: packages,timesync,docker,docker_group
+aiflow4_node_si_environment: {}
+aiflow4_node_control_url: ''
+aiflow4_node_server_installer_archive: /var/tmp/aiflow4-server-installer.tar.gz
+aiflow4_node_server_installer_root: >-
+  {{ '/opt/server-installer/' ~ aiflow4_node_server_installer_tag }}
+aiflow4_node_server_installer_bin: >-
+  {{ aiflow4_node_server_installer_root
+     ~ '/server-installer-1.1.0/bin/server-installer' }}
+aiflow4_node_join_token_path: /run/aiflow4/join-token

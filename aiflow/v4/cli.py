@@ -11,6 +11,9 @@
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
+  aiflow4 install control --version vX.Y.Z --domain D   install, re-run or upgrade the control plane (root)
+  aiflow4 install control --rollback    return the control plane to the previous release (root)
+  aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
   aiflow4 version
 """
 from __future__ import annotations
@@ -75,18 +78,25 @@ def build_ctx(s: Settings):
     from .control.db import DB
     from .control.events import Events
     from .core.fencing import Leases
+    from .control.jira import Jira
+    from .control.jira_connect import JiraAuth, SecretStore
     db = DB(s.database_url)
-    jira = github = None
-    if s.jira_email and s.jira_token:
-        from .control.jira import Jira
-        jira = Jira(s.jira_site, s.jira_email, s.jira_token)
+    github = None
+    # Every Jira call asks this source: the credential connected on the Integrations screen first, then
+    # JIRA_EMAIL / JIRA_API_TOKEN from owner.env (docs/v4/jira-connect.md).
+    jira_auth = JiraAuth(s, SecretStore(s.jira_secret_dir))
+    jira = Jira(s.jira_site, auth=jira_auth)
     if Path(s.github_app_dir, "app.pem").exists():
         from .control.github import GitHubApp
         github = GitHubApp(s.github_app_dir, s.github_org)
     repo_cache = RepoCache(s.control_repo)
-    return Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
-               events=Events(db, s.o2_url, s.o2_basic), repo=repo_cache, jira=jira, github=github,
-               refresh_repo=repo_cache.refresh)
+    events = Events(db, s.o2_url, s.o2_basic, source=s.o2_source)
+    ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
+              events=events, repo=repo_cache, jira=jira, github=github,
+              refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
+    events.bind_incident_context(ctx)
+    jira_auth.bind(ctx)
+    return ctx
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -142,7 +152,30 @@ def main(argv: list[str] | None = None) -> int:
     pu.add_argument("--baseline", default="")
     pw = sub.add_parser("worker")
     pw.add_argument("--account", required=True)
+    pi = sub.add_parser("install")
+    pi.add_argument("target", choices=["control"])
+    pi.add_argument("--version", dest="release", default="", metavar="vX.Y.Z")
+    pi.add_argument("--domain", default="")
+    pi.add_argument("--rollback", action="store_true")
+    pi.add_argument("--stack", default="", help="project stack whose OS toolchain server-installer adds, e.g. php-8.3")
+    pi.add_argument("--si", action="append", default=[], metavar="SI_NAME=VALUE")
+    pi.add_argument("--vpn", choices=["tailscale", "wireguard"], default="")
+    pi.add_argument("--otel-collector", action="store_true")
+    pi.add_argument("--health-timeout", type=int, default=300)
+    ps = sub.add_parser("secret")
+    ps.add_argument("action", choices=["set", "list"])
+    ps.add_argument("name", nargs="?")
+    ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
     a = ap.parse_args(argv)
+
+    if a.cmd == "install":
+        from .install.control import ControlInstaller, Options
+        return ControlInstaller(Options(version=a.release, domain=a.domain, rollback=a.rollback, stack=a.stack,
+                                        si=a.si, vpn=a.vpn, otel_collector=a.otel_collector,
+                                        health_timeout=a.health_timeout)).run()
+    if a.cmd == "secret":
+        from .install.control import secret_command
+        return secret_command(a.action, a.name, a.stdin)
     s = Settings.from_env()
 
     if a.cmd == "version":

@@ -1,0 +1,105 @@
+---
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_become: true
+    aiflow4_node_control_url: https://aiflow-control.example.net
+    aiflow4_node_server_installer_tag: v1.1.0
+  children:
+    aiflow4_control:
+      hosts:
+        control-01:
+          ansible_host: 192.0.2.10
+          aiflow4_control_modules: packages,timesync,docker,docker_group,ulimits
+    aiflow4_nodes:
+      hosts:
+        aiflow-node-01:
+          ansible_host: 192.0.2.101
+          aiflow4_node_name: aiflow-node-01
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-02:
+          ansible_host: 192.0.2.102
+          aiflow4_node_name: aiflow-node-02
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-03:
+          ansible_host: 192.0.2.103
+          aiflow4_node_name: aiflow-node-03
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-04:
+          ansible_host: 192.0.2.104
+          aiflow4_node_name: aiflow-node-04
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-05:
+          ansible_host: 192.0.2.105
+          aiflow4_node_name: aiflow-node-05
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-06:
+          ansible_host: 192.0.2.106
+          aiflow4_node_name: aiflow-node-06
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-07:
+          ansible_host: 192.0.2.107
+          aiflow4_node_name: aiflow-node-07
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-08:
+          ansible_host: 192.0.2.108
+          aiflow4_node_name: aiflow-node-08
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-09:
+          ansible_host: 192.0.2.109
+          aiflow4_node_name: aiflow-node-09
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}
+        aiflow-node-10:
+          ansible_host: 192.0.2.110
+          aiflow4_node_name: aiflow-node-10
+          aiflow4_node_role: worker
+          aiflow4_node_project: TESTWP
+          aiflow4_node_cpu_limit: 2
+          aiflow4_node_memory_limit: 4G
+          aiflow4_node_slots: 2
+          aiflow4_node_si_environment: {SI_PHP_VERSION: "8.3", SI_PHP_MODE: cli}

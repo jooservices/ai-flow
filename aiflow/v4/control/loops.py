@@ -1,7 +1,8 @@
 """Background loops of the control plane (process `aiflow4 control-loops`).
 
 jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes. A changed status or
-            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline).
+            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline). Without a usable Jira
+            credential it stops and keeps the jira_auth incident open (jira_connect.sync_gate).
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
             accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
             alerts people on critical ones.
@@ -19,11 +20,12 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import memory
+from . import jira_connect, memory
 from . import projects as project_lifecycle
 from . import rollout
+from . import version_release
 from ..core.toolchains import toolchain_gaps
-from .incidents import close_incident, open_incident
+from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
 from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
@@ -120,16 +122,23 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
     configured = ctx.repo().projects
-    # The control repo is authoritative when it contains project definitions: added projects join sync
-    # automatically and paused or removed projects stop being queried on the next pass.
+    # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
     keys = sorted(key for key, project in configured.items() if not project.paused)
-    if not ctx.jira or not keys:
+    # Without a usable credential (disconnected, refresh rejected), the jira_auth incident says why.
+    if not keys or not jira_connect.sync_gate(ctx):
         return 0
     projects = ",".join(keys)
     jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")
     n = 0
     changed_ticket_keys: set[str] = set()
     first_seen_ticket_keys: set[str] = set()
+    for project in keys:
+        for version in ctx.jira.project_versions(project):
+            ctx.db.run(
+                "INSERT INTO versions (id, project, name, released, release_date)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET project=EXCLUDED.project,"
+                " name=EXCLUDED.name, released=EXCLUDED.released, release_date=EXCLUDED.release_date",
+                (version["id"], project, version["name"], version["released"], version["release_date"]))
     preexisting_ticket_keys = {
         row["key"]
         for project in keys
@@ -157,6 +166,14 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " WHEN tickets.done_at IS NULL AND EXCLUDED.status = 'Done' THEN EXCLUDED.done_at"
             " ELSE tickets.done_at END, synced_at=now()",
             {**t, "done_at": done_at, "fields": J({"assignee": t.get("assignee")})})
+        # Replace the complete relationship for each ticket received from Jira, so removals are mirrored too.
+        ctx.db.run(
+            "WITH removed AS (DELETE FROM ticket_versions WHERE ticket_key=%s RETURNING ticket_key)"
+            " INSERT INTO ticket_versions (ticket_key, version_id)"
+            " SELECT %s, fix.version_id FROM unnest(%s::text[]) AS fix(version_id)"
+            " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
+            " ON CONFLICT (ticket_key, version_id) DO NOTHING",
+            (t["key"], t["key"], t["fix_versions"]))
         if not old:
             project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
         if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):
@@ -279,6 +296,12 @@ def watchdog(ctx: Ctx) -> None:
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL"):
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
+    # a flow that stands still and a configuration that keeps a project from getting work
+    try:
+        check_stack_pins(ctx)
+        check_idle_flow(ctx)
+    except Exception as e:  # noqa: BLE001 - a failing check must not stop the rest of the watchdog
+        log.warning("idle and pin checks failed: %s", e)
     # runs whose lease disappeared (worker died, node down, network split)
     for r in ctx.db.all("SELECT * FROM runs WHERE status='running'"):
         holder = ctx.leases.holder(r["ticket_key"])
@@ -373,9 +396,16 @@ def fleet_rollout(ctx: Ctx) -> dict | None:
     return rollout.tick(ctx, rollout.read_current(control_api.RELEASES))
 
 
+def version_release_scan(ctx: Ctx) -> int:
+    """Refresh live Jira version membership and audit which configured versions are ready or blocked."""
+    from . import api as control_api
+    control_api.github_gateway(ctx)  # merge-back retries for released versions need GitHub
+    return version_release.scan(ctx)
+
+
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -393,6 +423,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
                 last_rollout = now
+            if now - last_release >= 30 and ctx.leases.leader("version_release_scan", OWNER, 60_000):
+                version_release_scan(ctx)
+                last_release = now
             if now - last_mem >= 60 and ctx.leases.leader("memory_index", OWNER, 120_000):
                 written = memory.index(ctx.db)
                 if any(written.values()):

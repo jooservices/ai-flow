@@ -38,8 +38,13 @@ def test_database_url():
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
-    name = f"aiflow4_t_{uuid.uuid4().hex[:12]}"
+    from aiflow.v4.core import testdb
+    name = testdb.new_name()
     try:
+        try:  # leftovers of killed sessions: keep at most a handful of idle databases around
+            testdb.sweep(DATABASE_URL)
+        except Exception:  # noqa: BLE001 - a missing right to list or drop must not stop the tests
+            pass
         admin = psycopg.connect(DATABASE_URL, autocommit=True)
         template = os.environ.get("AIFLOW4_TEST_DATABASE_TEMPLATE")  # a database that already carries extensions (pgvector)
         admin.execute(sql.SQL("CREATE DATABASE {}" + (" TEMPLATE {}" if template else ""))
@@ -106,8 +111,16 @@ class FakeJira:
                               {"key": "NEWAPP", "name": "New App"}]
         self.project_workflows: dict[str, list[str]] = {}
         self.project_reads: list[str] = []
+        self.versions_data: dict[str, list[dict]] = {}
+        self.version_reads: list[str] = []
+        self.search_data: list[dict] = []
+        self.search_queries: list[str] = []
         self.deleted: list[str] = []
         self.transitions: list[tuple[str, str]] = []
+        self.version_data: dict[str, list[dict]] = {}
+        self.version_issue_data: dict[tuple[str, str], list[dict]] = {}
+        self.released_versions: list[str] = []
+        self.issue_links: list[tuple[str, str, str]] = []
 
     def projects(self) -> list[dict[str, str]]:
         return list(self.projects_data)
@@ -116,6 +129,27 @@ class FakeJira:
         self.project_reads.append(key)
         return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
                                                 "Needs owner", "Done"])
+
+    def project_versions(self, key: str) -> list[dict]:
+        self.version_reads.append(key)
+        return list(self.versions_data.get(key, []))
+
+    def search(self, jql: str):
+        self.search_queries.append(jql)
+        return iter(self.search_data)
+
+    def versions(self, project: str) -> list[dict]:
+        return list(self.version_data.get(project, []))
+
+    def version_issues(self, project: str, version_id: str) -> list[dict]:
+        return list(self.version_issue_data.get((project, str(version_id)), []))
+
+    def release_version(self, version_id: str, released: bool = True) -> None:
+        self.released_versions.append(str(version_id))
+        for versions in self.version_data.values():
+            for version in versions:
+                if str(version["id"]) == str(version_id):
+                    version["released"] = released
 
     def transition_to(self, key: str, target: str) -> str:
         self.transitions.append((key, target))
@@ -149,13 +183,19 @@ class FakeJira:
 
     initial_status = "Backlog"  # the status a new issue starts in
 
-    def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent=""):
+    def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent="", fix_version=""):
         self.created = getattr(self, "created", [])
         key = f"{project}-{900 + len(self.created)}"
-        self.created.append({"key": key, "project": project, "summary": summary, "description": description,
-                             "issuetype": issuetype, "labels": list(labels or []), "parent": parent})
+        created = {"key": key, "project": project, "summary": summary, "description": description,
+                   "issuetype": issuetype, "labels": list(labels or []), "parent": parent}
+        if fix_version:
+            created["fix_version"] = fix_version
+        self.created.append(created)
         self.status_of[key] = self.initial_status
         return key
+
+    def link_issues(self, blocker, blocked, link_type="Blocks"):
+        self.issue_links.append((blocker, blocked, link_type))
 
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))
@@ -172,6 +212,10 @@ class FakeGitHub:
         self.available_branches: dict[tuple[str, str], bool] = {}
         self.deleted_files: list[tuple[str, str]] = []
         self.repository_deletions: list[str] = []
+        self.branch_heads: dict[tuple[str, str], str] = {}
+        self.tags: dict[tuple[str, str], str] = {}
+        self.releases: dict[tuple[str, str], dict] = {}
+        self.merges: list[tuple[str, str, str, str]] = []
 
     def installation_repositories(self) -> list[dict[str, str]]:
         return list(self.repositories)
@@ -224,6 +268,30 @@ class FakeGitHub:
 
     def comment(self, repo, number, body):
         self.comments = getattr(self, "comments", []) + [(number, body)]
+
+    def branch_sha(self, repo, branch):
+        return self.branch_heads.get((repo, branch), f"sha-{branch}")
+
+    def merge_branch(self, repo, base, head, message):
+        self.merges.append((repo, base, head, message))
+        sha = f"merged-{len(self.merges):04d}"
+        self.branch_heads[(repo, base)] = sha
+        return {"sha": sha, "merged": True}
+
+    def tag_sha(self, repo, tag):
+        return self.tags.get((repo, tag))
+
+    def create_tag(self, repo, tag, sha):
+        self.tags[(repo, tag)] = sha
+
+    def release_by_tag(self, repo, tag):
+        return self.releases.get((repo, tag))
+
+    def create_release(self, repo, tag, name, notes):
+        release = {"html_url": f"https://github.com/jooservices/{repo}/releases/tag/{tag}",
+                   "tag_name": tag, "name": name, "body": notes}
+        self.releases[(repo, tag)] = release
+        return release
 
 
 @pytest.fixture

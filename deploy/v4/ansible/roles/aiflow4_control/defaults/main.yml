@@ -1,0 +1,11 @@
+---
+aiflow4_control_server_installer_tag: v1.1.0
+aiflow4_control_modules: packages,timesync,docker,docker_group,ulimits
+aiflow4_control_si_environment: {}
+aiflow4_control_server_installer_archive: >-
+  /var/tmp/aiflow4-server-installer.tar.gz
+aiflow4_control_server_installer_root: >-
+  {{ '/opt/server-installer/' ~ aiflow4_control_server_installer_tag }}
+aiflow4_control_server_installer_bin: >-
+  {{ aiflow4_control_server_installer_root
+     ~ '/server-installer-1.1.0/bin/server-installer' }}

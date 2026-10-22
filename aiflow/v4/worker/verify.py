@@ -109,7 +109,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         verdict = verdict_m.group(1) if verdict_m else ""
         findings = findings_of(text)
         result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
-                             "duration_s": int(res.duration_s), "log": res.log_path}
+                             "duration_s": int(res.duration_s), "log": res.log_path,
+                             "qc_passed": False, "ci": []}
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result
@@ -127,6 +128,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         # PASS from the reviewer; CI on the PR head must agree before anything is merged
         ci = wait_for_ci(api, c, pr.get("head_sha") or head, hb)
         failed = [x for x in ci if x["state"] == "failure"]
+        result["details"].update(ci=ci, qc_passed=bool(ci) and all(x["state"] in ("success", "neutral") for x in ci))
         if failed:
             findings = "\n".join(f"- CI {x['name']}: failed ({x['url']})" for x in failed[:10])
             return _rework(c, api, jira, pr_comment, result, findings, "CI failed", checks, t0=t0)

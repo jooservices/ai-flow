@@ -170,6 +170,24 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE"
 
+      - name: Security scan and release security report
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SECURITY_SEVERITY_THRESHOLD: ${{ vars.SECURITY_SEVERITY_THRESHOLD || 'HIGH' }}
+        run: |
+          scan=0
+          bash deploy/v4/ci/security-scan.sh dist/security-report "$IMAGE" || scan=1
+          python3 -m aiflow.v4.core.security_report report --version "$VERSION" --revision "$GITHUB_SHA" \
+            --threshold "$SECURITY_SEVERITY_THRESHOLD" \
+            --check "Dependencies (uv.lock)=dist/security-report/dependencies.json" \
+            --check "Repository (secrets, misconfiguration)=dist/security-report/repository.json" \
+            --check "Container image=dist/security-report/image.json" \
+            --note "v4 unit and integration tests=passed" \
+            --note "Release install, upgrade and rollback smoke test=passed" \
+            --note "Tarball and image signed (Sigstore)=passed" > dist/SECURITY-REPORT.md
+          cat dist/SECURITY-REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$scan"
+
       - name: Create GitHub Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -184,4 +202,4 @@ jobs:
           gh release upload "$VERSION" \
             "dist/aiflow4-$VERSION.tar.gz" \
             "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
-            dist/SHA256SUMS --clobber
+            dist/SHA256SUMS dist/SECURITY-REPORT.md --clobber

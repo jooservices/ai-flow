@@ -1,0 +1,83 @@
+# Security hardening (JAIF-231)
+
+AI Flow holds code access and AI credentials. This page lists what protects them, where to set it, and how it is tested
+(`tests/v4/test_security.py`, `tests/v4/test_security_report.py`, `tests/v4/test_console_escaping.py`).
+The coordinated disclosure policy is published in [`.github/SECURITY.md`](../../.github/SECURITY.md).
+
+## Where people manage it: the Security screen
+
+Console > **Security** (`/security`). Everybody who is signed in sees their own two-factor panel. People with the
+`security.manage` permission (Super Administrator) also see session settings, signed-in sessions and people; the audit log
+needs `security.audit` (also Super Administrator). All of it is also available as API under `/v1/security/*`.
+
+## AC1 Two-factor sign-in, recovery codes, sessions
+
+- **Two-factor sign-in (TOTP).** Set up on the Security screen: add the key to any authenticator app, enter a code, turn on.
+  The sign-in page has a field for the code. A code works once.
+- **Recovery codes.** Turning two-factor on shows ten single-use codes once (stored only as keyed hashes). A recovery code
+  is typed in the same field as the authenticator code. "Issue new recovery codes" replaces the set.
+- **Lost both?** A Super Administrator uses *Reset two-factor* on the people table; the person is signed out and sets it up
+  again.
+- **Require for administrators.** The setting *Require two-factor sign-in for administrators* (roles `super_admin` and
+  `owner`; default from `AIFLOW4_CONSOLE_REQUIRE_MFA`, off) makes a sign-in without two-factor a limited session that can
+  only open the Security screen to set it up. Administrators then cannot turn it off.
+- **Session length.** Setting *Session length* (5 minutes to 30 days, default 12 hours) applies to the next sign-in.
+- **Forced sign-out.** *Sign out* on a session, or *Sign out everywhere* for a person, ends the session in the database.
+  Every route that reads the session cookie checks it, so the next request on that session is refused (401). Logout,
+  and a password reset, end sessions the same way.
+
+## AC2 Secrets encrypted at rest
+
+Secrets are encrypted with AES-256-GCM (`aiflow/v4/core/secretbox.py`). The key is **not** in the database:
+
+- `AIFLOW4_SECRET_KEY` (urlsafe base64 of 32 random bytes) or `AIFLOW4_SECRET_KEY_FILE` (a file, mode 0600, same format).
+  Generate with `python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`.
+- Encrypted when a key is set: the Jira credential and OAuth app secret files, the GitHub App private key, and the
+  authenticator secrets in `console_users`. Recovery codes are keyed hashes. Console passwords were already salted scrypt
+  hashes. Without a key, files stay as before and authenticator secrets use a key derived from the console session secret
+  (also outside the database). Plaintext written before a key was set is still read and is encrypted the next time it is
+  saved. Keep the key with the other secrets and back it up separately: without it encrypted secrets cannot be read.
+
+## AC3 Rate limits and sign-in guessing protection
+
+- Every endpoint has a per-address budget (`AIFLOW4_RATE_LIMIT_PER_MIN`, default 600 a minute). Public endpoints (sign-in,
+  install, join, provider callbacks, health) and anonymous changes have a tighter per-path budget
+  (`AIFLOW4_RATE_LIMIT_PUBLIC_PER_MIN`, default 60). Over the budget the answer is `429` with `Retry-After`. `0` turns a
+  budget off. Behind a proxy set `AIFLOW4_TRUSTED_PROXIES` so the real client address is used.
+- Sign-in: budgets per address and per address+email (429), and 5 wrong passwords lock the account against
+  **password-only** attempts for 15 minutes. The lock never shuts the real owner out: someone who also gives a valid
+  authenticator code or an unused recovery code is still checked and signed in, which clears the lock. A guesser does not
+  have the second factor. An account without two-factor stays locked until the lock ends, or a Super Administrator uses
+  *Unlock* on the Security screen. All refusals look the same.
+
+## AC4 Cross-site requests and escaped text
+
+- A state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) that uses the console session cookie must send the header
+  `X-CSRF-Token`, an HMAC of that session; the console copies it from the `aiflow4_csrf` cookie. Without it, or with another
+  session's token, the answer is `403`. Requests with an `Authorization` header (nodes, workers, owner token) are not
+  browser-driven and are exempt; so is the sign-in request itself. The cookie is also `SameSite=Strict`.
+- Console text from tickets, projects, nodes and integrations goes through `esc()` before it is put in a page; links are
+  limited to `http(s)` and same-site paths. Pages carry a Content-Security-Policy (no foreign scripts, no framing).
+
+## AC5 Scans on every pull request
+
+Job `Security scan` in `.github/workflows/ci.yml` runs `deploy/v4/ci/security-scan.sh` (Trivy): dependencies (`uv.lock`),
+the repository (secrets, misconfiguration) and the control-api container image. A finding at or above the blocking level
+fails the job and blocks the merge when the check is required. The level is the repository variable
+`SECURITY_SEVERITY_THRESHOLD` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `HIGH`), not a constant in the code.
+
+## AC6 Release security report and disclosure policy
+
+Every release runs the same scan on the release image and publishes `SECURITY-REPORT.md` with the release: the blocking
+level, each check with counts per severity and PASS or FAIL, the test and install checks, and the disclosure policy link
+(`aiflow/v4/core/security_report.py`). A failing scan stops the release before it is published. The coordinated disclosure
+policy is [`.github/SECURITY.md`](../../.github/SECURITY.md): report privately through GitHub, acknowledgement in 3
+working days, fixes in 30 or 90 days by severity.
+
+## AC7 Audit log
+
+Every change to settings, people, roles and credentials is appended to `audit_log` with who, when, area, what and from
+which address (never a secret value): security settings, people and role creation, password resets, two-factor changes,
+forced sign-outs, sign-in and sign-out, and every successful state-changing console request (by its route, for example
+Jira and GitHub credential changes under `credentials`). The Security screen shows it read-only with an area filter. There
+is no route that writes, edits or deletes it, and database triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the table.

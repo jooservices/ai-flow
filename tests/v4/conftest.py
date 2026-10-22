@@ -21,6 +21,33 @@ REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "redis://127.0.0.1:16399/5"
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "postgresql://aiflow:test@127.0.0.1:15499/aiflow4")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "raw_csrf: do not add the CSRF header to console requests (tests of the protection)")
+
+
+@pytest.fixture(autouse=True)
+def console_csrf_header(request, monkeypatch):
+    """A console session cookie needs the session's X-CSRF-Token on every state-changing request (AC4 of JAIF-231).
+    Tests of other features sign in with a forged cookie, so this adds the matching token for them. Tests of the
+    protection itself opt out with `@pytest.mark.raw_csrf` and send exactly what they mean to."""
+    if request.node.get_closest_marker("raw_csrf"):
+        return
+    from starlette.testclient import TestClient
+    from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token
+    original = TestClient.request
+
+    def request_with_token(self, method, url, **kwargs):
+        cookie = self.cookies.get(COOKIE_NAME)
+        headers = kwargs.get("headers") or {}
+        if cookie and method.upper() not in ("GET", "HEAD", "OPTIONS") and not any(k.lower() == "x-csrf-token" for k in headers):
+            ctx = getattr(self.app, "state", None) and getattr(self.app.state, "ctx", None)
+            if ctx is not None:
+                kwargs["headers"] = {**headers, "X-CSRF-Token": csrf_token(cookie, ctx.settings.console_session_secret)}
+        return original(self, method, url, **kwargs)
+
+    monkeypatch.setattr(TestClient, "request", request_with_token)
+
+
 @pytest.fixture
 def leases():
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)

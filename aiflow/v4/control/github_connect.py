@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..core import secretbox
+
 
 _ID = re.compile(r"^[a-f0-9]{64}$")
 _META_FIELDS = ("id", "slug", "name", "html_url", "account_login", "account_type", "installation_id",
@@ -66,6 +68,8 @@ class GitHubSecretStore:
     def _write_file(self, path: Path, contents: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(path.parent, 0o700)
+        if path.name == "app.pem":
+            contents = secretbox.seal(contents, "app.pem")  # the App private key is encrypted at rest when a key is set
         temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -116,7 +120,8 @@ class GitHubSecretStore:
             raise ValueError("GitHub setup expired")
         meta_path, key_path = directory / "app.json", directory / "app.pem"
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-        pem = key_path.read_text(encoding="utf-8") if key_path.exists() else ""
+        pem = (secretbox.decrypt(key_path.read_text(encoding="utf-8"), context="app.pem")
+               if key_path.exists() else "")
         return record, meta, pem
 
     def update_pending(self, key: str, record: dict[str, Any], meta: dict[str, Any], private_key: str) -> None:

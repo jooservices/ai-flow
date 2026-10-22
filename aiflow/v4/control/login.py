@@ -12,6 +12,12 @@ Sign-in, in order:
 4. A wrong password counts a failure; MAX_FAILURES in a row lock the account for LOCK_S.
 Failed sign-ins are audited, but at most AUDIT_FAILED_PER_MIN rows a minute, so a flood cannot grow the table.
 
+Two-factor (docs/v4/security.md, mfa.py): an enrolled person adds `code` (authenticator code or recovery code). The lock of
+step 4 stops password-only guessing but not a request that also carries a valid second factor, so the real owner is never
+locked out. Each sign-in creates a `console_sessions` row named by the cookie's `sid`; ending that row (forced sign-out,
+logout, password reset) makes every later request on the cookie fail (console_auth.SESSION_REVOKED). Cookies: the session
+cookie is HttpOnly; the `aiflow4_csrf` cookie carries the CSRF token that security.py requires on state-changing requests.
+
 Gate rules when it is on:
 - a console page without a valid session redirects to `/login?next=...`; any other path answers 401;
 - a request that carries an `Authorization` header passes only to routes that check a bearer token themselves:
@@ -43,12 +49,17 @@ from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.routing import Match
 
-from .console_auth import COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, issue_session, verify_session
+from . import audit as audit_log
+from . import console_auth, mfa
+from .console_auth import COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, csrf_token, issue_session, verify_session
 from .db import J
 
 log = logging.getLogger(__name__)
 
-SESSION_TTL_S = 12 * 3600
+CSRF_COOKIE = "aiflow4_csrf"  # readable by the console script, which echoes it in the X-CSRF-Token header
+SESSION_TTL_S = 12 * 3600  # default session length; the "session length" security setting overrides it
+SESSION_TTL_MIN_S, SESSION_TTL_MAX_S = 5 * 60, 30 * 24 * 3600
+MFA_ROLES = ("super_admin", "owner")  # administrators: the roles the "require two-factor" setting applies to
 MAX_FAILURES = 5          # wrong passwords in a row before the account is locked
 LOCK_S = 15 * 60
 RATE_WINDOW_S = 15 * 60
@@ -59,8 +70,8 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = {"/", "/cc", "/delivery", "/sa", "/lead", "/business", "/review", "/stakeholder", "/knowledge",
-         "/integrations", "/projects"}
+PAGES = {"/", "/cc", "/dashboard", "/work", "/machines", "/users", "/delivery", "/sa", "/lead", "/business", "/review",
+         "/stakeholder", "/knowledge", "/integrations", "/projects", "/security"}
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -158,6 +169,9 @@ def seed_user(db, email: str, role: str, display_name: str = "",
             return None
         if deliver:
             deliver(password)
+    audit_log.record(db, "cli", "people", "user_created", email, {"role": role})
+    if role != "lead":
+        audit_log.record(db, "cli", "roles", "role_granted", email, {"role": role})
     return password
 
 
@@ -170,9 +184,35 @@ def reset_password(db, email: str, deliver: Callable[[str], None] | None = None)
                             " updated_at=now() WHERE email=%s RETURNING email", (hash_password(password), email)).fetchone()
         if not updated:
             raise ValueError("no such console user")
+        c.execute("UPDATE console_sessions SET revoked_at=now(), revoked_by='password reset'"
+                  " WHERE email=%s AND revoked_at IS NULL", (email,))  # a new password ends every open session
         if deliver:
             deliver(password)
+    audit_log.record(db, "cli", "people", "password_reset", email)
     return password
+
+
+def get_setting(db, key: str, default: str) -> str:
+    row = db.one("SELECT value FROM security_settings WHERE key=%s", (key,))
+    return row["value"] if row else default
+
+
+def set_setting(db, key: str, value: str, actor: str) -> None:
+    db.run("INSERT INTO security_settings (key, value, updated_by) VALUES (%s,%s,%s)"
+           " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()",
+           (key, value, actor))
+
+
+def session_ttl_s(ctx) -> int:
+    try:
+        value = int(get_setting(ctx.db, "session_ttl_s", str(SESSION_TTL_S)))
+    except ValueError:
+        value = SESSION_TTL_S
+    return max(SESSION_TTL_MIN_S, min(SESSION_TTL_MAX_S, value))
+
+
+def require_mfa(ctx) -> bool:
+    return get_setting(ctx.db, "require_mfa", "1" if ctx.settings.console_require_mfa else "0") == "1"
 
 
 # --- HTTP ----------------------------------------------------------------------------------------------------------
@@ -235,6 +275,8 @@ button:disabled{opacity:.6;cursor:default}#msg{min-height:20px;margin-top:12px;c
 <form id="f" autocomplete="on"><h1>AI Flow Command Center</h1><p>Sign in to continue.</p>
 <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required autofocus>
 <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+<label for="code">Authentication code or recovery code <span style="color:var(--muted)">(if two-factor is on)</span></label>
+<input id="code" name="code" type="text" autocomplete="one-time-code" inputmode="text" maxlength="32">
 <button id="go" type="submit">Sign in</button><div id="msg" role="alert"></div></form>
 <script>
 var next=new URLSearchParams(location.search).get("next")||"/cc";
@@ -244,10 +286,10 @@ fetch("/v1/auth/me",{credentials:"same-origin"}).then(function(r){if(r.status===
 document.getElementById("f").addEventListener("submit",function(e){e.preventDefault();
 var b=document.getElementById("go"),m=document.getElementById("msg");b.disabled=true;m.textContent="";
 fetch("/v1/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",
-body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value})})
+body:JSON.stringify({email:document.getElementById("email").value,password:document.getElementById("password").value,code:document.getElementById("code").value})})
 .then(function(r){return r.json().then(function(d){return[r.status,d]})})
-.then(function(x){if(x[0]===200){location.href=next}
-else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false}})
+.then(function(x){if(x[0]===200){location.href=x[1].mfa_setup_required?"/security":next}
+else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false;if(x[1].mfa_required){document.getElementById("code").focus()}}})
 .catch(function(){m.textContent="Cannot reach the server";b.disabled=false})});
 </script></body></html>
 """
@@ -317,8 +359,29 @@ def install_login(app: FastAPI, ctx) -> None:
     def user_json(email: str, role: str, name: str = "") -> dict:
         return {"email": email, "name": name, "role": role, "role_label": ROLE_LABELS.get(role, role)}
 
-    def attempt(ip: str, email: str, password: str) -> tuple[int, dict, dict]:
-        """The blocking part of a sign-in (Redis, database, scrypt); runs in a worker thread."""
+    def session_revoked(sid: str) -> bool:
+        """True when the session was ended (forced sign-out, logout, password reset), expired, or is unknown.
+        Fails closed: when the database cannot answer, the session does not count."""
+        try:
+            return ctx.db.one("SELECT 1 AS x FROM console_sessions WHERE sid=%s AND revoked_at IS NULL"
+                              " AND expires_at > now()", (sid,)) is None
+        except Exception:  # noqa: BLE001
+            log.exception("console session check failed")
+            return True
+
+    def register_revocation() -> None:
+        if len(settings.console_session_secret.encode()) >= 32:
+            console_auth.SESSION_REVOKED[settings.console_session_secret] = session_revoked
+
+    register_revocation()
+
+    def attempt(ip: str, email: str, password: str, code: str = "") -> tuple[int, dict, dict]:
+        """The blocking part of a sign-in (Redis, database, scrypt); runs in a worker thread.
+
+        Password guessing is slowed and blocked: per-IP and per-IP+email budgets, and MAX_FAILURES wrong passwords
+        lock the account against password-only attempts. The lock never shuts the real owner out: someone who also
+        presents a valid authenticator code or an unused recovery code (a second factor a guesser does not have) is
+        still checked and signed in, and success clears the lock."""
         wait = over_limit(ip, email)
         if wait:
             return 429, {"detail": "too many sign-in attempts; try again later"}, {"Retry-After": str(wait)}
@@ -326,23 +389,44 @@ def install_login(app: FastAPI, ctx) -> None:
         if email:
             ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, updated_at=now()"
                        " WHERE email=%s AND locked_until IS NOT NULL AND locked_until <= now()", (email,))
-            row = ctx.db.one("SELECT email, display_name, role, password_hash, disabled, locked_until"
-                             " FROM console_users WHERE email=%s", (email,))
+            row = ctx.db.one("SELECT email, display_name, role, password_hash, disabled, locked_until, totp_secret,"
+                             " totp_enabled FROM console_users WHERE email=%s", (email,))
         locked = bool(row and row["locked_until"])
-        usable = bool(row and not locked and not row["disabled"])
+        enrolled = bool(row and row["totp_enabled"])
+        second_factor = bool(code.strip()) and enrolled
+        usable = bool(row and not row["disabled"] and (not locked or second_factor))
         good = verify_password(password, row["password_hash"] if usable else _dummy_hash())
+        if usable and good and enrolled and not code.strip():
+            # right password, second factor still to come; not a failure and nothing is revealed to a wrong password
+            return 401, {"detail": "enter the code from your authenticator app or a recovery code",
+                         "mfa_required": True}, {}
+        factor = ""
+        if usable and good and enrolled:
+            factor = mfa.check_second_factor(ctx.db, row, email, code, settings.console_session_secret)
+            good = bool(factor)
         if not (usable and good):
-            if usable:
+            if usable and not locked:
                 ctx.db.run("UPDATE console_users SET failed_attempts=failed_attempts+1,"
                            " locked_until=CASE WHEN failed_attempts+1 >= %s THEN now() + make_interval(secs => %s)"
                            " ELSE locked_until END, updated_at=now() WHERE email=%s", (MAX_FAILURES, LOCK_S, email))
-            audit_failure(email, "account locked" if locked else REFUSED)
+            audit_failure(email, "account locked" if locked and not second_factor else REFUSED)
             return 401, {"detail": REFUSED}, {}
         ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, last_login_at=now(), updated_at=now()"
                    " WHERE email=%s", (email,))
         ctx.leases.r.delete(key("ip_email", digest(f"{ip}\n{email}")))
         audit("login", email, True, "signed in")
-        return 200, user_json(email, row["role"], row["display_name"]), {}
+        pending = row["role"] in MFA_ROLES and not enrolled and require_mfa(ctx)
+        ttl = session_ttl_s(ctx)
+        sid = secrets.token_urlsafe(18)
+        ctx.db.run("INSERT INTO console_sessions (sid, email, role, ip, expires_at)"
+                   " VALUES (%s,%s,%s,%s, now() + make_interval(secs => %s))", (sid, email, row["role"], ip, ttl))
+        audit_log.record(ctx.db, email, "auth", "signed_in", email,
+                         {"second_factor": factor or "none", "mfa_setup_required": pending}, ip)
+        body = user_json(email, row["role"], row["display_name"])
+        body.update({"mfa_setup_required": pending, "_sid": sid, "_ttl": ttl})
+        if factor == "recovery":
+            body["recovery_codes_left"] = mfa.recovery_codes_left(ctx.db, email)
+        return 200, body, {}
 
     @app.get("/login", include_in_schema=False)
     def login_page() -> HTMLResponse:
@@ -364,50 +448,86 @@ def install_login(app: FastAPI, ctx) -> None:
         except ValueError:
             email = ""
         try:
+            code = data.get("code") if isinstance(data.get("code"), str) else ""
             status, body, headers = await run_in_threadpool(
-                attempt, client_ip(request, settings.trusted_proxies), email, data["password"][:1024])
+                attempt, client_ip(request, settings.trusted_proxies), email, data["password"][:1024], code[:64])
         except redis.RedisError:
             log.exception("console sign-in: Redis is unavailable")
             return JSONResponse({"detail": "sign-in is unavailable; try again shortly"}, status_code=503)
+        sid, ttl = body.pop("_sid", ""), body.pop("_ttl", SESSION_TTL_S)
         response = JSONResponse(body, status_code=status, headers={"Cache-Control": "no-store", **headers})
         if status == 200:
-            response.set_cookie(COOKIE_NAME, issue_session(email, body["role"], int(time.time()) + SESSION_TTL_S, secret),
-                                max_age=SESSION_TTL_S, httponly=True, secure=secure_cookie(), samesite="strict", path="/")
+            register_revocation()
+            token = issue_session(email, body["role"], int(time.time()) + ttl, secret, sid, body["mfa_setup_required"])
+            set_session_cookies(response, token, ttl)
         return response
 
-    @app.post("/v1/auth/logout")
-    def logout() -> JSONResponse:
-        response = JSONResponse({"signed_out": True})
+    def set_session_cookies(response, token: str, ttl: int) -> None:
+        response.set_cookie(COOKIE_NAME, token, max_age=ttl, httponly=True, secure=secure_cookie(), samesite="strict", path="/")
+        # The console script reads this cookie and echoes it in X-CSRF-Token; it only works with this session's cookie.
+        response.set_cookie(CSRF_COOKIE, csrf_token(token, settings.console_session_secret), max_age=ttl, httponly=False,
+                            secure=secure_cookie(), samesite="strict", path="/")
+
+    def end_session(request: Request, actor_hint: str = "") -> str:
+        """Mark the session named by the request's cookie as ended; returns who it belonged to."""
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret, allow_pending=True)
+        if user and user.sid:
+            ctx.db.run("UPDATE console_sessions SET revoked_at=now(), revoked_by=%s WHERE sid=%s AND revoked_at IS NULL",
+                       (user.subject, user.sid))
+            audit_log.record(ctx.db, user.subject, "auth", "signed_out", user.subject)
+        return user.subject if user else ""
+
+    def clear_cookies(response) -> None:
         response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie(), samesite="strict")
+        response.delete_cookie(CSRF_COOKIE, path="/", secure=secure_cookie(), samesite="strict")
+
+    @app.post("/v1/auth/logout")
+    def logout(request: Request) -> JSONResponse:
+        end_session(request)
+        response = JSONResponse({"signed_out": True})
+        clear_cookies(response)
         return response
 
     @app.get("/logout", include_in_schema=False)
-    def logout_page() -> RedirectResponse:
+    def logout_page(request: Request) -> RedirectResponse:
+        end_session(request)
         response = RedirectResponse("/login", status_code=303)
-        response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie(), samesite="strict")
+        clear_cookies(response)
         return response
 
     @app.get("/v1/auth/me")
     def me(request: Request) -> JSONResponse:
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret, allow_pending=True)
         if not user:
             return JSONResponse({"detail": "not signed in"}, status_code=401)
         row = ctx.db.one("SELECT display_name FROM console_users WHERE email=%s", (user.subject,))
-        return JSONResponse(user_json(user.subject, user.role, (row or {}).get("display_name", "")))
+        body = user_json(user.subject, user.role, (row or {}).get("display_name", ""))
+        body["mfa_setup_required"] = user.mfa_pending
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+    app.state.set_session_cookies = set_session_cookies  # the two-factor setup route issues a full session after enrolling
 
     if not settings.console_login:
         return
 
-    @app.middleware("http")
     async def gate(request: Request, call_next):
         path = request.url.path
         if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES):
             return await call_next(request)
         if request.headers.get("authorization") and checks_token(request):
             return await call_next(request)
-        if verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret):
+        cookie = request.cookies.get(COOKIE_NAME, "")
+        # the session check reads the database (ended sessions), so it runs off the event loop
+        if await run_in_threadpool(verify_session, cookie, settings.console_session_secret):
             return await call_next(request)
+        pending = await run_in_threadpool(verify_session, cookie, settings.console_session_secret, None, True)
+        if pending:  # signed in but two-factor setup is required first: only the page shell and the setup routes
+            if path in PAGES or path.startswith("/v1/security/mfa"):
+                return await call_next(request)
+            return JSONResponse({"detail": "set up two-factor sign-in first", "mfa_setup_required": True}, status_code=403)
         if path in PAGES:
             target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
             return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=302)
         return JSONResponse({"detail": "sign in required"}, status_code=401)
+
+    app.middleware("http")(gate)

@@ -501,7 +501,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'security']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -984,7 +984,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
-        ("knowledge", "Knowledge"), ("integrations", "Integrations"), ("projects", "Projects"),
+        ("knowledge", "Knowledge"), ("integrations", "Integrations"), ("projects", "Projects"), ("security", "Security"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.

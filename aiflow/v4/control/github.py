@@ -18,6 +18,8 @@ from urllib.parse import quote
 import httpx
 import jwt
 
+from ..core import secretbox
+
 API = "https://api.github.com"
 
 
@@ -61,7 +63,7 @@ class GitHubApp:
                 stamp = ((self.dir / "app.json").stat().st_mtime_ns,
                          (self.dir / "app.pem").stat().st_mtime_ns)
                 meta = json.loads((self.dir / "app.json").read_text(encoding="utf-8"))
-                key = (self.dir / "app.pem").read_text(encoding="utf-8")
+                key = secretbox.decrypt((self.dir / "app.pem").read_text(encoding="utf-8"), context="app.pem")
             finally:
                 if lock_fd is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)

@@ -4153,4 +4153,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     jira_connect.mount(app, ctx)
     from .login import install_login
     install_login(app, ctx)
+    from .security import install_security
+    install_security(app, ctx)
     return app

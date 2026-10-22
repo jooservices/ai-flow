@@ -32,6 +32,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/delivery", include_in_schema=False)
     @app.get("/machines", include_in_schema=False)
     @app.get("/users", include_in_schema=False)
+    @app.get("/security", include_in_schema=False)
     @app.get("/sa", include_in_schema=False)
     @app.get("/lead", include_in_schema=False)
     @app.get("/business", include_in_schema=False)

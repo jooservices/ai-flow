@@ -13,6 +13,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 
 COOKIE_NAME = "aiflow4_session"
@@ -52,6 +53,8 @@ def checks_bearer(endpoint):
 class ConsoleUser:
     subject: str
     role: str
+    sid: str = ""  # names the console_sessions row; empty for a token issued without one
+    mfa_pending: bool = False  # signed in, but must set up two-factor sign-in before anything else
 
     @property
     def permissions(self) -> frozenset[str]:
@@ -66,20 +69,38 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def issue_session(subject: str, role: str, expires_at: int, secret: str) -> str:
+# signing secret -> callable(sid) that is True when that session was ended (forced sign-out) or is unknown.
+# login.install_login registers it; verify_session asks it for every token that names a session, so every
+# route that reads the cookie, not only the login gate, refuses an ended session.
+SESSION_REVOKED: dict[str, Callable[[str], bool]] = {}
+
+
+def csrf_token(session_cookie: str, secret: str) -> str:
+    """The cross-site request token for one session: an HMAC of its cookie, so it cannot be guessed or reused."""
+    return hmac.new(secret.encode(), b"csrf:" + session_cookie.encode(), hashlib.sha256).hexdigest()[:40]
+
+
+def issue_session(subject: str, role: str, expires_at: int, secret: str, sid: str = "", mfa_pending: bool = False) -> str:
     """Create the token that the console authentication flow sets as its HttpOnly cookie."""
     if not subject.strip() or role not in ALLOWED_ROLES or len(secret.encode()) < 32:
         raise ValueError("invalid console session claims or signing secret")
     header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64(json.dumps({"sub": subject.strip(), "role": role, "exp": int(expires_at)},
-                              separators=(",", ":")).encode())
+    claims: dict = {"sub": subject.strip(), "role": role, "exp": int(expires_at)}
+    if sid:
+        claims["sid"] = sid
+    if mfa_pending:
+        claims["pm"] = 1
+    payload = _b64(json.dumps(claims, separators=(",", ":")).encode())
     message = f"{header}.{payload}"
     signature = hmac.new(secret.encode(), message.encode("ascii"), hashlib.sha256).digest()
     return f"{message}.{_b64(signature)}"
 
 
-def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUser | None:
-    """Return claims only for a valid, unexpired session signed with the configured key."""
+def verify_session(token: str, secret: str, now: int | None = None, allow_pending: bool = False) -> ConsoleUser | None:
+    """Return claims only for a valid, unexpired, not ended session signed with the configured key.
+
+    A session that still has to set up two-factor sign-in is refused unless `allow_pending` (only the two-factor
+    setup routes pass it)."""
     if not token or len(secret.encode()) < 32:
         return None
     try:
@@ -99,6 +120,15 @@ def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUs
             return None
         if not isinstance(expires_at, int) or expires_at <= (int(time.time()) if now is None else now):
             return None
-        return ConsoleUser(subject.strip(), role)
+        sid = claims.get("sid", "")
+        if not isinstance(sid, str):
+            return None
+        pending = claims.get("pm") == 1
+        if pending and not allow_pending:
+            return None
+        revoked = SESSION_REVOKED.get(secret)
+        if sid and revoked and revoked(sid):
+            return None
+        return ConsoleUser(subject.strip(), role, sid, pending)
     except (ValueError, TypeError, AttributeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
         return None

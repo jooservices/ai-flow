@@ -481,6 +481,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-menu-view data-view="knowledge">Knowledge</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-security" aria-controls="view-security" aria-selected="false" data-act="view" data-menu-view data-view="security">Security</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -504,6 +505,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-sa" role="tabpanel" aria-labelledby="tab-sa" hidden></section>
   <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
   <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
+  <section class="view" id="view-security" role="tabpanel" aria-labelledby="tab-security" hidden></section>
   <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
@@ -548,6 +550,27 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 <script>
 (function () {
 'use strict';
+/* Cross-site request protection: every state-changing request to this site carries the session's CSRF token
+   (the aiflow4_csrf cookie, set at sign-in); the server rejects a console request without it. */
+(function () {
+  var nativeFetch = window.fetch;
+  function csrfCookie() { var m = document.cookie.match(/(?:^|;\s*)aiflow4_csrf=([^;]+)/); return m ? decodeURIComponent(m[1]) : ''; }
+  window.fetch = function (input, init) {
+    init = init || {};
+    var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var sameSite = url.charAt(0) === '/' && url.charAt(1) !== '/' || url.indexOf(location.origin + '/') === 0;
+      var token = csrfCookie();
+      if (sameSite && token) {
+        var headers = new Headers(init.headers || (input && input.headers) || {});
+        if (!headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', token);
+        init = Object.assign({}, init, { headers: headers });
+      }
+    }
+    return nativeFetch.call(window, input, init);
+  };
+})();
 /* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder and Knowledge, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
@@ -618,6 +641,7 @@ function viewOf(path) {
   if (path.indexOf('/integrations') === 0) return 'integrations';
   if (path.indexOf('/machines') === 0) return 'machines';
   if (path.indexOf('/users') === 0) return 'users';
+  if (path.indexOf('/security') === 0) return 'security';
   if (path.indexOf('/sa') === 0) return 'sa';
   if (path.indexOf('/delivery') === 0) return 'delivery';
   if (path.indexOf('/lead') === 0) return 'lead';
@@ -644,7 +668,8 @@ var MENU_ITEMS = [
   { view: 'users', label: 'Users and roles', permission: 'users.manage' },
   { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
-  { view: 'projects', label: 'Projects', permission: 'projects.manage' }
+  { view: 'projects', label: 'Projects', permission: 'projects.manage' },
+  { view: 'security', label: 'Security' }
 ];
 // Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
 function viewAllowed(view, role) {
@@ -1167,9 +1192,9 @@ function providerUsageChart(rows) {
       var count = byDay[day][provider] || 0;
       if (!count) return;
       var h = height * count / max; y -= h;
-      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider]) + ': ' + count + ' runs</title></rect>';
+      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + esc(day) + ' · ' + esc(PROVIDER[provider]) + ': ' + count + ' runs</title></rect>';
     });
-    svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + day.slice(8) + '</text>';
+    svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + esc(day.slice(8)) + '</text>';
   });
   return svg + '</svg>';
 }
@@ -1305,21 +1330,21 @@ function renderCC() {
   var topQ = hi.length ? Math.max.apply(null, hi) : null;
 
   var h = '<section class="kpis" aria-label="Summary">';
-  h += kpi('Nodes online', online.length + ' / ' + d.nodes.length, offline.length ? offline.map(function (n) { return n.name; }).join(', ') + ' down' : (d.nodes.length ? 'all heartbeating' : 'no node joined yet'), offline.length ? 'crit' : '', 'p-nodes');
+  h += kpi('Nodes online', online.length + ' / ' + d.nodes.length, offline.length ? esc(offline.map(function (n) { return n.name; }).join(', ')) + ' down' : (d.nodes.length ? 'all heartbeating' : 'no node joined yet'), offline.length ? 'crit' : '', 'p-nodes');
   h += kpi('Slots in use', used + ' / ' + slots, (used ? used + ' AI run' + (used > 1 ? 's' : '') + ' now' : 'idle') + (idleSlots ? ' · ' + idleSlots + ' on nodes without AI' : ''), '', 'p-nodes');
   h += kpi('Accounts ready', ready.length + ' / ' + d.accounts.length, (cool ? cool + ' without quota' : 'all have quota') + (out ? ' · ' + out + ' failing' : ''), cool || out ? 'warn' : '', 'p-accounts');
   h += kpi('Highest quota use', topQ == null ? '—' : Math.round(topQ * 100) + '%', 'across reported windows', topQ != null && topQ >= 0.9 ? 'crit' : topQ != null && topQ >= 0.75 ? 'warn' : '', 'p-accounts');
   h += kpi('Runs · 24 h', String(t.runs_24h || 0), (t.done_24h || 0) + ' done · ' + (t.failed_24h || 0) + ' not done', t.failed_24h ? 'warn' : '', 'p-runs');
   h += kpi('Tokens · 24 h', tok((t.tokens_in_24h || 0) + (t.tokens_out_24h || 0)), 'cost ' + usd(t.cost_24h), '', 'p-runs');
   h += kpi('Open incidents', String(d.incidents.length), crit ? crit + ' critical' : d.incidents.length ? 'warnings only' : 'none open', crit ? 'crit' : d.incidents.length ? 'warn' : '', 'p-incidents');
-  h += kpi('Services', S.services.length ? (S.services.length - svcDown.length) + ' / ' + S.services.length : '—', svcDown.length ? svcDown.map(function (s) { return s.name; }).join(', ') + ' down' : (S.svcError ? 'checks unreachable' : 'all checks passing'), svcDown.length || S.svcError ? 'crit' : '', 'p-central');
+  h += kpi('Services', S.services.length ? (S.services.length - svcDown.length) + ' / ' + S.services.length : '—', svcDown.length ? esc(svcDown.map(function (s) { return s.name; }).join(', ')) + ' down' : (S.svcError ? 'checks unreachable' : 'all checks passing'), svcDown.length || S.svcError ? 'crit' : '', 'p-central');
   h += '</section>';
 
   var alerts = d.incidents.filter(function (i) { return i.severity === 'critical' || i.severity === 'warning'; });
   if (alerts.length) {
     h += '<section class="alerts" aria-label="Alerts">';
     alerts.forEach(function (i) {
-      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + i.id + '">Details</button></div>';
+      h += '<div class="alert"><span class="pill" data-tone="' + (i.severity === 'critical' ? 'crit' : 'warn') + '">' + esc(KIND[i.kind] || i.kind) + '</span><span class="a-title">' + esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span><span class="spacer"></span><span class="a-detail mono">' + esc(when(i.opened_at)) + '</span><button class="btn sm" data-act="open-inc" data-id="' + esc(i.id) + '">Details</button></div>';
     });
     h += '</section>';
   }
@@ -1459,7 +1484,7 @@ function accMatch(a, f) {
 }
 function incCard(i, closed) {
   var tn = closed ? 'ok' : i.severity === 'critical' ? 'crit' : i.severity === 'warning' ? 'warn' : 'info';
-  return '<button class="inc" data-act="open-inc" data-id="' + i.id + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(i.detail) + '</span></button>';
+  return '<button class="inc" data-act="open-inc" data-id="' + esc(i.id) + '"' + (closed ? ' data-closed' : '') + '><span class="inc-top"><span class="mono muted" style="font-size:12px">#' + i.id + ' · ' + esc(when(i.opened_at)) + '</span><span style="font-weight:600">' + esc(i.title) + '</span><span class="spacer"></span>' + pill(tn, closed ? 'Resolved ' + when(i.closed_at) : (i.severity === 'critical' ? 'Critical' : 'Warning'), !closed && i.severity === 'critical') + '</span><span class="muted" style="font-size:12.5px">' + esc(i.detail) + '</span></button>';
 }
 function versionsBox() {
   var d = D(), pin = (d.versions && d.versions.tools) || {};
@@ -1484,7 +1509,7 @@ function runsTable(rows, limit) {
     h += '<tr tabindex="0" data-act="open-ticket" data-key="' + esc(r.ticket) + '"><td class="mono small">' + started + '</td><td class="mono">' + esc(r.ticket) + '</td><td>' + esc(r.step) + '</td><td class="mono">' + esc(r.account) + '</td><td class="mono small">' + esc(r.model || '—') + '</td><td class="mono">' + esc(r.node) + '</td>';
     h += '<td>' + pill(runTone(r.outcome), r.outcome + (r.error_kind && r.error_kind !== r.outcome ? ' · ' + r.error_kind : ''), r.live) + '</td>';
     h += '<td class="mono">' + (r.live ? '<span data-since="' + (r.elapsed_s || 0) + '" data-fmt="clock"></span>' : mmss(r.duration_s)) + '</td><td class="mono">' + (r.live ? '—' : tok((r.tokens_in || 0) + (r.tokens_out || 0))) + '</td><td class="mono">' + (r.live ? '—' : usd(r.cost_usd)) + '</td>';
-    h += '<td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener" data-stop>#' + esc(r.pr_url.split('/').pop()) + ' ' + ICON.ext + '</a>' : '—') + '</td></tr>';
+    h += '<td>' + (r.pr_url ? '<a href="' + esc(safeHref(r.pr_url)) + '" target="_blank" rel="noopener" data-stop>#' + esc(r.pr_url.split('/').pop()) + ' ' + ICON.ext + '</a>' : '—') + '</td></tr>';
   });
   return h + '</tbody></table></div>';
 }
@@ -1569,7 +1594,7 @@ function renderSA() {
   });
   h += '</section></div>';
 
-  h += '<section class="panel" id="sa-network"><div class="panel-h"><h2>Network errors and retries</h2><span class="hint">Read from registry events and runs</span><span class="spacer"></span><a class="btn sm" href="' + esc((d.links || {}).o2 || '/o2/') + '" target="_blank" rel="noopener">OpenObserve ' + ICON.ext + '</a></div>';
+  h += '<section class="panel" id="sa-network"><div class="panel-h"><h2>Network errors and retries</h2><span class="hint">Read from registry events and runs</span><span class="spacer"></span><a class="btn sm" href="' + esc(safeHref((d.links || {}).o2) || '/o2/') + '" target="_blank" rel="noopener">OpenObserve ' + ICON.ext + '</a></div>';
   if (!network.length) h += '<div class="empty">No network errors or retries recorded.</div>';
   else {
     h += '<div class="tablebox"><table style="min-width:850px"><thead><tr><th>Time</th><th>Source</th><th>Node / account</th><th>Ticket</th><th>Detail</th><th>Retry</th></tr></thead><tbody>';
@@ -1784,13 +1809,13 @@ function renderReviews() {
       var labels = { question_from_ai: 'Question from AI', decision_needed: 'Decision needed', review_before_merge: 'Review before merge', blocked: 'Blocked' };
       h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill(t.status === 'Needs owner' ? 'warn' : 'info', labels[t.kind] || t.status || 'Human review', true) + '</div>';
       if (t.description) h += '<div class="review-content">' + esc(t.description) + '</div>';
-      h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
+      h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(safeHref(pr.url)) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
       diff.forEach(function (x) { h += '<div class="review-fact"><div class="label">' + x[0] + '</div><div class="value mono">' + (x[1] == null ? '—' : esc(x[1])) + '</div></div>'; });
       h += '<div class="review-fact"><div class="label">Verify</div><div class="value">' + (ver.outcome ? pill(runTone(ver.outcome), (ver.verdict ? ver.verdict + ' · ' : '') + ver.outcome) : '—') + (ver.checks ? '<div class="small muted" style="margin-top:4px">' + esc(ver.checks) + '</div>' : '') + '</div></div></div>';
       if (ver.summary) h += '<div><strong>Verify result:</strong> ' + esc(ver.summary) + '</div>';
       if (ver.findings) h += '<div class="review-content"><strong>Findings:</strong>\n' + esc(ver.findings) + '</div>';
-      h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(t.jira_url) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
-      if (t.preview_url) h += '<a class="btn sm" href="' + esc(t.preview_url) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(safeHref(t.jira_url)) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
+      if (t.preview_url) h += '<a class="btn sm" href="' + esc(safeHref(t.preview_url)) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
       if (t.thread && t.thread.length) {
         h += '<div class="review-thread"><strong>AI question thread</strong>';
         t.thread.forEach(function (line) { h += '<div class="review-thread-line"><span class="muted">' + esc(line.author || line.kind) + ' · ' + esc(line.created_at || '') + '</span><div>' + esc(line.text || '') + '</div></div>'; });
@@ -1958,12 +1983,12 @@ function renderKnowledge() {
       var older = versions.filter(function (x) { return x.version === v.version - 1; })[0];
       h += '<article class="knowledge-version"><div><strong>Version ' + v.version + '</strong> · ' + esc(v.action) + ' · edited by <strong>' + esc(v.actor) + '</strong> · ' + esc(knowledgeDate(v.created_at)) +
         (v.approved_by ? ' · approved by ' + esc(v.approved_by) : '') + '</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before' + (older ? ' · v' + older.version : '') + '</div><pre>' + esc(older ? older.content : '(no earlier version)') + '</pre></div>' +
-        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre>' + (canManage ? '<button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + v.version + '">Restore this version</button>' : '') + '</div></div></article>';
+        '<div><div class="small">After · ' + esc(v.title) + (v.archived ? ' · archived' : '') + '</div><pre>' + esc(v.content) + '</pre>' + (canManage ? '<button class="btn sm" data-act="knowledge-restore" data-kind="' + esc(k.history.type) + '" data-id="' + esc(k.history.id) + '" data-version="' + esc(v.version) + '">Restore this version</button>' : '') + '</div></div></article>';
     });
     pendingHistory.forEach(function (p) {
       h += '<article class="knowledge-version"><div><strong>Pending PR #' + p.pr_number + '</strong> · proposed by <strong>' + esc(p.actor) + '</strong> · ' + esc(knowledgeDate(p.created_at)) +
         ' · before v' + p.base_version + ' · not active</div><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div>' +
-        '<div><div class="small">Proposed after · ' + esc(p.title) + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre><a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review pull request ' + ICON.ext + '</a></div></div></article>';
+        '<div><div class="small">Proposed after · ' + esc(p.title) + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre><a href="' + esc(safeHref(p.pr_url)) + '" target="_blank" rel="noopener">Review pull request ' + ICON.ext + '</a></div></div></article>';
     });
     h += '</div></section>';
   }
@@ -1976,7 +2001,7 @@ function renderKnowledge() {
   pending.forEach(function (p) {
     h += '<article class="knowledge-item"><h3>' + esc(p.title) + '</h3><div class="small">' + esc(p.id) + ' · proposed by ' + esc(p.actor) + ' · ' + esc(knowledgeDate(p.created_at)) + '</div>' +
       '<details><summary>View proposed change</summary><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before · v' + p.base_version + '</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div><div><div class="small">After' + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre></div></div></details>' +
-      '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div>' : '') + '</article>';
+      '<a href="' + esc(safeHref(p.pr_url)) + '" target="_blank" rel="noopener">Review PR #' + esc(p.pr_number) + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + esc(p.proposal_id) + '">Approve and merge policy</button></div>' : '') + '</article>';
   });
   h += '</section></div></div>';
   root.innerHTML = h;
@@ -2208,7 +2233,7 @@ function renderLead() {
 /* ---------- Business: progress by epic, tickets waiting on the owner, change requests ----------
    Read-only on tickets: the only write is the change request form (a new Story in Backlog). The owner moves an
    assessed change request to Intake in Jira; nothing here changes a ticket's status. */
-function jiraUrl(key) { return String((S.biz && S.biz.jira_site) || 'https://jooservices.atlassian.net').replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key); }
+function jiraUrl(key) { return String(safeHref(S.biz && S.biz.jira_site) || 'https://jooservices.atlassian.net').replace(/\/+$/, '') + '/browse/' + encodeURIComponent(key); }
 function needsOwner(all) {
   var byKey = {}; all.forEach(function (t) { byKey[t.key] = t; });
   return all.filter(function (t) { return t.status === 'Needs owner'; }).map(function (t) {
@@ -2260,6 +2285,7 @@ var PROG_TEXT = {
         steps: { check: 'Kiểm tra', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } }
 };
 function safeUrl(u) { return /^https?:\/\//.test(u || '') ? u : ''; }
+function safeHref(u) { u = String(u == null ? '' : u); return /^https?:\/\//i.test(u) || /^\/(?![\/\\])/.test(u) ? u : ''; }
 function releaseState(v) {
   var s = v.release && v.release.status;
   return v.released ? 'released' : s === 'checking' ? 'running' : s === 'failed' ? 'failed' : v.ready ? 'ready' : 'notReady';
@@ -2267,7 +2293,7 @@ function releaseState(v) {
 function releaseLink(v, t) {
   var rel = v.release || {}, h = '';
   if (rel.tag) h += '<span class="mono">' + esc(t.tag) + ' ' + esc(rel.tag) + '</span>';
-  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(rel.github_release_url) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
+  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(safeHref(rel.github_release_url)) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
   return h;
 }
 function releaseSteps(v, t) {
@@ -2275,7 +2301,7 @@ function releaseSteps(v, t) {
   if (!steps.length) return '<div class="muted">' + esc(t.noSteps) + '</div>';
   return '<ol class="d release-steps">' + steps.map(function (s) {
     var who = (s.run_id ? ' · ' + t.run + ' <span class="mono">' + esc(String(s.run_id).slice(0, 8)) + '</span>' : '') + (s.node ? ' · ' + t.node + ' <span class="mono">' + esc(s.node) + '</span>' : '');
-    var link = safeUrl(s.url) ? ' <a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
+    var link = safeUrl(s.url) ? ' <a href="' + esc(safeHref(s.url)) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
     return '<li data-step="' + esc(s.step) + '" data-state="' + esc(s.state) + '"><b>' + esc(t.steps[s.step] || s.step) + '</b> · ' + esc(s.state) + link + who + '</li>';
   }).join('') + '</ol>';
 }
@@ -2343,7 +2369,7 @@ function renderBForm(force) {
   epics.forEach(function (e) { h += '<option value="' + esc(e.key) + '"' + (v.epic === e.key ? ' selected' : '') + '>' + esc(e.key + ' ' + e.summary.slice(0, 60)) + '</option>'; });
   h += '</select></label>';
   if (S.cr.errors.length) h += '<div class="err" role="alert">' + S.cr.errors.map(esc).join('<br>') + '</div>';
-  if (S.cr.created) h += '<div role="status">Đã tạo <a class="mono" href="' + esc(S.cr.created.url) + '" target="_blank" rel="noopener">' + esc(S.cr.created.key) + ' ' + ICON.ext + '</a> ở Backlog; AI đang đánh giá tác động.</div>';
+  if (S.cr.created) h += '<div role="status">Đã tạo <a class="mono" href="' + esc(safeHref(S.cr.created.url)) + '" target="_blank" rel="noopener">' + esc(S.cr.created.key) + ' ' + ICON.ext + '</a> ở Backlog; AI đang đánh giá tác động.</div>';
   h += '<div><button class="btn primary" type="submit"' + (S.cr.sending ? ' disabled' : '') + '>' + (S.cr.sending ? 'Đang gửi…' : 'Gửi change request') + '</button></div></form></section>';
   $('#bform').innerHTML = h;
 }
@@ -2366,7 +2392,7 @@ function submitCR() {
 function list(items) { return items && items.length ? '<ul>' + items.map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul>' : '<span class="muted">không có</span>'; }
 function crCard(cr) {
   var ticket = ticketBy(cr.key), repository = ticket && ticket.repository;
-  var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(cr.url || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
+  var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(safeHref(cr.url) || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
   h += '<div class="small">Epic: ' + esc(cr.epic || '—') + ' · Repository: ' + esc(repository || '—') + ' · Trạng thái: ' + esc(cr.status) + '</div>';
   var i = cr.impact;
   if (!i) return h + '<div><span class="flag" data-tone="info">Đang đánh giá</span></div></div>';
@@ -2401,7 +2427,7 @@ function renderBusiness() {
 
 /* ---------- Stakeholder review and Jira verdicts ---------- */
 function stakeholderEnvLink(name, label, url) {
-  return url ? '<a class="btn" href="' + esc(url) + '" target="_blank" rel="noopener">' + label + ' ' + ICON.ext + '</a>' :
+  return url ? '<a class="btn" href="' + esc(safeHref(url)) + '" target="_blank" rel="noopener">' + label + ' ' + ICON.ext + '</a>' :
     '<span class="btn" aria-label="' + label + ': chưa deploy">' + label + ': chưa deploy</span>';
 }
 function renderStakeholderHead() {
@@ -2524,9 +2550,9 @@ function analyticsChart(rows) {
     [['ok', 'Done or merged'], ['rework', 'Rework'], ['failed', 'Failed'], ['other', 'Other']].forEach(function (k) {
       if (!b[k[0]]) return;
       var hh = H * b[k[0]] / max; y -= hh;
-      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + d + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
+      svg += '<rect class="an-' + k[0] + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + esc(d) + ' · ' + k[1] + ': ' + b[k[0]] + '</title></rect>';
     });
-    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + d.slice(8) + '</text>';
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + esc(d.slice(8)) + '</text>';
   });
   return svg + '</svg>';
 }
@@ -2600,9 +2626,9 @@ function drawerTicket(key) {
   var b = '<div class="facts">' + fact('Type', esc(t.type)) + fact('Repository', '<span class="mono">' + esc(repository) + '</span>') + fact('Priority', esc(t.priority || '—')) + fact('Parent', t.parent_key ? '<button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(t.parent_key) + '">' + esc(t.parent_key) + '</button>' : '—') + fact('Blocked by', (t.blocked_by || []).length ? esc(t.blocked_by.join(', ')) : '—') + fact('Updated', t.updated_age_s != null ? ago(t.updated_age_s + since()) : '—');
   if (t.run) b += fact('Worker', '<span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step)) + fact('Work clock', '<span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span> / 60:00') + fact('Lease', t.run.lease_ms > 0 ? Math.round(t.run.lease_ms / 1000) + ' s left' : 'expired') + fact('Fence', '#' + t.run.fence);
   b += '</div>';
-  b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(det && det.jira_url ? det.jira_url : 'https://jooservices.atlassian.net/browse/' + key) + '" target="_blank" rel="noopener">Open in Jira ' + ICON.ext + '</a>';
+  b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(safeHref(det && det.jira_url) || 'https://jooservices.atlassian.net/browse/' + key) + '" target="_blank" rel="noopener">Open in Jira ' + ICON.ext + '</a>';
   var prs = det ? det.runs.filter(function (r) { return r.pr_url; }).map(function (r) { return r.pr_url; }) : (t.last_run && t.last_run.pr_url ? [t.last_run.pr_url] : []);
-  prs.filter(function (u, i) { return prs.indexOf(u) === i; }).forEach(function (u) { b += '<a class="btn sm" href="' + esc(u) + '" target="_blank" rel="noopener">PR #' + esc(u.split('/').pop()) + ' ' + ICON.ext + '</a>'; });
+  prs.filter(function (u, i) { return prs.indexOf(u) === i; }).forEach(function (u) { b += '<a class="btn sm" href="' + esc(safeHref(u)) + '" target="_blank" rel="noopener">PR #' + esc(u.split('/').pop()) + ' ' + ICON.ext + '</a>'; });
   b += '</div>';
   if (!det) return drawerShell(esc(key) + ' · ' + esc(t.project || ''), esc(t.summary), pills, b + '<div class="empty">Loading runs and history…</div>');
   var acs = acLines(full.description);
@@ -3022,6 +3048,7 @@ function render() {
   else if (S.view === 'machines') renderCC();
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'users') renderUsers();
+  else if (S.view === 'security') renderSecurity();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
@@ -3048,7 +3075,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'security'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
 }
@@ -3065,6 +3092,7 @@ function setView(v) {
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
+  if (v === 'security') loadSecurity();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -3346,6 +3374,157 @@ window.addEventListener('popstate', function () {
   syncMenuVisibility(); showView(); render();
 });
 
+/* ---------- security: two-factor, sessions, people, audit log (docs/v4/security.md) ---------- */
+var SEC = { mfa: null, settings: null, users: null, sessions: null, audit: null, category: '', setup: null, codes: null, code: '', msg: '', err: '', busy: false };
+function secApi(url, method, body) {
+  var o = { cache: 'no-store', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } };
+  if (method) o.method = method;
+  if (body !== undefined) o.body = JSON.stringify(body);
+  return fetch(url, o).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+}
+function secFail(e) { SEC.err = e && e.message || 'Request failed'; SEC.busy = false; renderSecurity(); }
+function loadSecurity() {
+  secApi('/v1/security/mfa').then(function (d) {
+    SEC.mfa = d; renderSecurity();
+    if (d.can_manage_security) {
+      secApi('/v1/security/settings').then(function (x) { SEC.settings = x; renderSecurity(); }).catch(secFail);
+      secApi('/v1/security/users').then(function (x) { SEC.users = x.users; renderSecurity(); }).catch(secFail);
+      secApi('/v1/security/sessions').then(function (x) { SEC.sessions = x.sessions; renderSecurity(); }).catch(secFail);
+    }
+    loadAuditLog();
+  }).catch(secFail);
+}
+function loadAuditLog() {
+  secApi('/v1/security/audit?limit=100' + (SEC.category ? '&category=' + encodeURIComponent(SEC.category) : ''))
+    .then(function (x) { SEC.audit = x; renderSecurity(); }).catch(function () { SEC.audit = null; renderSecurity(); });
+}
+function renderSecurity() {
+  var root = $('#view-security'); if (!root) return;
+  var m = SEC.mfa, h = '<h1 class="dash-title">Security</h1><p class="lead">Two-factor sign-in, session length, forced sign-out and the audit log.</p>';
+  if (SEC.err) h += '<div class="notice err" role="alert">' + esc(SEC.err) + '</div>';
+  if (SEC.msg) h += '<div class="notice" role="status">' + esc(SEC.msg) + '</div>';
+  if (m && m.setup_required) h += '<div class="notice err" role="alert">Your role must use two-factor sign-in. Set it up below to continue.</div>';
+  h += '<section class="panel"><div class="panel-h"><h2>Two-factor sign-in</h2><span class="hint">Your account</span></div>';
+  if (!m) h += '<div class="empty">Loading…</div>';
+  else if (!m.enabled) {
+    h += '<p>Two-factor sign-in is <b>off</b>. Use an authenticator app (any app that supports TOTP).</p>';
+    if (SEC.setup) {
+      h += '<p>Add this key to your authenticator app, then enter the 6-digit code it shows.</p>';
+      h += '<p><code data-sec-secret>' + esc(SEC.setup.secret) + '</code></p>';
+      h += '<p class="small">Or open this link on your phone: <code>' + esc(SEC.setup.otpauth_uri) + '</code></p>';
+      h += '<form data-sec-form="enable"><label>Code <input data-sec-code value="' + esc(SEC.code) + '" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></label> ';
+      h += '<button class="btn primary" type="submit"' + (SEC.busy ? ' disabled' : '') + '>Turn on two-factor</button></form>';
+    } else h += '<button class="btn primary" data-sec="setup"' + (SEC.busy ? ' disabled' : '') + '>Set up two-factor sign-in</button>';
+  } else {
+    h += '<p>Two-factor sign-in is <b>on</b>. Recovery codes left: <b>' + Number(m.recovery_codes_left) + '</b>.</p>';
+    h += '<form data-sec-form="codes"><label>Current code <input data-sec-code value="' + esc(SEC.code) + '" autocomplete="one-time-code" maxlength="32"></label> ';
+    h += '<button class="btn" type="submit"' + (SEC.busy ? ' disabled' : '') + '>Issue new recovery codes</button> ';
+    h += m.required ? '' : '<button class="btn" type="button" data-sec="disable"' + (SEC.busy ? ' disabled' : '') + '>Turn off</button>';
+    h += '</form>';
+  }
+  if (SEC.codes) {
+    h += '<div class="notice" role="status"><b>Recovery codes</b> — each works once if you lose your authenticator. They are shown only now; store them safely.</div><pre data-sec-codes>';
+    SEC.codes.forEach(function (c) { h += esc(c) + '\n'; });
+    h += '</pre>';
+  }
+  h += '</section>';
+  if (m && m.can_manage_security) {
+    var s = SEC.settings;
+    h += '<section class="panel"><div class="panel-h"><h2>Session length and sign-in rules</h2><span class="hint">Applies to the next sign-in</span></div>';
+    if (!s) h += '<div class="empty">Loading…</div>';
+    else {
+      h += '<form data-sec-form="settings"><label>Session length (hours) <input data-sec-ttl type="number" min="' + Number(s.session_ttl_min_s / 3600) + '" max="' + Number(s.session_ttl_max_s / 3600) + '" step="0.5" value="' + Number(s.session_ttl_s / 3600) + '"></label> ';
+      h += '<label><input data-sec-require type="checkbox"' + (s.require_mfa ? ' checked' : '') + '> Require two-factor sign-in for administrators (' + esc((s.mfa_roles || []).join(', ')) + ')</label> ';
+      h += '<button class="btn primary" type="submit"' + (SEC.busy ? ' disabled' : '') + '>Save</button></form>';
+      h += '<p class="small">Secret encryption key: ' + (s.secret_key_configured ? 'configured' : 'not configured (set AIFLOW4_SECRET_KEY)') + ' · rate limits: ' + Number(s.rate_limit_per_min) + ' requests/min per address, ' + Number(s.rate_limit_public_per_min) + '/min on public endpoints.</p>';
+    }
+    h += '</section><section class="panel"><div class="panel-h"><h2>Signed-in sessions</h2><span class="hint">Forced sign-out ends the session at once</span></div>';
+    if (!SEC.sessions) h += '<div class="empty">Loading…</div>';
+    else if (!SEC.sessions.length) h += '<div class="empty">No sessions with tracking yet.</div>';
+    else {
+      h += '<div class="tablebox"><table><thead><tr><th>Person</th><th>Role</th><th>From</th><th>Started</th><th>Expires</th><th></th></tr></thead><tbody>';
+      SEC.sessions.forEach(function (x) {
+        h += '<tr><td>' + esc(x.email) + (x.current ? ' (this session)' : '') + '</td><td>' + esc(x.role) + '</td><td>' + esc(x.ip) + '</td><td>' + esc(x.created_at) + '</td><td>' + esc(x.expires_at) + '</td>';
+        h += '<td><button class="btn" data-sec="revoke" data-sid="' + esc(x.sid) + '">Sign out</button></td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += '</section><section class="panel"><div class="panel-h"><h2>People</h2><span class="hint">Two-factor status and recovery</span></div>';
+    if (!SEC.users) h += '<div class="empty">Loading…</div>';
+    else {
+      h += '<div class="tablebox"><table><thead><tr><th>Person</th><th>Role</th><th>Two-factor</th><th>Recovery codes</th><th>Sessions</th><th>State</th><th></th></tr></thead><tbody>';
+      SEC.users.forEach(function (u) {
+        h += '<tr><td>' + esc(u.email) + '</td><td>' + esc(u.role) + '</td><td>' + (u.totp_enabled ? 'on' : 'off') + '</td><td>' + Number(u.recovery_codes_left) + '</td><td>' + Number(u.sessions) + '</td>';
+        h += '<td>' + (u.disabled ? 'disabled' : u.locked ? 'locked' : 'active') + '</td><td>';
+        h += '<button class="btn" data-sec="user-signout" data-email="' + esc(u.email) + '">Sign out everywhere</button> ';
+        h += '<button class="btn" data-sec="user-mfa-reset" data-email="' + esc(u.email) + '">Reset two-factor</button> ';
+        h += '<button class="btn" data-sec="user-unlock" data-email="' + esc(u.email) + '">Unlock</button></td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += '</section>';
+  }
+  var a = SEC.audit;
+  if (a) {
+    h += '<section class="panel"><div class="panel-h"><h2>Audit log</h2><span class="hint">Read only · changes to settings, people, roles and credentials</span></div>';
+    h += '<label>Show <select data-sec-category><option value="">everything</option>';
+    (a.categories || []).forEach(function (c) { h += '<option value="' + esc(c) + '"' + (c === SEC.category ? ' selected' : '') + '>' + esc(c) + '</option>'; });
+    h += '</select></label>';
+    if (!a.entries.length) h += '<div class="empty">Nothing recorded yet.</div>';
+    else {
+      h += '<div class="tablebox"><table><thead><tr><th>When</th><th>Who</th><th>Area</th><th>What</th><th>Subject</th><th>From</th></tr></thead><tbody>';
+      a.entries.forEach(function (e) {
+        h += '<tr><td>' + esc(e.ts) + '</td><td>' + esc(e.actor) + '</td><td>' + esc(e.category) + '</td><td>' + esc(e.action) + '</td><td>' + esc(e.target) + '</td><td>' + esc(e.ip) + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += '</section>';
+  }
+  root.innerHTML = h;
+}
+function secDo(promise, done) {
+  SEC.busy = true; SEC.err = ''; SEC.msg = ''; renderSecurity();
+  promise.then(function (d) { SEC.busy = false; done(d); renderSecurity(); }).catch(secFail);
+}
+document.addEventListener('click', function (e) {
+  var el = e.target.closest && e.target.closest('[data-sec]'); if (!el) return;
+  var act = el.getAttribute('data-sec'), email = el.getAttribute('data-email'), sid = el.getAttribute('data-sid');
+  if (act === 'setup') secDo(secApi('/v1/security/mfa/setup', 'POST'), function (d) { SEC.setup = d; SEC.code = ''; });
+  else if (act === 'disable') {
+    if (!SEC.code) { SEC.err = 'Enter a current code first.'; renderSecurity(); return; }
+    secDo(secApi('/v1/security/mfa/disable', 'POST', { code: SEC.code }), function () { SEC.code = ''; SEC.msg = 'Two-factor sign-in is off.'; loadSecurity(); });
+  }
+  else if (act === 'revoke') secDo(secApi('/v1/security/sessions/' + encodeURIComponent(sid) + '/revoke', 'POST'), function () { SEC.msg = 'Session ended.'; loadSecurity(); });
+  else if (act === 'user-signout') secDo(secApi('/v1/security/users/' + encodeURIComponent(email) + '/sign-out', 'POST'), function () { SEC.msg = 'Signed out everywhere.'; loadSecurity(); });
+  else if (act === 'user-mfa-reset') {
+    if (!window.confirm('Reset two-factor sign-in for ' + email + '? They are signed out and must set it up again.')) return;
+    secDo(secApi('/v1/security/users/' + encodeURIComponent(email) + '/mfa/reset', 'POST'), function () { SEC.msg = 'Two-factor sign-in reset.'; loadSecurity(); });
+  }
+  else if (act === 'user-unlock') secDo(secApi('/v1/security/users/' + encodeURIComponent(email) + '/unlock', 'POST'), function () { SEC.msg = 'Account unlocked.'; loadSecurity(); });
+});
+document.addEventListener('input', function (e) {
+  if (e.target.matches && e.target.matches('[data-sec-code]')) SEC.code = e.target.value;
+});
+document.addEventListener('change', function (e) {
+  if (e.target.matches && e.target.matches('[data-sec-category]')) { SEC.category = e.target.value; loadAuditLog(); }
+});
+document.addEventListener('submit', function (e) {
+  var kind = e.target.getAttribute && e.target.getAttribute('data-sec-form'); if (!kind) return;
+  e.preventDefault();
+  if (kind === 'enable') secDo(secApi('/v1/security/mfa/enable', 'POST', { code: SEC.code }), function (d) {
+    SEC.codes = d.recovery_codes; SEC.setup = null; SEC.code = ''; SEC.msg = 'Two-factor sign-in is on.'; loadSecurity();
+  });
+  else if (kind === 'codes') secDo(secApi('/v1/security/mfa/recovery-codes', 'POST', { code: SEC.code }), function (d) {
+    SEC.codes = d.recovery_codes; SEC.code = ''; loadSecurity();
+  });
+  else if (kind === 'settings') {
+    var hours = Number($('[data-sec-ttl]').value), body = { session_ttl_s: Math.round(hours * 3600), require_mfa: $('[data-sec-require]').checked };
+    secDo(secApi('/v1/security/settings', 'PUT', body), function (d) { SEC.settings = d; SEC.msg = 'Saved.'; loadSecurity(); });
+  }
+});
+
 /* ---------- boot ---------- */
 try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }
 loadPrefs();
@@ -3354,6 +3533,7 @@ showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);
 if (S.view === 'projects') loadProjectList();
+if (S.view === 'security') loadSecurity();
 if (S.view === 'integrations') {
   var githubResult = new URLSearchParams(location.search).get('github');
   if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';

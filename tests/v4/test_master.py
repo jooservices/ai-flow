@@ -196,6 +196,10 @@ def test_first_configured_senior_gets_master_role_when_control_repo_has_no_maste
     repo = ControlRepo.load(control_repo)
     assert "master" in repo.account("mid").roles and "master" not in repo.account("senior-a").roles
 
+    accounts.write_text("accounts:\n  - {id: senior-omitted, provider: claude, node: cc, tier: senior}\n")
+    repo = ControlRepo.load(control_repo)
+    assert repo.account("senior-omitted").roles == ["dev", "verify", "master"]
+
 
 def test_command_center_has_master_budget_and_weekly_report_controls():
     html = (Path(__file__).parents[2] / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
@@ -327,7 +331,9 @@ def test_protected_master_actions_escalate_and_never_execute(client, ctx, monkey
     add_ticket(ctx.db, "TESTWP-220")
     ctx.jira.status_of["TESTWP-220"] = "Needs owner"
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append(args) or ["email"])
     response = action(client, cc, master, action=action_name, ticket="TESTWP-220", intent=intent,
                       fields={"Release status": "approved"}, headline="protected request",
                       why="The request changes a protected production system", options=["Wait for owner approval",
@@ -389,7 +395,9 @@ def test_master_escalates_one_clear_owner_message_with_options(client, ctx, monk
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append((args, channels)) or ["email"])
     payload = {"action": "escalate_to_owner", "intent": "choose whether to add another provider account",
                "why": "The master cannot provision or sign in an account", "options": ["Add a Codex account", "Keep the role uncovered"],
                "observation_key": "incident:role_coverage:master"}
@@ -398,9 +406,39 @@ def test_master_escalates_one_clear_owner_message_with_options(client, ctx, monk
     assert first.status_code == second.status_code == 200
     assert first.json()["escalated"] and not first.json()["already_sent"]
     assert second.json()["already_sent"] and len(sent) == 1
-    assert "Why a person is needed" in sent[0][2]
-    assert "- Add a Codex account" in sent[0][2] and "- Keep the role uncovered" in sent[0][2]
+    assert "Why a person is needed" in sent[0][0][2]
+    assert "- Add a Codex account" in sent[0][0][2] and "- Keep the role uncovered" in sent[0][0][2]
+    assert sent[0][1] == ["email"]
     assert ctx.db.one("SELECT count(*) AS n FROM master_escalations")["n"] == 1
+
+
+def test_master_escalation_retries_only_failed_channels(client, ctx, monkeypatch):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    attempts = []
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email", "slack"])
+
+    def send(*args, channels=None):
+        attempts.append(list(channels or []))
+        return ["email"] if len(attempts) == 1 else ["slack"]
+
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", send)
+    payload = {"action": "escalate_to_owner", "intent": "choose whether to add another provider account",
+               "why": "The master cannot provision or sign in an account", "options": ["Add a Codex account"],
+               "observation_key": "incident:role_coverage:retry"}
+    first = action(client, cc, master, **payload)
+    second = action(client, cc, master, **payload)
+    third = action(client, cc, master, **payload)
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert attempts == [["email", "slack"], ["slack"]]
+    assert first.json()["pending_channels"] == ["slack"]
+    assert second.json()["sent"] == ["slack"] and second.json()["pending_channels"] == []
+    assert third.json()["already_sent"] and third.json()["sent"] == []
+    row = ctx.db.one("SELECT pending_channels, delivered_channels FROM master_escalations"
+                     " WHERE observation_key='incident:role_coverage:retry'")
+    assert row["pending_channels"] == []
+    assert set(row["delivered_channels"]) == {"email", "slack"}
 
 
 def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, ctx, monkeypatch):
@@ -428,7 +466,9 @@ def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, c
     enabled = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
     assert enabled.status_code == 200 and master_candidate(client, cc, "claude-01")["step"] == "master"
     master = claim_master(client, cc, "claude-01").json()
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: ["email"])
     escalated = action(client, cc, master, action="escalate_to_owner", ticket="TESTWP-250",
                        intent="select how to handle the blocked decision", why="The master lacks project context",
                        options=["Ask the project owner", "Leave the ticket waiting"],
@@ -631,7 +671,9 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     from aiflow.v4.control.incidents import open_incident
     open_incident(ctx, "run_slow", "TESTWP-240", "warning", "TESTWP-240 needs attention", "run passed warn")
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append(args) or ["email"])
 
     class Bridge:
         def request(self, method, path, json=None, params=None):

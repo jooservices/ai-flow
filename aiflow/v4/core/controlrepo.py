@@ -195,7 +195,10 @@ class ControlRepo:
         if accounts and not any("master" in (a.roles or []) for a in accounts):
             senior = next((a for a in accounts if a.tier == "senior"), None)
             if senior:
-                senior.roles = list(dict.fromkeys([*(senior.roles or []), "master"]))
+                # Empty/omitted roles otherwise mean the normal dev and verify roles in the control API.
+                # Materialize those defaults before adding master so that this default does not erase them.
+                defaults = senior.roles or ["dev", "verify"]
+                senior.roles = list(dict.fromkeys([*defaults, "master"]))
         nodes: dict[str, Node] = {}
         for p in sorted((r / "nodes").glob("*.yaml")):
             d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}

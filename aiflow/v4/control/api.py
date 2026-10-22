@@ -2800,24 +2800,62 @@ def create_app(ctx: Ctx) -> FastAPI:
                     observation_key = f"ticket:{ticket}:{updated['jira_updated'].isoformat() if updated and updated['jira_updated'] else 'current'}"
                 else:
                     observation_key = f"master:{body.action}:{body.intent[:200]}"
-            sent_row = ctx.db.one(
-                "INSERT INTO master_escalations (observation_key,ticket,reason,options,run_id) VALUES (%s,%s,%s,%s,%s)"
+            configured_channels = notify.configured_channels()
+            created_row = ctx.db.one(
+                "INSERT INTO master_escalations"
+                " (observation_key,ticket,reason,options,run_id,pending_channels,delivered_channels,intent)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
                 " ON CONFLICT (observation_key) DO NOTHING RETURNING observation_key",
-                (observation_key, ticket, why, J(options), body.run_id))
+                (observation_key, ticket, why, J(options), body.run_id, configured_channels, [], body.intent[:1500]))
+            escalation = ctx.db.one(
+                "SELECT reason, options, pending_channels, delivered_channels, intent FROM master_escalations"
+                " WHERE observation_key=%s", (observation_key,))
+            # A NULL pending list marks rows created before channel delivery tracking was installed. Retry all
+            # currently configured channels for those rows; the prior version could not record partial failures.
+            pending_channels = set(escalation.get("pending_channels") or [])
+            delivered_channels = set(escalation.get("delivered_channels") or [])
+            if escalation.get("pending_channels") is None:
+                pending_channels.update(set(configured_channels) - delivered_channels)
+            elif not pending_channels and not delivered_channels:
+                # An observation first seen with no alert channels can be delivered if channels are configured
+                # later. Successfully delivered observations have a non-empty delivered list and stay suppressed.
+                pending_channels.update(configured_channels)
+            else:
+                pending_channels.update(set(configured_channels) - delivered_channels)
+            pending_before = sorted(pending_channels)
+            if pending_before != sorted(escalation.get("pending_channels") or []):
+                ctx.db.run("UPDATE master_escalations SET pending_channels=%s WHERE observation_key=%s",
+                           (pending_before, observation_key))
             link = (ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}") if ticket and ctx.settings.jira_site else ""
-            message = (f"Why a person is needed: {why}\nRequest: {body.intent[:1500]}\n"
-                       "Available options:\n" + "\n".join(f"- {option}" for option in options))
-            sent = (notify.send("warning", f"{ticket or 'AI Flow'} requires an owner decision", message, link)
-                    if sent_row else [])
+            why = str(escalation["reason"])
+            stored_options = [str(option) for option in (escalation.get("options") or [])]
+            message = (f"Why a person is needed: {why}\nRequest: {escalation.get('intent') or body.intent[:1500]}\n"
+                       "Available options:\n" + "\n".join(f"- {option}" for option in stored_options))
+            attempt_channels = sorted(pending_channels.intersection(configured_channels))
+            try:
+                sent = (notify.send("warning", f"{ticket or 'AI Flow'} requires an owner decision", message, link,
+                                    channels=attempt_channels) if attempt_channels else [])
+            except Exception as exc:  # Persist the pending channels and retry them on a later master cycle.
+                log.warning("master escalation notification failed: %s", type(exc).__name__)
+                sent = []
+            sent = sorted(set(sent).intersection(attempt_channels))
+            pending_channels.difference_update(sent)
+            delivered_channels.update(sent)
+            ctx.db.run("UPDATE master_escalations SET pending_channels=%s, delivered_channels=%s"
+                       " WHERE observation_key=%s",
+                       (sorted(pending_channels), sorted(delivered_channels), observation_key))
+            already_sent = bool(not created_row and delivered_channels and not pending_channels and not sent)
             audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"],
                   body.action == "escalate_to_owner", decision.reason,
                   {"intent_chars": len(body.intent), "observation_key": observation_key, "options": options})
             audit("notify", "master-escalation", ticket, body.run_id, body.fence, run["account_id"], True,
-                  ",".join(sent) if sent_row and sent else "duplicate suppressed" if not sent_row else "no channel configured",
-                  {"reason": why, "options": options, "observation_key": observation_key})
+                  ",".join(sent) if sent else ("pending: " + ",".join(sorted(pending_channels))
+                                                if pending_channels else "no channel configured or duplicate"),
+                  {"reason": why, "options": stored_options, "observation_key": observation_key,
+                   "pending_channels": sorted(pending_channels)})
             master_event("escalated", why)
-            return {"ok": True, "escalated": True, "reason": why, "options": options,
-                    "already_sent": not bool(sent_row), "sent": sent}
+            return {"ok": True, "escalated": True, "reason": why, "options": stored_options,
+                    "already_sent": already_sent, "sent": sent, "pending_channels": sorted(pending_channels)}
 
         if decision.decision != "allow":
             audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False,

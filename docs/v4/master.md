@@ -38,9 +38,10 @@ reason. Lease fencing and the control-repo policy hook remain in force. No other
 changes are available through the master action API.
 
 When the master needs a person to choose, it sends one alert through the configured owner channels. The alert says
-why a person is needed and lists the available choices. An observation key suppresses repeat messages until the
-ticket changes or a distinct incident is raised. Protected infrastructure, secret and production-release requests
-continue to be escalated by the policy hook.
+why a person is needed and lists the available choices. An observation key suppresses repeat messages after
+successful delivery; failed channels remain pending and are retried on a later master cycle without resending to
+channels that already succeeded. Protected infrastructure, secret and production-release requests continue to be
+escalated by the policy hook.
 
 ## Daily budget and malformed plans
 

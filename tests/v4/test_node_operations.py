@@ -216,6 +216,24 @@ def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(
     assert op["payload"]["services"] == repo.nodes["node1"].services
 
 
+def test_missing_safe_runtime_is_not_queued_as_an_installable_tool(client, ctx, monkeypatch):
+    headers = node_join(client, "node1")
+    ctx.repo().projects["TESTWP"].containers = True
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2,
+                                                    "tools": {"safe-container-runtime": "missing"}},
+                headers=headers)
+    sign_in(client, ctx, role="super_admin")
+    monkeypatch.setattr(control_api, "toolchain_gaps", lambda *args, **kwargs: ["safe-container-runtime"])
+
+    automatic = client.post("/v1/nodes/node1/operations", json={"action": "install"})
+    assert automatic.status_code == 409
+    assert automatic.json()["detail"] == "configure rootless Podman and project quotas on the node"
+    explicit = client.post("/v1/nodes/node1/operations", json={"action": "install",
+                                                                "component": "safe-container-runtime"})
+    assert explicit.status_code == 409
+    assert explicit.json()["detail"] == "configure rootless Podman and project quotas on the node"
+
+
 def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(monkeypatch):
     calls = []
     versions = iter([{"node": "node v22.4.0", "codex": "missing"},

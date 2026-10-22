@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import BROKEN_PREFIX, STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -84,6 +84,10 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
     """One version line per tool, or `missing`; names default to the node tools and every stack tool."""
     out = {}
     for name in names if names is not None else REPORTED_TOOLS:
+        if name == CONTAINER_RUNTIME_TOOL:
+            from ..worker.containers import safe_container_runtime_version
+            out[name] = safe_container_runtime_version()
+            continue
         cmd = TOOLS.get(name)
         if not cmd:
             out[name] = "missing"
@@ -512,6 +516,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     service_names: list[str] = []
     service_at = 0.0
     service_lock = threading.Lock()
+    container_cleanup_thread: threading.Thread | None = None
+    container_cleanup_at = 0.0
     try:
         while not stop.is_set():
             try:
@@ -604,6 +610,15 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     clean_scratch()
                     clean_worktrees(api, name)
                     sweep_test_databases()
+                    if (tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
+                            and time.time() - container_cleanup_at >= 24 * 60 * 60
+                            and (container_cleanup_thread is None or not container_cleanup_thread.is_alive())):
+                        from ..worker.containers import prune_image_cache
+
+                        container_cleanup_at = time.time()
+                        container_cleanup_thread = threading.Thread(
+                            target=prune_image_cache, name=f"aiflow4-container-prune-{name}", daemon=True)
+                        container_cleanup_thread.start()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

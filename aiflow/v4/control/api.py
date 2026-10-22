@@ -34,7 +34,8 @@ from ..core.controlrepo import ControlRepo, epic_for_ticket
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
-from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
+from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
+                               tools_for_stack)
 from . import business, jira_connect, knowledge, memory, rollout, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
@@ -284,6 +285,7 @@ class ProjectPreflightBody(BaseModel):
     repo: str = Field(min_length=1, max_length=200)
     base: str = Field(default="develop", min_length=1, max_length=120)
     stack: str = Field(default="", max_length=80)
+    containers: bool = False
 
 
 class ProjectCreateBody(ProjectPreflightBody):
@@ -298,6 +300,7 @@ class ProjectRepositoryConfigBody(BaseModel):
     base: str = Field(default="", max_length=120)
     checks: list[str] = Field(default_factory=list, max_length=50)
     stack: str = Field(default="", max_length=80)
+    containers: bool | None = None
 
 
 class ProjectRepositoriesBody(BaseModel):
@@ -1313,6 +1316,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         node_rows = {row["name"]: row for row in ctx.db.all("SELECT name,status,tools FROM nodes")}
         node_names = sorted(set(repo.nodes) | set(node_rows))
         required_tools = tools_for_stack(body.stack)
+        if body.containers and CONTAINER_RUNTIME_TOOL not in required_tools:
+            required_tools.append(CONTAINER_RUNTIME_TOOL)
         node_results = []
         for name in node_names:
             row = node_rows.get(name) or {}
@@ -1409,6 +1414,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return [{"repo": name, "base": str(configured.get(name.lower(), {}).get("base") or ""),
                  "checks": list(configured.get(name.lower(), {}).get("checks") or []),
                  "stack": str(configured.get(name.lower(), {}).get("stack") or ""),
+                 "containers": configured.get(name.lower(), {}).get("containers"),
                  "effective": project.settings_for_repo(name)} for name in names]
 
     @app.get("/v1/projects/{key}/repositories")
@@ -1432,7 +1438,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         available = [item for item in available
                      if str(item.get("full_name", "")).split("/", 1)[0].lower() == owner]
         return {"project": key, "default_repo": project.repo,
-                "project_defaults": {"base": project.base, "checks": project.checks, "stack": project.stack},
+                "project_defaults": {"base": project.base, "checks": project.checks, "stack": project.stack,
+                                     "containers": project.containers},
                 "repositories": repository_settings_payload(project),
                 "epic_repositories": project.epic_repositories or {},
                 "epics": epics, "github_repos": available, "stacks": sorted(STACK_TOOLS)}
@@ -1482,7 +1489,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 break
             repos[name.lower()] = {"repo": name, "base": base,
                                    "checks": [check.strip() for check in item.checks if check.strip()],
-                                   "stack": item.stack.strip()}
+                                   "stack": item.stack.strip(),
+                                   **({"containers": item.containers} if item.containers is not None else {})}
         mappings = {str(epic).strip(): str(name).strip() for epic, name in body.epic_repositories.items()
                     if str(name).strip()}
         if not error:
@@ -1570,7 +1578,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
         checks = [check.strip() for check in body.checks if check.strip()]
         config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                  "checks": checks, "merge": {"method": body.merge_method},
+                  "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
                   "limits": {"parallel": body.parallel_limit,
                              "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
                   "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
@@ -1835,7 +1843,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.action == "repair":
             if body.component:
                 raise HTTPException(400, "repair reconciles the full desired state; omit component")
-            selected = list(required)
+            selected = [tool for tool in required if tool != CONTAINER_RUNTIME_TOOL]
             if packages:
                 selected.append("packages")
         else:
@@ -1847,11 +1855,15 @@ def create_app(ctx: Ctx) -> FastAPI:
             elif component:
                 if component not in required:
                     raise HTTPException(400, "component is not required by this node's control repo state")
+                if component == CONTAINER_RUNTIME_TOOL:
+                    raise HTTPException(409, "configure rootless Podman and project quotas on the node")
                 if component not in missing:
                     raise HTTPException(409, "component is already present on this node")
                 selected = [component]
             else:
-                selected = sorted(missing)
+                selected = sorted(tool for tool in missing if tool != CONTAINER_RUNTIME_TOOL)
+                if not selected and CONTAINER_RUNTIME_TOOL in missing:
+                    raise HTTPException(409, "configure rootless Podman and project quotas on the node")
             if not selected:
                 raise HTTPException(409, "node has no missing required components")
 
@@ -2106,11 +2118,24 @@ def create_app(ctx: Ctx) -> FastAPI:
                                          " WHERE status='running' GROUP BY project")}
         projects = [key for key in projects if not repo.projects[key].parallel_limit or
                     running_by_project.get(key, 0) < repo.projects[key].parallel_limit]
+        node_tools = node_row.get("tools") or {}
+        missing_container_runtime = bool(toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], repo.versions))
+
+        def ticket_needs_missing_container_runtime(ticket: dict[str, Any]) -> bool:
+            project = repo.projects.get(str(ticket.get("project") or ""))
+            if not project or not missing_container_runtime:
+                return False
+            selected = project.settings_for_ticket({"key": ticket.get("key"), "type": ticket.get("type"),
+                                                     "epic": ticket_epic(ticket)})
+            return bool(selected.get("containers"))
+
         # A project with a declared stack is offered only after this node reports every pinned tool healthy.
         # Filtering here keeps another project on the same node available while a stack install is pending.
-        projects = [p for p in projects if not repo.projects[p].stacks or not toolchain_gaps(
-            node_row.get("tools") or {}, repo.projects[p].tools, repo.versions, repo.projects[p].stacks,
-            require_pins=True)]
+        projects = [p for p in projects if not (repo.projects[p].stacks or repo.projects[p].uses_containers)
+                    or not toolchain_gaps(node_tools,
+                                          [tool for tool in repo.projects[p].tools if tool != CONTAINER_RUNTIME_TOOL],
+                                          repo.versions, repo.projects[p].stacks,
+                                          require_pins=bool(repo.projects[p].stacks))]
         # Declared test services (PostgreSQL, Redis) must be reported healthy too; other projects stay available.
         reported_services = (node_row.get("metrics") or {}).get("services")
         projects = [p for p in projects
@@ -2125,6 +2150,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
+                if ticket_needs_missing_container_runtime(t):
+                    continue
                 if t["key"] in held or t["key"] in verify_cooling:
                     continue
                 dev = last_dev(t["key"], done=True)
@@ -2140,6 +2167,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
                                 " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
                                 (projects,)):
+                if ticket_needs_missing_container_runtime(t):
+                    continue
                 if t["key"] in held or t["key"] in triage_cooling:
                     continue
                 dev = last_dev(t["key"])
@@ -2157,6 +2186,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                if ticket_needs_missing_container_runtime(t):
+                    continue
                 if t["key"] in held or t["key"] in waiting:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
@@ -2169,6 +2200,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                                 " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
                                 " AND r.step = 'impact' AND r.outcome = 'assessed')"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
+                if ticket_needs_missing_container_runtime(t):
+                    continue
                 if t["key"] in held or t["key"] in waiting:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
@@ -2181,6 +2214,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             dev_rows = []
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
+                if ticket_needs_missing_container_runtime(t):
+                    continue
                 if t["key"] in held or t["key"] in cooling or any(b not in done for b in t["blocked_by"]):
                     continue
                 labels = set(t["labels"])
@@ -2375,7 +2410,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
-        return {"versions": version_release.candidates(ctx, account, node)}
+        repo = ctx.repo()
+        node_row = ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {}
+        versions = version_release.candidates(ctx, account, node)
+        versions = [item for item in versions
+                    if not (item.get("project") in repo.projects
+                            and repo.projects[item["project"]].settings_for_repo(item.get("repository", "")).get("containers")
+                            and toolchain_gaps(node_row.get("tools") or {}, [CONTAINER_RUNTIME_TOOL], repo.versions))]
+        return {"versions": versions}
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
@@ -2403,6 +2445,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = version_release.project_for_version(ctx, project, version)
         if not version_release.enabled(project) or project.repo.lower().rstrip("/") == "jooservices/ai-flow":
             raise HTTPException(403, "version release is not enabled for the selected repository")
+        if (project.settings_for_repo(project.repo).get("containers")
+                and toolchain_gaps((ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {}).get("tools") or {},
+                                   [CONTAINER_RUNTIME_TOOL], repo.versions)):
+            raise HTTPException(409, "safe container runtime is missing on this node")
         state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
                            (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):
@@ -2439,7 +2485,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                     github.create_branch(project.repo_name, release_branch, source_branch)
             tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
             selected_settings = {"repo": project.repo, "base": project.base,
-                                 "checks": version_release.check_commands(project), "stack": project.stack}
+                                 "checks": version_release.check_commands(project), "stack": project.stack,
+                                 "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
             ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash,details)"
                        " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'',%s)",
                        (run_id, key, project.key, acc.id, acc.provider, node, lease.fence,
@@ -2467,6 +2514,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                         "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
                         "target_branch": version_release.target_branch(project),
                         "release_branch": release_branch, "source_sha": source_sha,
+                        "containers": bool(project.settings_for_repo(project.repo).get("containers")),
                         "work_minutes": project.work_minutes()}
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
                   "description": f"Run full configured project checks on {release_branch}, cut from {source_branch}.",
@@ -3045,8 +3093,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             d = decide_read_only(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                                  str(payload.get("cwd") or ""), "an impact run assesses a change request; it does not change files")
         else:
+            details = run.get("details") or {}
+            selected = details.get("repository_settings") or {}
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
-                       str(payload.get("cwd") or ""))
+                       str(payload.get("cwd") or ""), containers=bool(selected.get("containers")))
         ctx.events.emit("policy.decision", ticket=run["ticket_key"], run_id=str(run["id"]), account=run["account_id"],
                         node=run["node"], outcome=d.decision, reason=d.reason[:200], tool=tool,
                         command=str((payload.get("tool_input") or {}).get("command", ""))[:300])

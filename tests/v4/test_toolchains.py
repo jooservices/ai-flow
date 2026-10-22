@@ -30,6 +30,24 @@ def test_project_tools_follow_the_stack_and_missing_is_explicit():
     assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == ["git", "uv", "composer", "wp"]
 
 
+def test_container_declaration_adds_the_safe_runtime_and_can_be_overridden_per_repository():
+    project = Project(key="TESTWP", repo="jooservices/test-aiflow-wp", containers=True,
+                      repositories=[{"repo": "jooservices/legacy", "containers": False}])
+    assert "safe-container-runtime" in project.tools
+    assert project.settings_for_repo("jooservices/test-aiflow-wp")["containers"] is True
+    assert project.settings_for_repo("jooservices/legacy")["containers"] is False
+    assert project.uses_containers is True
+
+
+def test_project_container_yaml_roundtrips_to_required_node_tool(control_repo):
+    (control_repo / "projects" / "TESTWP.yaml").write_text(
+        "key: TESTWP\nrepo: jooservices/test-aiflow-wp\ncontainers: true\n")
+    project = ControlRepo.load(control_repo).projects["TESTWP"]
+    assert project.containers is True
+    assert "safe-container-runtime" in project.tools
+    assert missing_tools({"git": "git 2.43", "uv": "uv 0.8"}, project.tools) == ["safe-container-runtime"]
+
+
 def test_control_repo_reads_the_project_stack_and_node_tool_union(control_repo):
     (control_repo / "projects" / "TESTWP.yaml").write_text(
         "key: TESTWP\nrepo: jooservices/test-aiflow-wp\nstack: php-8.3\n")
@@ -176,6 +194,60 @@ def test_dynamic_node_receives_stack_preflight_and_is_gated_until_healthy(client
     client.post("/v1/nodes/fresh-node/heartbeat", json={"tools": tools}, headers=headers)
     candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
     assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-931"]
+
+
+def test_project_requiring_containers_is_not_offered_until_runtime_is_healthy(client, ctx):
+    from tests.v4.conftest import add_ticket
+
+    ctx.repo().projects["TESTWP"].containers = True
+    headers = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-932")
+    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert candidates.json()["tickets"] == []
+
+    tools["safe-container-runtime"] = "rootless Podman 5.4; podman-compose 1.2; project quota"
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-932"]
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-932", "account": "claude-01"}, headers=headers)
+    assert claim.status_code == 200 and claim.json()["project"]["containers"] is True
+    run_headers = {"Authorization": f"Bearer {claim.json()['run_token']}"}
+    allowed = client.post("/v1/policy/decide", json={"tool_name": "Bash",
+                               "tool_input": {"command": "docker compose up -d"},
+                               "cwd": "/srv/aiflow/work/TESTWP/TESTWP-932"}, headers=run_headers)
+    assert allowed.json()["hookSpecificOutput"]["permissionDecision"] == "allow"
+    denied = client.post("/v1/policy/decide", json={"tool_name": "Bash",
+                              "tool_input": {"command": "docker run --rm -v /:/host alpine"},
+                              "cwd": "/srv/aiflow/work/TESTWP/TESTWP-932"}, headers=run_headers)
+    assert denied.json()["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_missing_runtime_gates_only_tickets_mapped_to_container_repository(client, ctx):
+    from tests.v4.conftest import add_ticket
+
+    project = ctx.repo().projects["TESTWP"]
+    container_repo = "jooservices/container-checks"
+    project.repositories = [{"repo": container_repo, "containers": True}]
+    project.epic_repositories = {"TESTWP-932": container_repo}
+    headers = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-932")
+    add_ticket(ctx.db, "TESTWP-933")
+    add_ticket(ctx.db, "TESTWP-934")
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-932'")
+    ctx.db.run("UPDATE tickets SET parent_key='TESTWP-932' WHERE key='TESTWP-933'")
+
+    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-934"]
+
+    tools["safe-container-runtime"] = "rootless Podman 5.4; podman-compose 1.2; project quota"
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert {ticket["key"] for ticket in candidates.json()["tickets"]} == {
+        "TESTWP-932", "TESTWP-933", "TESTWP-934"}
 
 
 def test_watchdog_keeps_tool_incident_while_the_node_is_offline(client, ctx):

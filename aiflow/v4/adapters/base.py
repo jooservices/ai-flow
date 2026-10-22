@@ -48,6 +48,7 @@ class RunSpec:
     log_path: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
     sandbox: str = "workspace-write"
+    container_start_hook: Callable[[int], None] | None = None
 
 
 @dataclass
@@ -140,6 +141,23 @@ class Adapter:
         log = open(spec.log_path, "w", encoding="utf-8") if spec.log_path else None
         proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=self.base_env(spec), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        if spec.container_start_hook:
+            try:
+                spec.container_start_hook(proc.pid)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                raise
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last_output = time.time()

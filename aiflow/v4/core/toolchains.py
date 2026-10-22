@@ -10,7 +10,8 @@ import re
 from collections.abc import Iterable
 
 # Tools every node reports, whatever its projects use (reporting only; requirements are below).
-NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker", "git", "node", "uv", "gh")
+NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker",
+              "safe-container-runtime", "git", "node", "uv", "gh")
 
 # Required on every worker node, and per AI provider of the accounts the node runs.
 BASE_TOOLS = ("git", "uv")
@@ -28,6 +29,9 @@ STACK_TOOLS: dict[str, tuple[str, ...]] = {
     "node-24": ("node",),
     "playwright": ("node", "playwright", "playwright-browser"),
 }
+
+# The rootless, quota-backed broker that safely exposes a Docker-compatible command set to one AI run.
+CONTAINER_RUNTIME_TOOL = "safe-container-runtime"
 
 # `versions.lock` names used by the control repo. Keep aliases here so installation and verification use the
 # same pins as the console's version display.

@@ -17,6 +17,28 @@ def test_bash_rules():
     assert decide(POLICY, "Bash", {"command": "mkdir -p core/src"}, wt).decision == "allow"
 
 
+def test_container_commands_require_project_declaration_and_stay_in_allowlist():
+    wt = "/srv/aiflow/work/TESTWP/TESTWP-1-x"
+    allowed = ["docker build -t app .", "docker compose up -d",
+               "docker compose run --rm composer composer ci",
+               f"docker run --rm -v {wt}:/worktree composer:2 composer ci"]
+    for command in allowed:
+        assert decide(POLICY, "Bash", {"command": command}, wt, containers=True).decision == "allow", command
+        assert decide(POLICY, "Bash", {"command": command}, wt).decision == "deny", command
+
+    denied = ["docker pull alpine", "docker exec app sh", "docker run --privileged alpine",
+              "docker run --rm -v /:/host alpine", "docker run --rm -v /etc/aiflow/secrets:/secrets alpine",
+              "docker run --rm -v /srv/aiflow/work/OTHER/OTHER-1:/other alpine",
+              f"docker run --rm -v {wt}/subdir:/worktree alpine",
+              f"docker run --rm --network=container:other -v {wt}:/worktree alpine",
+              "docker compose run --cap-add SYS_ADMIN composer composer ci",
+              "docker compose run --privileged composer composer ci",
+              "docker run --rm -v $PWD:/worktree alpine", "podman run alpine",
+              "env docker build .", "echo $(docker build .)"]
+    for command in denied:
+        assert decide(POLICY, "Bash", {"command": command}, wt, containers=True).decision == "deny", command
+
+
 def test_write_tools_stay_in_worktree():
     wt = "/srv/aiflow/work/TESTWP/TESTWP-1-x"
     assert decide(POLICY, "Write", {"file_path": f"{wt}/core/a.php"}, wt).decision == "allow"

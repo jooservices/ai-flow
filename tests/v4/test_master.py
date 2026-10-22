@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -179,6 +180,34 @@ def test_master_candidate_accepts_each_ready_account_status(client, ctx, status)
     assert master_candidate(client, cc, "claude-01")["step"] == "master"
 
 
+def test_first_configured_senior_gets_master_role_when_control_repo_has_no_master(control_repo):
+    accounts = control_repo / "accounts.yaml"
+    accounts.write_text("accounts:\n  - {id: mid, provider: codex, node: node1, tier: middle, roles: [dev]}\n"
+                        "  - {id: senior-a, provider: claude, node: cc, tier: senior, roles: [dev, verify]}\n"
+                        "  - {id: senior-b, provider: codex, node: cc, tier: senior, roles: [dev]}\n")
+    from aiflow.v4.core.controlrepo import ControlRepo
+    repo = ControlRepo.load(control_repo)
+    assert "master" in repo.account("senior-a").roles
+    assert "master" not in repo.account("senior-b").roles
+    assert "master" not in repo.account("mid").roles
+
+    accounts.write_text("accounts:\n  - {id: senior-a, provider: claude, node: cc, tier: senior, roles: [dev]}\n"
+                        "  - {id: mid, provider: codex, node: node1, tier: middle, roles: [master]}\n")
+    repo = ControlRepo.load(control_repo)
+    assert "master" in repo.account("mid").roles and "master" not in repo.account("senior-a").roles
+
+    accounts.write_text("accounts:\n  - {id: senior-omitted, provider: claude, node: cc, tier: senior}\n")
+    repo = ControlRepo.load(control_repo)
+    assert repo.account("senior-omitted").roles == ["dev", "verify", "master"]
+
+
+def test_command_center_has_master_budget_and_weekly_report_controls():
+    html = (Path(__file__).parents[2] / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    assert "function masterAutonomyPanel()" in html
+    assert "data-master-budget" in html and "master-budget-save" in html
+    assert "/v1/master/autonomy/budget" in html and "Weekly autonomy" in html
+
+
 def test_master_snapshot_contains_incidents_owner_queue_all_project_clocks_offline_and_quota(client, ctx):
     cc = ready(client, "cc", "claude-01")
     node1 = ready(client, "node1", "codex-01")
@@ -211,7 +240,8 @@ def test_master_snapshot_contains_incidents_owner_queue_all_project_clocks_offli
                           headers=cc)
     assert response.status_code == 200
     snapshot = response.json()
-    assert {ticket["key"] for ticket in snapshot["needs_owner"]} == {"TESTWP-201", "TESTWP-207"}
+    assert {ticket["key"] for ticket in snapshot["needs_owner"]} == {"TESTWP-201", "TESTWP-202", "TESTWP-207"}
+    assert next(ticket for ticket in snapshot["needs_owner"] if ticket["key"] == "TESTWP-202")["owner_escalated"]
     clock = next(r for r in snapshot["running_clocks"] if r["run_id"] == run_id)
     assert clock["elapsed_minutes"] >= 51
     assert clock["work_minutes"] == {"target": 30, "warn": 45, "hard": 60}
@@ -227,56 +257,58 @@ def test_master_snapshot_contains_incidents_owner_queue_all_project_clocks_offli
     assert {i["kind"] for i in snapshot["quota_incidents"]} == {"account_quota", "quota_high"}
 
 
-def test_master_actions_are_fenced_audited_and_comments_use_master_note_format(client, ctx, monkeypatch):
+def test_master_actions_are_limited_to_safe_fenced_actions_and_audited(client, ctx):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-210")
-    sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
-
-    commented = action(client, cc, master, action="jira_comment", ticket="TESTWP-210", intent="follow up",
-                       headline="status update", what="A slow run was found", why="The warn clock passed",
-                       result="The team has a current status", next="Continue monitoring")
-    assert commented.status_code == 200
-    body = ctx.jira.comments[-1][1]
-    for line in ("AI Flow · master · status update", "What:", "Why:", "Result:", "Next:",
-                 f"Run: claude-01 (claude/opus) on cc · run {master['run_id'][:8]} · fence {master['fence']}"):
-        assert line in body
-
-    updated = action(client, cc, master, action="jira_update", ticket="TESTWP-210", intent="mark as reviewed",
-                      fields={"Summary": "Reviewed"}, add_labels=["master-reviewed"])
-    assert updated.status_code == 200 and ctx.jira.fields[-1] == ("TESTWP-210", {"Summary": "Reviewed"})
-    assert ("add", "TESTWP-210", "master-reviewed") in ctx.jira.labels
-    requeued = action(client, cc, master, action="requeue", ticket="TESTWP-210", intent="return to queue",
-                      target_status="To Do", what="No worker owns the ticket", why="The run lease expired",
-                      result="Returned to To Do", next="The next worker can continue")
-    assert requeued.status_code == 200
+    ctx.jira.status_of["TESTWP-210"] = "In Progress"
+    moved = action(client, cc, master, action="move_to_todo", ticket="TESTWP-210",
+                   intent="return the unowned ticket to To Do", why="No worker owns it")
+    assert moved.status_code == 200
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-210'")["status"] == "To Do"
-    opened = action(client, cc, master, action="incident_open", intent="record a stalled ticket",
-                    kind="ticket_stuck", subject="TESTWP-210", severity="warning", title="stalled",
-                    detail="needs a follow-up")
-    assert opened.status_code == 200
-    closed = action(client, cc, master, action="incident_close", intent="the ticket moved again",
-                    kind="ticket_stuck", subject="TESTWP-210", result="work resumed")
-    assert closed.status_code == 200
-    notified = action(client, cc, master, action="notify_owner", intent="owner needs a status",
-                      title="Master update", detail="The ticket has been requeued")
-    assert notified.status_code == 200 and sent
+
+    add_ticket(ctx.db, "TESTWP-211")
+    ctx.jira.status_of["TESTWP-211"] = "To Do"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'TESTWP-211','TESTWP','dev','codex-01','codex','node1',3,'finished','failed')",
+               (str(uuid.uuid4()),))
+    retried = action(client, cc, master, action="retry", ticket="TESTWP-211",
+                     intent="retry after the failed dev run", why="The previous run failed")
+    assert retried.status_code == 200 and ctx.jira.status_of["TESTWP-211"] == "To Do"
+
+    ctx.db.run("UPDATE accounts SET status='error',last_error='probe failed' WHERE id='codex-01'")
+    paused = action(client, cc, master, action="pause_account", account_id="codex-01", pause_minutes=15,
+                    intent="pause the account after its health check failed", why="probe failed")
+    assert paused.status_code == 200
+    assert ctx.db.one("SELECT reason FROM master_account_pauses WHERE account_id='codex-01'")
+
+    add_ticket(ctx.db, "TESTWP-212", status="In Progress")
+    ctx.jira.status_of["TESTWP-212"] = "In Progress"
+    target_id = str(uuid.uuid4())
+    target_lease = ctx.leases.claim("TESTWP-212", target_id, 3600000)
+    assert target_lease.ok
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'TESTWP-212','TESTWP','dev','codex-01','codex','node1',%s,'running','')",
+               (target_id, target_lease.fence))
+    ctx.db.run("UPDATE runs SET started_at=now()-interval '61 minutes' WHERE id=%s", (target_id,))
+    restarted = action(client, cc, master, action="restart_run", ticket="TESTWP-212", target_run_id=target_id,
+                       intent="stop the run past the project hard limit", why="It exceeded 60 minutes")
+    assert restarted.status_code == 200
+    assert ctx.db.one("SELECT status,outcome FROM runs WHERE id=%s", (target_id,)) == {
+        "status": "lost", "outcome": "lost"}
+    assert not ctx.leases.holder("TESTWP-212")
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-212'")["status"] == "To Do"
+
+    forbidden = action(client, cc, master, action="jira_comment", ticket="TESTWP-210", intent="leave a note")
+    assert forbidden.status_code == 403 and not ctx.jira.comments
 
     audit = ctx.db.all("SELECT action, actor, run_id, fence, accepted FROM write_audit WHERE run_id=%s",
                        (master["run_id"],))
-    assert {entry["action"] for entry in audit} >= {"jira_comment", "jira_update", "requeue", "incident_open",
-                                                    "incident_close", "notify_owner"}
-    assert all(entry["actor"] == "claude-01" and entry["fence"] == master["fence"] and entry["accepted"]
-               for entry in audit)
-    event = ctx.db.one("SELECT account, run_id, fence FROM events WHERE type='master.action' ORDER BY id DESC LIMIT 1")
-    assert event["account"] == "claude-01" and event["run_id"] == master["run_id"] and event["fence"] == master["fence"]
-
-    denied = action(client, cc, master, action="github_merge", ticket="TESTWP-210", intent="merge a pull request")
-    assert denied.status_code == 403
-    denied_audit = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action='github_merge'",
-                              (master["run_id"],))
-    assert not denied_audit["accepted"] and "not allowed" in denied_audit["result"]
+    assert {entry["action"] for entry in audit} >= {"move_to_todo", "retry", "pause_account", "restart_run",
+                                                    "jira_comment"}
+    assert all(entry["actor"] == "claude-01" and entry["fence"] == master["fence"] for entry in audit)
+    assert all(entry["accepted"] for entry in audit if entry["action"] != "jira_comment")
+    assert not next(entry for entry in audit if entry["action"] == "jira_comment")["accepted"]
     direct = client.post("/v1/jira/TESTWP-210/comment", json={"run_id": master["run_id"], "fence": master["fence"],
                                                                 "body": "bypass"}, headers=cc)
     assert direct.status_code == 403
@@ -299,18 +331,22 @@ def test_protected_master_actions_escalate_and_never_execute(client, ctx, monkey
     add_ticket(ctx.db, "TESTWP-220")
     ctx.jira.status_of["TESTWP-220"] = "Needs owner"
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append(args) or ["email"])
     response = action(client, cc, master, action=action_name, ticket="TESTWP-220", intent=intent,
-                      fields={"Release status": "approved"}, headline="protected request")
+                      fields={"Release status": "approved"}, headline="protected request",
+                      why="The request changes a protected production system", options=["Wait for owner approval",
+                                                                                         "Cancel the request"],
+                      observation_key="ticket:TESTWP-220:protected")
 
     assert response.status_code == 200 and response.json()["escalated"]
-    assert category in response.json()["reason"]
+    assert "request changes a protected production system" in response.json()["reason"]
     assert not ctx.jira.fields
     assert ctx.jira.status_of["TESTWP-220"] == "Needs owner"
-    assert len(ctx.jira.comments) == 1 and sent
-    comment = ctx.jira.comments[0][1]
-    for line in ("AI Flow · master · owner decision required", "What:", "Why:", "Result:", "Next:", "Run:"):
-        assert line in comment
+    assert not ctx.jira.comments and len(sent) == 1
+    assert "Why a person is needed" in sent[0][2]
+    assert "- Wait for owner approval" in sent[0][2]
     attempted = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action=%s",
                            (master["run_id"], action_name))
     assert not attempted["accepted"] and category in attempted["result"]
@@ -318,7 +354,7 @@ def test_protected_master_actions_escalate_and_never_execute(client, ctx, monkey
                       (master["run_id"],))["n"] == 1
     event = ctx.db.one("SELECT outcome, reason FROM events WHERE type='master.action' AND run_id=%s",
                        (master["run_id"],))
-    assert event["outcome"] == "escalated" and category in event["reason"]
+    assert event["outcome"] == "escalated" and "protected production system" in event["reason"]
 
 
 @pytest.mark.parametrize("category", ["infrastructure", "secret", "production_release"])
@@ -329,41 +365,163 @@ def test_explicit_protected_category_escalates_even_with_harmless_intent(categor
 
 
 @pytest.mark.parametrize(("action_name", "intent"), [
-    ("incident_open", "open an incident for the offline node"),
-    ("requeue", "requeue the ticket after the hard limit so another worker continues"),
-    ("jira_comment", "ask the team to restart the node agent on node1"),
-    ("notify_owner", "tell the owner the database node has been down for 20 minutes"),
-    ("dev_reply", "answer the developer that the server restart is tracked in the node_down incident"),
+    ("retry", "retry this ticket after its failed run; the offline node is only an observation"),
+    ("move_to_todo", "move the ticket after the hard limit so another worker continues"),
+    ("pause_account", "pause the failing account while the database node is offline"),
+    ("restart_run", "restart this run after the node stopped sending heartbeats"),
+    ("open_bug", "open a Bug for the eligible repeated TESTFLOW failure"),
 ])
-def test_monitoring_follow_ups_about_nodes_servers_and_restarts_are_allowed(action_name, intent):
+def test_safe_monitoring_actions_about_nodes_and_restarts_are_allowed(action_name, intent):
     from aiflow.v4.control.policy import decide_master_action
     assert decide_master_action({}, action_name, intent).decision == "allow"
 
 
-def test_incident_for_offline_node_and_requeue_after_hard_limit_are_not_escalated(client, ctx, monkeypatch):
+def test_move_to_todo_after_hard_limit_is_not_escalated(client, ctx, monkeypatch):
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-230", status="In Progress")
+    ctx.jira.status_of["TESTWP-230"] = "In Progress"
     sent = []
     monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
-
-    opened = action(client, cc, master, action="incident_open", intent="open an incident for the offline node",
-                    kind="node_down", subject="node1", severity="critical", title="node1 is offline",
-                    detail="node1 server stopped sending heartbeats; restart the node agent or check the database"
-                           " and network configuration")
-    assert opened.status_code == 200 and not opened.json()["escalated"]
-    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_down' AND subject='node1'"
-                      " AND closed_at IS NULL")["n"] == 1
-
-    requeued = action(client, cc, master, action="requeue", ticket="TESTWP-230",
-                      intent="requeue the ticket after the hard limit", target_status="To Do",
-                      what="The run on node1 passed the 60 minute hard limit",
-                      why="The node server went offline and the database shows no heartbeat; restart lost the run",
-                      result="Returned to To Do", next="Another ready worker continues")
-    assert requeued.status_code == 200 and not requeued.json()["escalated"]
+    moved = action(client, cc, master, action="move_to_todo", ticket="TESTWP-230",
+                   intent="move the ticket back after its run passed the hard limit",
+                   why="The run exceeded the project's work-time limit on node1")
+    assert moved.status_code == 200 and not moved.json()["escalated"]
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-230'")["status"] == "To Do"
-    assert not ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE run_id=%s AND action='master-escalation'",
-                          (master["run_id"],))["n"]
+    assert not sent
+
+
+def test_master_escalates_one_clear_owner_message_with_options(client, ctx, monkeypatch):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    sent = []
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append((args, channels)) or ["email"])
+    payload = {"action": "escalate_to_owner", "intent": "choose whether to add another provider account",
+               "why": "The master cannot provision or sign in an account", "options": ["Add a Codex account", "Keep the role uncovered"],
+               "observation_key": "incident:role_coverage:master"}
+    first = action(client, cc, master, **payload)
+    second = action(client, cc, master, **payload)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["escalated"] and not first.json()["already_sent"]
+    assert second.json()["already_sent"] and len(sent) == 1
+    assert "Why a person is needed" in sent[0][0][2]
+    assert "- Add a Codex account" in sent[0][0][2] and "- Keep the role uncovered" in sent[0][0][2]
+    assert sent[0][1] == ["email"]
+    assert ctx.db.one("SELECT count(*) AS n FROM master_escalations")["n"] == 1
+
+
+def test_master_escalation_retries_only_failed_channels(client, ctx, monkeypatch):
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    attempts = []
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email", "slack"])
+
+    def send(*args, channels=None):
+        attempts.append(list(channels or []))
+        return ["email"] if len(attempts) == 1 else ["slack"]
+
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", send)
+    payload = {"action": "escalate_to_owner", "intent": "choose whether to add another provider account",
+               "why": "The master cannot provision or sign in an account", "options": ["Add a Codex account"],
+               "observation_key": "incident:role_coverage:retry"}
+    first = action(client, cc, master, **payload)
+    second = action(client, cc, master, **payload)
+    third = action(client, cc, master, **payload)
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert attempts == [["email", "slack"], ["slack"]]
+    assert first.json()["pending_channels"] == ["slack"]
+    assert second.json()["sent"] == ["slack"] and second.json()["pending_channels"] == []
+    assert third.json()["already_sent"] and third.json()["sent"] == []
+    row = ctx.db.one("SELECT pending_channels, delivered_channels FROM master_escalations"
+                     " WHERE observation_key='incident:role_coverage:retry'")
+    assert row["pending_channels"] == []
+    assert set(row["delivered_channels"]) == {"email", "slack"}
+
+
+def test_owner_can_change_daily_budget_and_read_weekly_autonomy_report(client, ctx, monkeypatch):
+    from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
+
+    secret = "test-console-session-secret-that-is-long-enough"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    initial = client.get("/v1/master/autonomy")
+    assert initial.status_code == 200
+    assert initial.json()["budget"]["daily_budget_minutes"] == 60
+    updated = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
+    assert updated.status_code == 200 and updated.json()["budget"]["daily_budget_minutes"] == 12
+    assert ctx.db.one("SELECT actor,accepted FROM write_audit WHERE action='daily-budget-update'") == {
+        "actor": "owner@example.test", "accepted": True}
+
+    add_ticket(ctx.db, "TESTWP-250", status="Done")
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'TESTWP-250','TESTWP','verify','codex-01','codex','node1',1,'finished','done')",
+               (str(uuid.uuid4()),))
+    ctx.db.run("UPDATE tickets SET done_at=now() WHERE key='TESTWP-250'")
+    cc = ready(client, "cc", "claude-01")
+    disabled = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 0})
+    assert disabled.status_code == 200 and master_candidate(client, cc, "claude-01") is None
+    enabled = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
+    assert enabled.status_code == 200 and master_candidate(client, cc, "claude-01")["step"] == "master"
+    master = claim_master(client, cc, "claude-01").json()
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: ["email"])
+    escalated = action(client, cc, master, action="escalate_to_owner", ticket="TESTWP-250",
+                       intent="select how to handle the blocked decision", why="The master lacks project context",
+                       options=["Ask the project owner", "Leave the ticket waiting"],
+                       observation_key="ticket:TESTWP-250:needs-owner-v1")
+    assert escalated.status_code == 200
+    ctx.events.emit("flow_bug.created", ticket="TESTFLOW-901", project="TESTFLOW", reason="same failure")
+
+    report = client.get("/v1/master/report?weeks=4")
+    assert report.status_code == 200
+    body = report.json()
+    assert len(body["trend"]) == 4
+    assert any(row["key"] == "TESTWP-250" for row in body["finished_without_person"])
+    assert body["needed_person"][0]["reason"] == "The master lacks project context"
+    assert body["needed_person"][0]["options"] == ["Ask the project owner", "Leave the ticket waiting"]
+    assert body["trend"][-1]["finished_without_person"] == 1
+    assert body["trend"][-1]["needed_person"] == 1
+    assert body["trend"][-1]["repeated_failures"] == 1
+    from aiflow.v4.control.db import J
+    ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J({"model_time_s": 720}), master["run_id"]))
+    exhausted = client.get("/v1/master/autonomy").json()["budget"]
+    assert exhausted["used_minutes"] >= 12 and exhausted["remaining_seconds"] == 0
+
+    client.cookies.set(COOKIE_NAME, issue_session("lead@example.test", "lead", 4_000_000_000, secret))
+    assert client.get("/v1/master/autonomy").status_code == 200
+    assert client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 30}).status_code == 403
+
+
+def test_invalid_plan_cycles_open_incident_and_a_valid_plan_resets_the_count(client, ctx):
+    cc = ready(client, "cc", "claude-01")
+    counts = []
+    for index in range(5):
+        master = claim_master(client, cc, "claude-01").json()
+        outcome = client.post("/v1/master/plan-outcome", json={"run_id": master["run_id"],
+                                      "fence": master["fence"], "valid": False}, headers=cc)
+        assert outcome.status_code == 200
+        assert outcome.json()["invalid_streak"] == index + 1
+        counts.append(outcome.json()["invalid_last_hour"])
+        # The endpoint is idempotent for a cycle even if a worker retries the record request.
+        duplicate = client.post("/v1/master/plan-outcome", json={"run_id": master["run_id"],
+                                         "fence": master["fence"], "valid": False}, headers=cc)
+        assert duplicate.json()["invalid_last_hour"] == index + 1
+        finish(client, cc, master)
+        ctx.db.run("UPDATE runs SET ended_at=now()-interval '2 minutes' WHERE id=%s", (master["run_id"],))
+    assert counts == [1, 2, 3, 4, 5]
+    incident = ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='master_invalid_plan'"
+                          " AND subject='global' AND closed_at IS NULL")
+    assert incident["n"] == 1
+
+    master = claim_master(client, cc, "claude-01").json()
+    valid = client.post("/v1/master/plan-outcome", json={"run_id": master["run_id"],
+                                  "fence": master["fence"], "valid": True}, headers=cc)
+    assert valid.status_code == 200 and valid.json()["invalid_streak"] == 0
+    assert ctx.db.one("SELECT closed_at FROM incidents WHERE kind='master_invalid_plan' AND subject='global'")["closed_at"]
 
 
 def test_master_policy_hook_denies_tool_execution_and_master_plan_parser_is_strict(client, ctx):
@@ -381,6 +539,88 @@ def test_master_policy_hook_denies_tool_execution_and_master_plan_parser_is_stri
     assert parse_plan(json.dumps({"summary": "x", "actions": [{"action": "requeue"}]})) is None
 
 
+@pytest.mark.parametrize(("answers", "expected", "validity"), [
+    (["not json", '{"summary":"checked","actions":[]}'], "done", [True]),
+    (["not json", "still not json"], "failed", [False]),
+])
+def test_master_retries_malformed_plan_once_and_records_cycle_validity(tmp_path, monkeypatch, answers, expected, validity):
+    from aiflow.v4.worker import master as worker_master
+    from aiflow.v4.worker.dev import Claimed
+
+    class FakeApi:
+        def __init__(self):
+            self.validity = []
+
+        def call(self, method, path, json=None, params=None):
+            if (method, path) == ("GET", "/v1/master/context"):
+                return {"open_incidents": [{"kind": "run_slow"}], "needs_owner": [], "running_clocks": [],
+                        "offline_nodes": [], "quota_accounts": [], "quota_incidents": [],
+                        "autonomy": {"remaining_seconds": 600}}
+            if (method, path) == ("POST", "/v1/master/flow-bugs"):
+                return {"reports": []}
+            if (method, path) == ("POST", "/v1/master/plan-outcome"):
+                self.validity.append(json["valid"])
+                return {"valid": json["valid"]}
+            raise AssertionError((method, path))
+
+    class FakeAdapter:
+        def __init__(self):
+            self.prompts = []
+            self.answers = iter(answers)
+
+        def argv(self, _spec):
+            return []
+
+        def run(self, spec, _progress, stop=None):
+            self.prompts.append(spec.prompt)
+            return SimpleNamespace(tokens_in=1, tokens_out=1, cost_usd=0.0, quota={}, error_kind="",
+                                   reset_at=None, final_text=next(self.answers), log_path=spec.log_path)
+
+    api, adapter = FakeApi(), FakeAdapter()
+    monkeypatch.setattr(worker_master, "get_adapter", lambda _provider: adapter)
+    claimed = Claimed(run_id=str(uuid.uuid4()), fence=3, run_token="test-token", account="claude-01",
+                      provider="claude", model="opus", effort="high", ticket={"key": MASTER_SCOPE},
+                      project={"node": "cc"}, identity=("bot", "bot@example.test"), step="master")
+    result = worker_master.run_master(api, claimed, str(tmp_path), "http://control.test", 30, [])
+
+    assert result["outcome"] == expected
+    assert len(adapter.prompts) == 2 and "STRICT FORMAT RETRY" in adapter.prompts[1]
+    assert api.validity == validity
+    if expected == "failed":
+        assert result["details"]["plan_attempts"] == 2
+    else:
+        assert result["details"]["completed"] == 0
+
+
+def test_master_does_not_call_model_when_nothing_needs_review(tmp_path, monkeypatch):
+    from aiflow.v4.worker import master as worker_master
+    from aiflow.v4.worker.dev import Claimed
+
+    class FakeApi:
+        def call(self, method, path, json=None, params=None):
+            if (method, path) == ("GET", "/v1/master/context"):
+                return {"open_incidents": [], "needs_owner": [], "running_clocks": [], "offline_nodes": [],
+                        "quota_accounts": [], "quota_incidents": [], "autonomy": {"remaining_seconds": 600}}
+            assert (method, path) == ("POST", "/v1/master/flow-bugs")
+            return {"reports": []}
+
+    class FakeAdapter:
+        def argv(self, _spec):
+            return []
+
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("idle master cycles must not spend a model run")
+
+    monkeypatch.setattr(worker_master, "get_adapter", lambda _provider: FakeAdapter())
+    claimed = Claimed(run_id=str(uuid.uuid4()), fence=3, run_token="test-token", account="claude-01",
+                      provider="claude", model="opus", effort="high", ticket={"key": MASTER_SCOPE},
+                      project={"node": "cc"}, identity=("bot", "bot@example.test"), step="master")
+    result = worker_master.run_master(FakeApi(), claimed, str(tmp_path), "http://control.test", 30, [])
+
+    assert result["outcome"] == "done" and result["details"]["no_watch"]
+    assert result["details"]["model_time_s"] == 0
+
+
 def test_codex_master_runs_use_read_only_sandbox_without_network(tmp_path, monkeypatch):
     from aiflow.v4.adapters.codex import CodexAdapter
     from aiflow.v4.worker import master as worker_master
@@ -389,10 +629,12 @@ def test_codex_master_runs_use_read_only_sandbox_without_network(tmp_path, monke
     class FakeApi:
         def call(self, method, path, json=None, params=None):
             if (method, path) == ("GET", "/v1/master/context"):
-                return {"open_incidents": [], "needs_owner": [], "running_clocks": [], "offline_nodes": [],
+                return {"open_incidents": [{"kind": "test", "subject": "one"}], "needs_owner": [], "running_clocks": [], "offline_nodes": [],
                         "quota_accounts": [], "quota_incidents": []}
-            assert (method, path) == ("POST", "/v1/master/flow-bugs")
-            return {"reports": []}
+            if (method, path) == ("POST", "/v1/master/flow-bugs"):
+                return {"reports": []}
+            assert (method, path) == ("POST", "/v1/master/plan-outcome")
+            return {"valid": json["valid"]}
 
     class FakeAdapter:
         def argv(self, _spec):
@@ -426,8 +668,12 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-240")
+    from aiflow.v4.control.incidents import open_incident
+    open_incident(ctx, "run_slow", "TESTWP-240", "warning", "TESTWP-240 needs attention", "run passed warn")
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.configured_channels", lambda: ["email"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send",
+                        lambda *args, channels=None: sent.append(args) or ["email"])
 
     class Bridge:
         def request(self, method, path, json=None, params=None):
@@ -436,10 +682,10 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     api = ControlClient.__new__(ControlClient)
     api.c = Bridge()
     # The intent alone matches no protected pattern; only the explicit category makes it an owner decision.
-    plan = {"summary": "checked", "actions": [{"action": "jira_comment", "ticket": "TESTWP-240",
-                                               "intent": "post a follow-up", "category": category,
-                                               "headline": "follow-up", "what": "w", "why": "y",
-                                               "result": "r", "next": "n"}]}
+    plan = {"summary": "checked", "actions": [{"action": "escalate_to_owner", "ticket": "TESTWP-240",
+                                               "intent": "the protected request needs an owner decision",
+                                               "category": category, "why": "The request is protected",
+                                               "options": ["Wait for approval", "Cancel"]}]}
 
     class FakeAdapter:
         def argv(self, _spec):
@@ -458,11 +704,10 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
 
     assert result["outcome"] == "done"
     assert result["details"]["escalated"] == 1 and result["details"]["refused"] == 0
-    assert sent and len(ctx.jira.comments) == 1
-    assert "AI Flow · master · owner decision required" in ctx.jira.comments[0][1]
-    attempted = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action='jira_comment'",
+    assert sent and not ctx.jira.comments
+    attempted = ctx.db.one("SELECT accepted, result FROM write_audit WHERE run_id=%s AND action='escalate_to_owner'",
                            (master["run_id"],))
-    assert not attempted["accepted"] and category in attempted["result"]
+    assert attempted["accepted"] and "explicitly requested" in attempted["result"]
 
 
 def test_repeated_testflow_failures_create_a_fenced_flow_bug_in_intake(client, ctx):

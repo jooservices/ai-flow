@@ -29,6 +29,10 @@ TESTWP_DEFAULT = {
     "versions": ["WordPress Core 0.5.0-beta", "WordPress Theme 0.5.0-beta"],
     "source_branch": "develop",
     "target_branch": "master",
+    "tag_prefixes": {
+        "WordPress Core 0.5.0-beta": "core-v",
+        "WordPress Theme 0.5.0-beta": "theme-v",
+    },
 }
 
 
@@ -78,10 +82,9 @@ def release_tag(project: Any, version_name: str) -> str:
     safe_name = re.sub(r"[^a-z0-9.-]+", "-", version_name.lower()).strip("-.")
     prefix = str(prefixes.get(version_name) or release.get("tag_prefix") or project.tag_prefix or "").strip()
     if prefix:
-        safe_prefix = re.sub(r"[^a-z0-9.-]+", "-", prefix.lower()).strip("-.")
         version = re.search(r"\d+(?:\.\d+)+(?:-[0-9a-z.-]+)?", version_name.lower())
         suffix = version.group(0) if version else safe_name
-        return f"{safe_prefix}-{suffix}"
+        return f"{prefix}{suffix}"
     return f"{project.key.lower()}-{safe_name}"
 
 

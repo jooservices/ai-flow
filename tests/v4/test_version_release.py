@@ -25,7 +25,7 @@ def issue(key: str, status: str = "Done") -> dict:
 def configure(ctx, versions=(("101", CORE),), issues=None) -> None:
     project = ctx.repo().projects["TESTWP"]
     project.version_release = {"enabled": True, "versions": [name for _, name in versions],
-                               "tag_prefixes": {CORE: "testwp-core", THEME: "testwp-theme"}}
+                               "tag_prefixes": {CORE: "testwp-core-v", THEME: "testwp-theme-v"}}
     ctx.jira.version_data["TESTWP"] = [{"id": version_id, "name": name, "released": False, "archived": False}
                                        for version_id, name in versions]
     for version_id, _ in versions:
@@ -96,11 +96,11 @@ def test_release_check_and_tag_prefix_can_be_set_on_project_configuration(ctx):
     configure(ctx)
     project = ctx.repo().projects["TESTWP"]
     project.release_check = ["vendor/bin/phpunit", "composer validate"]
-    project.tag_prefix = "core"
+    project.tag_prefix = "core-v"
     project.version_release["tag_prefixes"] = {}
 
     assert version_release.check_commands(project) == ["vendor/bin/phpunit", "composer validate"]
-    assert version_release.release_tag(project, CORE) == "core-0.5.0-beta"
+    assert version_release.release_tag(project, CORE) == "core-v0.5.0-beta"
 
 
 @pytest.mark.parametrize(("status", "reviewer", "qa", "qc", "missing"), [
@@ -193,7 +193,7 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
             if path == "/v1/github/token":
                 return {"token": "test-token"}
             if path.endswith("/complete"):
-                return {"released": True, "status": "released", "tag": "testwp-core-0.5.0-beta"}
+                return {"released": True, "status": "released", "tag": "testwp-core-v0.5.0-beta"}
             raise AssertionError(path)
 
     monkeypatch.setattr(release_worker, "Git", FakeGit)
@@ -426,7 +426,7 @@ def test_retry_after_merge_resumes_from_audited_commit_and_ticket_snapshot(clien
     assert resumed_response.status_code == 200, resumed_response.text
     resumed = resumed_response.json()
 
-    tag = "testwp-core-0.5.0-beta"
+    tag = "testwp-core-v0.5.0-beta"
     assert resumed["released"] is True
     assert ctx.github.tags[("test-aiflow-wp", tag)] == "merged-pr-0001"
     notes = ctx.github.releases[("test-aiflow-wp", tag)]["body"]
@@ -472,7 +472,7 @@ def test_premerge_retry_replaces_changelog_section_and_refreshes_existing_pr_not
     assert changelog.count("## WordPress Core 0\\.5\\.0\\-beta -") == 1
     assert "TESTWP-49" in changelog and "TESTWP-50" in changelog
     assert "TESTWP-49" in pr["body"] and "TESTWP-50" in pr["body"]
-    assert ctx.github.releases[("test-aiflow-wp", "testwp-core-0.5.0-beta")]["body"] == pr["body"]
+    assert ctx.github.releases[("test-aiflow-wp", "testwp-core-v0.5.0-beta")]["body"] == pr["body"]
 
 
 def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_back(client, ctx):
@@ -508,7 +508,7 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert "### Added" in ctx.github.files[("test-aiflow-wp", release_branch, "CHANGELOG.md")]
     assert "Current version: `0.5.0-beta`" in ctx.github.files[("test-aiflow-wp", release_branch, "README.md")]
     assert '"version": "0.5.0-beta"' in ctx.github.files[("test-aiflow-wp", release_branch, "package.json")]
-    tag = "testwp-core-0.5.0-beta"
+    tag = "testwp-core-v0.5.0-beta"
     assert ctx.github.tags[("test-aiflow-wp", tag)] == "merged-pr-0001"
     release = ctx.github.releases[("test-aiflow-wp", tag)]
     assert "TESTWP-50" in release["body"] and "TESTWP-51" in release["body"]
@@ -580,7 +580,7 @@ def test_scan_repairs_jira_released_version_after_registry_write_failure(client,
     assert version_release.scan(ctx) == 1
     state = ctx.db.one("SELECT status,master_sha,tag FROM version_releases"
                        " WHERE project='TESTWP' AND version_id='101'")
-    assert state == {"status": "released", "master_sha": "merged-pr-0001", "tag": "testwp-core-0.5.0-beta"}
+    assert state == {"status": "released", "master_sha": "merged-pr-0001", "tag": "testwp-core-v0.5.0-beta"}
     assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-version-released'")["n"] == 1
     assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-merge-back-task'")["n"] == 1
 
@@ -609,8 +609,8 @@ def test_core_and_theme_versions_in_one_repo_get_distinct_tags_and_releases(ctx)
                                            "checks": [{"command": "composer test", "passed": True}]})
         assert result["released"], result
 
-    assert set(ctx.github.tags) == {("test-aiflow-wp", "testwp-core-0.5.0-beta"),
-                                    ("test-aiflow-wp", "testwp-theme-0.5.0-beta")}
+    assert set(ctx.github.tags) == {("test-aiflow-wp", "testwp-core-v0.5.0-beta"),
+                                    ("test-aiflow-wp", "testwp-theme-v0.5.0-beta")}
     assert set(ctx.github.releases) == set(ctx.github.tags)
 
 
@@ -780,7 +780,7 @@ def test_testwp_default_release_scope_names_both_trial_versions(ctx):
     eligible = version_release.project_versions(ctx, project)
 
     assert [item["name"] for item in eligible] == [CORE, THEME]
-    assert version_release.release_tag(project, CORE) == "testwp-wordpress-core-0.5.0-beta"
+    assert version_release.release_tag(project, CORE) == "core-v0.5.0-beta"
 
 
 def test_manifest_update_pyproject_bumps_project_version_only():

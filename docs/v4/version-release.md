@@ -65,7 +65,9 @@ check results.
 
 After the PR merge, the tag points at the merge commit on `master`. By default, the tag combines the project key
 and normalized version name, for example `testwp-wordpress-core-0.5.0-beta`. A configured `tag_prefix` or
-`tag_prefixes` replaces the project component and keeps the numeric version, for example `widget-core-1.2.0`.
+`tag_prefixes` is prepended literally to the numeric version: include any desired separator and `v` in the
+prefix. The TESTWP defaults use `core-v` and `theme-v`, producing `core-v0.5.0-beta` and `theme-v0.5.0-beta`.
+For another project, `widget-core-v` produces `widget-core-v1.2.0`.
 The GitHub Release uses that exact tag. Jira's Released flag and release date are set last. An existing tag must
 point to the same commit; existing PRs, tags, Releases and Jira Released state are reused on retry. The registry
 records the merge commit, tag, GitHub Release URL and Jira version state. If Jira reports Released but the
@@ -93,7 +95,7 @@ its project entry in the AI Flow control repository:
 release_check: # optional project-level override
   - composer install
   - vendor/bin/phpunit
-tag_prefix: widget
+tag_prefix: widget-core-v
 version_release:
   enabled: true
   versions:
@@ -106,8 +108,8 @@ version_release:
   readme_file: README.md
   manifest_files: [] # omit for automatic discovery of supported manifests
   tag_prefixes:
-    "Widget Core 1.2.0": widget-core
-    "Widget Theme 1.2.0": widget-theme
+    "Widget Core 1.2.0": widget-core-v
+    "Widget Theme 1.2.0": widget-theme-v
   issue_type: Release
   bug_issue_type: Bug
 ```

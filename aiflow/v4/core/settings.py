@@ -65,6 +65,7 @@ class Settings:
     owner_token: str = ""
     o2_url: str = ""
     o2_basic: str = ""
+    o2_source: str = "control"
     public_url: str = "http://127.0.0.1:18480"
     join_control_url: str = ""
     gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
@@ -108,6 +109,7 @@ class Settings:
         s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)
         s.gatus_url = _env("GATUS_URL", s.gatus_url)
         s.control_version = _env("VERSION", s.control_version)
+        s.o2_source = _env("O2_SOURCE", s.o2_source)
         s.rollout_batch_size = max(1, int(_env("ROLLOUT_BATCH_SIZE", str(s.rollout_batch_size))))
         s.rollout_install_timeout_s = int(_env("ROLLOUT_INSTALL_TIMEOUT_S", str(s.rollout_install_timeout_s)))
         s.rollout_soak_s = int(_env("ROLLOUT_SOAK_S", str(s.rollout_soak_s)))

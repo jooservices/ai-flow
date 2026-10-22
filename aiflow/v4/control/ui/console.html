@@ -572,8 +572,10 @@ function nodeBy(n) { return D().nodes.filter(function (x) { return x.name === n;
 function accBy(id) { return D().accounts.filter(function (x) { return x.id === id; })[0]; }
 function ticketBy(k) { return D().tickets.filter(function (x) { return x.key === k; })[0]; }
 function incBy(id) { return D().incidents.concat(D().incidents_recent || []).filter(function (x) { return String(x.id) === String(id); })[0]; }
-function consoleOwner() { return S.consoleUser && S.consoleUser.role === 'owner'; }
-function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'lead'); }
+function consoleCan(permission) {
+  var permissions = S.consoleUser && S.consoleUser.permissions || [];
+  return permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0;
+}
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
@@ -629,8 +631,8 @@ function pollConsoleSession() {
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null;
     render();
-    if (S.drawer && S.drawer.kind === 'node' && consoleReader()) loadNodeOperations(S.drawer.id);
-    if (S.view === 'integrations' && consoleOwner() && !S.integrations.data && !S.integrations.busy) loadIntegrations();
+    if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
+    if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
   }).catch(function () { S.consoleUser = null; render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
 }
@@ -752,9 +754,9 @@ function connectImportedGitHubApp() {
 function renderGitHubIntegrations() {
   var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
   h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
-  if (consoleOwner()) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
+  if (consoleCan('integrations.manage')) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
   h += '</div>';
-  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can manage integrations.</div>';
+  if (!consoleCan('integrations.manage')) h += '<div class="muted">Only an authenticated user with integration management permission can manage integrations.</div>';
   else {
     if (state.notice) h += '<div class="good" role="status">' + esc(state.notice) + '</div>';
     if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
@@ -830,7 +832,7 @@ function removeManagedProject(key) {
     .catch(function (e) { toast('Could not remove project', String(e.message || e), 'warn'); });
 }
 function loadNodeOperations(name) {
-  if (!consoleReader()) return;
+  if (!consoleCan('console.read')) return;
   fetch('/v1/nodes/' + encodeURIComponent(name) + '/operations', { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -1017,7 +1019,7 @@ function renderCC() {
   }
 
   h += '<div class="grid-2">';
-  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleOwner() ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
+  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
   if (!d.nodes.length) h += '<div class="empty">No node has joined. Create a one-use join command below and run it on the new machine.</div>';
   d.nodes.forEach(function (n) {
     var accs = d.accounts.filter(function (a) { return a.node === n.name; });
@@ -2220,7 +2222,7 @@ function drawerNode(name) {
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
   b += '</div>';
-  if (consoleOwner()) {
+  if (consoleCan('nodes.manage')) {
     b += '<div class="dsec"><h4>Install and repair</h4>';
     if (n.status === 'online' && n.has_agent) {
       b += '<div class="small">Install only components missing from the required toolchain, or reconcile versions.lock and desired services.</div>';
@@ -2233,8 +2235,8 @@ function drawerNode(name) {
     var join = S.joinCommands[n.name];
     if (join) b += '<div class="small">Expires ' + when(join.expires_at) + ' · one use</div><pre class="report-md">' + esc(join.command) + '</pre><button class="btn sm" data-act="copy-join" data-node="' + esc(n.name) + '">Copy command</button>';
     b += '</div>';
-  } else if (S.consoleUser && S.consoleUser.role === 'lead') {
-    b += '<div class="dsec"><h4>Install and repair</h4><div class="small">Only an authenticated owner can install or repair a node.</div></div>';
+  } else if (S.consoleUser) {
+    b += '<div class="dsec"><h4>Install and repair</h4><div class="small">Only an authenticated user with node management permission can install or repair a node.</div></div>';
   }
   var desiredServices = n.desired_services || [];
   b += '<div class="dsec"><h4>Desired services</h4>';
@@ -2242,7 +2244,7 @@ function drawerNode(name) {
   else desiredServices.forEach(function (svc) { b += '<div class="small">' + esc(svc.name || svc.unit || 'service') + ' · ' + esc(svc.unit || 'unit missing') + (svc.healthcheck || svc.healthcheck_configured ? ' · health check configured' : ' · systemd active check') + '</div>'; });
   b += '</div>';
   if (n.status === 'online' && n.has_agent) b += '<div class="small">AI account authorization is handled separately; installation does not sign accounts in.</div>';
-  if (consoleReader()) {
+  if (consoleCan('console.read')) {
     var nodeOps = S.nodeOperations[n.name] || [];
     b += '<div class="dsec"><h4>Operation log</h4>';
     if (!nodeOps.length) b += '<div class="empty">No install or repair operations recorded.</div>';
@@ -2372,7 +2374,7 @@ function openDrawer(kind, id, opener) {
   lastFocus = opener || document.activeElement;
   S.drawer = { kind: kind, id: id };
   if (kind === 'ticket') loadTicket(id);
-  if (kind === 'node' && consoleReader()) loadNodeOperations(id);
+  if (kind === 'node' && consoleCan('console.read')) loadNodeOperations(id);
   renderDrawer();
   $('#overlay').setAttribute('data-open', ''); $('#drawer').setAttribute('data-open', ''); $('#drawer').setAttribute('aria-hidden', 'false');
   setTimeout(function () { var c = $('#drawer [data-act="close"]'); if (c) c.focus(); }, 60);
@@ -2400,7 +2402,7 @@ function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
   var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
   h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
-  if (consoleOwner()) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
+  if (consoleCan('projects.manage')) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
   h += '</div>';
   if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
@@ -2410,7 +2412,7 @@ function renderProjects() {
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
       h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
-      if (consoleOwner()) {
+      if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
         h += '<button class="btn sm danger" data-act="project-remove" data-key="' + esc(p.key) + '">Remove</button>';
@@ -2419,9 +2421,9 @@ function renderProjects() {
     });
     h += '</tbody></table></div>';
   }
-  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can add, pause, resume or remove projects.</div>';
+  if (!consoleCan('projects.manage')) h += '<div class="muted">Only an authenticated user with project management permission can add, pause, resume or remove projects.</div>';
   h += '</section>';
-  if (state.showForm && consoleOwner()) {
+  if (state.showForm && consoleCan('projects.manage')) {
     var form = state.form, catalog = state.catalog || {}, jiraProjects = catalog.jira_projects || [], repos = catalog.github_repos || [];
     h += '<section class="panel"><div class="panel-h"><h2>Add project</h2><span class="hint">Preflight runs before any control repo change.</span></div>';
     if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';

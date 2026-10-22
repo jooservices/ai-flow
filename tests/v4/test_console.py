@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from aiflow.v4 import VERSION
+from aiflow.v4.control.console_auth import ROLE_PERMISSIONS
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -35,6 +36,11 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def console_session(role: str) -> dict:
+    return {"authenticated": True, "user": role, "role": role,
+            "permissions": sorted(ROLE_PERMISSIONS[role])}
 
 
 def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
@@ -113,7 +119,7 @@ S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
 S.projectAdmin.repositoryEditor = {json.dumps(repository_editor)};
-S.consoleUser = {{authenticated: true, user: 'owner', role: 'owner'}};
+S.consoleUser = {json.dumps(console_session("owner"))};
 renderProjects();
 console.log(projectsView.innerHTML);
 """
@@ -184,14 +190,14 @@ def test_node_drawer_exposes_owner_install_repair_join_and_lead_audit_view():
             "missing_tools": ["codex"], "has_agent": True, "required_tools": ["codex"],
             "desired_services": [{"name": "worker-api", "unit": "worker-api.service",
                                   "healthcheck_configured": True}], "projects": [], "heartbeat_age_s": 12}
-    owner = render_drawer(node, {"authenticated": True, "user": "owner", "role": "owner"})
+    owner = render_drawer(node, console_session("owner"))
     assert 'data-act="node-install"' in owner and 'data-act="node-repair"' in owner
     assert "worker-api.service" in owner and "health check configured" in owner
-    lead = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"})
+    lead = render_drawer(node, console_session("lead"))
     assert 'data-act="node-install"' not in lead and 'data-act="node-repair"' not in lead
-    assert "Only an authenticated owner can install or repair a node." in lead
+    assert "Only an authenticated user with node management permission can install or repair a node." in lead
     no_agent = dict(node, status="joined", has_agent=False)
-    join = render_drawer(no_agent, {"authenticated": True, "user": "owner", "role": "owner"})
+    join = render_drawer(no_agent, console_session("owner"))
     assert 'data-act="join-command"' in join
 
 
@@ -199,7 +205,7 @@ def test_node_operation_log_escapes_service_names_from_saved_results():
     service_name = '<img src=x onerror="alert(1)">'
     node = {"name": "node3", "ip": "192.0.2.55", "status": "online", "metrics": {}, "tools": {},
             "has_agent": True, "projects": [], "heartbeat_age_s": 12}
-    rendered = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"}, [{
+    rendered = render_drawer(node, console_session("lead"), [{
         "status": "completed", "action": "repair", "actor": "owner", "created_at": None,
         "result": {"services": [{"name": service_name, "healthy": True}]},
     }])
@@ -441,10 +447,10 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
               "legacy_owner_env": False, "oauth_app": {"configured": True, "client_id": "client-1"},
               "redirect_uri": "https://control.example.test/v1/integrations/jira/oauth/callback",
               "requested_scopes": ["read:jira-work", "write:jira-work", "offline_access"]}
-    def render(data: dict) -> str:
+    def render(data: dict, permissions: list[str] | None = None) -> str:
         return run_script("var root = {innerHTML: ''};"
                           " document.querySelector = function (s) { return s === '#view-integrations' ? root : null; };"
-                          f" S.view = 'integrations'; S.consoleUser = {{role: 'owner'}};"
+                          f" S.view = 'integrations'; S.consoleUser = {{permissions: {json.dumps(permissions or sorted(ROLE_PERMISSIONS['owner']))}}};"
                           f" S.integ.jira = {json.dumps(data)}; renderIntegrations();"
                           " console.log(root.innerHTML);")
 
@@ -455,6 +461,7 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
     assert 'type="password" data-integ-field="client_secret"' in out and 'type="password" data-integ-field="api_token"' in out
     needs = render({**status, "connected": False, "needs_reconnect": True, "state": "needs_reconnect"})
     assert "Reconnect needed" in needs and "Press Connect Jira again" in needs
+    assert "Connect GitHub" in render(status, ["integrations.manage"])
 
 
 def test_knowledge_view_renders_resources_history_and_owner_approval_diff():

@@ -109,7 +109,8 @@ def ensure_internal(secret_dir: Path, public_url: str, gatus_url: str) -> list[s
                         "AIFLOW4_OWNER_TOKEN": secrets.token_urlsafe(32),
                         "AIFLOW4_REVIEWER_TOKEN": secrets.token_urlsafe(32),
                         "AIFLOW4_CONSOLE_SESSION_SECRET": secrets.token_urlsafe(48),
-                        "O2_BASIC": o2_basic},
+                        "O2_BASIC": o2_basic,
+                        "AIFLOW4_CONSOLE_LOGIN": "1"},  # sign-in required; the install seeds the Super Administrator
                   force={"AIFLOW4_PUBLIC_URL": public_url, "AIFLOW4_GATUS_URL": gatus_url}):
         changed.append(APP_ENV)
     for name in (POSTGRES_ENV, OPENOBSERVE_ENV, APP_ENV):

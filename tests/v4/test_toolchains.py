@@ -129,7 +129,8 @@ def test_unhealthy_stack_blocks_only_its_project_and_watchdog_warns(client, ctx)
     add_ticket(ctx.db, "TESTWP-930")
     add_ticket(ctx.db, "OTHER-930")
 
-    tools = {"git": "git 2.43", "uv": "uv 0.5", "php": "PHP 8.3.9", "composer": "Composer 2.7.9",
+    tools = {"git": "git 2.43", "uv": "uv 0.5", "claude": "Claude Code 2.1.305",
+             "opencode": "opencode 1.0.0", "php": "PHP 8.3.9", "composer": "Composer 2.7.9",
              "wp": "WP-CLI 2.12.0"}
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=cc)
     keys = [item["key"] for item in client.get("/v1/work/candidates", params={"account": "claude-01"},
@@ -162,7 +163,7 @@ def test_dynamic_node_receives_stack_preflight_and_is_gated_until_healthy(client
     add_ticket(ctx.db, "TESTWP-931")
 
     headers = join(client, "fresh-node")
-    tools = {"git": "git 2.43", "uv": "uv 0.5", "php": "PHP 8.3.10",
+    tools = {"git": "git 2.43", "uv": "uv 0.5", "claude": "Claude Code 2.1.305", "php": "PHP 8.3.10",
              "composer": "Composer 2.7.9", "wp": "WP-CLI 2.12.0"}
     response = client.post("/v1/nodes/fresh-node/heartbeat", json={"tools": tools}, headers=headers)
     desired = response.json()["desired"]

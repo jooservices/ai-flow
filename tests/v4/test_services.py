@@ -183,14 +183,14 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
         return {t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
                                              headers=cc).json()["tickets"]}
 
-    r = client.post("/v1/nodes/cc/heartbeat", json={"tools": {}}, headers=cc)
+    r = client.post("/v1/nodes/cc/heartbeat", json={"services": {}}, headers=cc)
     assert r.json()["desired"]["project_services"] == {"TESTWP": ["postgres", "redis"]}
     assert candidates() == {"OTHER-940"}  # nothing reported yet: no work for the project that needs services
 
     sick = {"postgres": {"state": "running", "healthy": True, "detail": "ok", "endpoint": "127.0.0.1:15499"},
             "redis": {"state": "unhealthy", "healthy": False, "detail": "Redis does not answer PING (started)",
                       "endpoint": "127.0.0.1:16399"}}
-    client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": sick}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"services": sick}, headers=cc)
     assert candidates() == {"OTHER-940"}
     watchdog(ctx)
     incident = ctx.db.one("SELECT severity, detail FROM incidents WHERE kind='node_services'"
@@ -204,7 +204,7 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
     assert by_name["redis"]["projects"] == ["TESTWP"]
 
     healthy = {**sick, "redis": {**sick["redis"], "state": "started", "healthy": True, "detail": "answers PING"}}
-    client.post("/v1/nodes/cc/heartbeat", json={"tools": {}, "services": healthy}, headers=cc)
+    client.post("/v1/nodes/cc/heartbeat", json={"services": healthy}, headers=cc)
     watchdog(ctx)
     assert candidates() == {"TESTWP-940", "OTHER-940"}
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_services' AND closed_at IS NULL")["n"] == 0

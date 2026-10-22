@@ -393,4 +393,52 @@ def join_node(client, name: str, ip: str = "", role: str = "worker", project: st
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    if joined.status_code == 200:
+        # The API tests model an installed agent: after join it reports a healthy baseline before tests change a
+        # particular condition. Tests of the join-only result post directly to /v1/nodes/join instead.
+        from aiflow.v4.core.system_check import condition
+        from aiflow.v4.core.toolchains import pinned_version
+
+        ctx = client.app.state.ctx
+        repo = ctx.repo()
+        project_key = joined.json()["project"]
+        required = repo.tools_for_node(name, [project_key])
+        tools = {}
+        for tool in required:
+            pin = pinned_version(repo.versions, tool, repo.projects[project_key].stacks)
+            version = pin or "1.0"
+            tools[tool] = f"{tool} {version}"
+        tools.update({"git": "git version 2.43.0", "uv": "uv 0.8.1", "claude": "Claude Code 2.1.305",
+                      "codex": "codex 1.0.0", "codex-code-mode-host": "codex-code-mode-host 1.0.0",
+                      "opencode": "opencode 1.0.0", "grok": "grok 1.0.0", "php": "PHP 8.3.10",
+                      "composer": "Composer 2.8.4", "wp": "WP-CLI 2.12.0", "node": "node v24.0.0",
+                      "python3": "Python 3.12.2", "playwright": "Version 1.56.0",
+                      "playwright-browser": "Playwright Chromium 1.56.0"})
+        services = {name: {"state": "running", "healthy": True, "detail": "healthy"}
+                    for name in repo.projects[project_key].required_services}
+        credentials = {account.id: condition(f"credential:{account.id}", f"Credentials · {account.id}", "ready",
+                                             "Credential is present and valid.")
+                       for account in repo.accounts_on(name)}
+        from aiflow.v4.control.db import J
+        from aiflow.v4.control.system_check import refresh_node
+
+        metrics = {"disk_free": 20 * 1024 ** 3, "services": services}
+        ctx.db.run("UPDATE nodes SET tools=%s,metrics=%s WHERE name=%s", (J(tools), J(metrics), name))
+        readiness = refresh_node(
+            ctx, name, "heartbeat",
+            [condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+             condition("workspace-permissions", "Work directory permissions", "ready",
+                       "The node can write its work and state directories."),
+             condition("control-network", "Control API network", "ready",
+                       "The machine reached the control API and sent this heartbeat."),
+             condition("repository-network", "Repository network", "ready",
+                       "The machine can reach GitHub over HTTPS.")],
+            credential_checks=credentials)
+        # No HTTP heartbeat is sent by this helper, so retain the real joined status while modeling a ready agent
+        # report for tests that exercise work scheduling. Trigger tests use direct join requests instead.
+        for item in readiness["machine"]:
+            if item["id"] == "node-heartbeat":
+                item.update(result="ready", detail="The test agent is connected to the control API.", action="")
+        ctx.db.run("UPDATE nodes SET readiness=%s WHERE name=%s", (J(readiness), name))
+    return joined

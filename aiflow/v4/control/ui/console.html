@@ -413,6 +413,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" aria-selected="false" data-act="view" data-view="system-check">System check</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -444,6 +445,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-system-check" role="tabpanel" aria-labelledby="tab-system-check" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -507,6 +509,7 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
+  systemCheck: null, systemCheckError: '', systemCheckBusy: false,
   consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
@@ -524,6 +527,7 @@ var S = {
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
 function viewOf(path) {
+  if (path.indexOf('/system-check') === 0) return 'system-check';
   if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/integrations') === 0) return 'integrations';
   if (path.indexOf('/sa') === 0) return 'sa';
@@ -654,6 +658,46 @@ function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+}
+function loadSystemCheck() {
+  fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; if (S.view === 'system-check') renderSystemCheck(); })
+    .catch(function (e) { S.systemCheckError = String(e.message || e); if (S.view === 'system-check') renderSystemCheck(); });
+}
+function renderSystemCheck() {
+  var root = $('#view-system-check'); if (!root) return;
+  var data = S.systemCheck, h = '<section class="panel"><div class="panel-h"><h2>System check</h2>';
+  h += '<span class="hint">Conditions needed before work can start, by machine and project</span><span class="spacer"></span>';
+  h += '<a class="btn sm" href="/v1/support-bundle">Download support bundle</a>';
+  if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="system-check-run"' + (S.systemCheckBusy ? ' disabled' : '') + '>Run now</button>';
+  h += '</div>';
+  if (S.systemCheckError) h += '<div class="stakeholder-error">' + esc(S.systemCheckError) + '</div>';
+  if (!data) h += '<div class="muted">Loading readiness results…</div>';
+  else if (!(data.nodes || []).length) h += '<div class="muted">No machine has joined yet. Results will appear after the first machine heartbeat.</div>';
+  else (data.nodes || []).forEach(function (node) {
+    var readiness = node.readiness || {};
+    h += '<section class="project-checks"><div class="panel-h"><strong class="mono">' + esc(node.name) + '</strong>';
+    h += '<span class="pill" data-tone="' + (node.status === 'online' ? 'ok' : 'warn') + '">' + esc(node.status) + '</span>';
+    h += '<span class="muted">Checked ' + esc(readiness.checked_at ? when(readiness.checked_at) : 'not yet') + ' · trigger ' + esc(readiness.trigger || 'pending') + '</span></div>';
+    function conditionRows(scope, conditions) {
+      h += '<h3>' + esc(scope) + '</h3>';
+      if (!conditions || !conditions.length) { h += '<div class="muted">No conditions reported yet.</div>'; return; }
+      h += '<div class="project-table"><table><thead><tr><th>Condition</th><th>Result</th><th>Details and action</th></tr></thead><tbody>';
+      conditions.forEach(function (item) {
+        var labels = { ready: 'Ready', fixed_automatically: 'Fixed automatically', needs_action: 'Needs an action', not_possible_on_this_machine: 'Not possible on this machine' };
+        var tone = item.result === 'ready' || item.result === 'fixed_automatically' ? 'ok' : 'warn';
+        var text = item.detail || '';
+        if (item.action) text += (text ? ' ' : '') + item.action;
+        h += '<tr><td>' + esc(item.name || item.id) + '</td><td><span class="pill" data-tone="' + tone + '">' + esc(labels[item.result] || item.result) + '</span></td><td>' + esc(text || '—') + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    conditionRows('Machine', readiness.machine || []);
+    Object.keys(readiness.projects || {}).sort().forEach(function (project) { conditionRows('Project · ' + project, readiness.projects[project]); });
+    h += '</section>';
+  });
+  h += '</section>';
+  root.innerHTML = h;
 }
 function loadProjectRepositories(key) {
   S.projectAdmin.repositoryEditor = { key: key, busy: true, saving: false, error: '', data: null };
@@ -2430,10 +2474,16 @@ function renderProjects() {
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
   else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
   else {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Actions</th></tr></thead><tbody>';
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Machine readiness</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td>';
+      var readiness = p.node_readiness || [], blocked = readiness.filter(function (n) { return n.blocked; });
+      if (blocked.length) blocked.forEach(function (n) {
+        h += '<div class="bad"><span class="mono">' + esc(n.name) + '</span>: ' + esc((n.conditions || []).map(function (c) { return c.name + ' — ' + (c.action || c.detail); }).join('; ')) + '</div>';
+      });
+      else h += '<span class="good">' + (readiness.length ? 'Ready on ' + readiness.length + ' machine' + (readiness.length === 1 ? '' : 's') : 'No assigned machine') + '</span>';
+      h += '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
@@ -2523,6 +2573,7 @@ function render() {
   else if (S.view === 'knowledge') renderKnowledge();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
+  else if (S.view === 'system-check') renderSystemCheck();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2542,7 +2593,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'system-check'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -2555,6 +2606,7 @@ function setView(v) {
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
+  if (v === 'system-check') loadSystemCheck();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -2565,6 +2617,13 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'system-check-run') {
+    S.systemCheckBusy = true; renderSystemCheck();
+    fetch('/v1/system-check/run', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
+      .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
+      .catch(function (err) { S.systemCheckError = String(err.message || err); })
+      .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });
+  }
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }
@@ -2768,6 +2827,7 @@ showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);
 if (S.view === 'projects') loadProjectList();
+if (S.view === 'system-check') loadSystemCheck();
 if (S.view === 'integrations') {
   var githubResult = new URLSearchParams(location.search).get('github');
   if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';

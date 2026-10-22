@@ -212,6 +212,7 @@ def test_joined_project_node_is_online_preflight_green_and_can_claim_project_tic
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
     cc = join(client, "cc")
+    ctx.events.q.queue.clear()  # discard the test helper's simulated first agent heartbeat
     response = client.post("/v1/nodes/cc/heartbeat", json={
         "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
     }, headers=cc)

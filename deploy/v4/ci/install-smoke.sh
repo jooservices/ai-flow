@@ -254,6 +254,21 @@ wait_for_release() {
   return 1
 }
 
+wait_for_system_check() {
+  local node=$1
+  for _ in $(seq 1 120); do
+    if curl --silent --show-error --fail http://127.0.0.1:18080/v1/system-check \
+      | python3 -c 'import json,sys; data=json.load(sys.stdin); node=next((n for n in data.get("nodes",[]) if n.get("name")==sys.argv[1]),{}); result=node.get("readiness",{}); sys.exit(0 if result.get("checked_at") and result.get("machine") and "SMOKE" in result.get("projects",{}) else 1)' \
+        "$node"; then
+      break
+    fi
+    sleep 2
+  done
+  curl --silent --show-error --fail http://127.0.0.1:18080/v1/support-bundle \
+    | python3 -c 'import json,sys; data=json.load(sys.stdin); nodes=data.get("system_check",{}).get("nodes",[]); node=next((n for n in nodes if n.get("name")==sys.argv[1]),{}); result=node.get("readiness",{}); sys.exit(0 if result.get("checked_at") and "SMOKE" in result.get("projects",{}) else 1)' \
+      "$node" || { echo "clean-install support bundle omitted the system check for $node" >&2; return 1; }
+}
+
 # Evaluate a Python expression against control's /v1/state: r is the latest fleet rollout, m its members by node,
 # incidents the open (kind, subject) pairs, v the candidate and p the previous release.
 STATE_CHECK='
@@ -284,6 +299,8 @@ set_current() {
 
 wait_for_release smoke-node-a "$PREVIOUS_VERSION"
 wait_for_release smoke-node-b "$PREVIOUS_VERSION"
+wait_for_system_check smoke-node-a
+wait_for_system_check smoke-node-b
 # Start fleet rollout processing only after both joined nodes have reported the previous release.
 # This gives the rollout a real baseline to canary from and lets node B's failed candidate halt it.
 docker exec "$CONTROL" systemctl enable --now aiflow4-control-loops.service

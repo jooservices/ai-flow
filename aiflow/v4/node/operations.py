@@ -558,7 +558,8 @@ def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
     return _version_ok(actual, expected)
 
 
-def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[str, Any]) -> dict[str, Any]:
+def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[str, Any],
+                               required_tools: list[str] | None = None) -> dict[str, Any]:
     """Install and preflight every configured project stack on this host.
 
     The API remains responsible for project admission using the next heartbeat. This routine only installs
@@ -572,12 +573,13 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
         str(project): tools_for_stacks_in_project(stacks)
         for project, stacks in project_stacks.items()
     }
-    required = list(dict.fromkeys(tool for values in project_tools.values() for tool in values))
+    required = list(dict.fromkeys([*(required_tools or []),
+                                   *(tool for values in project_tools.values() for tool in values)]))
     if not required:
         return {"tools": {}, "gaps": {}}
     before = tool_versions(required)
     per_project_stacks = {str(project): stacks for project, stacks in project_stacks.items()}
-    selected = set()
+    selected = set(toolchain_gaps(before, required_tools or [], versions))
     for project, tools in project_tools.items():
         selected.update(toolchain_gaps(before, tools, versions, per_project_stacks[project], require_pins=True))
     ordered = sorted(selected, key=lambda tool: (
@@ -597,7 +599,7 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
     after = tool_versions(required)
     gaps = {project: toolchain_gaps(after, tools, versions, per_project_stacks[project], require_pins=True)
             for project, tools in project_tools.items()}
-    return {"tools": after, "gaps": gaps}
+    return {"tools": after, "gaps": gaps, "installed": [tool for tool in ordered if tool in required]}
 
 
 def _service_health(service: dict[str, Any]) -> dict[str, Any]:

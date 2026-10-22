@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, version_release, system_check
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -254,6 +254,10 @@ class HeartbeatBody(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
+    system_conditions: list[dict[str, Any]] = Field(default_factory=list)
+    credential_checks: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    auto_fixed_tools: list[str] = Field(default_factory=list)
+    auto_fixed_conditions: list[str] = Field(default_factory=list)
 
 
 class ClaimBody(BaseModel):
@@ -1360,11 +1364,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
+        nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
         return {"projects": [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
-                              "base": project.base, "stack": project.stack}
+                              "base": project.base, "stack": project.stack,
+                              "node_readiness": [{"name": node["name"],
+                                  "blocked": bool(system_check.blocking_reasons(node.get("readiness"), project.key)),
+                                  "conditions": system_check.blocking_reasons(node.get("readiness"), project.key)}
+                                  for node in nodes if project.key in repo.projects_for_node(
+                                      node["name"], node.get("projects") or [], node.get("dynamic", False))]}
                              for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
 
     @app.get("/v1/projects/catalog")
@@ -1589,6 +1599,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
+        system_check.refresh_all(ctx, "project_added")
         return {"saved": True, "project": key, "commit": commit, "preflight": result}
 
     @app.post("/v1/projects/{key}/pause")
@@ -1733,6 +1744,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "invalid, expired, or used join token")
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
         repo = ctx.repo()
+        system_check.refresh_node(ctx, row["name"], "machine_joined")
         project = repo.projects[row["projects"][0]]
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
                 "stack": project.stack, "release": current_release(), "node_token": token,
@@ -1742,12 +1754,18 @@ def create_app(ctx: Ctx) -> FastAPI:
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
-        prev = ctx.db.one("SELECT status FROM nodes WHERE name=%s", (node,))
+        prev = ctx.db.one("SELECT status,release_version,tools,metrics FROM nodes WHERE name=%s", (node,))
+        reported_tools = body.tools if "tools" in body.model_fields_set else (prev or {}).get("tools") or {}
+        reported_release = body.release_version if "release_version" in body.model_fields_set \
+            else (prev or {}).get("release_version") or ""
+        previous_metrics = (prev or {}).get("metrics") or {}
+        reported_metrics = body.metrics if "metrics" in body.model_fields_set else previous_metrics
+        reported_services = body.services if "services" in body.model_fields_set else previous_metrics.get("services", {})
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
-                   (body.slots_total, body.slots_used, body.release_version, J(body.tools),
-                    J({**body.metrics, "services": body.services}),
+                   (body.slots_total, body.slots_used, reported_release, J(reported_tools),
+                    J({**reported_metrics, "services": reported_services}),
                     body.release_protocol, body.slots_used, node))
         for account_id, expires_at in body.credential_expiries.items():
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
@@ -1794,6 +1812,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
+        trigger = "upgrade" if prev and prev.get("release_version") and prev["release_version"] != reported_release \
+            else "heartbeat"
+        system_check.refresh_node(
+            ctx, node, trigger,
+            body.system_conditions if "system_conditions" in body.model_fields_set else None,
+            body.auto_fixed_tools if "auto_fixed_tools" in body.model_fields_set else None,
+            body.credential_checks if "credential_checks" in body.model_fields_set else None,
+            body.auto_fixed_conditions if "auto_fixed_conditions" in body.model_fields_set else None)
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": release,
                             "projects": node_projects,
@@ -2098,7 +2124,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if ctx.leases.cooling(account_id):
             return []
-        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,readiness FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
         running_by_project = {row["project"]: int(row["count"]) for row in
@@ -2115,6 +2141,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         reported_services = (node_row.get("metrics") or {}).get("services")
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
+        projects = [p for p in projects
+                    if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
         roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
@@ -3334,6 +3362,26 @@ def create_app(ctx: Ctx) -> FastAPI:
     def state() -> dict:
         from .state import snapshot
         return snapshot(ctx)
+
+    @app.get("/v1/system-check")
+    def system_check_report() -> dict:
+        nodes = ctx.db.all("SELECT name,status,readiness,readiness_checked_at FROM nodes ORDER BY name")
+        return {"nodes": [{"name": row["name"], "status": row["status"],
+                            "readiness": row["readiness"] or {},
+                            "checked_at": row["readiness_checked_at"].isoformat()
+                            if row["readiness_checked_at"] else None} for row in nodes]}
+
+    @app.post("/v1/system-check/run")
+    def system_check_run(request: Request) -> dict:
+        console_user(request, "nodes.manage", target="system-check", action="run")
+        return {"nodes": system_check.refresh_all(ctx, "manual")}
+
+    @app.get("/v1/support-bundle")
+    def support_bundle() -> JSONResponse:
+        return JSONResponse(system_check.support_bundle(ctx), headers={
+            "Content-Disposition": 'attachment; filename="aiflow4-support.json"',
+            "Cache-Control": "no-store",
+        })
 
     @app.get("/v1/tickets/{key}/timeline")
     def ticket_timeline(key: str) -> dict:

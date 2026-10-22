@@ -39,6 +39,21 @@ REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
 
 
 _MISSING_LIBRARY = re.compile(r"error while loading shared libraries:\s*([^\s:]+)", re.IGNORECASE)
+_network_checked_at = 0.0
+_github_network_ok: bool | None = None
+
+
+def _github_network_available() -> bool:
+    """Check the HTTPS route used to clone configured GitHub repositories without logging network details."""
+    global _network_checked_at, _github_network_ok
+    if time.time() - _network_checked_at >= 600 or _github_network_ok is None:
+        try:
+            with socket.create_connection(("github.com", 443), timeout=3):
+                _github_network_ok = True
+        except OSError:
+            _github_network_ok = False
+        _network_checked_at = time.time()
+    return _github_network_ok
 
 
 def _headless_launch_problem(binary: Path) -> str:
@@ -168,6 +183,85 @@ def credential_expiries(states: list[dict]) -> dict[str, str | None]:
             if account not in out or (value and (not current or value < current)):
                 out[account] = value
     return out
+
+
+def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[str] | None = None,
+                               work_path: Path | None = None, state_path: Path | None = None) -> list[dict]:
+    """Probe host assumptions that do not depend on any one project."""
+    from ..core.system_check import condition
+
+    out = []
+    free = metrics_data.get("disk_free")
+    if isinstance(free, (int, float)):
+        gib = int(free / (1024 ** 3))
+        if free >= 5 * 1024 ** 3:
+            result = "fixed_automatically" if "disk-space" in (auto_fixed_conditions or set()) else "ready"
+            detail = f"The node freed space automatically; {gib} GiB is available." if result == "fixed_automatically" \
+                else f"{gib} GiB is available."
+            out.append(condition("disk-space", "Free disk space", result, detail))
+        else:
+            out.append(condition("disk-space", "Free disk space", "needs_action",
+                                 f"Only {gib} GiB is available; work needs at least 5 GiB.",
+                                 "Free at least 5 GiB on /srv/aiflow."))
+
+    work = Path(work_path or "/srv/aiflow/work")
+    state = Path(state_path or STATE_DIR)
+    created = False
+    try:
+        if not work.exists():
+            work.mkdir(parents=True, mode=0o755)
+            created = True
+        if not state.exists():
+            state.mkdir(parents=True, mode=0o750)
+            created = True
+        writable = os.access(work, os.W_OK | os.X_OK) and os.access(state, os.W_OK | os.X_OK)
+    except OSError:
+        writable = False
+    if writable:
+        result = "fixed_automatically" if created else "ready"
+        detail = "The node created its work directory and can write its state." if created else \
+            "The node can write its work and state directories."
+        out.append(condition("workspace-permissions", "Work directory permissions", result, detail))
+    else:
+        out.append(condition("workspace-permissions", "Work directory permissions", "needs_action",
+                             "The node cannot write its work and state directories.",
+                             "Restore write access to /srv/aiflow/work and /run/aiflow4/workers for the aiflow service account."))
+    # A successful authenticated heartbeat is itself the control API network check.
+    out.append(condition("control-network", "Control API network", "ready",
+                         "The machine reached the control API and sent this heartbeat."))
+    if _github_network_available():
+        out.append(condition("repository-network", "Repository network", "ready",
+                             "The machine can reach GitHub over HTTPS."))
+    else:
+        out.append(condition("repository-network", "Repository network", "needs_action",
+                             "The machine cannot reach GitHub over HTTPS.",
+                             "Allow outbound HTTPS access to github.com on port 443 from this machine."))
+    return out
+
+
+def _credential_conditions(states: list[dict]) -> dict[str, dict]:
+    """Publish credential presence/validity only; never copy provider output or credential material."""
+    from ..core.system_check import condition
+
+    checks: dict[str, dict] = {}
+    for worker in states:
+        account = str(worker.get("account") or "")
+        if not account:
+            continue
+        probe = worker.get("probe") or {}
+        if isinstance(probe, dict) and probe.get("ok"):
+            item = condition(f"credential:{account}", f"Credentials · {account}", "ready",
+                             "Credential is present and valid.")
+        elif not worker.get("alive", True) or worker.get("state") == "signed_out" or \
+                (isinstance(probe, dict) and probe.get("error_kind") == "auth"):
+            item = condition(f"credential:{account}", f"Credentials · {account}", "needs_action",
+                             "Credential is missing or invalid.", f"Sign in again to AI account {account} on this machine.")
+        else:
+            item = condition(f"credential:{account}", f"Credentials · {account}", "needs_action",
+                             "Credential validity has not been confirmed.",
+                             f"Sign in to AI account {account} on this machine.")
+        checks[account] = item
+    return checks
 
 
 def systemctl(*args: str) -> int:
@@ -501,6 +595,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
+    auto_fixed_tools: set[str] = set()
+    auto_fixed_conditions: set[str] = set()
     pending_network_events: list[dict] = []
     operation_thread: threading.Thread | None = None
     toolchain_thread: threading.Thread | None = None
@@ -520,14 +616,21 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     tools, tools_at = tool_versions(), time.time()
                 ws = worker_states()
                 used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
-                desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
+                heartbeat = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
                     "release_protocol": 1,
                     "tools": tools,
                     "services": _services_snapshot(service_state, service_lock),
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+                    "workers": ws, "credential_expiries": credential_expiries(ws),
+                    "system_conditions": _system_machine_conditions(m, auto_fixed_conditions),
+                    "credential_checks": _credential_conditions(ws),
+                    "auto_fixed_tools": sorted(auto_fixed_tools),
+                    "auto_fixed_conditions": sorted(auto_fixed_conditions)}, retries=2)
+                auto_fixed_tools.clear()
+                auto_fixed_conditions.clear()
+                desired = heartbeat["desired"]
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
                     pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
@@ -540,7 +643,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 continue
             stack_request = {"release": desired.get("release", ""),
                              "project_stacks": desired.get("project_stacks", {}),
-                             "versions": desired.get("versions", {})}
+                             "versions": desired.get("versions", {}), "tools": desired.get("tools", [])}
             signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
             if signature != toolchain_signature and (toolchain_thread is None or not toolchain_thread.is_alive()):
                 from .operations import prepare_project_toolchains
@@ -549,7 +652,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
 
                 def prepare(request=stack_request):
                     try:
-                        result = prepare_project_toolchains(request["project_stacks"], request["versions"])
+                        extra_tools = request.get("tools", [])
+                        if extra_tools:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                                extra_tools)
+                        else:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"])
                         with toolchain_lock:
                             toolchain_result.clear()
                             toolchain_result.update(result)
@@ -564,9 +672,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 # so tools fixed by hand or by repair are reported again.
                 with toolchain_lock:
                     prepared_tools = toolchain_result.pop("tools", None)
+                    installed_tools = toolchain_result.pop("installed", [])
                 if isinstance(prepared_tools, dict) and prepared_tools:
                     tools.update({str(k): str(v) for k, v in prepared_tools.items()})
                     tools_at = time.time()
+                if isinstance(installed_tools, list):
+                    auto_fixed_tools.update(str(tool) for tool in installed_tools)
             wanted = sorted({str(s) for services in (desired.get("project_services") or {}).values()
                              for s in services})
             if wanted != service_names:
@@ -602,7 +713,9 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
                     clean_scratch()
-                    clean_worktrees(api, name)
+                    removed_worktrees = clean_worktrees(api, name)
+                    if removed_worktrees and isinstance(m.get("disk_free"), (int, float)) and m["disk_free"] < 5 * 1024 ** 3:
+                        auto_fixed_conditions.add("disk-space")
                     sweep_test_databases()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)

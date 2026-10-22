@@ -30,6 +30,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): create or import a GitHub App, choose its installation and refresh accessible repositories
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels

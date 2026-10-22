@@ -509,6 +509,7 @@ var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
+    repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   view: viewOf(location.pathname),
@@ -648,6 +649,34 @@ function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+}
+function loadProjectRepositories(key) {
+  S.projectAdmin.repositoryEditor = { key: key, busy: true, saving: false, error: '', data: null };
+  renderProjects();
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/repositories', { cache: 'no-store' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (data) { var ed = S.projectAdmin.repositoryEditor; if (ed && ed.key === key) { ed.data = data; ed.error = ''; } })
+    .catch(function (e) { var ed = S.projectAdmin.repositoryEditor; if (ed && ed.key === key) ed.error = String(e.message || e); })
+    .then(function () { var ed = S.projectAdmin.repositoryEditor; if (ed && ed.key === key) { ed.busy = false; renderProjects(); } });
+}
+function addProjectRepository(name) {
+  var ed = S.projectAdmin.repositoryEditor, data = ed && ed.data;
+  if (!data || !name || (data.repositories || []).some(function (r) { return r.repo === name; })) return;
+  data.repositories.push({ repo: name, base: '', checks: [], stack: '', effective: { base: data.project_defaults.base,
+    checks: data.project_defaults.checks, stack: data.project_defaults.stack } });
+  renderProjects();
+}
+function saveProjectRepositories() {
+  var ed = S.projectAdmin.repositoryEditor; if (!ed || !ed.data || ed.saving) return;
+  ed.saving = true; ed.error = ''; renderProjects();
+  var body = { repositories: ed.data.repositories.map(function (r) { return { repo: r.repo, base: r.base || '',
+    checks: r.checks || [], stack: r.stack || '' }; }), epic_repositories: ed.data.epic_repositories || {} };
+  fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/repositories', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast('Repository settings saved', d.commit || 'Control repository updated', 'ok');
+      S.projectAdmin.repositoryEditor = null; loadProjectList(); poll(); })
+    .catch(function (e) { ed.error = String(e.message || e); ed.saving = false; renderProjects(); });
 }
 function loadProjectCatalog(refresh) {
   if (refresh) S.projectAdmin.catalog = null;
@@ -1389,7 +1418,7 @@ function renderReviews() {
       ];
       h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill('info', 'Human review', true) + '</div>';
       if (t.description) h += '<div class="review-content">' + esc(t.description) + '</div>';
-      h += '<div class="review-facts"><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
+      h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
       diff.forEach(function (x) { h += '<div class="review-fact"><div class="label">' + x[0] + '</div><div class="value mono">' + (x[1] == null ? '—' : esc(x[1])) + '</div></div>'; });
       h += '<div class="review-fact"><div class="label">Verify</div><div class="value">' + (ver.outcome ? pill(runTone(ver.outcome), (ver.verdict ? ver.verdict + ' · ' : '') + ver.outcome) : '—') + (ver.checks ? '<div class="small muted" style="margin-top:4px">' + esc(ver.checks) + '</div>' : '') + '</div></div></div>';
       if (ver.summary) h += '<div><strong>Verify result:</strong> ' + esc(ver.summary) + '</div>';
@@ -1903,8 +1932,9 @@ function submitCR() {
 }
 function list(items) { return items && items.length ? '<ul>' + items.map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul>' : '<span class="muted">không có</span>'; }
 function crCard(cr) {
+  var ticket = ticketBy(cr.key), repository = ticket && ticket.repository;
   var h = '<div class="cr-item" data-cr="' + esc(cr.key) + '"><div><a class="mono" href="' + esc(cr.url || jiraUrl(cr.key)) + '" target="_blank" rel="noopener">' + esc(cr.key) + '</a> ' + esc(cr.summary) + '</div>';
-  h += '<div class="small">Epic: ' + esc(cr.epic || '—') + ' · Trạng thái: ' + esc(cr.status) + '</div>';
+  h += '<div class="small">Epic: ' + esc(cr.epic || '—') + ' · Repository: ' + esc(repository || '—') + ' · Trạng thái: ' + esc(cr.status) + '</div>';
   var i = cr.impact;
   if (!i) return h + '<div><span class="flag" data-tone="info">Đang đánh giá</span></div></div>';
   h += '<div><span class="flag" data-tone="' + ({ S: 'ok', M: 'warn', L: 'crit' }[i.size] || 'muted') + '">Độ lớn ' + esc(i.size) + '</span></div>';
@@ -2091,6 +2121,7 @@ function card(t, p) {
   var h = '<button class="card" data-act="open-ticket" data-key="' + esc(t.key) + '">';
   h += '<span class="c-top"><span class="c-key">' + esc(t.key) + '</span><span class="c-type">' + esc(t.type) + '</span>' + (t.priority && t.priority !== 'Medium' ? '<span class="c-type">' + esc(t.priority) + '</span>' : '') + '</span>';
   h += '<span class="c-title">' + esc(t.summary) + '</span>';
+  if (t.repository) h += '<span class="c-run">Repository · <span class="mono">' + esc(t.repository) + '</span></span>';
   if (flags) h += '<span class="c-top">' + flags + '</span>';
   if (t.run) {
     var wm = p.work_minutes || {};
@@ -2132,7 +2163,8 @@ function drawerTicket(key) {
   var det = S.ticket[key];
   var full = det && det.ticket ? det.ticket : t;
   var pills = pill(stTone(t.status), t.status) + (t.labels || []).map(function (l) { return '<span class="pill">' + esc(l) + '</span>'; }).join('');
-  var b = '<div class="facts">' + fact('Type', esc(t.type)) + fact('Priority', esc(t.priority || '—')) + fact('Parent', t.parent_key ? '<button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(t.parent_key) + '">' + esc(t.parent_key) + '</button>' : '—') + fact('Blocked by', (t.blocked_by || []).length ? esc(t.blocked_by.join(', ')) : '—') + fact('Updated', t.updated_age_s != null ? ago(t.updated_age_s + since()) : '—');
+  var repository = full.repository || t.repository || (det && det.repository) || '—';
+  var b = '<div class="facts">' + fact('Type', esc(t.type)) + fact('Repository', '<span class="mono">' + esc(repository) + '</span>') + fact('Priority', esc(t.priority || '—')) + fact('Parent', t.parent_key ? '<button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(t.parent_key) + '">' + esc(t.parent_key) + '</button>' : '—') + fact('Blocked by', (t.blocked_by || []).length ? esc(t.blocked_by.join(', ')) : '—') + fact('Updated', t.updated_age_s != null ? ago(t.updated_age_s + since()) : '—');
   if (t.run) b += fact('Worker', '<span class="mono">' + esc(t.run.account) + '</span> · ' + esc(t.run.step)) + fact('Work clock', '<span class="mono" data-since="' + (t.run.elapsed_s || 0) + '" data-fmt="clock"></span> / 60:00') + fact('Lease', t.run.lease_ms > 0 ? Math.round(t.run.lease_ms / 1000) + ' s left' : 'expired') + fact('Fence', '#' + t.run.fence);
   b += '</div>';
   b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(det && det.jira_url ? det.jira_url : 'https://jooservices.atlassian.net/browse/' + key) + '" target="_blank" rel="noopener">Open in Jira ' + ICON.ext + '</a>';
@@ -2376,9 +2408,10 @@ function renderProjects() {
   else {
     h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
-      h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc(p.repo) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
+      h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
       h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
       if (consoleOwner()) {
+        h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
         h += '<button class="btn sm danger" data-act="project-remove" data-key="' + esc(p.key) + '">Remove</button>';
       }
@@ -2421,6 +2454,34 @@ function renderProjects() {
       h += '<button class="btn" data-act="project-add-cancel">Cancel</button></div>';
     }
     h += '</section>';
+  var editor = state.repositoryEditor;
+  if (editor) {
+    h += '<section class="panel"><div class="panel-h"><h2>Repositories · ' + esc(editor.key) + '</h2><span class="hint">Map Jira epics to repositories visible to the connected GitHub App.</span><span class="spacer"></span><button class="btn sm" data-act="project-repositories-close">Close</button></div>';
+    if (editor.error) h += '<div class="stakeholder-error">' + esc(editor.error) + '</div>';
+    if (editor.busy || !editor.data) h += '<div class="muted">Loading Jira epics and GitHub repositories…</div>';
+    else {
+      var data = editor.data, options = data.github_repos || [], configured = data.repositories || [], defaults = data.project_defaults || {};
+      h += '<p class="muted">Project default: <span class="mono">' + esc(data.default_repo) + '</span>. Unmapped tickets use this repository.</p>';
+      h += '<div class="project-table"><table><thead><tr><th>Epic</th><th>Jira status</th><th>Repository</th></tr></thead><tbody>';
+      (data.epics || []).forEach(function (epic) {
+        var selected = (data.epic_repositories || {})[epic.key] || '';
+        h += '<tr><td><span class="mono">' + esc(epic.key) + '</span> ' + esc(epic.summary) + '</td><td>' + esc(epic.status || '—') + '</td><td><select data-epic-repository="' + esc(epic.key) + '"><option value="">Use project default · ' + esc(data.default_repo) + '</option>';
+        options.forEach(function (r) { h += '<option value="' + esc(r.full_name) + '"' + (selected === r.full_name ? ' selected' : '') + '>' + esc(r.full_name) + '</option>'; });
+        h += '</select></td></tr>';
+      });
+      if (!(data.epics || []).length) h += '<tr><td colspan="3" class="muted">No Jira epics found in this project.</td></tr>';
+      h += '</tbody></table></div>';
+      h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
+      configured.forEach(function (r) {
+        h += '<section class="project-checks"><strong class="mono">' + esc(r.repo) + (r.repo === data.default_repo ? ' · default' : '') + '</strong>';
+        h += '<div class="project-form"><label>Base branch<input data-repository-config="base" data-repo="' + esc(r.repo) + '" value="' + esc(r.base || '') + '" placeholder="Inherit ' + esc(defaults.base || 'develop') + '"></label>';
+        h += '<label>Stack<select data-repository-config="stack" data-repo="' + esc(r.repo) + '"><option value="">Inherit project stack</option>' + (data.stacks || []).map(function (s) { return '<option value="' + esc(s) + '"' + (r.stack === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>';
+        h += '<label class="wide">Checks, one command per line<textarea data-repository-config="checks" data-repo="' + esc(r.repo) + '" placeholder="Inherit project checks">' + esc((r.checks || []).join('\n')) + '</textarea></label></div></section>';
+      });
+      h += '<div class="project-actions"><select data-repository-add><option value="">Add a repository…</option>' + options.filter(function (r) { return !configured.some(function (c) { return c.repo === r.full_name; }); }).map(function (r) { return '<option value="' + esc(r.full_name) + '">' + esc(r.full_name) + '</option>'; }).join('') + '</select><button class="btn sm" data-act="project-repository-add">Add repository</button><span class="spacer"></span><button class="btn primary" data-act="project-repositories-save"' + (editor.saving ? ' disabled' : '') + '>Save repository settings</button></div>';
+    }
+    h += '</section>';
+  }
   }
   root.innerHTML = h;
 }
@@ -2484,6 +2545,10 @@ document.addEventListener('click', function (e) {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }
   else if (act === 'project-catalog-refresh') loadProjectCatalog(true);
+  else if (act === 'project-repositories') loadProjectRepositories(el.getAttribute('data-key'));
+  else if (act === 'project-repositories-close') { S.projectAdmin.repositoryEditor = null; renderProjects(); }
+  else if (act === 'project-repository-add') { var addSelect = $('[data-repository-add]'); addProjectRepository(addSelect ? addSelect.value : ''); }
+  else if (act === 'project-repositories-save') saveProjectRepositories();
   else if (act === 'github-refresh') loadGitHubIntegrations();
   else if (act === 'github-manifest') {
     var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
@@ -2584,6 +2649,14 @@ document.addEventListener('input', function (e) {
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
   }
+  if (e.target && e.target.matches('[data-repository-config]')) {
+    var editor = S.projectAdmin.repositoryEditor, data = editor && editor.data;
+    if (data) {
+      var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
+      var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+    }
+  }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
@@ -2601,6 +2674,23 @@ document.addEventListener('change', function (e) {
     S.projectAdmin.preflight = null;
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
+  }
+  if (e.target && e.target.matches('[data-epic-repository]')) {
+    var editor = S.projectAdmin.repositoryEditor, data = editor && editor.data;
+    if (data) {
+      var epicKey = e.target.getAttribute('data-epic-repository'), repoName = e.target.value;
+      data.epic_repositories = data.epic_repositories || {};
+      if (repoName) data.epic_repositories[epicKey] = repoName; else delete data.epic_repositories[epicKey];
+      if (repoName) addProjectRepository(repoName); else renderProjects();
+    }
+  }
+  if (e.target && e.target.matches('[data-repository-config]')) {
+    var editor = S.projectAdmin.repositoryEditor, data = editor && editor.data;
+    if (data) {
+      var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
+      var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+    }
   }
 });
 document.addEventListener('keydown', function (e) {

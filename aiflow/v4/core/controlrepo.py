@@ -16,7 +16,27 @@ from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, too
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
 
 __all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
-           "tools_for_stack", "tools_for_stacks"]
+           "tools_for_stack", "tools_for_stacks", "epic_for_ticket"]
+
+
+def epic_for_ticket(ticket: dict[str, Any], tickets_by_key: dict[str, dict[str, Any]] | None = None) -> str:
+    """Resolve a ticket's epic key through its parent chain, including subtasks below stories."""
+    by_key = tickets_by_key or {}
+    if ticket.get("epic") or ticket.get("epic_key"):
+        return str(ticket.get("epic") or ticket.get("epic_key"))
+    if ticket.get("type") == "Epic":
+        return str(ticket.get("key") or "")
+    parent = str(ticket.get("parent_key") or "")
+    seen: set[str] = set()
+    while parent and parent not in seen:
+        seen.add(parent)
+        item = by_key.get(parent)
+        if not item:
+            return parent
+        if item.get("type") == "Epic":
+            return parent
+        parent = str(item.get("parent_key") or "")
+    return ""
 
 
 @dataclass
@@ -50,10 +70,51 @@ class Project:
     priority: int = 5          # lower first: workers serve the projects in this order
     paused: bool = False       # paused projects remain configured but do not sync or receive new claims
     nodes: list[str] = field(default_factory=list)  # optional node assignments for projects created in the console
+    repositories: list[dict[str, Any]] = field(default_factory=list)
+    epic_repositories: dict[str, str] = field(default_factory=dict)
+    default_repo: str = ""  # retained on repository-specific project views
 
     @property
     def repo_name(self) -> str:
         return self.repo.split("/", 1)[-1]
+
+    @staticmethod
+    def _epic_key(ticket: dict[str, Any] | None) -> str:
+        if not ticket:
+            return ""
+        return str(ticket.get("epic") or ticket.get("epic_key") or
+                   (ticket.get("key") if ticket.get("type") == "Epic" else "") or
+                   ticket.get("parent_key") or "")
+
+    def repo_for(self, ticket: dict[str, Any] | None) -> str:
+        """Select a ticket's repository by its resolved epic, falling back to the project default."""
+        epic = self._epic_key(ticket)
+        mapped = (self.epic_repositories or {}).get(epic, "") if epic else ""
+        if mapped:
+            return str(mapped)
+        for item in self.repositories or []:
+            if not isinstance(item, dict):
+                continue
+            if epic and epic in (item.get("epics") or []):
+                return str(item.get("repo") or self.repo)
+        return self.default_repo or self.repo
+
+    def settings_for_repo(self, repo: str) -> dict[str, Any]:
+        """Return repository settings with legacy project values as defaults."""
+        selected = next((item for item in self.repositories or []
+                         if isinstance(item, dict) and str(item.get("repo") or "").lower() == repo.lower()), {})
+        return {"repo": repo or self.repo,
+                "base": str(selected.get("base") or self.base),
+                "checks": list(selected.get("checks") or self.checks),
+                "stack": selected.get("stack") or self.stack}
+
+    def settings_for_ticket(self, ticket: dict[str, Any] | None) -> dict[str, Any]:
+        return self.settings_for_repo(self.repo_for(ticket))
+
+    @property
+    def configured_repositories(self) -> list[str]:
+        return list(dict.fromkeys([self.repo] + [str(item.get("repo") or "") for item in self.repositories
+                                                   if isinstance(item, dict) and item.get("repo")]))
 
     def work_minutes(self) -> dict[str, int]:
         wm = (self.limits or {}).get("work_minutes") or {}
@@ -62,12 +123,16 @@ class Project:
     @property
     def tools(self) -> list[str]:
         """The base worker tools plus the extra tools this project's stack needs."""
-        return tools_for_stacks_in_project(self.stack)
+        return tools_for_stacks_in_project(self.stacks)
 
     @property
     def stacks(self) -> list[str]:
-        """Normalized stack names, preserving support for the original single-string form."""
-        return normalize_stacks(self.stack)
+        """Normalized stacks required by the defaults and every repository in this project."""
+        values: list[str] = list(normalize_stacks(self.stack))
+        for item in self.repositories or []:
+            if isinstance(item, dict):
+                values.extend(normalize_stacks(item.get("stack")))
+        return list(dict.fromkeys(values))
 
     @property
     def parallel_limit(self) -> int:

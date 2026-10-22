@@ -75,18 +75,25 @@ def build_ctx(s: Settings):
     from .control.db import DB
     from .control.events import Events
     from .core.fencing import Leases
+    from .control.jira import Jira
+    from .control.jira_connect import JiraAuth, SecretStore
     db = DB(s.database_url)
-    jira = github = None
-    if s.jira_email and s.jira_token:
-        from .control.jira import Jira
-        jira = Jira(s.jira_site, s.jira_email, s.jira_token)
+    github = None
+    # Every Jira call asks this source: the credential connected on the Integrations screen first, then
+    # JIRA_EMAIL / JIRA_API_TOKEN from owner.env (docs/v4/jira-connect.md).
+    jira_auth = JiraAuth(s, SecretStore(s.jira_secret_dir))
+    jira = Jira(s.jira_site, auth=jira_auth)
     if Path(s.github_app_dir, "app.pem").exists():
         from .control.github import GitHubApp
         github = GitHubApp(s.github_app_dir, s.github_org)
     repo_cache = RepoCache(s.control_repo)
-    return Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
-               events=Events(db, s.o2_url, s.o2_basic), repo=repo_cache, jira=jira, github=github,
-               refresh_repo=repo_cache.refresh)
+    events = Events(db, s.o2_url, s.o2_basic, source=s.o2_source)
+    ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
+              events=events, repo=repo_cache, jira=jira, github=github,
+              refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
+    events.bind_incident_context(ctx)
+    jira_auth.bind(ctx)
+    return ctx
 
 
 def main(argv: list[str] | None = None) -> int:

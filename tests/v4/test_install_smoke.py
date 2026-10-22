@@ -200,6 +200,22 @@ def test_three_argument_install_smoke_setup_uses_baseline_artifact_and_parent_ve
     assert 'docker exec --env BASELINE="$baseline"' in script
 
 
+def test_control_install_smoke_covers_install_rerun_upgrade_and_rollback_on_ubuntu_systemd():
+    script = (ROOT / "deploy/v4/ci/control-install-smoke.sh").read_text()
+    assert 'docker build --pull -f "$ROOT/deploy/v4/ci/systemd.Dockerfile"' in script
+    assert "FROM ubuntu:24.04" in (ROOT / "deploy/v4/ci/systemd.Dockerfile").read_text()
+    steps = ["== 1. clean install of $PREVIOUS", "== 2. the same command again",
+             "== 3. failed upgrade to $TARGET rolls back", "== 4. upgrade to $TARGET", "== 5. owner rollback"]
+    assert [script.index(s) for s in steps] == sorted(script.index(s) for s in steps)
+    assert "((ELAPSED <= 600))" in script  # Command Center within 10 minutes
+    assert '[[ $BEFORE == "$AFTER" ]]' in script  # the second run changes nothing
+    assert "AIFLOW4_INSTALL_SIMULATE_UNHEALTHY=control-api-a" in script and "[[ $RC == 5 ]]" in script
+    assert "install control --rollback" in script
+    # the fingerprint compares hashes and ids; secret values never leave the container
+    fingerprint = script[script.index("fingerprint() {"):script.index("current() {")]
+    assert "sha256sum /etc/aiflow/secrets/control/*.env" in fingerprint and "cat /etc/aiflow" not in fingerprint
+
+
 def test_install_and_operations_docs_describe_the_release_gate():
     install = (ROOT / "docs/v4/install.md").read_text()
     operations = (ROOT / "docs/v4/node-operations.md").read_text()

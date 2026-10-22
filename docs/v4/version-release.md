@@ -57,9 +57,15 @@ configured `tag_prefixes` value replaces the component part and keeps the versio
 for `Widget Core 1.2.0` produces `widget-core-1.2.0`. An
 existing tag must point to the same release commit, and an existing GitHub Release is reused on retry. The
 control plane then merges the destination back into the source. If that merge fails, it creates a Jira follow-up
-Task and comments its key on the Release tracker.
+Task and comments its key on the Release tracker. Merge-back is attempted even when a write after Jira Released
+(audit, event, or tracker comment) fails, and its outcome is recorded once in `write_audit` (`github-merge-back`
+or `jira-merge-back-task`). If neither could be recorded, the periodic version scan retries merge-back under the
+version lease for every `released` registry row without such a record, so develop never stays behind master.
 
-The version lease fences worker reports and publication writes. Jira comments, Bugs, branch merges, tags,
+The version lease fences worker reports and publication writes. A completion is accepted only from the run that
+holds the lease of the Jira version named in the URL; a run claimed for another version is refused before any
+write. Jira-controlled text in the release notes (version name and ticket summaries) is escaped as literal
+Markdown. Jira comments, Bugs, branch merges, tags,
 GitHub Releases, and Jira Released state are recorded in the registry events and `write_audit`; the Release
 tracker also records the checked tickets, test result, master commit, tag, Release URL, and Jira status.
 

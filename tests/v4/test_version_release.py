@@ -432,6 +432,103 @@ def test_failed_merge_back_creates_a_ready_jira_follow_up_task(ctx):
                and task["key"] in comment for key, comment in ctx.jira.comments)
 
 
+def test_completion_for_another_version_than_the_claimed_lease_is_rejected_without_side_effects(client, ctx):
+    configure(ctx, versions=(("101", CORE), ("102", THEME)))
+    evidence(ctx, "TESTWP-80", version_id="101")
+    evidence(ctx, "TESTWP-81", version_id="102")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    headers = node_headers(client)
+    claim = claim_release(client, headers, "101")
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    audits_before = ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"]
+    comments_before = len(ctx.jira.comments)
+
+    response = client.post("/v1/version-releases/102/complete",
+                           json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                                 "checks": [{"command": "composer install", "passed": True},
+                                            {"command": "vendor/bin/phpunit", "passed": True}]},
+                           headers=headers)
+
+    assert response.status_code == 403
+    assert getattr(ctx.github, "merges", []) == []
+    assert getattr(ctx.github, "tags", {}) == {}
+    assert getattr(ctx.github, "releases", {}) == {}
+    assert ctx.jira.released_versions == []
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit")["n"] == audits_before
+    assert len(ctx.jira.comments) == comments_before
+    assert not [row for row in getattr(ctx.jira, "created", []) if row["issuetype"] in ("Bug", "Task")]
+
+
+def test_merge_back_runs_even_when_the_released_comment_fails(ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-82")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+    comment = ctx.jira.comment
+
+    def failing_comment(key, text):
+        if "Version released" in text:
+            raise RuntimeError("Jira 503")
+        return comment(key, text)
+
+    ctx.jira.comment = failing_comment
+    with pytest.raises(RuntimeError, match="Jira 503"):
+        version_release.complete(ctx, project, version,
+                                 {"id": "run-comment", "fence": 5, "account_id": "claude-01", "node": "cc"},
+                                 {"head_sha": "a" * 40, "checks": [{"command": "composer test", "passed": True}]})
+
+    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+    assert ctx.db.one("SELECT status FROM version_releases")["status"] == "released"
+
+
+def test_scan_retries_merge_back_for_a_released_version_without_a_merge_back_record(ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-83")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+    merge_branch, create_issue = ctx.github.merge_branch, ctx.jira.create_issue
+
+    def fail_merge_back(repo, base, head, message):
+        if base == "develop":
+            raise RuntimeError("GitHub 502")
+        return merge_branch(repo, base, head, message)
+
+    def fail_task(project_key, summary, *args, **kwargs):
+        if summary.startswith("Merge "):
+            raise RuntimeError("Jira 503")
+        return create_issue(project_key, summary, *args, **kwargs)
+
+    ctx.github.merge_branch, ctx.jira.create_issue = fail_merge_back, fail_task
+    with pytest.raises(RuntimeError, match="Jira 503"):
+        version_release.complete(ctx, project, version,
+                                 {"id": "run-back", "fence": 6, "account_id": "claude-01", "node": "cc"},
+                                 {"head_sha": "a" * 40, "checks": [{"command": "composer test", "passed": True}]})
+    assert ctx.jira.released_versions == ["101"]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action LIKE '%%merge-back%%'")["n"] == 0
+
+    ctx.github.merge_branch, ctx.jira.create_issue = merge_branch, create_issue
+    version_release.scan(ctx)
+    version_release.scan(ctx)
+
+    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+
+
+def test_release_notes_escape_markdown_in_the_jira_version_name():
+    snapshot = {"version": "Core [x](https://evil.test) *0.5*\n# Owned", "tickets": []}
+
+    notes = version_release._changelog(snapshot, "a" * 40, [])
+
+    assert notes.splitlines()[0] == "## Core \\[x\\]\\(https\\:\\/\\/evil\\.test\\) \\*0\\.5\\* \\# Owned"
+    assert "\n# Owned" not in notes
+
+
 def test_ai_flow_repository_never_becomes_a_version_release_candidate(client, ctx):
     ctx.repo().projects["AIFLOW"] = Project(key="AIFLOW", repo="jooservices/ai-flow",
                                               version_release={"enabled": True, "versions": ["v4.0.0"]})

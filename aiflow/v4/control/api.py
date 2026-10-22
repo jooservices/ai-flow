@@ -2211,6 +2211,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                      {"version_id": version_id, "head_sha": body.head_sha, "checks": body.checks})
         if run["step"] != "version_release" or run["node"] != node:
             raise HTTPException(403, "run is not a version release owned by this node")
+        if run["ticket_key"] != version_release.version_identity(run["project"], version_id):
+            raise HTTPException(403, "run holds the lease of another Jira version")
         project = ctx.repo().projects.get(run["project"])
         if not project or not version_release.enabled(project):
             raise HTTPException(403, "project is not enabled for version releases")

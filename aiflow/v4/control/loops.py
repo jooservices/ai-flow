@@ -383,6 +383,8 @@ def fleet_rollout(ctx: Ctx) -> dict | None:
 
 def version_release_scan(ctx: Ctx) -> int:
     """Refresh live Jira version membership and audit which configured versions are ready or blocked."""
+    from . import api as control_api
+    control_api.github_gateway(ctx)  # merge-back retries for released versions need GitHub
     return version_release.scan(ctx)
 
 

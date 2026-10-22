@@ -8,6 +8,7 @@ repo-and-version preset for the trial.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import string
 import time
@@ -16,7 +17,10 @@ from typing import Any
 
 from .db import J
 
+log = logging.getLogger(__name__)
+
 FAILURE_ACTIONS = ("jira-release-check-failed", "jira-release-publish-failed")
+MERGE_BACK_ACTIONS = ("github-merge-back", "jira-merge-back-task")
 JIRA_RETRY_S = 3600  # a publish error whose Jira follow-up could not be created waits this long before a retry
 
 TESTWP_DEFAULT = {
@@ -250,7 +254,38 @@ def scan(ctx) -> int:
                 scanned += 1
             finally:
                 ctx.leases.release(lock_key, run_id, claim.fence)
+        reconcile_merge_backs(ctx, project)
     return scanned
+
+
+def reconcile_merge_backs(ctx, project: Any) -> int:
+    """Retry merge-back for released versions whose release run stopped before recording one.
+
+    The Jira version is already Released, so it no longer appears in `project_versions`; this durable path reads
+    released rows from the registry and runs the same idempotent `merge_back` under the version lease.
+    """
+    if ctx.github is None:
+        return 0
+    done = 0
+    rows = ctx.db.all("SELECT * FROM version_releases WHERE project=%s AND status='released'", (project.key,))
+    for row in rows:
+        if not row["tracker_key"] or _merge_back_recorded(ctx, row["tracker_key"]):
+            continue
+        lock_key = version_identity(project.key, row["version_id"])
+        run_id = str(uuid.uuid4())
+        claim = ctx.leases.claim(lock_key, run_id, 300_000)
+        if not claim.ok:
+            continue
+        try:
+            if ctx.leases.valid(lock_key, run_id, claim.fence):
+                merge_back(ctx, project, row["tracker_key"], row["version_name"], row["tag"],
+                           {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""})
+                done += 1
+        except Exception:  # noqa: BLE001 - nothing was recorded, so the next scan retries
+            log.exception("merge-back retry failed for %s %s", project.key, row["version_name"])
+        finally:
+            ctx.leases.release(lock_key, run_id, claim.fence)
+    return done
 
 
 def candidates(ctx, account: str, node: str) -> list[dict[str, Any]]:
@@ -289,7 +324,7 @@ def tracker_for(ctx, project: Any, version_id: str, version_name: str) -> str:
 
 
 def _changelog(snapshot: dict[str, Any], sha: str, checks: list[dict[str, Any]]) -> str:
-    lines = [f"## {snapshot['version']}", "", "### Included tickets"]
+    lines = [f"## {_markdown_text(snapshot['version'])}", "", "### Included tickets"]
     lines.extend(f"- [{ticket['key']}] {_markdown_text(ticket['summary'])}" for ticket in snapshot["tickets"])
     lines.extend(("", "### Release checks", f"- Passed on `{sha}`"))
     lines.extend(f"- `{item['command']}`: passed" for item in checks)
@@ -477,40 +512,75 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=sha,
                master_sha=master_sha, tag=tag, github_release_url=release_url,
                gate_detail=f"Released at {tag} ({master_sha}).")
-    _audit(ctx, project, tracker, run, "jira-version-released", "Released",
-           {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
-            "tickets": snapshot["tickets"]})
-    ctx.events.emit("version_release.jira_version", ticket=tracker, project=project.key, step="version_release",
-                    run_id=str(run["id"]), fence=run["fence"], outcome="Released", reason=version["name"],
-                    data={"version_id": version["id"], "tag": tag, "master_sha": master_sha,
-                          "release_url": release_url})
-    ctx.jira.comment(tracker, f"Version released.\nChecked tickets: {', '.join(t['key'] for t in snapshot['tickets'])}\n"
-                     f"Checks passed on develop commit: {sha}\nCommit on {target}: {master_sha}\nTag: {tag}\n"
-                     f"GitHub Release: {release_url or tag}\nJira version: Released")
-    ctx.events.emit("version_release.completed", ticket=tracker, project=project.key, step="version_release",
-                    run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
-                    outcome="released", reason=f"{tag} {release_url}",
-                    data={"tickets": snapshot["tickets"], "checked_sha": sha, "master_sha": master_sha,
-                          "tag": tag, "release_url": release_url, "jira_version": "Released"})
+    # Merge-back runs even when a post-release write below fails; it audits itself, and the scan retries it for
+    # any released version without a merge-back record (`reconcile_merge_backs`).
+    try:
+        _audit(ctx, project, tracker, run, "jira-version-released", "Released",
+               {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
+                "tickets": snapshot["tickets"]})
+        ctx.events.emit("version_release.jira_version", ticket=tracker, project=project.key, step="version_release",
+                        run_id=str(run["id"]), fence=run["fence"], outcome="Released", reason=version["name"],
+                        data={"version_id": version["id"], "tag": tag, "master_sha": master_sha,
+                              "release_url": release_url})
+        ctx.jira.comment(tracker, f"Version released.\nChecked tickets: {', '.join(t['key'] for t in snapshot['tickets'])}\n"
+                         f"Checks passed on develop commit: {sha}\nCommit on {target}: {master_sha}\nTag: {tag}\n"
+                         f"GitHub Release: {release_url or tag}\nJira version: Released")
+        ctx.events.emit("version_release.completed", ticket=tracker, project=project.key, step="version_release",
+                        run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
+                        outcome="released", reason=f"{tag} {release_url}",
+                        data={"tickets": snapshot["tickets"], "checked_sha": sha, "master_sha": master_sha,
+                              "tag": tag, "release_url": release_url, "jira_version": "Released"})
+    finally:
+        merge_back(ctx, project, tracker, version["name"], tag, run)
+    return {"released": True, "status": "released", "tag": tag, "sha": master_sha,
+            "release_url": release_url}
+
+
+def _merge_back_recorded(ctx, tracker: str) -> bool:
+    return bool(ctx.db.one("SELECT 1 AS done FROM write_audit WHERE ticket=%s AND action IN (%s, %s) LIMIT 1",
+                           (tracker, *MERGE_BACK_ACTIONS)))
+
+
+def _best_effort(what: str, fn, *args: Any, **kwargs: Any) -> None:
+    try:
+        fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - the merge-back outcome is already audited
+        log.exception("version release %s failed", what)
+
+
+def merge_back(ctx, project: Any, tracker: str, version_name: str, tag: str, run: dict) -> None:
+    """Merge the destination back into the source once per release, or leave one ready Jira follow-up Task.
+
+    The audit row is written right after the GitHub merge or the Task creation, so a failing comment or event
+    afterwards never causes a second merge-back or a duplicate Task.
+    """
+    if _merge_back_recorded(ctx, tracker):
+        return
+    repo = project.repo_name
+    source, target = source_branch(project), target_branch(project)
     try:
         back = ctx.github.merge_branch(repo, source, target, f"chore: merge {target} back after {tag}")
         back_sha = str(back.get("sha") or ctx.github.branch_sha(repo, source))
-        ctx.jira.comment(tracker, f"Merge-back complete: {target} into {source} at {back_sha}.")
-        ctx.events.emit("version_release.merge_back", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="merged", reason=back_sha,
-                        data={"source": target, "target": source})
     except Exception as exc:  # noqa: BLE001 - published release remains valid; leave an actionable Jira task
-        task = ctx.jira.create_issue(project.key, f"Merge {target} back after {version['name']}",
+        task = ctx.jira.create_issue(project.key, f"Merge {target} back after {version_name}",
                                      f"Release {tag} is published. Merge {target} into {source} and resolve any conflicts.\n"
                                      f"Error: {str(exc)[:2000]}", issuetype="Task",
                                      labels=["aiflow-version-release", "merge-back", "aiflow-ready"])
-        ctx.jira.transition_to(task, "To Do")
-        ctx.jira.comment(tracker, f"Merge-back failed; follow-up ticket {task} created. {str(exc)[:500]}")
-        ctx.events.emit("version_release.merge_back", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="ticket_created", reason=task,
-                        data={"error": str(exc)[:2000]})
-    return {"released": True, "status": "released", "tag": tag, "sha": master_sha,
-            "release_url": release_url}
+        _audit(ctx, project, tracker, run, "jira-merge-back-task", task,
+               {"source": target, "target": source, "tag": tag, "error": str(exc)[:2000]})
+        _best_effort("merge-back task transition", ctx.jira.transition_to, task, "To Do")
+        _best_effort("merge-back comment", ctx.jira.comment, tracker,
+                     f"Merge-back failed; follow-up ticket {task} created. {str(exc)[:500]}")
+        _best_effort("merge-back event", ctx.events.emit, "version_release.merge_back", ticket=tracker,
+                     project=project.key, step="version_release", run_id=str(run["id"]), fence=run["fence"],
+                     outcome="ticket_created", reason=task, data={"error": str(exc)[:2000]})
+        return
+    _audit(ctx, project, tracker, run, "github-merge-back", back_sha, {"source": target, "target": source, "tag": tag})
+    _best_effort("merge-back comment", ctx.jira.comment, tracker,
+                 f"Merge-back complete: {target} into {source} at {back_sha}.")
+    _best_effort("merge-back event", ctx.events.emit, "version_release.merge_back", ticket=tracker,
+                 project=project.key, step="version_release", run_id=str(run["id"]), fence=run["fence"],
+                 outcome="merged", reason=back_sha, data={"source": target, "target": source})
 
 
 def version_identity(project: str, version_id: str) -> str:

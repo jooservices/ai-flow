@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from aiflow.v4.control.jira import FIELDS, Jira
@@ -36,6 +38,48 @@ def test_jira_reads_project_versions_and_normalizes_fix_version_ids():
     assert requests[0].method == "GET"
     assert requests[0].url.path == "/rest/api/3/project/TESTWP/versions"
     assert Jira.normalize(jira_issue("TESTWP-1", "To Do", ("100", "200")))["fix_versions"] == ["100", "200"]
+
+
+def test_releasing_a_jira_version_sets_released_flag_and_release_date():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    jira = Jira("https://jira.example.test", "person@example.test", "token",
+                client=httpx.Client(transport=httpx.MockTransport(respond), base_url="https://jira.example.test"))
+
+    jira.release_version("100")
+
+    assert requests[0].method == "PUT"
+    assert requests[0].url.path == "/rest/api/3/version/100"
+    assert requests[0].read()
+    import json
+    body = json.loads(requests[0].content)
+    assert body["released"] is True and body["releaseDate"]
+
+
+def test_release_tracker_can_store_the_jira_version_field_on_creation():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.url.path == "/rest/api/3/field":
+            return httpx.Response(200, json=[{"id": "customfield_12345", "name": "Version", "custom": True}])
+        if request.url.path == "/rest/api/3/issue":
+            return httpx.Response(201, json={"key": "TESTWP-900"})
+        raise AssertionError(request.url.path)
+
+    jira = Jira("https://jira.example.test", "person@example.test", "token",
+                client=httpx.Client(transport=httpx.MockTransport(respond), base_url="https://jira.example.test"))
+
+    key = jira.create_issue("TESTWP", "Release 1.2.0", "Release tracker", issuetype="Release",
+                            version_field="1.2.0")
+
+    assert key == "TESTWP-900"
+    payload = json.loads(requests[-1].content)
+    assert payload["fields"]["customfield_12345"] == "1.2.0"
 
 
 def test_jira_sync_upserts_versions_and_replaces_ticket_version_links(ctx):

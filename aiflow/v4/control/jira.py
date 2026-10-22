@@ -156,7 +156,8 @@ class Jira:
         """List Jira versions for one project, including their stable ids and Released state."""
         data = self.call("GET", f"/rest/api/3/project/{project}/versions")
         return [{"id": str(v.get("id") or ""), "name": str(v.get("name") or ""),
-                 "released": bool(v.get("released")), "archived": bool(v.get("archived"))}
+                 "released": bool(v.get("released")), "release_date": v.get("releaseDate") or None,
+                 "archived": bool(v.get("archived"))}
                 for v in data if v.get("id") and v.get("name")]
 
     def version_issues(self, project: str, version_id: str) -> list[dict]:
@@ -184,7 +185,8 @@ class Jira:
 
     # --- writes ---------------------------------------------------------------------------------------------
     def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Story",
-                     labels: list[str] | None = None, parent: str = "", fix_version: str = "") -> str:
+                     labels: list[str] | None = None, parent: str = "", fix_version: str = "",
+                     version_field: str = "") -> str:
         """Create an issue and return its key; `parent` links it to an epic (team-managed and company-managed)."""
         fields: dict[str, Any] = {"project": {"key": project}, "summary": summary, "issuetype": {"name": issuetype},
                                   "description": text_to_adf(description), "labels": list(labels or [])}
@@ -192,6 +194,10 @@ class Jira:
             fields["parent"] = {"key": parent}
         if fix_version:
             fields["fixVersions"] = [{"id": str(fix_version)}]
+        if version_field:
+            field_id = self.custom_field("Version")
+            if field_id:
+                fields[field_id] = str(version_field)
         return self.call("POST", "/rest/api/3/issue", {"fields": fields})["key"]
 
     def link_issues(self, blocker: str, blocked: str, link_type: str = "Blocks") -> None:

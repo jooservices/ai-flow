@@ -120,6 +120,7 @@ class FakeJira:
         self.version_data: dict[str, list[dict]] = {}
         self.version_issue_data: dict[tuple[str, str], list[dict]] = {}
         self.released_versions: list[str] = []
+        self.version_release_dates: dict[str, str] = {}
         self.issue_links: list[tuple[str, str, str]] = []
 
     def projects(self) -> list[dict[str, str]]:
@@ -145,11 +146,17 @@ class FakeJira:
         return list(self.version_issue_data.get((project, str(version_id)), []))
 
     def release_version(self, version_id: str, released: bool = True) -> None:
+        from datetime import date
+
         self.released_versions.append(str(version_id))
+        if released:
+            self.version_release_dates[str(version_id)] = date.today().isoformat()
         for versions in self.version_data.values():
             for version in versions:
                 if str(version["id"]) == str(version_id):
                     version["released"] = released
+                    if released:
+                        version["release_date"] = date.today().isoformat()
 
     def transition_to(self, key: str, target: str) -> str:
         self.transitions.append((key, target))
@@ -183,13 +190,16 @@ class FakeJira:
 
     initial_status = "Backlog"  # the status a new issue starts in
 
-    def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent="", fix_version=""):
+    def create_issue(self, project, summary, description, issuetype="Story", labels=None, parent="", fix_version="",
+                     version_field=""):
         self.created = getattr(self, "created", [])
         key = f"{project}-{900 + len(self.created)}"
         created = {"key": key, "project": project, "summary": summary, "description": description,
                    "issuetype": issuetype, "labels": list(labels or []), "parent": parent}
         if fix_version:
             created["fix_version"] = fix_version
+        if version_field:
+            created["version_field"] = version_field
         self.created.append(created)
         self.status_of[key] = self.initial_status
         return key
@@ -216,22 +226,44 @@ class FakeGitHub:
         self.tags: dict[tuple[str, str], str] = {}
         self.releases: dict[tuple[str, str], dict] = {}
         self.merges: list[tuple[str, str, str, str]] = []
+        self.files: dict[tuple[str, str, str], str] = {
+            ("test-aiflow-wp", "develop", "README.md"): "# Test WordPress\n\nA test repo.\n",
+            ("test-aiflow-wp", "develop", "package.json"): '{\n  "name": "test",\n  "version": "0.4.0"\n}\n',
+            ("test-aiflow-wp", "develop", "CHANGELOG.md"): "# Changelog\n\n## 0.4.0\n- Previous release\n",
+        }
+        self.compare_results: dict[tuple[str, str, str], dict] = {}
+        self.pr_by_number: dict[int, dict] = {}
+        self.merge_commit_enabled = True
+        self.merge_commit_enable_calls: list[str] = []
 
     def installation_repositories(self) -> list[dict[str, str]]:
         return list(self.repositories)
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         self.branches.append((repo, branch, "check"))
-        return self.available_branches.get((repo, branch), branch == "develop")
+        return self.available_branches.get((repo, branch), branch == "develop" or (repo, branch) in self.branch_heads)
 
     def default_branch(self, repo):
         return "develop"
 
     def create_branch(self, repo, branch, base):
         self.branches.append((repo, branch, base))
+        self.branch_heads[(repo, branch)] = self.branch_heads.get((repo, base), f"sha-{base}")
+        for (file_repo, file_branch, path), content in list(self.files.items()):
+            if file_repo == repo and file_branch == base:
+                self.files[(repo, branch, path)] = content
+
+    def repository_files(self, repo, ref):
+        return sorted(path for (file_repo, branch, path) in self.files
+                      if file_repo == repo and branch == ref)
+
+    def file_content(self, repo, branch, path):
+        return self.files.get((repo, branch, path))
 
     def commit_file(self, repo, branch, path, content, message):
         self.commits.append({"repo": repo, "branch": branch, "path": path, "content": content, "message": message})
+        self.files[(repo, branch, path)] = content
+        self.branch_heads[(repo, branch)] = f"{len(self.commits):040x}"
         return f"commit{len(self.commits):04d}"
 
     def delete_file(self, repo, branch, path, message):
@@ -246,8 +278,12 @@ class FakeGitHub:
         return "ghs_fake", datetime.now(timezone.utc) + timedelta(hours=1)
 
     def create_pr(self, repo, head, base, title, body, draft=True):
-        pr = {"html_url": f"https://github.com/jooservices/{repo}/pull/{len(self.prs) + 1}", "number": len(self.prs) + 1}
-        self.prs.append({"repo": repo, "head": head, "base": base, "title": title, "draft": draft})
+        number = len(self.prs) + 1
+        pr = {"repo": repo, "head": head, "base": base, "title": title, "body": body,
+              "draft": draft, "number": number, "state": "open", "merged": False,
+              "html_url": f"https://github.com/jooservices/{repo}/pull/{number}"}
+        self.prs.append(pr)
+        self.pr_by_number[number] = pr
         return pr
 
     def create_control_pr(self, repo, head, base, title, body):
@@ -258,7 +294,29 @@ class FakeGitHub:
 
     def merge_pr(self, repo, number, title="", method="squash"):
         self.merged = getattr(self, "merged", []) + [(repo, number, title, method)]
-        return {"merged": True, "sha": "abc123", "message": "Pull Request successfully merged"}
+        sha = f"merged-pr-{number:04d}"
+        pr = self.pr_by_number.get(number)
+        if pr:
+            pr.update({"merged": True, "state": "closed", "merge_commit_sha": sha})
+            self.branch_heads[(repo, pr["base"])] = sha
+        return {"merged": True, "sha": sha if pr else "abc123", "message": "Pull Request successfully merged"}
+
+    def release_pr(self, repo, head, base):
+        return next((pr for pr in self.prs if pr["repo"] == repo and pr["head"] == head
+                     and pr["base"] == base), None)
+
+    def reopen_pr(self, repo, number):
+        pr = self.pr_by_number[number]
+        pr.update({"state": "open", "merged": False})
+        return pr
+
+    def enable_merge_commit(self, repo):
+        if not self.merge_commit_enabled:
+            self.merge_commit_enable_calls.append(repo)
+            self.merge_commit_enabled = True
+
+    def compare_branches(self, repo, base, head):
+        return self.compare_results.get((repo, base, head), {"ahead_by": 1, "status": "ahead"})
 
     def pr(self, repo, number):
         return getattr(self, "pr_data", {}).get(number, {

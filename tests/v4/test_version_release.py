@@ -92,6 +92,17 @@ def test_release_notes_escape_multiline_jira_summaries_as_markdown_text():
     assert "\n## Injected" not in notes and "\n![image]" not in notes
 
 
+def test_release_check_and_tag_prefix_can_be_set_on_project_configuration(ctx):
+    configure(ctx)
+    project = ctx.repo().projects["TESTWP"]
+    project.release_check = ["vendor/bin/phpunit", "composer validate"]
+    project.tag_prefix = "core"
+    project.version_release["tag_prefixes"] = {}
+
+    assert version_release.check_commands(project) == ["vendor/bin/phpunit", "composer validate"]
+    assert version_release.release_tag(project, CORE) == "core-0.5.0-beta"
+
+
 @pytest.mark.parametrize(("status", "reviewer", "qa", "qc", "missing"), [
     ("In Progress", True, True, True, "Done"),
     ("Done", False, True, True, "reviewer PASS"),
@@ -166,7 +177,7 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
             return tmp_path
 
         def remote_branch_exists(self, _mirror, branch):
-            return branch == "develop"
+            return branch == "release/core-a"
 
         def detached(self, _mirror, path, ref):
             self.refs.append(ref)
@@ -193,14 +204,16 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
                       project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "checks": ["true"],
                                "source_branch": "develop", "work_minutes": {"hard": 1}},
                       identity=("bot", "bot@example.test"), step="version_release")
+    claimed.project.update({"release_branch": "release/core-a", "source_sha": "a" * 40})
 
     result = release_worker.run_version_release(api, claimed, {"id": "101", "name": CORE}, "TESTWP-900",
                                                 str(tmp_path), 1, [])
 
     assert result["outcome"] == "done"
-    assert git_refs == ["origin/develop"]
+    assert git_refs == ["origin/release/core-a"]
     complete = next(call for call in api.calls if call[1].endswith("/complete"))
     assert complete[2]["head_sha"] == "a" * 40
+    assert complete[2]["source_sha"] == "a" * 40
     assert complete[2]["checks"] == [{"command": "true", "passed": True, "exit_code": 0, "output": ""}]
 
 
@@ -222,14 +235,28 @@ def test_failed_release_checks_create_one_bug_per_failed_command_linked_as_block
 
     bugs = [item for item in ctx.jira.created if item["issuetype"] == "Bug"]
     assert result["status"] == "failed" and len(bugs) == 2
-    assert all(bug["fix_version"] == "101" and {"release-check", "aiflow-ready"} <= set(bug["labels"])
+    assert all({"release-check", "release-qa", "aiflow-ready"} <= set(bug["labels"])
                for bug in bugs)
-    assert all(ctx.jira.status_of[bug["key"]] == "To Do" for bug in bugs)
+    assert all(ctx.jira.status_of[bug["key"]] == "Backlog" for bug in bugs)
     assert ctx.jira.issue_links == [(bugs[0]["key"], tracker, "Blocks"), (bugs[1]["key"], tracker, "Blocks")]
     assert ctx.db.one("SELECT status FROM version_releases WHERE project='TESTWP' AND version_id='101'")["status"] == "failed"
     assert getattr(ctx.github, "merges", []) == []
+    assert ctx.github.prs == [] and ctx.github.commits == []
     assert getattr(ctx.github, "tags", {}) == {}
     assert getattr(ctx.github, "releases", {}) == {}
+    comments_before = len(ctx.jira.comments)
+
+    replay = version_release.complete(ctx, ctx.repo().projects["TESTWP"], version, run,
+                                      {"head_sha": "a" * 40, "checks": [
+                                          {"command": "composer test", "passed": False, "exit_code": 1,
+                                           "output": "assertion failed"},
+                                          {"command": "npm test", "passed": False, "exit_code": 2,
+                                           "output": "test failed"}]})
+
+    assert replay["bugs"] == [{"key": bug["key"], "command": command}
+                              for bug, command in zip(bugs, ("composer test", "npm test"))]
+    assert len([item for item in ctx.jira.created if item["issuetype"] == "Bug"]) == 2
+    assert len(ctx.jira.comments) == comments_before
 
 
 def test_failed_bugs_enter_the_live_gate_and_are_rechecked_only_after_done(ctx):
@@ -243,21 +270,19 @@ def test_failed_bugs_enter_the_live_gate_and_are_rechecked_only_after_done(ctx):
                              {"head_sha": "a" * 40, "checks": [{"command": "composer test", "passed": False,
                                                                     "exit_code": 1, "output": "failed"}]})
     bug = next(row for row in ctx.jira.created if row["issuetype"] == "Bug")
-    ctx.jira.version_issue_data[("TESTWP", "101")].append(issue(bug["key"], "To Do"))
-
-    blocked = version_release.evaluate(ctx, ctx.repo().projects["TESTWP"], version)
-    assert f"{bug['key']}: missing Done, reviewer PASS, QA merge, QC checks" in blocked["reasons"]
-    ctx.jira.version_issue_data[("TESTWP", "101")][-1] = issue(bug["key"], "Done")
-    still_blocked = version_release.evaluate(ctx, ctx.repo().projects["TESTWP"], version)
-    assert f"{bug['key']}: missing reviewer PASS, QA merge, QC checks" in still_blocked["reasons"]
-    assert version_release.scan(ctx) == 1
-    state = ctx.db.one("SELECT status,gate_detail FROM version_releases WHERE project='TESTWP' AND version_id='101'")
-    assert state["status"] == "failed" and bug["key"] in state["gate_detail"]
+    project = ctx.repo().projects["TESTWP"]
+    assert bug["key"] not in {row["key"] for row in ctx.jira.version_issue_data[("TESTWP", "101")]}
+    blocked = version_release.evaluate(ctx, project, version)
+    assert not blocked["ready"] and f"{bug['key']}: release-check Bug is Backlog, not Done" in blocked["reasons"]
+    ctx.jira.status_of[bug["key"]] = "Done"
+    ready = version_release.evaluate(ctx, project, version)
+    assert ready["ready"]
 
 
-def test_failed_version_waits_until_jira_search_lists_its_new_bugs(client, ctx):
+def test_release_check_bug_done_restarts_release_from_checks_without_jira_version_membership(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-45")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
     project = ctx.repo().projects["TESTWP"]
     version = ctx.jira.version_data["TESTWP"][0]
     version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
@@ -268,23 +293,29 @@ def test_failed_version_waits_until_jira_search_lists_its_new_bugs(client, ctx):
     bug = next(row for row in ctx.jira.created if row["issuetype"] == "Bug")
     headers = node_headers(client)
 
-    # Jira search has not indexed the new Bug yet: the member list still shows only the Done ticket
+    # The release QA Bug stays in Backlog and blocks by status, independent of Jira version indexing.
     lagging = version_release.evaluate(ctx, project, version)
     candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
-    claim = claim_release(client, headers)
 
     assert not lagging["ready"]
-    assert f"{bug['key']}: release-check Bug is not yet listed in Jira version {CORE}" in lagging["reasons"]
-    assert candidates["versions"] == [] and claim.status_code == 409
+    assert f"{bug['key']}: release-check Bug is Backlog, not Done" in lagging["reasons"]
+    assert candidates["versions"] == []
     assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release'")["n"] == 0
     assert len([row for row in ctx.jira.created if row["issuetype"] == "Bug"]) == 1
 
-    ctx.jira.version_issue_data[("TESTWP", "101")].append(issue(bug["key"], "To Do"))
-    assert client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()["versions"] == []
-    ctx.jira.version_issue_data[("TESTWP", "101")].pop()
-    evidence(ctx, bug["key"])
+    ctx.jira.status_of[bug["key"]] = "Done"
     ready = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
     assert [item["version_id"] for item in ready["versions"]] == ["101"]
+    claim = claim_release(client, headers)
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    result = client.post("/v1/version-releases/101/complete",
+                         json={"run_id": run["run_id"], "fence": run["fence"],
+                               "head_sha": run["project"]["source_sha"],
+                               "source_sha": run["project"]["source_sha"],
+                               "checks": [{"command": "composer install", "passed": True},
+                                          {"command": "vendor/bin/phpunit", "passed": True}]}, headers=headers)
+    assert result.status_code == 200 and result.json()["released"] is True
 
 
 def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(client, ctx):
@@ -292,12 +323,12 @@ def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(
     evidence(ctx, "TESTWP-46")
     ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
     headers = node_headers(client)
-    merge_branch = ctx.github.merge_branch
+    merge_pr = ctx.github.merge_pr
 
-    def protected(repo, base, head, message):
-        raise RuntimeError("409 merge conflict: master is protected")
+    def protected(repo, number, title="", method="squash"):
+        return {"merged": False, "sha": "", "message": "409 merge conflict: master is protected"}
 
-    ctx.github.merge_branch = protected
+    ctx.github.merge_pr = protected
 
     def worker_iteration(expected: str = "failed") -> int:
         claims = 0
@@ -308,8 +339,10 @@ def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(
                 continue
             claims += 1
             run = claim.json()
+            checked_head = ctx.github.branch_sha("test-aiflow-wp", run["project"]["release_branch"])
             result = client.post("/v1/version-releases/101/complete",
-                                 json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                                 json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": checked_head,
+                                       "source_sha": run["project"]["source_sha"],
                                        "checks": [{"command": "composer install", "passed": True},
                                                   {"command": "vendor/bin/phpunit", "passed": True}]},
                                  headers=headers)
@@ -324,7 +357,8 @@ def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(
     error_comments = [body for key, body in ctx.jira.comments if key == tracker and "integration error" in body]
     state = ctx.db.one("SELECT status,gate_detail FROM version_releases WHERE project='TESTWP' AND version_id='101'")
     assert claims == 1
-    assert len(tasks) == 1 and "release-publish" in tasks[0]["labels"]
+    assert len([task for task in tasks if "release-publish" in task["labels"]]) == 1
+    assert not [task for task in tasks if "merge-back" in task["labels"]]
     assert ctx.jira.issue_links == [(tasks[0]["key"], tracker, "Blocks")]
     assert len(error_comments) == 1 and tasks[0]["key"] in error_comments[0]
     assert state["status"] == "failed" and "master is protected" in state["gate_detail"]
@@ -332,10 +366,13 @@ def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(
     assert ctx.github.tags == {} and ctx.jira.released_versions == []
 
     ctx.jira.status_of[tasks[0]["key"]] = "Done"
-    ctx.github.merge_branch = merge_branch
+    ctx.github.merge_pr = merge_pr
     assert worker_iteration("released") == 1
     assert ctx.jira.released_versions == ["101"] and len(ctx.github.tags) == 1
-    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"]) == 1
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"
+                and "release-publish" in row["labels"]]) == 1
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"
+                and "merge-back" in row["labels"]]) == 1
 
 
 def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_back(client, ctx):
@@ -343,6 +380,7 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     evidence(ctx, "TESTWP-50")
     evidence(ctx, "TESTWP-51")
     ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    ctx.github.merge_commit_enabled = False
     headers = node_headers(client)
     claim = claim_release(client, headers)
     assert claim.status_code == 200, claim.text
@@ -350,34 +388,59 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
 
     result = client.post("/v1/version-releases/101/complete",
                          json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                               "source_sha": run["project"]["source_sha"],
                                "checks": [{"command": "composer install", "passed": True, "exit_code": 0},
                                           {"command": "vendor/bin/phpunit", "passed": True, "exit_code": 0}]},
                          headers=headers)
 
     assert result.status_code == 200 and result.json()["released"] is True
-    assert len(ctx.github.merges) == 2
-    assert ctx.github.merges[0][1:3] == ("master", "develop")
-    assert ctx.github.merges[1][1:3] == ("develop", "master")
+    assert ctx.github.merges == []
+    merge_back_tasks = [row for row in ctx.jira.created if row["issuetype"] == "Task"
+                        and "merge-back" in row["labels"]]
+    assert len(merge_back_tasks) == 1
+    assert ctx.github.prs[0]["head"].startswith("release/") and ctx.github.prs[0]["base"] == "master"
+    assert ctx.github.prs[0]["draft"] is False
+    assert ctx.github.merged == [("test-aiflow-wp", 1, "Release WordPress Core 0.5.0-beta", "merge")]
+    assert ctx.github.merge_commit_enable_calls == ["test-aiflow-wp"]
+    release_branch = ctx.github.prs[0]["head"]
+    assert "TESTWP-50" in ctx.github.files[("test-aiflow-wp", release_branch, "CHANGELOG.md")]
+    assert "TESTWP-51" in ctx.github.files[("test-aiflow-wp", release_branch, "CHANGELOG.md")]
+    assert "### Added" in ctx.github.files[("test-aiflow-wp", release_branch, "CHANGELOG.md")]
+    assert "Current version: `0.5.0-beta`" in ctx.github.files[("test-aiflow-wp", release_branch, "README.md")]
+    assert '"version": "0.5.0-beta"' in ctx.github.files[("test-aiflow-wp", release_branch, "package.json")]
     tag = "testwp-core-0.5.0-beta"
-    assert ctx.github.tags[("test-aiflow-wp", tag)] == "merged-0001"
+    assert ctx.github.tags[("test-aiflow-wp", tag)] == "merged-pr-0001"
     release = ctx.github.releases[("test-aiflow-wp", tag)]
     assert "TESTWP-50" in release["body"] and "TESTWP-51" in release["body"]
     assert "composer install" in release["body"]
     assert ctx.jira.released_versions == ["101"]
+    assert ctx.jira.version_release_dates["101"] == datetime.now(timezone.utc).date().isoformat()
+    release_tracker = next(row for row in ctx.jira.created if row["issuetype"] == "Release")
+    assert release_tracker["version_field"] == CORE
+    assert not [transition for transition in ctx.jira.transitions if transition[1] == "Human review"]
     tracker = claim.json()["tracker_key"]
     comment = next(body for key, body in reversed(ctx.jira.comments) if key == tracker and "Version released" in body)
     assert "TESTWP-50" in comment and "a" * 12 in comment and tag in comment and "GitHub Release:" in comment
     state = ctx.db.one("SELECT status,master_sha,tag,github_release_url FROM version_releases"
                        " WHERE project='TESTWP' AND version_id='101'")
-    assert state["status"] == "released" and state["master_sha"] == "merged-0001" and state["tag"] == tag
+    assert state["status"] == "released" and state["master_sha"] == "merged-pr-0001" and state["tag"] == tag
     audit = ctx.db.all("SELECT action,result FROM write_audit WHERE ticket=%s ORDER BY id", (tracker,))
     assert {item["action"] for item in audit} >= {"github-tag", "github-release", "github-merge", "jira-version-released"}
-    assert "Release" in ctx.jira.comments[-1][1] or "Merge-back" in ctx.jira.comments[-1][1]
+    assert "Version released" in comment and "merge-back ticket" in ctx.jira.comments[-1][1].lower()
     candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
     assert candidates["versions"] == []
     repeated = claim_release(client, headers)
     assert repeated.status_code == 404
     assert len(ctx.github.tags) == len(ctx.github.releases) == 1
+    before_commits = len(ctx.github.commits)
+    replay = version_release.complete(ctx, ctx.repo().projects["TESTWP"], ctx.jira.version_data["TESTWP"][0],
+                                      {"id": run["run_id"], "fence": run["fence"],
+                                       "account_id": "claude-01", "node": "cc"},
+                                      {"head_sha": "a" * 40, "source_sha": "a" * 40,
+                                       "checks": [{"command": "composer install", "passed": True}]})
+    assert replay["released"] is True
+    assert len(ctx.github.prs) == 1 and len(ctx.github.tags) == len(ctx.github.releases) == 1
+    assert len(ctx.github.commits) == before_commits and ctx.jira.released_versions == ["101"]
 
 
 def test_scan_repairs_jira_released_version_after_registry_write_failure(client, ctx, monkeypatch):
@@ -408,22 +471,25 @@ def test_scan_repairs_jira_released_version_after_registry_write_failure(client,
     assert response.status_code == 200 and response.json()["status"] == "reconciling"
     assert ctx.jira.released_versions == ["101"]
     assert ctx.db.one("SELECT status FROM version_releases WHERE project='TESTWP' AND version_id='101'")["status"] == "checking"
-    assert not [row for row in ctx.jira.created if row["issuetype"] == "Task"]
-    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"
+                and "merge-back" in row["labels"]]) == 1
+    assert ctx.github.merges == []
     client.post(f"/v1/runs/{run['run_id']}/release", json={"fence": run["fence"]}, headers=headers)
 
     monkeypatch.setattr(version_release, "_set_state", set_state)
     assert version_release.scan(ctx) == 1
     state = ctx.db.one("SELECT status,master_sha,tag FROM version_releases"
                        " WHERE project='TESTWP' AND version_id='101'")
-    assert state == {"status": "released", "master_sha": "merged-0001", "tag": "testwp-core-0.5.0-beta"}
+    assert state == {"status": "released", "master_sha": "merged-pr-0001", "tag": "testwp-core-0.5.0-beta"}
     assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-version-released'")["n"] == 1
-    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-merge-back-task'")["n"] == 1
 
     version_release.scan(ctx)
-    assert len(ctx.github.merges) == 2
+    assert ctx.github.merges == []
     assert len(ctx.github.tags) == len(ctx.github.releases) == 1
     assert ctx.jira.released_versions == ["101"]
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"
+                and "merge-back" in row["labels"]]) == 1
 
 
 def test_core_and_theme_versions_in_one_repo_get_distinct_tags_and_releases(ctx):
@@ -456,14 +522,6 @@ def test_failed_merge_back_creates_a_ready_jira_follow_up_task(ctx):
     version = ctx.jira.version_data["TESTWP"][0]
     snapshot = version_release.evaluate(ctx, project, version)
     version_release.record_gate(ctx, project, version, snapshot)
-    merge_branch = ctx.github.merge_branch
-
-    def fail_merge_back(repo, base, head, message):
-        if base == "develop" and head == "master":
-            raise RuntimeError("merge conflict")
-        return merge_branch(repo, base, head, message)
-
-    ctx.github.merge_branch = fail_merge_back
     result = version_release.complete(ctx, project, version,
                                       {"id": "run-merge-back", "fence": 4,
                                        "account_id": "claude-01", "node": "cc"},
@@ -474,8 +532,31 @@ def test_failed_merge_back_creates_a_ready_jira_follow_up_task(ctx):
     assert result["released"] is True
     assert "merge-back" in task["labels"] and "aiflow-ready" in task["labels"]
     assert ctx.jira.status_of[task["key"]] == "To Do"
+    assert ctx.github.merges == []
     assert any(key == ctx.db.one("SELECT tracker_key FROM version_releases")["tracker_key"]
                and task["key"] in comment for key, comment in ctx.jira.comments)
+
+
+def test_no_merge_back_ticket_is_created_when_master_has_no_missing_commits(ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-71")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    ctx.github.compare_results[("test-aiflow-wp", "develop", "master")] = {"ahead_by": 0, "status": "identical"}
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+
+    result = version_release.complete(ctx, project, version,
+                                      {"id": "run-no-back", "fence": 5,
+                                       "account_id": "claude-01", "node": "cc"},
+                                      {"head_sha": "a" * 40,
+                                       "checks": [{"command": "composer test", "passed": True}]})
+    version_release.scan(ctx)
+
+    assert result["released"] is True
+    assert not [row for row in ctx.jira.created if row["issuetype"] == "Task" and "merge-back" in row["labels"]]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+    assert ctx.github.merges == []
 
 
 def test_completion_for_another_version_than_the_claimed_lease_is_rejected_without_side_effects(client, ctx):
@@ -526,8 +607,8 @@ def test_merge_back_runs_even_when_the_released_comment_fails(ctx):
                                  {"id": "run-comment", "fence": 5, "account_id": "claude-01", "node": "cc"},
                                  {"head_sha": "a" * 40, "checks": [{"command": "composer test", "passed": True}]})
 
-    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
-    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+    assert ctx.github.merges == []
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-merge-back-task'")["n"] == 1
     assert ctx.db.one("SELECT status FROM version_releases")["status"] == "released"
 
 
@@ -538,19 +619,14 @@ def test_scan_retries_merge_back_for_a_released_version_without_a_merge_back_rec
     project = ctx.repo().projects["TESTWP"]
     version = ctx.jira.version_data["TESTWP"][0]
     version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
-    merge_branch, create_issue = ctx.github.merge_branch, ctx.jira.create_issue
-
-    def fail_merge_back(repo, base, head, message):
-        if base == "develop":
-            raise RuntimeError("GitHub 502")
-        return merge_branch(repo, base, head, message)
+    create_issue = ctx.jira.create_issue
 
     def fail_task(project_key, summary, *args, **kwargs):
         if summary.startswith("Merge "):
             raise RuntimeError("Jira 503")
         return create_issue(project_key, summary, *args, **kwargs)
 
-    ctx.github.merge_branch, ctx.jira.create_issue = fail_merge_back, fail_task
+    ctx.jira.create_issue = fail_task
     with pytest.raises(RuntimeError, match="Jira 503"):
         version_release.complete(ctx, project, version,
                                  {"id": "run-back", "fence": 6, "account_id": "claude-01", "node": "cc"},
@@ -558,12 +634,12 @@ def test_scan_retries_merge_back_for_a_released_version_without_a_merge_back_rec
     assert ctx.jira.released_versions == ["101"]
     assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action LIKE '%%merge-back%%'")["n"] == 0
 
-    ctx.github.merge_branch, ctx.jira.create_issue = merge_branch, create_issue
+    ctx.jira.create_issue = create_issue
     version_release.scan(ctx)
     version_release.scan(ctx)
 
-    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
-    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+    assert ctx.github.merges == []
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-merge-back-task'")["n"] == 1
 
 
 def test_release_notes_escape_markdown_in_the_jira_version_name():
@@ -571,7 +647,7 @@ def test_release_notes_escape_markdown_in_the_jira_version_name():
 
     notes = version_release._changelog(snapshot, "a" * 40, [])
 
-    assert notes.splitlines()[0] == "## Core \\[x\\]\\(https\\:\\/\\/evil\\.test\\) \\*0\\.5\\* \\# Owned"
+    assert notes.splitlines()[0].startswith("## Core \\[x\\]\\(https\\:\\/\\/evil\\.test\\) \\*0\\.5\\* \\# Owned - ")
     assert "\n# Owned" not in notes
 
 

@@ -6,40 +6,41 @@
 <title>AI Flow Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700;800&display=swap">
 <style>
 :root{
-  --bg:#F2F4F8; --surface:#FFFFFF; --surface-2:#F7F8FB; --line:#D9DFE9; --line-soft:#E9EDF3;
-  --fg:#101828; --muted:#4F5D77; --faint:#8C96AA;
-  --accent:#2453D6; --accent-weak:rgba(36,83,214,.10); --accent-fg:#FFFFFF;
-  --good:#0F7548; --good-weak:rgba(15,117,72,.12);
-  --warn:#8F5200; --warn-weak:rgba(176,104,0,.14);
-  --crit:#BB2727; --crit-weak:rgba(187,39,39,.12);
-  --track:#E2E7EF; --overlay:rgba(16,24,40,.38); --shadow:0 18px 50px rgba(16,24,40,.18);
-  --f-ui:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --f-cond:"IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
-  --f-mono:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --bg:#f5f1eb; --surface:#fffdf9; --surface-2:#f7f3ed; --line:#ded6cb; --line-soft:#eee7dd;
+  --fg:#292620; --muted:#6d665d; --faint:#9a9185;
+  --accent:#8c5a3b; --accent-weak:rgba(140,90,59,.13); --accent-fg:#fffdf9;
+  --good:#467953; --good-weak:rgba(70,121,83,.13);
+  --warn:#9a6718; --warn-weak:rgba(154,103,24,.14);
+  --crit:#ad493d; --crit-weak:rgba(173,73,61,.13);
+  --track:#e7dfd4; --overlay:rgba(41,38,32,.42); --shadow:0 18px 50px rgba(41,38,32,.18);
+  --provider-claude:#d98b5f; --provider-codex:#58a98b; --provider-grok:#9c83d4; --provider-opencode:#74899a;
+  --f-ui:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-cond:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:#0A0F1E; --surface:#111933; --surface-2:#0D1429; --line:#25314F; --line-soft:#1A2441;
-    --fg:#E7ECF6; --muted:#A1ADC7; --faint:#6E7B99;
-    --accent:#88AAFF; --accent-weak:rgba(136,170,255,.15); --accent-fg:#0A0F1E;
-    --good:#52DB9E; --good-weak:rgba(82,219,158,.14);
-    --warn:#F3B649; --warn-weak:rgba(243,182,73,.15);
-    --crit:#FF7E7E; --crit-weak:rgba(255,126,126,.15);
-    --track:#1D2847; --overlay:rgba(3,6,15,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
+    --bg:#121110; --surface:#1a1917; --surface-2:#201e1b; --line:#2d2a26; --line-soft:#26231f;
+    --fg:#ece7df; --muted:#9a9388; --faint:#6b655c;
+    --accent:#d1a276; --accent-weak:rgba(209,162,118,.16); --accent-fg:#171512;
+    --good:#86c77f; --good-weak:rgba(134,199,127,.14);
+    --warn:#e6bb52; --warn-weak:rgba(230,187,82,.15);
+    --crit:#e46e5e; --crit-weak:rgba(228,110,94,.15);
+    --track:#302c27; --overlay:rgba(0,0,0,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
     color-scheme:dark;
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0A0F1E; --surface:#111933; --surface-2:#0D1429; --line:#25314F; --line-soft:#1A2441;
-  --fg:#E7ECF6; --muted:#A1ADC7; --faint:#6E7B99;
-  --accent:#88AAFF; --accent-weak:rgba(136,170,255,.15); --accent-fg:#0A0F1E;
-  --good:#52DB9E; --good-weak:rgba(82,219,158,.14);
-  --warn:#F3B649; --warn-weak:rgba(243,182,73,.15);
-  --crit:#FF7E7E; --crit-weak:rgba(255,126,126,.15);
-  --track:#1D2847; --overlay:rgba(3,6,15,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
+  --bg:#121110; --surface:#1a1917; --surface-2:#201e1b; --line:#2d2a26; --line-soft:#26231f;
+  --fg:#ece7df; --muted:#9a9388; --faint:#6b655c;
+  --accent:#d1a276; --accent-weak:rgba(209,162,118,.16); --accent-fg:#171512;
+  --good:#86c77f; --good-weak:rgba(134,199,127,.14);
+  --warn:#e6bb52; --warn-weak:rgba(230,187,82,.15);
+  --crit:#e46e5e; --crit-weak:rgba(228,110,94,.15);
+  --track:#302c27; --overlay:rgba(0,0,0,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -62,8 +63,8 @@ a{color:var(--accent)}
 .topbar .wrap{display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; padding-block:10px}
 .brand{display:flex; align-items:center; gap:10px; font-family:var(--f-cond); font-weight:700; font-size:18px; letter-spacing:.01em}
 .brand svg{color:var(--accent)}
-.tabs{display:flex; gap:4px; background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:3px}
-.tab{border:0; background:transparent; padding:8px 14px; border-radius:8px; cursor:pointer; color:var(--muted); font-weight:500; min-height:38px}
+.tabs{display:flex; min-width:0; max-width:100%; gap:4px; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; scrollbar-width:thin; -webkit-overflow-scrolling:touch; background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:3px}
+.tab{flex:0 0 auto; white-space:nowrap; border:0; background:transparent; padding:8px 14px; border-radius:8px; cursor:pointer; color:var(--muted); font-weight:500; min-height:38px}
 .tab[aria-selected="true"]{background:var(--surface); color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.08), inset 0 0 0 1px var(--line)}
 .spacer{flex:1 1 auto}
 .sim{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
@@ -114,7 +115,7 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 .review-chart-row{display:grid; grid-template-columns:92px minmax(0,1fr) 28px; align-items:center; gap:8px; font-size:12px}
 .review-chart-bar{height:22px; display:flex; align-items:stretch; background:var(--surface-2); border-radius:5px; overflow:hidden; min-width:0}
 .review-chart-bar span{display:flex; justify-content:center; align-items:center; min-width:0; color:#fff; font-size:11px; font-weight:600; overflow:hidden}
-.reason-question_from_ai{background:#2453D6}.reason-decision_needed{background:#7B61A8}.reason-review_before_merge{background:#0F7548}.reason-blocked{background:#B66A00}
+.reason-question_from_ai{background:var(--provider-claude)}.reason-decision_needed{background:#7B61A8}.reason-review_before_merge{background:#0F7548}.reason-blocked{background:#B66A00}
 .review-legend{display:flex; gap:8px 16px; flex-wrap:wrap; font-size:12px; color:var(--muted)}
 .review-legend span{display:inline-flex; align-items:center; gap:6px}.review-legend i{display:inline-block; width:10px; height:10px; border-radius:2px}
 .review-breakdown{display:grid; grid-template-columns:minmax(0,1.7fr) minmax(260px,1fr); gap:16px; align-items:start}
@@ -289,7 +290,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .bd-bar span:hover{filter:brightness(1.12)}
 .seg-work{background:var(--accent)} .seg-ci{background:var(--faint)} .seg-queue{background:var(--warn)} .seg-blocked{background:var(--crit)}
 .bd-bar.tl-bar span{min-width:2px}
-.tl-queued{background:var(--warn)} .tl-dev{background:var(--accent)} .tl-rework{background:#7b6cff} .tl-verify{background:var(--good)} .tl-waiting{background:var(--crit)} .tl-ai{background:var(--faint)}
+.tl-queued{background:var(--warn)} .tl-dev{background:var(--accent)} .tl-rework{background:var(--provider-grok)} .tl-verify{background:var(--good)} .tl-waiting{background:var(--crit)} .tl-ai{background:var(--faint)}
 .legend{display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted)}
 .legend span{display:inline-flex; align-items:center; gap:6px}
 .legend i{width:10px; height:10px; border-radius:3px; display:inline-block}
@@ -396,7 +397,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .an-chart{width:100%; max-width:640px; height:auto; display:block}
 .an-chart text{fill:var(--muted); font-family:var(--f-mono); font-size:10px}
 .an-ok{background:var(--good); fill:var(--good)} .an-rework{background:var(--warn); fill:var(--warn)} .an-failed{background:var(--crit); fill:var(--crit)} .an-other{background:var(--faint); fill:var(--faint)}
-.st-done{background:var(--good)} .st-verify{background:var(--accent)} .st-progress{background:#7b6cff} .st-todo{background:var(--faint)} .st-wait{background:var(--warn)}
+.st-done{background:var(--good)} .st-verify{background:var(--accent)} .st-progress{background:var(--provider-grok)} .st-todo{background:var(--faint)} .st-wait{background:var(--warn)}
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
 .lead-controls{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.lead-controls label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .lead-controls select{min-width:210px;min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
@@ -415,6 +416,48 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .footer .f-links{display:inline-flex; flex-wrap:wrap; gap:4px 14px}
 .footer .f-copy{margin-left:auto}
 @media (max-width:640px){ .topbar{position:static} .epic{grid-template-columns:minmax(0,1fr)} .ver{grid-template-columns:90px minmax(0,1fr)} .footer .f-copy{margin-left:0} }
+
+/* Command Center V2 warm graphite shell and dashboard */
+.tab[hidden]{display:none}
+.dash-title{margin:4px 0 0;font-size:24px;letter-spacing:-.025em}
+.dash-section{display:flex;flex-direction:column;gap:12px}
+.dash-section-title{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.dash-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.dash-kpi{min-width:0;text-align:left;display:flex;flex-direction:column;gap:4px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:13px;cursor:pointer}
+.dash-kpi:hover{border-color:var(--accent)}
+.dash-kpi .label{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.dash-kpi .value{font-size:27px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.dash-kpi .detail{font-size:12px;color:var(--muted)}
+.dash-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr);gap:12px;align-items:start}
+.dash-flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px}
+.flow-step{display:grid;gap:5px;padding:10px;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:10px}
+.flow-step b{font-family:var(--f-mono);font-size:20px}.flow-step span{font-size:11px;color:var(--muted)}
+.dash-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dash-tools input{max-width:320px}
+.sort-btn{display:inline-flex;align-items:center;gap:4px;padding:0;border:0;background:none;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}
+.dash-table{min-width:680px}.dash-table td:first-child{font-weight:700}
+.roadmap-list{display:grid;gap:7px}.roadmap-row{width:100%;display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(100px,1fr) 52px;align-items:center;gap:10px;text-align:left;padding:8px;border:1px solid transparent;border-radius:9px;background:transparent;cursor:pointer}
+.roadmap-row:hover{background:var(--surface-2);border-color:var(--line)}
+.roadmap-row .roadmap-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.roadmap-track{height:12px;border-radius:6px;background:var(--track);overflow:hidden}.roadmap-track i{display:block;height:100%;background:var(--good)}
+.provider-legend{display:flex;gap:8px 14px;flex-wrap:wrap;color:var(--muted);font-size:12px}.provider-legend span{display:inline-flex;align-items:center;gap:6px}.provider-swatch{width:9px;height:9px;border-radius:50%;background:var(--provider-color)}
+.provider-claude{--provider-color:var(--provider-claude)}.provider-codex{--provider-color:var(--provider-codex)}.provider-grok{--provider-color:var(--provider-grok)}.provider-opencode{--provider-color:var(--provider-opencode)}
+.provider-chart{display:block;width:100%;height:auto;min-height:120px}.provider-chart .provider-claude{fill:var(--provider-claude)}.provider-chart .provider-codex{fill:var(--provider-codex)}.provider-chart .provider-grok{fill:var(--provider-grok)}.provider-chart .provider-opencode{fill:var(--provider-opencode)}
+.dhead-tools{display:flex;align-items:end;gap:10px 14px;flex-wrap:wrap}.ai-filter{max-width:190px}.ai-filter select{min-width:150px}
+.project-picker{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 40px;gap:6px;align-items:end;min-width:min(320px,100%);max-width:440px;flex:1 1 320px}
+.project-picker label{grid-column:1/-1;color:var(--muted);font-size:12px}.project-picker input{background:var(--surface);min-width:0}
+.project-picker .star-button{min-height:40px;border:1px solid var(--line);border-radius:9px;background:var(--surface);cursor:pointer;color:var(--muted);font-size:19px}
+.project-picker .star-button[aria-pressed="true"]{color:var(--warn)}
+.project-options{position:absolute;z-index:30;top:100%;left:0;right:46px;max-height:min(55vh,360px);overflow:auto;margin-top:4px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
+.project-options[hidden]{display:none}.project-options .option-group{padding:6px 9px;color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.project-option{display:flex;width:100%;align-items:center;gap:8px;padding:8px 9px;border:0;border-radius:7px;background:transparent;text-align:left;cursor:pointer}.project-option:hover,.project-option[aria-selected="true"]{background:var(--surface-2)}.project-option .key{font-family:var(--f-mono);font-weight:700}.project-option .repo{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}.project-option .starred{margin-left:auto;color:var(--warn);font-size:11px}
+.command-search[hidden]{display:none}.command-search{position:fixed;inset:0;z-index:60;display:grid;place-items:start center;padding:10vh 16px 24px}.command-scrim{position:absolute;inset:0;background:var(--overlay)}
+.command-dialog{position:relative;width:min(620px,100%);max-height:80vh;overflow:hidden;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+.command-dialog header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}.command-dialog h2{margin:0;flex:1;color:var(--fg);font-size:16px;letter-spacing:0;text-transform:none}.command-dialog input{border:0;border-radius:0;border-bottom:1px solid var(--line);background:var(--surface);font-size:16px;min-height:52px;padding:12px 16px}
+.command-results{overflow:auto;padding:6px;display:grid;gap:3px}.command-result{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border:0;border-radius:9px;background:transparent;text-align:left;cursor:pointer}.command-result:hover,.command-result:focus-visible{background:var(--surface-2)}.command-result strong{font-family:var(--f-mono);font-size:12px}.command-result .kind{margin-left:auto;color:var(--muted);font-size:11px}.command-hint{padding:8px 14px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px}
+.provider-name{font-weight:700;color:var(--provider-color)}.quota-table td{vertical-align:top}.quota-table .qcell{min-width:200px}
+svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--provider-codex)}svg .provider-grok{fill:var(--provider-grok)}svg .provider-opencode{fill:var(--provider-opencode)}
+@media (max-width:900px){.dash-grid{grid-template-columns:minmax(0,1fr)}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){.dash-kpis{grid-template-columns:minmax(0,1fr)}.roadmap-row{grid-template-columns:minmax(0,1fr) 52px}.roadmap-track{grid-column:1/-1;grid-row:2}.command-search{padding-top:4vh}.tabs{max-width:100%;width:100%}.project-picker{min-width:100%}}
 </style>
 </head>
 <body>
@@ -424,33 +467,43 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="2.6"></circle><circle cx="19" cy="5" r="2.6"></circle><circle cx="19" cy="19" r="2.6"></circle><path d="M7.4 10.9 16.6 6.1M7.4 13.1l9.2 4.8"></path></svg>
       <span>AI Flow</span>
     </div>
-    <div class="tabs" role="tablist" aria-label="Views">
-      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Command Center</button>
-      <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-view="delivery">Delivery</button>
-      <button class="tab" role="tab" id="tab-sa" aria-controls="view-sa" aria-selected="false" data-act="view" data-view="sa">SA</button>
-      <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-view="lead">Team Lead</button>
-      <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-view="business">Business</button>
-      <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
-      <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
-      <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
-      <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
-      <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
+    <div class="tabs" role="tablist" aria-label="Console views">
+      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Dashboard</button>
+      <button class="tab" role="tab" id="tab-work" aria-controls="view-work" aria-selected="false" data-act="view" data-view="work">Work board</button>
+      <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-menu-view data-view="delivery">Delivery</button>
+      <button class="tab" role="tab" id="tab-sa" aria-controls="view-sa" aria-selected="false" data-act="view" data-menu-view data-view="sa">SA</button>
+      <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-menu-view data-view="lead">Team Lead</button>
+      <button class="tab" role="tab" id="tab-business" aria-controls="view-business" aria-selected="false" data-act="view" data-menu-view data-view="business">Business</button>
+      <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-menu-view data-view="review">Human review</button>
+      <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-menu-view data-view="stakeholder">Stakeholder</button>
+      <button class="tab" role="tab" id="tab-machines" aria-controls="view-machines" aria-selected="false" data-act="view" data-menu-view data-view="machines">Machines and AI</button>
+      <button class="tab" role="tab" id="tab-users" aria-controls="view-users" aria-selected="false" data-act="view" data-menu-view data-view="users">Users and roles</button>
+      <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-menu-view data-view="knowledge">Knowledge</button>
+      <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
+      <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
     <a class="iconbtn" href="/o2/" target="_blank" rel="noopener" title="Logs and metrics (OpenObserve)">Logs</a>
     <a class="iconbtn" href="/mail/" target="_blank" rel="noopener" title="Alert emails (Mailpit)">Alerts mail</a>
-    <button class="iconbtn" data-act="theme" aria-label="Switch light or dark" title="Light or dark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"></path></svg></button>
+    <button class="iconbtn" data-act="search-open" aria-keyshortcuts="Control+K Meta+K" aria-label="Search views, projects, and tickets (Ctrl K)" title="Search · Ctrl K">Search <kbd>Ctrl K</kbd></button>
+    <button class="iconbtn" data-act="theme" aria-label="Switch light or dark" title="Light or dark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="7"></circle><path d="M12 1a7 7 0 1 0 0 14z" fill="currentColor"></path><path d="M5 21h14M8 17v4m8-4v4"/></svg><span class="theme-label">Theme</span></button>
   </div>
 </header>
 <main class="wrap">
   <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"></section>
+  <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden>
+    <div class="dhead" id="work-head"></div>
+    <div id="work-body" class="view"></div>
+  </section>
   <section class="view" id="view-delivery" role="tabpanel" aria-labelledby="tab-delivery" hidden>
     <div class="dhead" id="dhead"></div>
     <div id="dbody" class="view"></div>
   </section>
   <section class="view" id="view-sa" role="tabpanel" aria-labelledby="tab-sa" hidden></section>
+  <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
   <section class="view" id="view-lead" role="tabpanel" aria-labelledby="tab-lead" hidden></section>
   <section class="view" id="view-business" role="tabpanel" aria-labelledby="tab-business" hidden>
     <div class="dhead" id="bhead"></div>
@@ -483,6 +536,15 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawer-title"></aside>
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="command-search" id="command-search" hidden>
+  <button class="command-scrim" type="button" data-act="search-close" aria-label="Close search"></button>
+  <section class="command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-search-title">
+    <header><h2 id="command-search-title">Jump to a view, project, or ticket</h2><button class="btn sm" type="button" data-act="search-close">Close <kbd>Esc</kbd></button></header>
+    <input id="command-query" type="search" autocomplete="off" placeholder="Search the console…" aria-label="Search views, projects, and tickets" aria-controls="command-results">
+    <div class="command-results" id="command-results" role="listbox" aria-label="Search results"></div>
+    <div class="command-hint"><kbd>Ctrl K</kbd> or <kbd>⌘ K</kbd> to open · <kbd>Esc</kbd> to close</div>
+  </section>
+</div>
 <script>
 (function () {
 'use strict';
@@ -536,7 +598,9 @@ var S = {
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   view: viewOf(location.pathname),
-  project: null, search: '', typeFilter: 'all', epic: 'all', accFilter: 'all',
+  project: null, search: '', typeFilter: 'all', aiFilter: 'all', epic: 'all', accFilter: 'all', starredProjects: [],
+  dashboardQuery: '', dashboardSort: 'key', dashboardSortDir: 1, commandSearchOpen: false,
+  projectQuery: '', projectPickerOpen: false,
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
@@ -548,8 +612,12 @@ var S = {
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
 function viewOf(path) {
+  if (path.indexOf('/work') === 0) return 'work';
+  if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/integrations') === 0) return 'integrations';
+  if (path.indexOf('/machines') === 0) return 'machines';
+  if (path.indexOf('/users') === 0) return 'users';
   if (path.indexOf('/sa') === 0) return 'sa';
   if (path.indexOf('/delivery') === 0) return 'delivery';
   if (path.indexOf('/lead') === 0) return 'lead';
@@ -563,6 +631,39 @@ function viewOf(path) {
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
+var MENU_ITEMS = [
+  { view: 'cc', label: 'Dashboard' },
+  { view: 'work', label: 'Work board' },
+  { view: 'delivery', label: 'Delivery' },
+  { view: 'sa', label: 'SA', permission: 'console.write' },
+  { view: 'lead', label: 'Team Lead' },
+  { view: 'business', label: 'Business' },
+  { view: 'review', label: 'Human review' },
+  { view: 'stakeholder', label: 'Stakeholder' },
+  { view: 'machines', label: 'Machines and AI', permission: 'node.operations.read' },
+  { view: 'users', label: 'Users and roles', permission: 'users.manage' },
+  { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
+  { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
+  { view: 'projects', label: 'Projects', permission: 'projects.manage' }
+];
+// Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
+function viewAllowed(view, role) {
+  var item = MENU_ITEMS.filter(function (x) { return x.view === view; })[0];
+  return !!item && !!role && (!item.permission || consoleCan(item.permission));
+}
+function syncMenuVisibility() {
+  var role = S.consoleUser && S.consoleUser.role;
+  $$('.tab[data-menu-view]').forEach(function (tab) {
+    var visible = viewAllowed(tab.getAttribute('data-view'), role);
+    tab.hidden = !visible;
+    tab.setAttribute('aria-hidden', String(!visible));
+  });
+  if (role && !viewAllowed(S.view, role)) {
+    S.view = 'cc';
+    showView();
+    try { history.replaceState(null, '', '/dashboard'); } catch (x) { /* embedded preview */ }
+  }
+}
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
 function since() { return (Date.now() - S.fetchedAt) / 1000; }
@@ -574,12 +675,15 @@ function loadPrefs() {
     if (!p || typeof p !== 'object') return;
     if (typeof p.project === 'string') S.project = p.project;
     if (typeof p.typeFilter === 'string') S.typeFilter = p.typeFilter;
+    if (typeof p.aiFilter === 'string') S.aiFilter = p.aiFilter;
     if (typeof p.epic === 'string') S.epic = p.epic;
+    if (Array.isArray(p.starredProjects)) S.starredProjects = p.starredProjects.filter(function (x) { return typeof x === 'string'; });
   } catch (x) { /* storage off */ }
 }
 function savePrefs() {
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ project: S.project, typeFilter: S.typeFilter, epic: S.epic }));
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ project: S.project, typeFilter: S.typeFilter,
+      aiFilter: S.aiFilter, epic: S.epic, starredProjects: S.starredProjects }));
   } catch (x) { /* storage off */ }
 }
 function keyNumber(key) {
@@ -679,12 +783,13 @@ function pollConsoleSession() {
     return r.json();
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null;
+    syncMenuVisibility();
     render();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
-  }).catch(function () { S.consoleUser = null; render(); })
+  }).catch(function () { S.consoleUser = null; syncMenuVisibility(); render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
 }
 function projectResponseError(response) {
@@ -930,7 +1035,7 @@ function copyJoinCommand(name) {
 function pollServices() {
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
     S.services = d.services || []; S.svcError = d.error || '';
-    if (S.view === 'cc' && S.data) renderCC();
+    if (S.view === 'machines' && S.data) renderCC();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
 }
@@ -940,7 +1045,8 @@ function pollAnalytics() {
     return r.json();
   }).then(function (d) {
     S.analytics = d.rows || []; S.anError = '';
-    if (S.view === 'delivery' && S.data) renderDBody();
+    if ((S.view === 'delivery' || S.view === 'work') && S.data) renderDBody();
+    if (S.view === 'cc' && S.data) renderDashboard();
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
@@ -1034,6 +1140,127 @@ function renderLive() {
 }
 
 /* ---------- Command Center ---------- */
+function dashboardProjectCounts(projectKey) {
+  var rows = D().tickets.filter(function (t) { return t.project === projectKey && t.type !== 'Epic'; });
+  return { total: rows.length, open: rows.filter(function (t) { return t.status !== 'Done'; }).length,
+    building: rows.filter(function (t) { return t.status === 'In Progress'; }).length,
+    waiting: rows.filter(function (t) { return t.status === 'Needs owner' || t.status === 'Human review'; }).length,
+    done: rows.filter(function (t) { return t.status === 'Done'; }).length };
+}
+function providerUsageChart(rows) {
+  var days = utcDays(ANALYTICS_DAYS), providers = {}, accountProvider = {};
+  D().accounts.forEach(function (a) { accountProvider[a.id] = a.provider; providers[a.provider] = true; });
+  var byDay = {};
+  days.forEach(function (day) { byDay[day] = {}; });
+  rows.forEach(function (row) {
+    var provider = accountProvider[row.account];
+    if (!provider || !byDay[row.day]) return;
+    byDay[row.day][provider] = (byDay[row.day][provider] || 0) + Number(row.runs || 0);
+  });
+  var keys = Object.keys(PROVIDER).filter(function (key) { return providers[key]; });
+  var max = 1;
+  days.forEach(function (day) { max = Math.max(max, keys.reduce(function (n, key) { return n + (byDay[day][key] || 0); }, 0)); });
+  var width = 30, gap = 10, height = 112, labelHeight = 18;
+  var svg = '<svg class="provider-chart" viewBox="0 0 ' + (days.length * (width + gap)) + ' ' + (height + labelHeight) + '" role="img" aria-label="AI runs per day by provider over the last ' + days.length + ' days">';
+  days.forEach(function (day, index) {
+    var x = index * (width + gap) + gap / 2, y = height;
+    keys.forEach(function (provider) {
+      var count = byDay[day][provider] || 0;
+      if (!count) return;
+      var h = height * count / max; y -= h;
+      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider]) + ': ' + count + ' runs</title></rect>';
+    });
+    svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + day.slice(8) + '</text>';
+  });
+  return svg + '</svg>';
+}
+function renderDashboard() {
+  var root = $('#view-cc'); if (!root) return;
+  var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
+  var cursor = focusSearch && oldSearch.selectionStart;
+  var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
+  var openProjects = d.projects.filter(function (p) { return !p.closed; }).length;
+  var inProgress = tickets.filter(function (t) { return t.status === 'In Progress'; }).length;
+  var waiting = tickets.filter(function (t) { return t.status === 'Needs owner' || t.status === 'Human review'; });
+  var selectedProject = d.projects.filter(function (p) { return p.key === S.project; })[0] || d.projects[0];
+  var selectedKey = selectedProject ? selectedProject.key : '';
+  var q = S.dashboardQuery.trim().toLowerCase();
+  var projectRows = d.projects.filter(function (p) { return !q || (p.key + ' ' + p.repo).toLowerCase().indexOf(q) >= 0; }).map(function (p) {
+    return { project: p, counts: dashboardProjectCounts(p.key) };
+  });
+  projectRows.sort(function (a, b) {
+    var key = S.dashboardSort, left = key === 'key' ? a.project.key.toLowerCase() : a.counts[key];
+    var right = key === 'key' ? b.project.key.toLowerCase() : b.counts[key];
+    if (typeof left === 'string') return left.localeCompare(right) * S.dashboardSortDir;
+    return (left - right) * S.dashboardSortDir;
+  });
+  var recentRuns = d.active_runs.slice().sort(function (a, b) { return (a.elapsed_s || 0) - (b.elapsed_s || 0); }).slice(0, 8);
+  var flow = STATUS_COLS.map(function (c) {
+    return '<div class="flow-step"><b>' + tickets.filter(function (t) { return t.status === c[0]; }).length + '</b><span>' + esc(c[1]) + '</span></div>';
+  }).join('');
+  var h = '<h1 class="dash-title">Dashboard</h1><section class="dash-section" aria-labelledby="dashboard-work-title"><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
+  h += '<div class="dash-kpis" aria-label="Work summary">';
+  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Active projects</span><span class="value">' + openProjects + '</span><span class="detail">' + d.projects.length + ' configured projects</span></button>';
+  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">AI working</span><span class="value">' + inProgress + '</span><span class="detail">tickets in progress</span></button>';
+  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Waiting for you</span><span class="value">' + waiting.length + '</span><span class="detail">human review or owner decision</span></button>';
+  h += '<button class="dash-kpi" data-act="view" data-view="delivery"><span class="label">Runs · 24 h</span><span class="value">' + Number(totals.runs_24h || 0) + '</span><span class="detail">' + Number(totals.done_24h || 0) + ' completed · ' + Number(totals.failed_24h || 0) + ' failed</span></button></div>';
+  h += '<div class="dash-grid"><section class="panel" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
+  h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';
+  h += '<div class="tablebox"><table class="dash-table"><thead><tr><th><button class="sort-btn" data-act="dashboard-sort" data-key="key">Project' + (S.dashboardSort === 'key' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="open">Open' + (S.dashboardSort === 'open' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="building">Building' + (S.dashboardSort === 'building' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="waiting">Waiting' + (S.dashboardSort === 'waiting' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="done">Done' + (S.dashboardSort === 'done' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th></tr></thead><tbody>';
+  projectRows.forEach(function (row) {
+    var p = row.project, c = row.counts;
+    h += '<tr><td><button class="linkbtn" data-act="dashboard-project" data-p="' + esc(p.key) + '" aria-label="Open ' + esc(p.key) + ' on the Work board">' + esc(p.key) + '</button><div class="small">' + esc(p.repo) + (selectedKey === p.key ? ' · selected' : '') + '</div></td><td>' + c.open + '</td><td>' + c.building + '</td><td>' + c.waiting + '</td><td>' + c.done + '</td></tr>';
+  });
+  if (!projectRows.length) h += '<tr><td colspan="5" class="empty">No matching projects.</td></tr>';
+  h += '</tbody></table></div></section></div>';
+  h += '<div class="dash-grid"><section class="panel"><div class="panel-h"><h2>What is being built</h2><span class="hint">Live runs and the selected project roadmap · ' + esc(selectedKey || 'no project selected') + '</span><span class="spacer"></span><button class="btn sm" data-act="view" data-view="work">Open Work board</button></div>';
+  if (recentRuns.length) {
+    h += '<div class="att">';
+    recentRuns.forEach(function (run) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(run.ticket) + '"><span class="pill" data-tone="info">Running</span><span class="t"><span class="mono muted">' + esc(run.ticket) + '</span> ' + esc(run.summary || '') + '<span class="d">' + esc(run.project) + ' · ' + esc(PROVIDER[run.provider] || run.provider || '') + ' · ' + esc(run.step) + '</span></span><span class="mono">' + mmss(run.elapsed_s) + '</span></button>'; });
+    h += '</div>';
+  } else h += '<div class="empty">No AI work is running now.</div>';
+  var roadmap = selectedKey ? epicProgress(projTicketsFor(selectedKey)) : [];
+  h += '<h3>Roadmap' + (selectedKey ? ' · ' + esc(selectedKey) : '') + '</h3>';
+  if (!roadmap.length) h += '<div class="empty">No epics are available for this project yet.</div>';
+  else {
+    h += '<div class="roadmap-list">';
+    roadmap.slice(0, 8).forEach(function (row) {
+      h += '<button class="roadmap-row" data-act="epic-dashboard" data-key="' + esc(row.epic.key) + '" aria-label="Open Work board filtered by epic ' + esc(row.epic.key) + '"><span class="roadmap-label"><span class="mono muted">' + esc(row.epic.key) + '</span> ' + esc(row.epic.summary) + '</span><span class="roadmap-track" aria-hidden="true"><i style="width:' + row.pct + '%"></i></span><span class="mono">' + row.pct + '% · ' + row.counts.done + '/' + row.items + '</span></button>';
+    });
+    h += '</div>';
+  }
+  h += '</section><section class="panel"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
+  if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
+  waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
+  h += '</div></section></div></section>';
+  var providers = Object.keys(PROVIDER).filter(function (key) { return d.accounts.some(function (a) { return a.provider === key; }); });
+  var tokenTotal = S.analytics.reduce(function (n, row) { return n + Number(row.tokens_in || 0) + Number(row.tokens_out || 0); }, 0);
+  var costTotal = S.analytics.reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
+  h += '<section class="dash-section" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><div class="dash-grid">';
+  h += '<section class="panel"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
+  if (S.anError) h += '<div class="empty">Usage chart unavailable: ' + esc(S.anError) + '</div>';
+  h += providerUsageChart(S.analytics);
+  h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + key + '"></i><span class="provider-name">' + esc(PROVIDER[key]) + '</span></span>'; }).join('') + '</div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Control plane records run usage</span></div><div class="facts"><div class="fact"><span class="fl">Tokens · 24 h</span><span class="fv mono">' + tok((totals.tokens_in_24h || 0) + (totals.tokens_out_24h || 0)) + '</span></div><div class="fact"><span class="fl">Cost · 24 h</span><span class="fv mono">' + usd(totals.cost_24h) + '</span></div><div class="fact"><span class="fl">Tokens · 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section></div>';
+  h += '<section class="panel"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Every configured account, its provider, current status, usage, and next reported reset</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
+  if (!d.accounts.length) h += '<tr><td colspan="4" class="empty">No AI accounts are configured.</td></tr>';
+  d.accounts.forEach(function (a) {
+    var reset = quotaResetText(a);
+    h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next reported reset: ' + esc(reset) + '</span></td></tr>';
+  });
+  h += '</tbody></table></div></section></section>';
+  root.innerHTML = h;
+  if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
+}
+function projTicketsFor(projectKey) { return D().tickets.filter(function (t) { return t.project === projectKey; }); }
+function quotaResetText(account) {
+  var windows = account.quota && account.quota.windows || {}, resets = [];
+  Object.keys(windows).forEach(function (key) { if (windows[key] && windows[key].resets_at) resets.push(Number(windows[key].resets_at)); });
+  if (resets.length) return epochWhen(Math.min.apply(null, resets));
+  if (account.cooldown_until) return when(account.cooldown_until);
+  return 'Not reported';
+}
 function masterAutonomyPanel() {
   if (!consoleReader()) return '<section class="panel"><div class="panel-h"><h2>Master autonomy</h2></div><div class="muted">Sign in to view the autonomy report and daily budget.</div></section>';
   if (!S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
@@ -1098,6 +1325,7 @@ function renderCC() {
     h += '</section>';
   }
 
+  h += toolWaitsPanel(d);
   h += masterAutonomyPanel();
 
   h += '<div class="grid-2">';
@@ -1180,7 +1408,7 @@ function renderCC() {
   var focusId = oldJoin && oldJoin.contains(document.activeElement) ? document.activeElement.id : '';
   var focusStart = focusId && document.activeElement.selectionStart;
   var focusEnd = focusId && document.activeElement.selectionEnd;
-  $('#view-cc').innerHTML = h;
+  $('#view-machines').innerHTML = h;
   if (oldJoin) $('#node-onboarding').replaceWith(oldJoin);
   if (focusId) {
     var focusTarget = $('#' + focusId);
@@ -1379,14 +1607,15 @@ function projectCloseControl(project) {
 }
 function renderDHead() {
   var d = D();
-  var h = '<div class="projtabs" role="group" aria-label="Project">';
-  d.projects.forEach(function (p) { h += '<button class="projtab" data-act="project" data-p="' + esc(p.key) + '" aria-pressed="' + (S.project === p.key) + '">' + esc(p.key) + '<span class="sub">' + esc(p.repo) + '</span></button>'; });
-  if (!d.projects.length) h += '<span class="muted">No project in aiflow-control/projects</span>';
-  h += '</div><label class="search" for="q" style="flex-direction:row; font-weight:400">' + ICON.search + '<input id="q" type="search" placeholder="Search key or title" value="' + esc(S.search) + '" aria-label="Search tickets"></label>';
+  var active = document.activeElement, focusId = active && active.id, focusStart = active && active.selectionStart, focusEnd = active && active.selectionEnd;
+  var h = '<h1 class="dash-title">' + (S.view === 'work' ? 'Work board' : 'Delivery') + '</h1><div class="dhead-tools">';
+  h += renderProjectPicker();
+  h += '<label class="search" for="q" style="flex-direction:row; font-weight:400">' + ICON.search + '<input id="q" type="search" placeholder="Search key or title" value="' + esc(S.search) + '" aria-label="Search tickets"></label>';
   var types = {}; projTickets().forEach(function (t) { if (t.type !== 'Epic') types[t.type] = 1; });
   h += '<div class="seg" role="group" aria-label="Type"><button data-act="type" data-t="all" aria-pressed="' + (S.typeFilter === 'all') + '">All types</button>';
   Object.keys(types).sort().forEach(function (t) { h += '<button data-act="type" data-t="' + esc(t) + '" aria-pressed="' + (S.typeFilter === t) + '">' + esc(t) + '</button>'; });
   h += '</div>';
+  h += '<label class="ai-filter" for="ai-filter">AI <select id="ai-filter" aria-label="Filter by AI state"><option value="all"' + (S.aiFilter === 'all' ? ' selected' : '') + '>All AI states</option><option value="ready"' + (S.aiFilter === 'ready' ? ' selected' : '') + '>Ready for AI</option><option value="working"' + (S.aiFilter === 'working' ? ' selected' : '') + '>AI working</option><option value="attention"' + (S.aiFilter === 'attention' ? ' selected' : '') + '>Needs attention</option></select></label>';
   var epics = sortEpics(projTickets().filter(function (t) { return t.type === 'Epic'; }));
   if (epics.length) {
     h += '<label style="flex-direction:row;align-items:center;gap:8px;font-weight:400">Epic <select id="epicSel" style="width:auto;min-width:200px;max-width:340px"><option value="all">All epics</option>';
@@ -1396,7 +1625,46 @@ function renderDHead() {
   h += '<span class="spacer"></span>';
   var p = d.projects.filter(function (x) { return x.key === S.project; })[0];
   if (p) h += '<button class="btn sm" data-act="open-report">Report</button>' + projectCloseControl(p) + '<a class="btn sm" href="https://github.com/' + esc(p.repo) + '/pulls" target="_blank" rel="noopener">Pull requests ' + ICON.ext + '</a><a class="btn sm" href="https://jooservices.atlassian.net/jira/software/c/projects/' + esc(p.key) + '/issues" target="_blank" rel="noopener">Jira ' + ICON.ext + '</a>';
-  $('#dhead').innerHTML = h;
+  h += '</div>';
+  var head = S.view === 'work' ? $('#work-head') : $('#dhead'); if (head) head.innerHTML = h;
+  if (focusId) { var focus = $('#' + focusId); if (focus) { focus.focus(); if (focus.setSelectionRange && focusStart != null) focus.setSelectionRange(focusStart, focusEnd); } }
+  if (S.projectPickerOpen) renderProjectPickerOptions();
+}
+function renderProjectPicker() {
+  var d = D(), selected = d.projects.filter(function (p) { return p.key === S.project; })[0];
+  var value = S.projectPickerOpen ? S.projectQuery : (selected ? selected.key + ' · ' + selected.repo : '');
+  return '<div class="project-picker" id="project-picker"><label for="work-project">Choose a project</label>' +
+    '<input id="work-project" type="search" role="combobox" aria-autocomplete="list" aria-controls="project-options" aria-expanded="' + S.projectPickerOpen + '" autocomplete="off" placeholder="Search projects by name or key" value="' + esc(value) + '">' +
+    '<button type="button" class="star-button" data-act="project-star" aria-pressed="' + (S.project && S.starredProjects.indexOf(S.project) >= 0) + '" aria-label="' + (S.starredProjects.indexOf(S.project) >= 0 ? 'Unstar ' : 'Star ') + esc(S.project || 'selected project') + '">' + (S.starredProjects.indexOf(S.project) >= 0 ? '★' : '☆') + '</button>' +
+    '<div class="project-options" id="project-options" role="listbox" aria-label="Projects"' + (S.projectPickerOpen ? '' : ' hidden') + '></div></div>';
+}
+function renderProjectPickerOptions() {
+  var box = $('#project-options'), input = $('#work-project');
+  if (!box || !input) return;
+  var query = String(input.value || '').trim().toLowerCase();
+  var matches = D().projects.filter(function (p) { return (p.key + ' ' + p.repo).toLowerCase().indexOf(query) >= 0; });
+  matches.sort(function (a, b) {
+    var as = S.starredProjects.indexOf(a.key) >= 0, bs = S.starredProjects.indexOf(b.key) >= 0;
+    return as !== bs ? (as ? -1 : 1) : a.key.localeCompare(b.key);
+  });
+  var stars = matches.filter(function (p) { return S.starredProjects.indexOf(p.key) >= 0; }).slice(0, 20);
+  var rest = matches.filter(function (p) { return S.starredProjects.indexOf(p.key) < 0; }).slice(0, Math.max(0, 25 - stars.length));
+  var h = '';
+  if (stars.length) {
+    h += '<div class="option-group">Starred projects</div>';
+    stars.forEach(function (p) { h += projectOption(p, true); });
+  }
+  if (rest.length) {
+    h += '<div class="option-group">Projects' + (matches.length > stars.length + rest.length ? ' · ' + (matches.length - stars.length - rest.length) + ' more matches; refine your search' : '') + '</div>';
+    rest.forEach(function (p) { h += projectOption(p, false); });
+  }
+  if (!matches.length) h = '<div class="empty">No matching projects.</div>';
+  box.innerHTML = h;
+  box.hidden = !S.projectPickerOpen;
+  input.setAttribute('aria-expanded', String(S.projectPickerOpen));
+}
+function projectOption(project, starred) {
+  return '<button type="button" class="project-option" role="option" aria-selected="' + (project.key === S.project) + '" data-act="select-work-project" data-p="' + esc(project.key) + '"><span class="key">' + esc(project.key) + '</span><span class="repo">' + esc(project.repo) + '</span>' + (starred ? '<span class="starred">Starred</span>' : '') + '</button>';
 }
 function epicOf(t, byKey) {
   var cur = t, guard = 0;
@@ -1431,7 +1699,10 @@ function renderDBody() {
   var work = all.filter(function (t) { return t.type !== 'Epic'; });
   var q = S.search.trim().toLowerCase();
   var list = work.filter(function (t) {
-    return (S.typeFilter === 'all' || t.type === S.typeFilter) && (S.epic === 'all' || epicOf(t, byKey) === S.epic) &&
+    var aiMatches = S.aiFilter === 'all' || (S.aiFilter === 'ready' && t.status === 'To Do' && (t.labels || []).indexOf('aiflow-ready') >= 0) ||
+      (S.aiFilter === 'working' && !!t.run) || (S.aiFilter === 'attention' &&
+        (t.status === 'Needs owner' || t.status === 'Human review' || (!t.run && t.last_run && ['failed', 'lost', 'timeout', 'quota'].indexOf(t.last_run.outcome) >= 0)));
+    return aiMatches && (S.typeFilter === 'all' || t.type === S.typeFilter) && (S.epic === 'all' || epicOf(t, byKey) === S.epic) &&
       (!q || t.key.toLowerCase().indexOf(q) >= 0 || t.summary.toLowerCase().indexOf(q) >= 0);
   });
   var cnt = function (s) { return work.filter(function (t) { return t.status === s; }).length; };
@@ -1442,7 +1713,9 @@ function renderDBody() {
   var p = D().projects.filter(function (x) { return x.key === S.project; })[0] || {};
   var wm = p.work_minutes || { target: 30, warn: 45, hard: 60 };
 
-  var h = '<section class="kpis" aria-label="Project summary">';
+  var boardOnly = S.view === 'work', h = '';
+  if (!boardOnly) {
+  h = '<section class="kpis" aria-label="Project summary">';
   h += kpi('Tickets', String(work.length), all.length - work.length + ' epics', '', 'd-board');
   h += kpi('Done', done + (work.length ? ' · ' + Math.round(100 * done / work.length) + '%' : ''), 'merged or closed', '', 'd-epics');
   h += kpi('Ready for AI', String(work.filter(function (t) { return t.status === 'To Do' && t.labels.indexOf('aiflow-ready') >= 0; }).length), 'To Do with aiflow-ready', '', 'd-board');
@@ -1453,8 +1726,9 @@ function renderDBody() {
   h += '</section>';
 
   h += epicsPanel(all, 'epic', 'd-epics');
+  }
 
-  h += '<section class="panel" id="d-board" aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
+  h += '<section class="panel"' + (boardOnly ? '' : ' id="d-board"') + ' aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
   STATUS_COLS.forEach(function (c) {
     var items = list.filter(function (t) { return t.status === c[0]; });
     if (c[0] === 'Done') items.sort(function (a, b) { return (a.updated_age_s || 0) - (b.updated_age_s || 0); });
@@ -1466,6 +1740,7 @@ function renderDBody() {
   });
   h += '</div></section>';
 
+  if (!boardOnly) {
   h += '<section class="panel" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
   var att = [];
   work.forEach(function (t) {
@@ -1482,7 +1757,9 @@ function renderDBody() {
   h += '</div></section>';
   h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
-  $('#dbody').innerHTML = h;
+  }
+  var target = S.view === 'work' ? $('#work-body') : $('#dbody');
+  if (target) target.innerHTML = h;
 }
 
 /* ---------- Human review ---------- */
@@ -2469,7 +2746,7 @@ function drawerNode(name) {
       b += '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" data-act="node-install" data-node="' + esc(n.name) + '"' + (S.operationBusy[n.name] ? ' disabled' : '') + '>Install missing</button>';
       b += '<button class="btn sm primary" data-act="node-repair" data-node="' + esc(n.name) + '"' + (S.operationBusy[n.name] ? ' disabled' : '') + '>Repair to desired state</button></div>';
     } else {
-      b += '<div class="small">This node has no online agent. Generate a one-time join command from Command Center.</div>';
+      b += '<div class="small">This node has no online agent. Generate a one-time join command from Machines and AI.</div>';
     }
     if (n.status !== 'online') b += '<button class="btn sm" data-act="join-command" data-node="' + esc(n.name) + '">Generate join command</button>';
     var join = S.joinCommands[n.name];
@@ -2639,6 +2916,29 @@ function renderFooter() {
   [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
 }
 
+/* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
+function projectChecksCell(c) {
+  if (!c || !c.has_checks) return '<span class="muted">no checks</span>';
+  var current = (c.machines || []).filter(function (m) { return m.current; });
+  if (!current.length) return pill('info', 'not checked yet');
+  var blocked = [];
+  current.forEach(function (m) { (m.cannot_run || []).forEach(function (x) { blocked.push({ node: m.node, x: x }); }); });
+  if (!blocked.length) return pill('ok', 'all can run · ' + current.length + ' machine' + (current.length > 1 ? 's' : ''));
+  var h = pill('crit', blocked.length + ' cannot run');
+  blocked.forEach(function (b) { h += '<div class="small" style="color:var(--crit)"><span class="mono">' + esc(b.x.command) + '</span> on ' + esc(b.node) + ': ' + esc(b.x.detail || ('missing ' + (b.x.tool || 'tool'))) + '</div>'; });
+  return h;
+}
+function toolWaitsPanel(d) {
+  var waits = d.tool_waits || [];
+  if (!waits.length) return '';
+  var h = '<section class="panel" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Tickets waiting for a tool</h2><span class="hint">Parked for a machine that has the tool; the owner is not asked</span></div>';
+  h += '<table><thead><tr><th>Tool</th><th>Waiting tickets</th><th>Projects</th><th>Missing on</th><th>Maintenance ticket</th></tr></thead><tbody>';
+  waits.forEach(function (w) {
+    h += '<tr><td class="mono">' + esc(w.requirement) + '</td><td class="mono" title="' + esc(w.tickets.map(function (t) { return t.key; }).join(', ')) + '">' + esc(w.count) + '</td><td>' + esc((w.projects || []).join(', ')) + '</td><td>' + esc((w.machines || []).join(', ')) + '</td><td class="mono">' + (w.maintenance_ticket ? esc(w.maintenance_ticket) : '<span class="muted">after 24 h without a capable machine</span>') + '</td></tr>';
+  });
+  return h + '</tbody></table></section>';
+}
+
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
   var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
@@ -2649,10 +2949,10 @@ function renderProjects() {
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
   else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
   else {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Actions</th></tr></thead><tbody>';
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
@@ -2729,12 +3029,78 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function renderUsers() {
+  var root = $('#view-users'); if (!root) return;
+  var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
+  var role = S.consoleUser && S.consoleUser.role || 'unknown';
+  var h = '<h1 class="dash-title">Users and roles</h1><p class="lead">Console access is assigned to signed-in accounts. Dashboard and Work board are open to every console role.</p>';
+  h += '<section class="panel"><div class="panel-h"><h2>Your console access</h2><span class="hint">Authenticated session</span></div><div class="facts">';
+  h += '<div class="fact"><span class="fl">Signed in as</span><span class="fv">' + esc(S.consoleUser && S.consoleUser.user || 'Unknown user') + '</span></div>';
+  h += '<div class="fact"><span class="fl">Role</span><span class="fv">' + esc(roleLabels[role] || role) + '</span></div></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>View</th><th>Your access</th></tr></thead><tbody>';
+  MENU_ITEMS.forEach(function (item) {
+    h += '<tr><td>' + esc(item.label) + '</td><td>' + (viewAllowed(item.view, role) ? 'Available' : 'Not available') + '</td></tr>';
+  });
+  h += '</tbody></table></div><p class="small">Role assignment and account invitations are managed through the configured console login process.</p></section>';
+  root.innerHTML = h;
+}
+
+function quickSearchResults(query) {
+  var q = String(query || '').trim().toLowerCase(), role = S.consoleUser && S.consoleUser.role;
+  var views = MENU_ITEMS.filter(function (item) { return viewAllowed(item.view, role) && (!q || item.label.toLowerCase().indexOf(q) >= 0); })
+    .slice(0, 8).map(function (item) { return { kind: 'view', key: item.view, label: item.label, detail: 'View' }; });
+  var projects = D().projects.filter(function (p) { return !q || (p.key + ' ' + p.repo).toLowerCase().indexOf(q) >= 0; });
+  projects.sort(function (a, b) {
+    var as = S.starredProjects.indexOf(a.key) >= 0, bs = S.starredProjects.indexOf(b.key) >= 0;
+    return as !== bs ? (as ? -1 : 1) : a.key.localeCompare(b.key);
+  });
+  projects = projects.slice(0, q ? 6 : 4).map(function (p) { return { kind: 'project', key: p.key, label: p.key, detail: p.repo }; });
+  var tickets = q ? D().tickets.filter(function (t) { return (t.key + ' ' + t.summary + ' ' + t.project).toLowerCase().indexOf(q) >= 0; })
+    .slice(0, 8).map(function (t) { return { kind: 'ticket', key: t.key, label: t.key, detail: t.summary }; }) : [];
+  return views.concat(projects, tickets);
+}
+function renderCommandSearchResults(query) {
+  var root = $('#command-results'); if (!root) return;
+  var rows = quickSearchResults(query);
+  root.innerHTML = rows.length ? rows.map(function (row) {
+    return '<button class="command-result" type="button" role="option" data-act="search-result" data-kind="' + esc(row.kind) + '" data-key="' + esc(row.key) + '"><strong>' + esc(row.label) + '</strong><span>' + esc(row.detail) + '</span><span class="kind">' + esc(row.kind) + '</span></button>';
+  }).join('') : '<div class="empty">No matching views, projects, or tickets.</div>';
+}
+function openCommandSearch() {
+  var root = $('#command-search'); if (!root) return;
+  S.commandSearchOpen = true; root.hidden = false;
+  var input = $('#command-query'); if (input) { input.value = ''; renderCommandSearchResults(''); input.focus(); }
+}
+function closeCommandSearch() {
+  var root = $('#command-search'); if (!root) return;
+  S.commandSearchOpen = false; root.hidden = true;
+  var opener = $('[data-act="search-open"]'); if (opener) opener.focus();
+}
+function openEpicOnWorkBoard(key) {
+  S.epic = key; S.search = ''; S.aiFilter = 'all'; savePrefs(); setView('work');
+}
+function chooseSearchResult(kind, key, source) {
+  closeCommandSearch();
+  if (kind === 'view') { setView(key); return; }
+  if (kind === 'project') {
+    var alreadyWork = S.view === 'work';
+    S.project = key; S.epic = 'all'; S.search = ''; S.projectQuery = ''; S.projectPickerOpen = false; savePrefs(); setView('work');
+    if (alreadyWork) { render(); var picker = $('#work-project'); if (picker) picker.focus(); }
+    return;
+  }
+  if (kind === 'ticket') {
+    setView('work'); openDrawer('ticket', key, source); return;
+  }
+}
+
 function render() {
   renderLive();
   renderFooter();
-  if (S.view === 'cc') renderCC();
-  else if (S.view === 'delivery') { renderDHead(); renderDBody(); }
+  if (S.view === 'cc') renderDashboard();
+  else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
+  else if (S.view === 'machines') renderCC();
   else if (S.view === 'sa') renderSA();
+  else if (S.view === 'users') renderUsers();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
@@ -2761,14 +3127,18 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) {
+    var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
+  });
 }
 function setView(v) {
+  if (S.consoleUser && !viewAllowed(v, S.consoleUser.role)) v = 'cc';
   if (S.view === v) return;
   S.view = v;
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
   showView();
-  try { history.pushState(null, '', v === 'cc' ? '/cc' : '/' + v); } catch (e) { /* file preview */ }
+  var paths = { cc: '/dashboard', work: '/work', machines: '/machines', users: '/users' };
+  try { history.pushState(null, '', paths[v] || '/' + v); } catch (e) { /* file preview */ }
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
@@ -2780,10 +3150,39 @@ function flash(id) { var el = document.getElementById(id); if (!el) return; el.s
 /* ---------- interactions ---------- */
 document.addEventListener('click', function (e) {
   if (e.target.closest('[data-stop]')) return;
+  if (S.projectPickerOpen && !e.target.closest('#project-picker')) {
+    S.projectPickerOpen = false;
+    renderProjectPickerOptions();
+  }
   var el = e.target.closest('[data-act]');
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'search-open') openCommandSearch();
+  else if (act === 'search-close') closeCommandSearch();
+  else if (act === 'search-result') chooseSearchResult(el.getAttribute('data-kind'), el.getAttribute('data-key'), el);
+  else if (act === 'dashboard-project') {
+    S.project = el.getAttribute('data-p'); S.epic = 'all'; S.search = ''; savePrefs(); setView('work');
+  }
+  else if (act === 'dashboard-sort') {
+    var sortKey = el.getAttribute('data-key');
+    if (S.dashboardSort === sortKey) S.dashboardSortDir *= -1;
+    else { S.dashboardSort = sortKey; S.dashboardSortDir = sortKey === 'key' ? 1 : -1; }
+    renderDashboard();
+    var sortFocus = $('[data-act="dashboard-sort"][data-key="' + sortKey + '"]'); if (sortFocus) sortFocus.focus();
+  }
+  else if (act === 'epic-dashboard') {
+    openEpicOnWorkBoard(el.getAttribute('data-key'));
+  }
+  else if (act === 'select-work-project') {
+    S.project = el.getAttribute('data-p'); S.epic = 'all'; S.search = ''; S.projectQuery = ''; S.projectPickerOpen = false;
+    savePrefs(); render(); var selectedInput = $('#work-project'); if (selectedInput) selectedInput.focus();
+  }
+  else if (act === 'project-star') {
+    var starIndex = S.starredProjects.indexOf(S.project);
+    if (starIndex >= 0) S.starredProjects.splice(starIndex, 1); else if (S.project) S.starredProjects.push(S.project);
+    savePrefs(); renderDHead(); var starButton = $('.star-button'); if (starButton) starButton.focus();
+  }
   else if (act === 'master-budget-save') saveMasterBudget();
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
@@ -2887,7 +3286,7 @@ document.addEventListener('click', function (e) {
         openDrawer('node', newName, el);
         createJoinCommand(newName, newRole, newProject);
       } else if (newProject) {
-        toast('Could not create join command', 'Choose a project shown in Command Center.', 'warn');
+        toast('Could not create join command', 'Choose a project shown in Machines and AI.', 'warn');
       }
     }
   }
@@ -2904,6 +3303,11 @@ document.addEventListener('click', function (e) {
   }
 });
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
+  if (e.target && e.target.id === 'work-project') {
+    S.projectQuery = e.target.value; S.projectPickerOpen = true; renderProjectPickerOptions();
+  }
+  if (e.target && e.target.id === 'dash-project-search') { S.dashboardQuery = e.target.value; renderDashboard(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
     S.projectAdmin.form[field] = e.target.value;
@@ -2933,6 +3337,9 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && e.target.id === 'ai-filter') {
+    S.aiFilter = e.target.value; savePrefs(); renderDBody(); tick();
+  }
   if (e.target && e.target.matches('[data-github-installation]')) S.integrations.selected = e.target.value;
   if (e.target && e.target.matches('[data-review-project]')) { S.reviewProject = e.target.value; loadReviews(); }
   if (e.target && e.target.matches('[data-project-field]')) {
@@ -2961,8 +3368,41 @@ document.addEventListener('change', function (e) {
   }
 });
 document.addEventListener('keydown', function (e) {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 'k') {
+    e.preventDefault(); openCommandSearch(); return;
+  }
+  if (e.key === 'Escape' && S.commandSearchOpen) { e.preventDefault(); closeCommandSearch(); return; }
+  if (S.commandSearchOpen && e.key === 'Tab') {
+    var dialog = $('.command-dialog'), focusable = dialog ? $$('input,button,[tabindex]:not([tabindex="-1"])', dialog).filter(function (x) { return !x.disabled; }) : [];
+    if (focusable.length) {
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  }
+  if (S.commandSearchOpen && (e.key === 'ArrowDown' || e.key === 'Enter') && e.target.id === 'command-query') {
+    var firstResult = $('.command-result');
+    if (firstResult) { e.preventDefault(); if (e.key === 'Enter') firstResult.click(); else firstResult.focus(); }
+  }
+  if (e.target.id === 'work-project' && (e.key === 'ArrowDown' || e.key === 'Enter')) {
+    var firstProject = $('.project-option');
+    if (firstProject) { e.preventDefault(); if (e.key === 'Enter') firstProject.click(); else firstProject.focus(); }
+  }
+  if (e.target.matches && e.target.matches('.project-option') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    var projectOptions = $$('.project-option'), projectIndex = projectOptions.indexOf(e.target), projectDelta = e.key === 'ArrowDown' ? 1 : -1;
+    if (projectIndex >= 0 && projectOptions.length) { e.preventDefault(); projectOptions[(projectIndex + projectDelta + projectOptions.length) % projectOptions.length].focus(); }
+  }
+  if (S.commandSearchOpen && e.target.matches && e.target.matches('.command-result') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    var searchResults = $$('.command-result'), resultIndex = searchResults.indexOf(e.target), resultDelta = e.key === 'ArrowDown' ? 1 : -1;
+    if (resultIndex >= 0 && searchResults.length) { e.preventDefault(); searchResults[(resultIndex + resultDelta + searchResults.length) % searchResults.length].focus(); }
+  }
+  if (e.key === 'Escape' && S.projectPickerOpen) { S.projectPickerOpen = false; renderProjectPickerOptions(); }
   if (e.key === 'Escape' && S.drawer) closeAll();
   if (e.key === 'Enter' && e.target.matches && e.target.matches('tr[data-act]')) e.target.click();
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.target.matches && e.target.matches('[role="tab"]')) {
+    var tabs = $$('.tab').filter(function (tab) { return !tab.hidden; }), here = tabs.indexOf(e.target), delta = e.key === 'ArrowRight' ? 1 : -1;
+    if (here >= 0 && tabs.length) { e.preventDefault(); var next = tabs[(here + delta + tabs.length) % tabs.length]; next.focus(); setView(next.getAttribute('data-view')); }
+  }
 });
 var CR_FIELDS = { 'cr-title': 'title', 'cr-desc': 'description', 'cr-epic': 'epic' };
 var JOIN_FIELDS = { 'join-name': 'name', 'join-key': 'provision_key' };
@@ -3005,11 +3445,15 @@ document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
 });
-window.addEventListener('popstate', function () { setView(viewOf(location.pathname)); });
+window.addEventListener('popstate', function () {
+  S.view = viewOf(location.pathname);
+  syncMenuVisibility(); showView(); render();
+});
 
 /* ---------- boot ---------- */
 try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }
 loadPrefs();
+syncMenuVisibility();
 showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);

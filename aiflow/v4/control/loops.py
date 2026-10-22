@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, memory, knowledge
+from . import jira_connect, memory, knowledge, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -279,6 +279,8 @@ def watchdog(ctx: Ctx) -> None:
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_services' AND closed_at IS NULL"):
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
+    # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
+    tooling.sweep(ctx)
     # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {a.node for a in repo.accounts}
     for n in ctx.db.all("SELECT name, status FROM nodes"):

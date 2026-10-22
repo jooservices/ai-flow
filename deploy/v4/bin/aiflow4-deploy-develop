@@ -7,6 +7,7 @@ set -euo pipefail
 STAGE_ONLY=no
 if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=yes; shift; fi
 [ -r /etc/aiflow/deploy.env ] && { set -a; . /etc/aiflow/deploy.env; set +a; }
+[ -r "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}" ] && { set -a; . "${AIFLOW4_CONTROL_ENV:-/etc/aiflow/control.env}"; set +a; }   # node agent on/off, as aiflow4-deploy
 [ "${AIFLOW4_CHANNEL:-release}" = develop ] || { echo "this host is not on the develop channel (set AIFLOW4_CHANNEL=develop in /etc/aiflow/deploy.env)" >&2; exit 3; }
 exec 9>/run/aiflow4-deploy.lock; flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }   # one deploy at a time
 BUNDLE=${1:-}; REF=${2:-TESTFLOW-30-v4-core}
@@ -61,7 +62,17 @@ mkdir -p /root/.bridge/out/release; rm -f /root/.bridge/out/release/*.tar.gz
 cp "$TAR" /root/.bridge/out/release/; echo "$SHA" > /root/.bridge/out/release/SHA
 # nodes follow CURRENT through their heartbeat; write it before this node restarts its agent
 echo "$SHA" > "$RELEASES/CURRENT.tmp" && mv "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT"
-aiflow4-develop-install "$TAR" "$SHA"
+# node-agent-step: the control machine never runs AI sessions unless AIFLOW4_DEPLOY_NODE_AGENT is not 0
+if [ "${AIFLOW4_DEPLOY_NODE_AGENT:-1}" != 0 ]; then
+  aiflow4-develop-install "$TAR" "$SHA"
+elif systemctl list-unit-files aiflow4-node-agent.service 2>/dev/null | grep -q '^aiflow4-node-agent\.service'; then
+  systemctl disable -q --now aiflow4-node-agent 2>/dev/null || true
+  systemctl reset-failed aiflow4-node-agent 2>/dev/null || true
+  echo "node agent disabled and stopped (AIFLOW4_DEPLOY_NODE_AGENT=0)"
+else
+  echo "node agent not installed (AIFLOW4_DEPLOY_NODE_AGENT=0)"
+fi
+# end node-agent-step
 ls -1t "$RELEASES"/aiflow4-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep 10 releases
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
 echo "deployed $SHA"

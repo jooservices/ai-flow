@@ -244,6 +244,17 @@ def test_project_writes_require_owner_session_and_reject_without_changes(client,
     assert ctx.github.commits == [] and not (control_repo / "projects/NEWAPP.yaml").exists()
 
 
+def test_super_admin_can_resume_and_pause_a_project(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    save_project(client, ctx, control_repo)
+    owner_sign_in(client, ctx, role="super_admin")
+
+    paused = client.post("/v1/projects/NEWAPP/pause", json={"paused": True})
+    resumed = client.post("/v1/projects/NEWAPP/pause", json={"paused": False})
+    assert paused.status_code == 200 and paused.json()["status"] == "paused"
+    assert resumed.status_code == 200 and resumed.json()["status"] == "active"
+
+
 def test_project_epic_repository_lookup_inherits_project_defaults_and_all_repo_stacks():
     project = Project(key="MULTI", repo="jooservices/default", base="develop", stack="php-8.3",
                       checks=["composer install"], repositories=[

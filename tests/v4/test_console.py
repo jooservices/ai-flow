@@ -2,7 +2,10 @@
 import json
 import re
 import shutil
+import socket
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +27,13 @@ var localStorage = {getItem: function () { return null; }, setItem: function () 
 var fetch = function () {};
 var setInterval = function () {};
 """
+OWNER_PERMISSIONS = sorted(ROLE_PERMISSIONS["owner"])
+LEAD_PERMISSIONS = sorted(ROLE_PERMISSIONS["lead"])
+
+
+def console_session_user(role: str = "owner", permissions: list[str] | None = None) -> dict:
+    return {"authenticated": True, "user": role + "@example.test", "role": role,
+            "permissions": permissions if permissions is not None else sorted(ROLE_PERMISSIONS[role])}
 
 
 def run_script(driver: str, prelude: str = STUBS) -> str:
@@ -49,6 +59,9 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
         pytest.skip("Node.js is needed to render the console drawer")
     script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
     script = script[:script.index(BOOT)]
+    if console_user and "permissions" not in console_user:
+        console_user = {**console_user, "permissions": LEAD_PERMISSIONS if console_user.get("role") == "lead"
+                        else OWNER_PERMISSIONS}
     driver = f"""
 var node = {json.dumps(node)};
 S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
@@ -83,7 +96,7 @@ console.log(saView.innerHTML);
     return result.stdout
 
 
-def render_knowledge(data: dict, history: dict | None = None) -> str:
+def render_knowledge(data: dict, history: dict | None = None, user: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Knowledge view")
@@ -95,6 +108,7 @@ document.querySelector = function (selector) {{ return selector === '#view-knowl
 S.knowledge.data = {json.dumps(data)};
 S.knowledge.actor = 'Mai Nguyen';
 S.knowledge.history = {json.dumps(history)};
+S.consoleUser = {json.dumps(user or console_session_user())};
 renderKnowledge();
 console.log(knowledgeView.innerHTML);
 """
@@ -105,7 +119,7 @@ console.log(knowledgeView.innerHTML);
 
 
 def render_projects(projects: list[dict], catalog: dict, preflight: dict | None = None,
-                   repository_editor: dict | None = None) -> str:
+                    user: dict | None = None, repository_editor: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
@@ -119,7 +133,7 @@ S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
 S.projectAdmin.repositoryEditor = {json.dumps(repository_editor)};
-S.consoleUser = {json.dumps(console_session("owner"))};
+S.consoleUser = {json.dumps(user or console_session("owner"))};
 renderProjects();
 console.log(projectsView.innerHTML);
 """
@@ -127,6 +141,20 @@ console.log(projectsView.innerHTML);
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def render_integrations(user: dict, jira: dict | None = None) -> str:
+    driver = f"""
+var integrationsView = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-integrations' ? integrationsView : null; }};
+S.view = 'integrations';
+S.consoleUser = {json.dumps(user)};
+S.integ.jira = {json.dumps(jira)};
+S.integrations = {{data: {{connected: false}}, pending: null, installations: [], selected: '', busy: false}};
+renderIntegrations();
+console.log(integrationsView.innerHTML);
+"""
+    return run_script(driver)
 
 
 def html() -> str:
@@ -452,7 +480,7 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
     def render(data: dict, permissions: list[str] | None = None) -> str:
         return run_script("var root = {innerHTML: ''};"
                           " document.querySelector = function (s) { return s === '#view-integrations' ? root : null; };"
-                          f" S.view = 'integrations'; S.consoleUser = {{permissions: {json.dumps(permissions or sorted(ROLE_PERMISSIONS['owner']))}}};"
+                          f" S.view = 'integrations'; S.consoleUser = {{permissions: {json.dumps(permissions if permissions is not None else sorted(ROLE_PERMISSIONS['owner']))}}};"
                           f" S.integ.jira = {json.dumps(data)}; renderIntegrations();"
                           " console.log(root.innerHTML);")
 
@@ -485,6 +513,128 @@ def test_knowledge_view_renders_resources_history_and_owner_approval_diff():
     assert "Ops notes" in output and "knowledge-history" in output
     assert "Before · v1" in output and "After · Ops notes" in output
     assert "Policy approvals" in output and "allow: [git status]" in output and "Approve and merge policy" in output
+
+
+def test_super_admin_session_shows_github_connect_and_project_resume_controls(ctx):
+    from fastapi.testclient import TestClient
+    from aiflow.v4.control.api import create_app
+    from aiflow.v4.control.console_auth import issue_session
+
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client = TestClient(create_app(ctx))
+    client.cookies.set("aiflow4_session", issue_session("admin@example.test", "super_admin", 2_000_000_000,
+                                                         secret))
+    session = client.get("/v1/console/session")
+    assert session.status_code == 200
+    user = session.json()
+    assert user["role"] == "super_admin"
+    assert "*" in user["permissions"]
+
+    jira = {"connected": False, "source": "none", "state": "disconnected", "needs_reconnect": False,
+            "oauth_app": {"configured": False}, "site_url": "", "requested_scopes": [], "redirect_uri": ""}
+    integrations = render_integrations(user, jira)
+    projects = render_projects([
+        {"key": "ACTIVE", "repo": "acme/active", "status": "active", "priority": 1, "ticket_count": 0},
+        {"key": "NEWAPP", "repo": "acme/new-app", "status": "paused", "priority": 2, "ticket_count": 0},
+    ], {}, user=user)
+    node = render_drawer({"name": "node1", "ip": "192.0.2.1", "status": "online", "metrics": {},
+                          "tools": {}, "has_agent": True, "projects": [], "heartbeat_age_s": 10}, user)
+    knowledge = render_knowledge({
+        "resources": [{"type": "knowledge", "id": "ops", "title": "Ops notes", "content": "notes",
+                        "archived": False, "version": 1, "updated_by": "Admin", "updated_at": None}],
+        "proposals": [{"proposal_id": 7, "type": "policy", "id": "default", "title": "Default policy",
+                       "content": "allow: []", "base_content": "allow: []", "base_version": 1,
+                       "archived": False, "actor": "Admin", "created_at": None, "pr_number": 1,
+                       "pr_url": "https://github.com/example/control/pull/1"}],
+    }, user=user)
+    assert ">Connect GitHub</button>" in integrations
+    assert "Use an existing GitHub App" in integrations
+    assert "data-github-app-id" in integrations and "data-github-key-file" in integrations
+    assert ">Connect Jira</button>" in integrations
+    assert "Add project" in projects and ">Pause</button>" in projects
+    assert "Resume</button>" in projects and "Remove</button>" in projects
+    assert 'data-act="node-install"' in node and 'data-act="node-repair"' in node
+    assert "New resource" in knowledge and 'data-act="knowledge-edit"' in knowledge
+    assert 'data-act="knowledge-approve"' in knowledge
+
+
+def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browser(ctx):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error, sync_playwright
+    import uvicorn
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.api import create_app
+
+    try:
+        playwright = sync_playwright().start()
+    except Error as exc:
+        pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Error as exc:
+            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+
+        ctx.settings.console_login = True
+        ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.repo().projects["TESTWP"].paused = True
+        password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
+        assert password
+        app = create_app(ctx)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("127.0.0.1", 0))
+        server_socket.listen(128)
+        base_url = f"http://127.0.0.1:{server_socket.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
+        server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
+        try:
+            server_thread.start()
+            deadline = time.monotonic() + 10
+            while not server.started and server_thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert server.started, "console test server did not start"
+
+            page = browser.new_page()
+            page.goto(base_url + "/login?next=%2Fintegrations", wait_until="domcontentloaded")
+            page.get_by_label("Email").fill("browser-admin@example.test")
+            page.get_by_label("Password").fill(password)
+            page.get_by_role("button", name="Sign in").click()
+            page.wait_for_url("**/integrations")
+            page.get_by_role("button", name="Connect GitHub").wait_for(state="visible", timeout=10000)
+            existing_app = page.locator("#view-integrations summary").filter(has_text="Use an existing GitHub App")
+            existing_app.click()
+            page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
+            page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+
+            page.get_by_role("tab", name="Projects").click()
+            page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+        finally:
+            browser.close()
+            server.should_exit = True
+            if server_thread.is_alive():
+                server_thread.join(timeout=5)
+            server_socket.close()
+    finally:
+        playwright.stop()
+
+
+def test_lead_sees_only_read_permitted_controls():
+    lead = console_session_user("lead")
+    integrations = render_integrations(lead)
+    projects = render_projects([{"key": "NEWAPP", "repo": "acme/new-app", "status": "paused",
+                                 "priority": 1, "ticket_count": 0}], {}, user=lead)
+    knowledge = render_knowledge({"resources": [{"type": "knowledge", "id": "ops", "title": "Ops notes",
+                                                   "content": "notes", "archived": False, "version": 1,
+                                                   "updated_by": "owner", "updated_at": None}],
+                                  "proposals": []}, user=lead)
+    assert "Only a role with integration management permission" in integrations
+    assert "Connect GitHub" not in integrations and "Connect Jira" not in integrations
+    assert "Resume" not in projects and "Add project" not in projects and "Remove" not in projects
+    assert "Ops notes" in knowledge and 'data-act="knowledge-history"' in knowledge
+    assert 'data-act="knowledge-edit"' not in knowledge and 'data-act="knowledge-approve"' not in knowledge
 
 
 def test_team_lead_view_renders_ticket_ac_statuses_metrics_and_exports():

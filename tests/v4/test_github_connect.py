@@ -109,6 +109,10 @@ def test_existing_app_import_verifies_installation_persists_only_private_key_and
     assert status.json()["account"] == {"login": "acme", "type": "Organization"}
     assert PRIVATE_KEY not in status.text and "ghs_" not in status.text
 
+    owner_sign_in(client, ctx, role="super_admin")
+    admin_status = client.get("/v1/integrations/github")
+    assert admin_status.status_code == 200 and admin_status.json()["connected"]
+
     catalog = client.get("/v1/projects/catalog")
     assert catalog.status_code == 200
     assert [row["full_name"] for row in catalog.json()["github_repos"]] == ["acme/first"]

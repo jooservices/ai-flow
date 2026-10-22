@@ -1,0 +1,705 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>AI Flow Command Center V2</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+/* Layout concept: one menu of role views. Dashboard (work, and AI with machines) and the Work board come first and are open to
+   everyone. Projects are picked with a searchable list that scales to hundreds, never a row of buttons. Warm graphite ground;
+   one colour per AI, always named in text; status is written in words, never colour alone. */
+
+/* Layout concept (V2): the owner's day in one scroll. Summary cards, then the Kanban with the owner's queue beside it,
+   then the roadmap (a bar selects an epic and filters the Kanban), then AI usage and quota per AI.
+   Warm graphite ground; one colour per AI provider, always named in text; status uses words, not colour alone. */
+:root{
+  --bg:#121110; --panel:#1a1917; --panel2:#201e1b; --line:#2d2a26; --text:#ece7df; --muted:#9a9388; --faint:#6b655c;
+  --claude:#d98b5f; --codex:#58c4a3; --grok:#b69df2; --opencode:#8fa3b5;
+  --ok:#86c77f; --warn:#e6bb52; --crit:#e46e5e; --focus:#f0e6d2;
+  --font:'Manrope',system-ui,-apple-system,'Segoe UI',sans-serif; --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--font);margin:0;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 40px}
+button,input,select{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.wrap{max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;padding:18px 0 4px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px}
+.brand i{width:26px;height:26px;border-radius:8px;background:conic-gradient(from 210deg,var(--claude),var(--codex),var(--grok),var(--claude));display:grid;place-items:center}
+.brand i::after{content:"";width:12px;height:12px;border-radius:50%;background:var(--bg)}
+.brand small{font-weight:500;color:var(--muted);font-size:12px;margin-left:4px}
+.seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.seg button{padding:6px 12px;border-radius:7px;color:var(--muted);font-weight:600;font-size:13px;transition:background .2s,color .2s}
+.seg button[aria-pressed=true]{background:var(--panel2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.sp{flex:1}
+.sys{display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:13px;color:var(--muted);transition:border-color .2s}
+.sys:hover{border-color:var(--muted);color:var(--text)}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 8px rgba(134,199,127,0)}0%{box-shadow:0 0 0 0 rgba(134,199,127,.6)}}
+.btn{padding:7px 13px;border-radius:9px;border:1px solid var(--line);background:var(--panel);font-weight:600;font-size:13px;transition:border-color .2s,transform .15s}
+.btn:hover{border-color:var(--muted)} .btn:active{transform:scale(.97)}
+.btn.primary{background:var(--text);color:var(--bg);border-color:var(--text)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.k .lab{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.k .val{font-size:34px;font-weight:800;letter-spacing:-.02em;margin-top:4px;display:flex;align-items:baseline;gap:8px}
+.k .val small{font-size:13px;font-weight:600;color:var(--muted)}
+.k .sub{color:var(--muted);font-size:12px;margin-top:2px;display:flex;justify-content:space-between;align-items:end;gap:8px}
+.k.hot{border-color:#5a4423;background:linear-gradient(180deg,#221c13,var(--panel))}
+.k.hot .val{color:var(--warn)}
+.up{color:var(--ok)}
+h2{margin:0 0 12px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+h2 span{font-weight:500;text-transform:none;letter-spacing:0;font-size:12px}
+.main{display:grid;grid-template-columns:minmax(0,3fr) minmax(270px,1fr);gap:12px;align-items:start}
+.bar-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.bar-tools select,.bar-tools input{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:6px 10px;font-size:13px;min-width:0}
+.bar-tools input{width:170px}
+.fl{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--warn);color:var(--warn);font-size:12px;font-weight:600}
+.fl button{color:var(--warn);font-weight:800;padding:0 2px}
+.leg{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:0 0 10px}
+.leg span{display:inline-flex;align-items:center;gap:6px}
+.leg i{width:9px;height:9px;border-radius:50%}
+.pipe{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.col{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.col h3{margin:0 0 2px;font-size:11px;font-weight:700;color:var(--muted);display:flex;justify-content:space-between;letter-spacing:.03em;white-space:nowrap}
+.col h3 b{color:var(--text);font-family:var(--mono)}
+.col.attn{border-color:#5a4423}
+.stack{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow-y:auto;padding-right:2px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.tk{flex:none;display:grid;gap:5px;padding:8px;border-radius:9px;background:var(--bg);border:1px solid var(--line);text-align:left;position:relative;overflow:hidden;animation:drop .45s cubic-bezier(.2,.9,.3,1.2) both;transition:border-color .2s,transform .2s;min-width:0}
+.tk:hover{border-color:var(--muted);transform:translateY(-1px)}
+.tk .id{font-family:var(--mono);font-size:10.5px;color:var(--muted);display:flex;justify-content:space-between;gap:6px}
+.tk .ti{font-size:12px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tk .ft{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--muted)}
+.tk .ft i{width:7px;height:7px;border-radius:50%;flex:none}
+.tk.run::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,transparent,var(--codex),transparent);background-size:50% 100%;background-repeat:no-repeat;animation:slide 1.8s linear infinite}
+@keyframes slide{from{background-position:-60% 0}to{background-position:160% 0}}
+@keyframes drop{from{opacity:0;transform:translateY(-8px) scale(.96)}to{opacity:1;transform:none}}
+.older{font-size:11px;color:var(--faint);text-align:center;padding:4px 0}
+.none{font-size:11px;color:var(--faint);text-align:center;padding:14px 0}
+.ask{display:flex;flex-direction:column;gap:10px}
+.q{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:12px;display:grid;gap:8px;animation:drop .5s both;transition:opacity .4s,transform .4s}
+.q.gone{opacity:0;transform:translateX(30px)}
+.q .top{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}
+.q p{margin:0;font-size:13px}
+.q .act{display:flex;gap:6px;flex-wrap:wrap}
+.tag{padding:2px 7px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border:1px solid var(--line);color:var(--muted)}
+.tag.crit{color:var(--crit);border-color:#5b2c26}.tag.warn{color:var(--warn);border-color:#5a4423}.tag.ok{color:var(--ok);border-color:#2f4a2d}
+.empty{color:var(--muted);text-align:center;padding:28px 8px;border:1px dashed var(--line);border-radius:11px}
+.feed{display:grid;gap:6px;max-height:112px;overflow:hidden;font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:4px}
+.feed div{animation:drop .4s both;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.feed b{color:var(--text);font-weight:500}
+/* roadmap */
+.axis,.lane{display:grid;grid-template-columns:190px minmax(0,1fr);gap:12px}
+.scale{position:relative;height:20px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+.scale span{position:absolute;transform:translateX(-50%)}
+.gwrap{position:relative}
+.lane{align-items:center;padding:7px 0;border-top:1px solid var(--line);cursor:pointer;border-radius:8px;transition:background .2s;text-align:left;width:100%}
+.lane:hover{background:var(--panel2)}
+.lane.sel{background:var(--panel2);box-shadow:inset 0 0 0 1px var(--warn)}
+.lane .nm{display:flex;flex-direction:column;min-width:0;font-weight:600;font-size:13px}
+.lane .nm small{color:var(--faint);font-weight:500;font-size:11px;font-family:var(--mono)}
+.track{position:relative;height:28px;border-radius:8px;background:repeating-linear-gradient(90deg,transparent 0 calc(100%/4 - 1px),var(--line) calc(100%/4 - 1px) calc(100%/4))}
+.gb{position:absolute;top:3px;bottom:3px;border-radius:8px;background:var(--bg);border:1px solid var(--line);overflow:hidden}
+.gb i{position:absolute;inset:0 auto 0 0;width:0;transition:width 1.2s cubic-bezier(.2,.8,.2,1)}
+.gb span{position:absolute;inset:0;display:flex;align-items:center;padding:0 9px;font-size:11px;font-family:var(--mono);text-shadow:0 1px 2px rgba(0,0,0,.7);white-space:nowrap}
+.today{position:absolute;top:-6px;bottom:0;border-left:2px dashed var(--warn);pointer-events:none;z-index:2}
+.today::before{content:"today";position:absolute;top:-14px;left:-17px;font:500 10px var(--mono);color:var(--warn)}
+.hint{color:var(--faint);font-size:12px}
+/* usage */
+.lower{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:12px;align-items:start}
+.chart{position:relative}
+.legend{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.lg{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted);transition:opacity .2s}
+.lg i{width:8px;height:8px;border-radius:50%}.lg[aria-pressed=false]{opacity:.35}
+svg text{font-family:var(--mono);fill:var(--muted);font-size:10px}
+.tip{position:absolute;pointer-events:none;background:#0c0b0a;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:12px;opacity:0;transition:opacity .15s;white-space:nowrap;z-index:3}
+.tip b{display:block;margin-bottom:3px;font-family:var(--mono)}
+.share{display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+.share i{display:block;height:100%;transition:width .8s cubic-bezier(.2,.8,.2,1)}
+.shl{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted);font-family:var(--mono)}
+.qa{display:grid;gap:12px}
+.qp{border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:12px;display:grid;gap:9px}
+.qp .hd{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.qp .hd b{display:flex;align-items:center;gap:8px;font-size:14px}
+.qp .hd b i{width:10px;height:10px;border-radius:50%}
+.qp .hd span{font-size:12px;color:var(--muted)}
+.meter{height:9px;border-radius:5px;background:var(--bg);border:1px solid var(--line);overflow:hidden}
+.meter i{display:block;height:100%;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.qrow{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.qrow b{color:var(--text);font-family:var(--mono);font-weight:500}
+details.accs summary{cursor:pointer;color:var(--muted);font-size:12px;list-style:none}
+details.accs summary::before{content:"▸ ";} details[open].accs summary::before{content:"▾ ";}
+.accrows{display:grid;gap:5px;margin-top:8px}
+.accrow{display:grid;grid-template-columns:minmax(0,1fr) 54px 92px;gap:8px;font-size:12px;align-items:center}
+.accrow .mono{color:var(--muted)}
+.state{font-size:11px;font-weight:700;text-align:right}
+.state.ready{color:var(--ok)}.state.low{color:var(--warn)}.state.fail{color:var(--crit)}
+/* drawers */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,100%);background:var(--panel);border-left:1px solid var(--line);padding:22px max(18px,env(safe-area-inset-right,0px)) 22px 22px;transform:translateX(105%);transition:transform .35s cubic-bezier(.2,.8,.2,1);z-index:20;overflow:auto;display:grid;gap:14px;align-content:start}
+.drawer.open{transform:none;box-shadow:-30px 0 60px rgba(0,0,0,.5)}
+.drawer h4{margin:0;font-size:18px;line-height:1.3}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .3s;z-index:19}.scrim.on{opacity:1;pointer-events:auto}
+.tl{display:grid;gap:10px;margin:0;padding:0;list-style:none}
+.tl li{display:grid;grid-template-columns:14px 1fr;gap:10px;font-size:13px}
+.tl li i{width:10px;height:10px;border-radius:50%;background:var(--line);margin-top:5px}
+.tl li.done i{background:var(--ok)}.tl li.cur i{background:var(--warn);box-shadow:0 0 0 4px rgba(230,187,82,.2)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:6px 8px 6px 0}
+td{padding:9px 8px 9px 0;border-top:1px solid var(--line)}
+@media (max-width:1180px){.main,.lower{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.pipe{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media (max-width:760px){.pipe{grid-template-columns:repeat(2,minmax(0,1fr))}.axis,.lane{grid-template-columns:104px minmax(0,1fr)}.bar-tools input{width:100%}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+[hidden]{display:none!important}
+/* ----- app shell (V2 with the role menu of the current console) ----- */
+.tabs{display:flex;gap:2px;align-items:center;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--line);margin-top:6px;padding-bottom:0}
+.tabs::-webkit-scrollbar{display:none}
+.tab{padding:11px 14px;color:var(--muted);font-weight:600;font-size:14px;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .2s,border-color .2s}
+.tab:hover{color:var(--text)}
+.tab[aria-selected=true]{color:var(--text);border-bottom-color:var(--warn)}
+.tab.key{font-weight:800}
+.tabs .div{width:1px;height:18px;background:var(--line);margin:0 8px;flex:none}
+.tab .badge{margin-left:6px;background:var(--warn);color:#2a1d05;border-radius:999px;font-size:11px;font-weight:800;padding:1px 7px}
+.viewas{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+.viewas select{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:6px 9px;font-size:13px}
+.page{display:flex;flex-direction:column;gap:12px}
+.page>.lead{margin:2px 0 4px;color:var(--muted);max-width:75ch}
+.page>h1{margin:6px 0 0;font-size:22px;letter-spacing:-.01em}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.funnel{display:grid;gap:8px}
+.fr{display:grid;grid-template-columns:104px minmax(0,1fr) 46px;gap:10px;align-items:center;font-size:13px;cursor:pointer;border-radius:8px;padding:2px 4px;text-align:left;width:100%}
+.fr:hover{background:var(--panel2)}
+.fr .b{height:14px;border-radius:7px;background:var(--bg);border:1px solid var(--line);overflow:hidden}
+.fr .b i{display:block;height:100%;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.fr b{font-family:var(--mono);text-align:right}
+.hbars{display:grid;gap:9px}
+.hb{display:grid;grid-template-columns:120px minmax(0,1fr) 64px;gap:10px;align-items:center;font-size:13px}
+.hb .b{height:12px;border-radius:6px;background:var(--bg);border:1px solid var(--line);overflow:hidden}
+.hb .b i{display:block;height:100%;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.hb span:last-child{font-family:var(--mono);text-align:right;color:var(--muted)}
+.stk{display:flex;height:22px;border-radius:7px;overflow:hidden;border:1px solid var(--line);background:var(--bg)}
+.stk i{display:block;height:100%;width:0;transition:width 1s cubic-bezier(.2,.8,.2,1)}
+.keyl{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:12px;color:var(--muted)}
+.keyl span{display:inline-flex;align-items:center;gap:6px}.keyl i{width:9px;height:9px;border-radius:3px}
+.dt{width:100%;border-collapse:collapse;font-size:13px}
+.dt th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:6px 10px 8px 0;white-space:nowrap}
+.dt td{padding:10px 10px 10px 0;border-top:1px solid var(--line);vertical-align:middle}
+.dt .num{font-family:var(--mono);text-align:right;white-space:nowrap}
+.scroll{overflow-x:auto}
+.pillstate{font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;border:1px solid var(--line);white-space:nowrap}
+.pillstate.ok{color:var(--ok);border-color:#2f4a2d}.pillstate.warn{color:var(--warn);border-color:#5a4423}.pillstate.crit{color:var(--crit);border-color:#5b2c26}
+.usebar{display:flex;align-items:center;gap:8px;min-width:130px;font-family:var(--mono);font-size:12px}
+.usebar .b{flex:1;height:8px;border-radius:4px;background:var(--bg);border:1px solid var(--line);overflow:hidden}.usebar .b i{display:block;height:100%}
+.cmd{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;overflow-x:auto;white-space:nowrap;color:var(--muted)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.toggle{width:40px;height:22px;border-radius:11px;background:var(--line);position:relative;transition:background .2s;flex:none}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--text);transition:transform .2s}
+.toggle[aria-pressed=true]{background:var(--ok)}.toggle[aria-pressed=true]::after{transform:translateX(18px)}
+.fld{display:grid;gap:5px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.fld input,.fld select,.fld textarea,select.in,input.in{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:14px;text-transform:none;letter-spacing:0;font-weight:500;width:100%;min-width:0}
+.fld textarea{min-height:84px;resize:vertical}
+.assess{display:grid;gap:8px}
+.crit2{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:13px;display:grid;gap:5px;animation:drop .5s both}
+.shimmer{height:10px;border-radius:5px;background:linear-gradient(90deg,var(--line),var(--panel2),var(--line));background-size:200% 100%;animation:sh 1.1s infinite}
+@keyframes sh{to{background-position:-200% 0}}
+.rev{display:grid;gap:10px}
+.rev .hd{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.rev h3{margin:0;font-size:16px}
+.chk{display:flex;gap:6px 14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.chk span b{color:var(--ok)}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translate(-50%,20px);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:11px;font-weight:700;font-size:13px;opacity:0;transition:all .3s;z-index:40;pointer-events:none;max-width:90vw}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+@media (max-width:900px){.grid2,.grid3{grid-template-columns:1fr}.viewas{display:none}}
+
+.dt td:first-child{white-space:nowrap}
+@media (min-width:900px){.qa{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* ----- V3 additions: project picker, command bar, sub tabs, management pages ----- */
+.pick{display:inline-flex;align-items:center;gap:10px;padding:7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-weight:600;font-size:13px;min-width:0;max-width:100%;transition:border-color .2s}
+.pick:hover{border-color:var(--muted)}
+.pick .k{font-family:var(--mono);color:var(--warn);font-size:12px}
+.pick .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick svg{width:12px;height:12px;flex:none;color:var(--muted)}
+.pop{position:fixed;z-index:50;width:min(380px,calc(100vw - 24px));max-height:min(480px,70vh);display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.55);animation:drop .2s both}
+.pop input{margin:10px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:14px;width:calc(100% - 20px)}
+.pop .lst{overflow:auto;padding:0 6px 8px;display:grid;gap:1px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.pop .grp{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);font-weight:700;padding:10px 10px 4px}
+.pop .it{display:grid;grid-template-columns:22px 64px minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 8px;border-radius:9px;text-align:left;width:100%;font-size:13px}
+.pop .it:hover,.pop .it.on{background:var(--panel2)}
+.pop .it .kk{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.pop .it .st{font-size:15px;line-height:1;color:var(--faint)}
+.pop .it .st.on{color:var(--warn)}
+.pop .it small{color:var(--faint);font-size:11px}
+.pop .none2{padding:16px;color:var(--muted);text-align:center;font-size:13px}
+.cmdbtn{display:flex;align-items:center;gap:10px;padding:7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted);font-size:13px;min-width:210px;transition:border-color .2s}
+.cmdbtn:hover{border-color:var(--muted);color:var(--text)}
+.cmdbtn kbd{margin-left:auto;font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--faint)}
+.cmdk{position:fixed;inset:0;z-index:60;display:grid;justify-items:center;align-content:start;padding-top:12vh;background:rgba(0,0,0,.55)}
+.cmdk>div{width:min(560px,calc(100vw - 24px));background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.6);animation:drop .2s both}
+.cmdk input{width:100%;background:transparent;border:0;border-bottom:1px solid var(--line);padding:16px 18px;font-size:16px;outline:0}
+.cmdk .lst{max-height:50vh;overflow:auto;padding:6px}
+.cmdk .it{display:grid;grid-template-columns:84px minmax(0,1fr) auto;gap:10px;align-items:center;padding:9px 12px;border-radius:10px;width:100%;text-align:left;font-size:14px}
+.cmdk .it.on,.cmdk .it:hover{background:var(--panel2)}
+.cmdk .it span:first-child{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:700}
+.cmdk .it small{color:var(--faint);font-family:var(--mono);font-size:11px}
+.subtabs{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px;align-self:flex-start;flex-wrap:wrap}
+.subtabs button{padding:7px 14px;border-radius:7px;color:var(--muted);font-weight:700;font-size:13px;transition:background .2s,color .2s}
+.subtabs button[aria-pressed=true]{background:var(--panel2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.pagehead{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+.pagehead .grow{flex:1}
+.stars{color:var(--warn)}
+.star{font-size:16px;line-height:1;color:var(--faint);padding:2px 4px;border-radius:6px}.star.on{color:var(--warn)}
+.statgrid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
+.mut{color:var(--muted)}.fnt{color:var(--faint)}
+.thread{display:grid;gap:8px;margin-top:4px}
+.msg{padding:9px 12px;border-radius:12px;font-size:13px;max-width:92%;animation:drop .3s both}
+.msg.me{background:var(--panel2);border:1px solid var(--line);justify-self:end}
+.msg.ai{background:var(--bg);border:1px solid var(--line);justify-self:start}
+.msg small{display:block;color:var(--faint);font-size:11px;margin-bottom:2px}
+.avatar{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:12px;color:#1a1306;flex:none}
+.chip2{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted);margin:2px 4px 2px 0;white-space:nowrap}
+.mx{width:100%;border-collapse:collapse;font-size:13px}
+.mx th{padding:8px 6px;color:var(--muted);font-size:11px;letter-spacing:.05em;text-transform:uppercase;text-align:center;font-weight:700}
+.mx th:first-child,.mx td:first-child{text-align:left;padding-left:0;white-space:nowrap}
+.mx td{border-top:1px solid var(--line);padding:8px 6px;text-align:center}
+.mx input{width:18px;height:18px;accent-color:var(--warn);cursor:pointer}
+.mx input:disabled{cursor:not-allowed;opacity:.5}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.stepper button{width:28px;height:28px;color:var(--muted);font-size:16px}.stepper button:hover{background:var(--panel2);color:var(--text)}
+.stepper span{min-width:28px;text-align:center;font-family:var(--mono);font-size:13px}
+.wait{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--warn);animation:rot 1s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+.mcard{display:grid;gap:12px}
+.mhead{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
+.acts2{display:flex;gap:6px;flex-wrap:wrap}
+.btn.sm{padding:5px 10px;font-size:12px}
+.btn.danger{color:var(--crit);border-color:#5b2c26}
+.projrow{cursor:pointer}.projrow:hover td{background:var(--panel2)}
+th.sortable{cursor:pointer}th.sortable:hover{color:var(--text)}
+@media (max-width:1100px){.statgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.cmdbtn{min-width:0}.cmdbtn span.t{display:none}}
+</style>
+<div class="wrap">
+<header>
+  <div class="brand"><i></i>AI Flow<small>Command Center V2 · demo data</small></div>
+  <div class="sp"></div>
+  <button class="cmdbtn" id="cmdBtn" aria-label="Search projects, tickets and views"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9.2 9.2L12.5 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="t">Search projects, tickets, views</span><kbd>Ctrl K</kbd></button>
+  <label class="viewas">View as <select id="roleSel" aria-label="View as role"></select></label>
+  <span class="avatar" style="background:#f2b84b" title="Viet Vu · Administrator">VV</span>
+</header>
+<nav class="tabs" id="tabs" role="tablist" aria-label="Views"></nav>
+<main style="display:grid;gap:12px">
+<div class="page" data-page="dash" id="p-dash" hidden></div>
+<div class="page" data-page="board" id="p-board" hidden></div>
+<div class="page" data-page="delivery" id="p-delivery" hidden></div>
+<div class="page" data-page="sa" id="p-sa" hidden></div>
+<div class="page" data-page="lead" id="p-lead" hidden></div>
+<div class="page" data-page="biz" id="p-biz" hidden></div>
+<div class="page" data-page="review" id="p-review" hidden></div>
+<div class="page" data-page="stake" id="p-stake" hidden></div>
+<div class="page" data-page="machines" id="p-machines" hidden></div>
+<div class="page" data-page="users" id="p-users" hidden></div>
+<div class="page" data-page="know" id="p-know" hidden></div>
+<div class="page" data-page="integ" id="p-integ" hidden></div>
+<div class="page" data-page="proj" id="p-proj" hidden></div>
+</main>
+</div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Details"></aside>
+<div class="toast" id="toast" role="status"></div>
+<script>
+(function(){
+'use strict';
+var $=function(s,r){return(r||document).querySelector(s)},$$=function(s,r){return[].slice.call((r||document).querySelectorAll(s))};
+function el(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function rng(s){return function(){s|=0;s=s+0x6D2B79F5|0;var t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+var R=rng(20261023);
+function store(k,v){try{if(v===undefined){var x=localStorage.getItem('aiflow-demo-'+k);return x?JSON.parse(x):null}localStorage.setItem('aiflow-demo-'+k,JSON.stringify(v))}catch(e){return null}}
+var P={claude:{n:'Claude',h:'#d98b5f'},codex:{n:'Codex',h:'#58c4a3'},grok:{n:'Grok',h:'#b69df2'},opencode:{n:'OpenCode',h:'#8fa3b5'}};
+var STAGES=['Backlog','Intake','To Do','In Progress','In Verify','Human review','Done'];
+function dt(m,d){return Date.UTC(2026,m-1,d)}
+var T0=dt(10,14),T1=dt(11,22),NOW=dt(10,23);
+
+/* ---------- projects (26 here; the picker and tables are built for hundreds) ---------- */
+var PN=[['JAIF','AI Flow'],['JOOWP','WordPress'],['JOOC','Client'],['JDTO','DTO'],['JOOXCR','XCrawler'],['JOOCR','Control Room'],['JOOF','Flickr'],['JOONETM','Network Management'],['JOOSX','StoryX'],['JOOUA','Useragent'],['JOODT','Draytek'],['JOOWM','WordPress MCP'],['JAVM','JavMeta'],['SGIMS','SGCarmart IMS'],['SGWEB','SGCarmart Web'],['SGAPP','SGCarmart App'],['OPSLB','Ops Lab'],['HOMEL','Homelab'],['CRWNW','Crawler News'],['CRWST','Crawler Stories'],['GOFLK','Go Flickr Downloader'],['GOJAV','Go Jable Downloader'],['GOTEL','Go Telegram Downloader'],['LCFG','Laravel Config'],['LEVT','Laravel Events'],['LLOG','Laravel Logging']];
+var EPICS=[
+ ['JAIF','Execution core',dt(10,19),dt(10,21),100,30],['JAIF','Gates and rules',dt(10,20),dt(10,28),62,24],['JAIF','Control on the UI',dt(10,23),dt(11,6),20,18],['JAIF','Packaging and install',dt(10,24),dt(11,3),35,15],['JAIF','No CLI for end users',dt(10,24),dt(11,10),44,22],
+ ['JOOWP','Platform and delivery',dt(10,14),dt(10,20),100,26],['JOOWP','Core engine',dt(10,14),dt(10,30),88,245],['JOOWP','Theme jooservices',dt(10,16),dt(10,28),94,86],['JOOWP','MCP plugin',dt(10,20),dt(11,8),45,11],['JOOWP','Bundle (on hold)',dt(11,5),dt(11,20),0,0]];
+var EP_POOL=['Foundation','Core features','Quality and tests','Integrations','Release','Documentation'];
+var REAL=[
+ ['JAIF-130','Offline bundle and .deb package',3,'codex','Packaging and install'],['JAIF-184','Release progress screen',3,'codex','Packaging and install'],['JAIF-217','Many repositories per project',3,'codex','Control on the UI'],['JAIF-219','Super Administrator sees no GitHub panel',3,'codex','Control on the UI'],['JAIF-220','GitHub credentials held by Command Center',3,'codex','Control on the UI'],['JAIF-109','Console login with roles',3,'claude','Control on the UI'],['JAIF-218','Grok accounts reported as signed out',4,'codex','Execution core'],['JAIF-95','Assign AI account to a node from the UI',1,null,'Control on the UI'],['JAIF-127','Authorize AI account from the UI',2,null,'No CLI for end users'],['JAIF-174','Create a VM from Command Center',2,null,'No CLI for end users'],['JAIF-178','Ticket lifecycle in OpenObserve',2,null,'Gates and rules'],['JAIF-215','Canary breaks the cc worker on a new endpoint',2,null,'Gates and rules'],['JAIF-221','Composer install fails on nodes',2,null,'Packaging and install'],['JAIF-222','Role-based views per person',2,null,'Control on the UI'],['JAIF-223','Knowledge that is never lost',2,null,'Gates and rules'],['JAIF-96','Edit project and node settings from the UI',0,null,'Control on the UI'],['JAIF-97','Secrets and runtime config from the UI',0,null,'Control on the UI'],['JAIF-138','Release step done by AI',6,'codex','Gates and rules'],['JAIF-137','Release readiness check',6,'claude','Gates and rules'],['JAIF-136','Install the control plane with one command',6,'codex','Packaging and install'],
+ ['JOOWP-312','Media upload: MCP reports failure',3,'codex','MCP plugin'],['JOOWP-311','Plugin hardening: roles and settings',3,'claude','MCP plugin'],['JOOWP-310','MCP OAuth connection unstable',3,'codex','MCP plugin'],['JOOWP-253','Review which @api symbols themes use',5,'claude','Core engine'],['JOOWP-277','Translate JavaScript strings',5,'claude','Core engine'],['JOOWP-256','Regenerate the 0.1.0 API baseline',2,null,'Core engine'],['JOOWP-278','POT file and Vietnamese catalogue',2,null,'Core engine'],['JOOWP-201','Fully responsive on all devices',0,null,'Theme jooservices'],['JOOWP-301','Layout shift over budget',0,null,'Theme jooservices'],['JOOWP-224','Release packaging guide',6,'claude','Theme jooservices'],['JOOWP-220','Performance and SEO gate',6,'codex','Theme jooservices']];
+var FILL=['Tighten the retry rule','Document the new screen','Add a test for the edge case','Handle an empty response','Rename a confusing label','Clean up an old helper','Show the reason on failure','Cache the lookup','Validate the input earlier','Speed up the list page'];
+var PROJ={},PLIST=[],TICKETS=[];
+(function build(){var starred=store('stars')||['JAIF','JOOWP'];
+ PN.forEach(function(p,pi){var key=p[0],o={key:key,name:p[1],star:starred.indexOf(key)>-1,state:(key==='JOOWM'||key==='SGAPP'||key==='HOMEL')?'Paused':'Running',epics:[],last:Math.round(2+R()*600)};
+  if(key==='JAIF')o.counts=[59,1,9,6,1,0,148];else if(key==='JOOWP')o.counts=[27,0,7,6,0,2,329];
+  else{o.counts=[Math.round(4+R()*36),R()<.3?1:0,Math.round(R()*8),Math.round(R()*5),Math.round(R()*3),R()<.3?1:0,Math.round(20+R()*280)];if(o.state==='Paused')o.counts[3]=0}
+  if(key==='JAIF'||key==='JOOWP')o.epics=EPICS.filter(function(e){return e[0]===key});
+  else{var n=2+Math.floor(R()*2),tot=o.counts.reduce(function(a,b){return a+b},0);for(var i=0;i<n;i++){var s=dt(10,14+Math.floor(R()*8)),pct=Math.round(10+R()*90);o.epics.push([key,EP_POOL[(pi+i)%EP_POOL.length],s,s+864e5*(8+Math.floor(R()*22)),pct,Math.round(tot/n)])}}
+  PROJ[key]=o;PLIST.push(o);
+  var eps=o.epics.filter(function(e){return e[5]>0}).map(function(e){return e[1]});
+  var real=REAL.filter(function(r){return r[0].indexOf(key+'-')===0});
+  o.counts.forEach(function(cnt,si){var rs=real.filter(function(r){return r[2]===si});rs.forEach(function(r){TICKETS.push({k:r[0],t:r[1],s:si,p:r[3],e:r[4],pr:key,age:Math.round(10+R()*300)})});
+   var extra=Math.min(Math.max(0,cnt-rs.length),(key==='JAIF'||key==='JOOWP')?(si===6?14:si===0?16:6):(si===6?4:si===0?5:3));
+   for(var i=0;i<extra;i++){TICKETS.push({k:key+'-'+(900-si*100-i),t:FILL[Math.floor(R()*FILL.length)],s:si,p:si>=3&&si<=5?['codex','claude','codex'][Math.floor(R()*3)]:null,e:eps[Math.floor(R()*eps.length)]||'',pr:key,age:Math.round(30+R()*3000),gen:1})}})})})();
+function sortedProjects(){return PLIST.slice().sort(function(a,b){return (b.star-a.star)||a.key.localeCompare(b.key)})}
+
+/* ---------- people needed (waiting for you, human review) ---------- */
+var QUEUE=[
+ {id:'q1',k:'JAIF-213',pr:'JAIF',kind:'Question from the AI',title:'Is the existing offline bundle enough?',body:'The developer AI found a bundle already in the repository and stopped to ask whether it should build a new one.',age:'38 min',tone:'crit',thread:[]},
+ {id:'q2',k:'JOOWP-271',pr:'JOOWP',kind:'Question from the AI',title:'Provide a token for the dependency audit, or skip this gate?',body:'The security scan cannot reach the audit service without a token. Core cannot finish its checklist without this scan.',age:'2 h',tone:'crit',thread:[]},
+ {id:'q3',k:'JAIF-109',pr:'JAIF',kind:'Decision needed',title:'Keep the lab on two control replicas until the login gate fix ships?',body:'It keeps workers running while public sign-in stays on.',age:'1 h',tone:'warn',thread:[]},
+ {id:'q4',k:'JOOWP-243',pr:'JOOWP',kind:'Decision needed',title:'Accept a wider threshold for the flaky boot-cost test?',body:'It passes on a quiet machine and fails when machines are busy.',age:'5 h',tone:'warn',thread:[]},
+ {id:'q5',k:'JOOWP-253',pr:'JOOWP',kind:'Review before merge',title:'Review which @api symbols the themes really use',body:'Pull request #212 · +148 −22 lines · verified by Claude. Checks passed: unit tests, lint, API baseline.',age:'11 min',tone:'',thread:[],review:1},
+ {id:'q6',k:'JOOWP-277',pr:'JOOWP',kind:'Review before merge',title:'Translate the JavaScript strings through the runtime config',body:'Pull request #214 · +310 −57 lines · verified by Claude. Checks passed: unit tests, lint, i18n check.',age:'3 min',tone:'',thread:[],review:1}];
+var HW={weeks:['Sep 1','Sep 8','Sep 15','Sep 22','Sep 29','Oct 6','Oct 13','Oct 20'],q:[9,11,8,12,7,6,5,4],d:[6,7,9,6,5,5,3,3],r:[14,16,18,15,13,12,9,7],b:[5,4,6,3,4,2,2,1]};
+
+/* ---------- AI accounts and machines ---------- */
+var NODES=[{n:'node1',gb:24,cpu:12,busy:6,state:'Online'},{n:'node2',gb:20,cpu:10,busy:7,state:'Online'},{n:'node3',gb:20,cpu:10,busy:7,state:'Online'}];
+var ACCS=[
+ {id:'claude-01',ai:'claude',node:'node1',par:2,roles:['develop','verify','intake'],used:34,reset:'Mon 09:00',tok:2.4,cost:4.6,state:'ready'},{id:'claude-02',ai:'claude',node:'node2',par:2,roles:['develop','verify'],used:27,reset:'Tue 14:00',tok:2.0,cost:3.9,state:'ready'},{id:'claude-03',ai:'claude',node:'node3',par:2,roles:['develop','verify'],used:22,reset:'Wed 08:00',tok:2.0,cost:3.7,state:'ready'},
+ {id:'codex-01',ai:'codex',node:'node1',par:4,roles:['develop','verify','intake'],used:61,reset:'Sun 18:00',tok:5.1,cost:9.8,state:'ready'},{id:'codex-02',ai:'codex',node:'node2',par:4,roles:['develop','verify'],used:74,reset:'Sat 22:30',tok:5.9,cost:11.2,state:'low'},{id:'codex-03',ai:'codex',node:'node3',par:4,roles:['develop','verify'],used:58,reset:'Sun 03:00',tok:4.0,cost:7.6,state:'ready'},
+ {id:'grok-01',ai:'grok',node:'node1',par:1,roles:['verify','develop'],used:12,reset:'no reset',tok:.5,cost:.9,state:'ready'},{id:'grok-02',ai:'grok',node:'node2',par:1,roles:['verify','develop'],used:9,reset:'no reset',tok:.3,cost:.6,state:'ready'},{id:'grok-03',ai:'grok',node:'node3',par:1,roles:['verify','develop'],used:14,reset:'no reset',tok:.3,cost:.6,state:'ready'},
+ {id:'opencode-01',ai:'opencode',node:'node1',par:1,roles:['develop'],used:0,reset:'—',tok:0,cost:0,state:'failing'},{id:'opencode-02',ai:'opencode',node:'node2',par:1,roles:['develop'],used:0,reset:'—',tok:0,cost:0,state:'failing'},{id:'opencode-03',ai:'opencode',node:'node3',par:1,roles:['develop'],used:0,reset:'—',tok:0,cost:0,state:'failing'}];
+var AINOTE={claude:'Weekly limit; each account resets at its own time',codex:'Weekly limit; each account resets at its own time',grok:'Paid from a prepaid balance, so there is no reset',opencode:'Free model with no limit. Not in use: all 3 accounts fail their check'};
+var DAYS=[];for(var d=0;d<14;d++){var b=.55+.45*Math.sin(d/2.2)+R()*.5;DAYS.push({claude:Math.round(b*5.2+R()*3),codex:Math.round(b*11+R()*6),grok:Math.round(b*1.2+R()*1.2),opencode:Math.round(R()*.6)})}
+
+/* ---------- people and roles ---------- */
+var VIEWS=[['dash','Dashboard'],['board','Work board'],['delivery','Delivery'],['sa','SA'],['lead','Team Lead'],['biz','Business'],['review','Human review'],['stake','Stakeholder'],['machines','Machines and AI'],['users','Users and roles'],['know','Knowledge'],['integ','Integrations'],['proj','Projects']];
+var ROLEDEF={'Administrator':VIEWS.map(function(v){return v[0]}),'Product owner':['dash','board','delivery','biz','lead','stake','review','know'],'Delivery':['dash','board','delivery','review'],'SA':['dash','board','sa','machines','integ','know'],'BA':['dash','board','biz','know'],'Team Lead':['dash','board','delivery','lead','review','know'],'Business':['dash','board','biz'],'Reviewer':['board','review'],'Stakeholder':['dash','board','stake']};
+var USERS=[['Viet Vu','jooservices@gmail.com',['Administrator'],'All projects','just now','Active','#f2b84b'],['An Nguyen','an@example.com',['Product owner'],'JAIF, JOOWP','2 h ago','Active','#58c4a3'],['Binh Tran','binh@example.com',['Reviewer'],'JOOWP','yesterday','Active','#b69df2'],['Chi Le','chi@example.com',['BA','Business'],'JAIF','3 days ago','Active','#d98b5f'],['Dung Pham','dung@example.com',['SA'],'All projects','today','Active','#8fa3b5'],['Hoa Vo','hoa@example.com',['Team Lead','Delivery'],'JAIF, JOOWP, JOOC','today','Active','#e6bb52'],['Khanh Do','khanh@example.com',['Stakeholder'],'JOOWP','last week','Invited','#86c77f']];
+var S={role:'Administrator',page:'dash',dview:'work',bp:store('bp')||'JAIF',epic:'',ai:'',q:'',dscope:'starred',feed:[],handled:{},conns:null,sort:'prog',sortDir:-1,pq:'',pshow:8};
+
+/* ---------- helpers ---------- */
+function counts(keys){var c=[0,0,0,0,0,0,0];keys.forEach(function(k){PROJ[k].counts.forEach(function(v,i){c[i]+=v})});return c}
+function scopeKeys(){return S.dscope==='all'?PLIST.map(function(p){return p.key}):PLIST.filter(function(p){return p.star}).map(function(p){return p.key})}
+function boardKeys(){return S.bp==='ALL'?PLIST.map(function(p){return p.key}):[S.bp]}
+function openQueue(keys){return QUEUE.filter(function(q){return !S.handled[q.id]&&(!keys||keys.indexOf(q.pr)>-1)})}
+function allowed(id){var r=ROLEDEF[S.role];return !r||r.indexOf(id)>-1}
+function toast(m){var t=$('#toast');t.textContent=m;t.classList.add('on');clearTimeout(toast.h);toast.h=setTimeout(function(){t.classList.remove('on')},2400)}
+function tbl(heads,rows,cls){return '<div class="scroll"><table class="dt '+(cls||'')+'"><thead><tr>'+heads.map(function(h){return '<th>'+h+'</th>'}).join('')+'</tr></thead><tbody>'+rows.map(function(r){return '<tr>'+r.map(function(c){return '<td'+(c&&c.n!==undefined?' class="num"':'')+'>'+(c&&c.n!==undefined?c.n:c)+'</td>'}).join('')+'</tr>'}).join('')+'</tbody></table></div>'}
+function pill(t,tone){return '<span class="pillstate '+(tone||'')+'">'+t+'</span>'}
+function useBar(p,col){return '<div class="usebar"><div class="b"><i style="width:'+p+'%;background:'+(col||(p>70?'var(--crit)':p>50?'var(--warn)':'var(--ok)'))+'"></i></div>'+p+'%</div>'}
+function animBars(root){requestAnimationFrame(function(){requestAnimationFrame(function(){$$('[data-w]',root||document).forEach(function(i){i.style.width=i.dataset.w+'%'})})})}
+function page(id,html){var s=$('#p-'+id);s.innerHTML=html;return s}
+function accState(s){return s==='ready'?pill('Ready','ok'):s==='failing'?pill('Failing its check','crit'):pill('Low quota','warn')}
+function ago(m){return m<90?m+' min ago':m<2880?Math.round(m/60)+' h ago':Math.round(m/1440)+' days ago'}
+function feed(h){S.feed.unshift(h);S.feed=S.feed.slice(0,5);var f=$('#feed');if(f){f.innerHTML='';S.feed.forEach(function(x){f.appendChild(el('div','',x))})}}
+
+/* ---------- project picker: search, stars, scales to hundreds ---------- */
+var CHEV='<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4.5l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+function pickerButton(val,allowAll){var p=val==='ALL'?null:PROJ[val];return '<button class="pick" data-pick="'+(allowAll?1:0)+'" aria-haspopup="listbox"><span class="k">'+(p?p.key:'ALL')+'</span><span class="nm">'+(p?esc(p.name):'All projects ('+PLIST.length+')')+'</span>'+CHEV+'</button>'}
+var popEl=null,popClose=null;
+function closePop(){if(popEl){popEl.remove();popEl=null}if(popClose){document.removeEventListener('mousedown',popClose,true);popClose=null}}
+function openPicker(btn,val,allowAll,onPick){closePop();var rc=btn.getBoundingClientRect();popEl=el('div','pop');popEl.style.left=Math.max(8,Math.min(rc.left,window.innerWidth-390))+'px';popEl.style.top=(rc.bottom+6)+'px';
+ popEl.innerHTML='<input type="search" placeholder="Find a project by name or key" aria-label="Find a project"><div class="lst" role="listbox"></div>';document.body.appendChild(popEl);
+ var inp=$('input',popEl),lst=$('.lst',popEl),cur=0,shown=[];
+ function draw(){var q=inp.value.trim().toLowerCase(),items=sortedProjects().filter(function(p){return !q||(p.key+' '+p.name).toLowerCase().indexOf(q)>-1});shown=[];lst.innerHTML='';
+  function row(p){var i=shown.length;shown.push(p.key);var r=el('div','it'+(i===cur?' on':''));r.setAttribute('role','option');
+   r.innerHTML='<button class="st'+(p.star?' on':'')+'" aria-label="Star" tabindex="-1">'+(p.star?'★':'☆')+'</button><span class="kk">'+p.key+'</span><span>'+esc(p.name)+(p.state==='Paused'?' <small>paused</small>':'')+'</span><small>'+p.counts.slice(3,6).reduce(function(a,b){return a+b},0)+' active</small>';
+   r.onclick=function(e){if(e.target.classList.contains('st')){p.star=!p.star;store('stars',PLIST.filter(function(x){return x.star}).map(function(x){return x.key}));draw();return}closePop();onPick(p.key)};lst.appendChild(r)}
+  if(allowAll&&!q){var a=el('div','it'+(cur===0?' on':''));shown.push('ALL');a.innerHTML='<span></span><span class="kk">ALL</span><span>All projects ('+PLIST.length+')</span><small></small>';a.onclick=function(){closePop();onPick('ALL')};lst.appendChild(a)}
+  var st=items.filter(function(p){return p.star});if(st.length&&!q){lst.appendChild(el('div','grp','Starred'));st.forEach(row)}
+  lst.appendChild(el('div','grp',q?'Matches ('+items.length+')':'All projects ('+items.length+')'));if(!items.length)lst.appendChild(el('div','none2','No project matches “'+esc(q)+'”.'));items.slice(0,60).forEach(row);if(items.length>60)lst.appendChild(el('div','none2','Keep typing to narrow '+(items.length-60)+' more.'));
+  var on=$('.it.on',lst);if(on)on.scrollIntoView({block:'nearest'})}
+ inp.oninput=function(){cur=0;draw()};
+ inp.onkeydown=function(e){if(e.key==='ArrowDown'){cur=Math.min(shown.length-1,cur+1);draw();e.preventDefault()}else if(e.key==='ArrowUp'){cur=Math.max(0,cur-1);draw();e.preventDefault()}else if(e.key==='Enter'){if(shown[cur]){closePop();onPick(shown[cur])}}else if(e.key==='Escape')closePop()};
+ popClose=function(e){if(popEl&&!popEl.contains(e.target)&&!btn.contains(e.target))closePop()};document.addEventListener('mousedown',popClose,true);draw();inp.focus()}
+function bindPickers(root,val,allowAll,onPick){$$('[data-pick]',root).forEach(function(b){b.onclick=function(){openPicker(b,val,allowAll,onPick)}})}
+
+/* ---------- command bar (Ctrl or Cmd + K) ---------- */
+var cmd=null;
+function openCmd(){if(cmd)return;cmd=el('div','cmdk');cmd.innerHTML='<div role="dialog" aria-label="Search"><input type="search" placeholder="Jump to a view, a project or a ticket" aria-label="Search"><div class="lst"></div></div>';document.body.appendChild(cmd);
+ var inp=$('input',cmd),lst=$('.lst',cmd),cur=0,res=[];
+ function draw(){var q=inp.value.trim().toLowerCase();res=[];
+  VIEWS.filter(function(v){return allowed(v[0])&&(!q||v[1].toLowerCase().indexOf(q)>-1)}).forEach(function(v){res.push(['View',v[1],'',function(){go(v[0])}])});
+  PLIST.filter(function(p){return q&&(p.key+' '+p.name).toLowerCase().indexOf(q)>-1}).slice(0,6).forEach(function(p){res.push(['Project',p.name,p.key,function(){S.bp=p.key;S.epic='';store('bp',S.bp);go('board')}])});
+  if(q.length>1)TICKETS.filter(function(t){return(t.k+' '+t.t).toLowerCase().indexOf(q)>-1}).slice(0,6).forEach(function(t){res.push(['Ticket',t.t,t.k,function(){S.bp=t.pr;S.epic='';store('bp',S.bp);S.q=t.k;go('board')}])});
+  lst.innerHTML='';res.slice(0,14).forEach(function(r,i){var b=el('button','it'+(i===cur?' on':''),'<span>'+r[0]+'</span><span>'+esc(r[1])+'</span><small>'+esc(r[2])+'</small>');b.onclick=function(){closeCmd();r[3]()};lst.appendChild(b)});if(!res.length)lst.appendChild(el('div','none2','Nothing found.'))}
+ inp.oninput=function(){cur=0;draw()};inp.onkeydown=function(e){if(e.key==='ArrowDown'){cur=Math.min(Math.min(res.length,14)-1,cur+1);draw();e.preventDefault()}else if(e.key==='ArrowUp'){cur=Math.max(0,cur-1);draw();e.preventDefault()}else if(e.key==='Enter'&&res[cur]){closeCmd();res[cur][3]()}else if(e.key==='Escape')closeCmd()};
+ cmd.onmousedown=function(e){if(e.target===cmd)closeCmd()};draw();inp.focus()}
+function closeCmd(){if(cmd){cmd.remove();cmd=null}}
+document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();cmd?closeCmd():openCmd()}else if(e.key==='Escape'){closeCmd();closePop();closeDrawer()}});
+
+/* ---------- drawer and ticket detail ---------- */
+function drawer(html){var d=$('#drawer');d.innerHTML=html;d.classList.add('open');$('#scrim').classList.add('on');var c=$('#cls');if(c){c.onclick=closeDrawer;c.focus()}}
+function closeDrawer(){$('#drawer').classList.remove('open');$('#scrim').classList.remove('on')}
+$('#scrim').onclick=closeDrawer;
+function openTicket(t){var steps=['In the backlog','Intake rewrites it','Ready for an AI','AI is developing','A different AI verifies','A person reviews','Done and merged'],p=t.p?P[t.p]:null;
+ drawer('<div style="display:flex;justify-content:space-between;align-items:center"><span class="mono mut">'+t.k+'</span><button class="btn" id="cls">Close</button></div><h4>'+esc(t.t)+'</h4>'
+  +'<div style="display:flex;gap:8px;flex-wrap:wrap"><span class="tag '+(t.s===6?'ok':t.s===5?'warn':'')+'">'+STAGES[t.s]+'</span>'+(t.e?'<span class="tag">'+esc(t.e)+'</span>':'')+(p?'<span class="tag" style="color:'+p.h+'">'+p.n+'</span>':'')+'</div>'
+  +'<ul class="tl">'+steps.map(function(s,i){return '<li class="'+(i<t.s?'done':i===t.s?'cur':'')+'"><i></i><span>'+s+'</span></li>'}).join('')+'</ul>'
+  +'<div class="card" style="background:var(--panel2)"><div class="mono mut" style="font-size:12px">Time in this step</div><div class="mono" style="font-size:22px;font-weight:800">'+(t.age<90?t.age+' min':Math.round(t.age/60)+' h')+'</div><div class="mut" style="font-size:12px;margin-top:4px">A pull request opens when development finishes. Verification always uses a different AI.</div></div>'
+  +'<div class="row"><button class="btn" id="tkj">Open in Jira</button><button class="btn" id="tkp">Open pull request</button></div>');
+ $('#tkj').onclick=function(){toast('Opens '+t.k+' in Jira (demo)')};$('#tkp').onclick=function(){toast('Opens the pull request (demo)')}}
+
+/* ---------- shared cards ---------- */
+function spark(vals,color){var w=92,h=30,mx=Math.max.apply(null,vals)||1,p=vals.map(function(v,i){return[i*(w/(vals.length-1)),h-3-(v/mx)*(h-8)]});var d=p.map(function(a,i){return(i?'L':'M')+a[0].toFixed(1)+' '+a[1].toFixed(1)}).join(' '),l=p[p.length-1];
+ return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" aria-hidden="true"><path d="'+d+' L'+w+' '+h+' L0 '+h+'Z" fill="'+color+'" opacity=".12"/><path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.6" stroke-linejoin="round"/><circle cx="'+l[0]+'" cy="'+l[1]+'" r="3" fill="'+color+'"/></svg>'}
+function countUp(n,to){var from=parseFloat(n.dataset.v||0),t0=performance.now();n.dataset.v=to;(function f(t){var p=Math.min(1,(t-t0)/900),e=1-Math.pow(1-p,3);n.textContent=Math.round(from+(to-from)*e).toLocaleString('en-US');if(p<1)requestAnimationFrame(f)})(t0)}
+function kpiCards(keys,boxSel){var c=counts(keys),total=c.reduce(function(a,b){return a+b},0),done=c[6],flight=c[3]+c[4]+c[5],ask=openQueue(keys).length,last=DAYS[DAYS.length-1],today=last.claude+last.codex+last.grok+last.opencode,wk=DAYS.slice(-7).map(function(x){return x.claude+x.codex+x.grok+x.opencode});
+ var tiles=[['Done','<span data-n="'+done+'">0</span><small class="up">+14 this week</small>',spark(DAYS.slice(-10).map(function(x,i){return 6+x.codex*.6+i}),'var(--ok)'),'of '+total.toLocaleString('en-US')+' tickets · '+Math.round(done/Math.max(1,total)*100)+'%',''],
+  ['In flight','<span data-n="'+flight+'">0</span><small>tickets</small>',spark([3,4,4,5,6,5,7,6,flight],'var(--codex)'),'in progress, verify or human review',''],
+  ['Waiting for you','<span data-n="'+ask+'">0</span><small>'+(ask?'need a person':'all clear')+'</small>',spark([1,2,1,3,2,4,3,2,ask],'var(--warn)'),'questions, decisions and reviews','hot'],
+  ['AI usage today','<span data-n="'+today+'">0</span><small>M tokens</small>',spark(wk,'var(--claude)'),'about $'+Math.round(today*1.9)+' at list price','']];
+ var box=$(boxSel);box.innerHTML='';tiles.forEach(function(t){var d=el('div','card k '+t[4]);d.innerHTML='<div class="lab">'+t[0]+'</div><div class="val mono">'+t[1]+'</div><div class="sub"><span>'+t[3]+'</span>'+t[2]+'</div>';box.appendChild(d)});
+ $$('[data-n]',box).forEach(function(n){n.dataset.v=0;countUp(n,+n.dataset.n)})}
+function usageChart(){var n=14,data=DAYS.slice(-n),W=1180,H=250,L=34,B=22,T=8,bw=(W-L)/n,keys=Object.keys(P).filter(function(k){return!S.hidden||!S.hidden[k]});
+ var totals=data.map(function(d){return keys.reduce(function(s,k){return s+d[k]},0)}),mx=Math.max(16,Math.ceil(Math.max.apply(null,totals)/8)*8);
+ var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" role="img" aria-label="Tokens per day by AI">';
+ for(var g=0;g<=4;g++){var y=T+(H-B-T)*(1-g/4);s+='<line x1="'+L+'" x2="'+W+'" y1="'+y+'" y2="'+y+'" stroke="#2d2a26" stroke-dasharray="2 4"/><text x="0" y="'+(y+3)+'">'+Math.round(mx*g/4)+'M</text>'}
+ data.forEach(function(d,i){var x=L+i*bw+bw*.18,w=bw*.64,y=H-B,hh=H-B-T;keys.forEach(function(k){var h=d[k]/mx*hh;y-=h;s+='<rect x="'+x+'" y="'+(H-B)+'" width="'+w+'" height="0" rx="2" fill="'+P[k].h+'"><animate attributeName="y" from="'+(H-B)+'" to="'+y+'" dur=".7s" begin="'+(i*.035)+'s" fill="freeze" calcMode="spline" keySplines=".2 .8 .2 1" keyTimes="0;1"/><animate attributeName="height" from="0" to="'+h+'" dur=".7s" begin="'+(i*.035)+'s" fill="freeze" calcMode="spline" keySplines=".2 .8 .2 1" keyTimes="0;1"/></rect>'});
+  s+='<rect class="hit" data-i="'+i+'" x="'+(L+i*bw)+'" y="'+T+'" width="'+bw+'" height="'+(H-B-T)+'" fill="transparent"/>';if(i%2===0){var dd=new Date(Date.now()-(n-1-i)*864e5);s+='<text x="'+(L+i*bw+bw/2)+'" y="'+(H-6)+'" text-anchor="middle">'+(dd.getMonth()+1)+'/'+dd.getDate()+'</text>'}});
+ var box=$('#usage');box.innerHTML=s+'</svg>';var tip=$('#tip'),card=box.parentNode;
+ $$('.hit',box).forEach(function(r){r.onmousemove=function(ev){var d=data[+r.dataset.i],h='<b>'+(d.claude+d.codex+d.grok+d.opencode)+' M tokens</b>';Object.keys(P).forEach(function(k){h+='<div><span style="color:'+P[k].h+'">●</span> '+P[k].n+' <span class="mono">'+d[k]+'M</span></div>'});tip.innerHTML=h;tip.style.opacity=1;var rc=card.getBoundingClientRect();tip.style.left=Math.min(ev.clientX-rc.left+14,card.clientWidth-170)+'px';tip.style.top=(ev.clientY-rc.top+14)+'px'};r.onmouseleave=function(){tip.style.opacity=0}});
+ var tot={},all=0;Object.keys(P).forEach(function(k){tot[k]=data.reduce(function(s,d){return s+d[k]},0);all+=tot[k]});
+ $('#usageNote').textContent=all+'M tokens · about $'+Math.round(all*1.9)+' · last 14 days';
+ $('#share').innerHTML='<div class="share">'+Object.keys(P).map(function(k){return '<i style="width:0;background:'+P[k].h+'" data-w="'+(tot[k]/all*100)+'"></i>'}).join('')+'</div><div class="shl">'+Object.keys(P).map(function(k){return '<span><span style="color:'+P[k].h+'">●</span> '+P[k].n+' '+Math.round(tot[k]/all*100)+'%</span>'}).join('')+'</div>';animBars($('#share'));
+ var lg=$('#legend');lg.innerHTML='';Object.keys(P).forEach(function(k){var b=el('button','lg','<i style="background:'+P[k].h+'"></i>'+P[k].n);b.setAttribute('aria-pressed',!(S.hidden&&S.hidden[k]));b.onclick=function(){S.hidden=S.hidden||{};S.hidden[k]=!S.hidden[k];usageChart()};lg.appendChild(b)})}
+function accRows(list,withNode){return list.map(function(a){return ['<b class="mono">'+a.id+'</b>'+(withNode?' <span class="fnt">on '+a.node+'</span>':''),useBar(a.used,P[a.ai].h),a.reset==='—'?'<span class="fnt">—</span>':a.reset,{n:a.tok.toFixed(1)+' M'},{n:'$'+a.cost.toFixed(2)},accState(a.state)]})}
+function sumTok(l){return l.reduce(function(s,a){return s+a.tok},0)}function sumCost(l){return l.reduce(function(s,a){return s+a.cost},0)}
+function quotaCards(){var q=$('#qa');q.innerHTML='';Object.keys(P).forEach(function(k){var list=ACCS.filter(function(a){return a.ai===k}),card=el('div','qp');
+  card.innerHTML='<div class="hd"><b><i style="background:'+P[k].h+'"></i>'+P[k].n+'</b><span>'+list.length+' accounts · '+sumTok(list).toFixed(1)+' M tokens · about $'+sumCost(list).toFixed(2)+' today</span></div><div class="qrow" style="margin-top:-2px"><span>'+esc(AINOTE[k])+'</span></div>'+tbl(['Account','Quota used','Resets','Tokens','Cost','State'],accRows(list,true));q.appendChild(card)});animBars(q)}
+function pos(t){return Math.max(0,Math.min(100,(t-T0)/(T1-T0)*100))}
+function ganttInto(sel,keys,onPick,selEpic){var g=$(sel);g.innerHTML='';var ax=el('div','axis','<div></div><div class="scale"></div>'),sc=$('.scale',ax);
+ [[10,14],[10,21],[10,28],[11,4],[11,11],[11,18]].forEach(function(d){var s=el('span','',(d[0]===10?'Oct ':'Nov ')+d[1]);s.style.left=pos(dt(d[0],d[1]))+'%';sc.appendChild(s)});g.appendChild(ax);
+ var body=el('div','');body.style.position='relative';g.appendChild(body);var list=[];keys.forEach(function(k){PROJ[k].epics.forEach(function(e){list.push(e)})});
+ if(!list.length)body.appendChild(el('div','empty','No epics yet.'));
+ list.forEach(function(e,i){var hold=e[5]===0,col=hold?'var(--faint)':e[4]===100?'var(--ok)':e[4]<30?'var(--grok)':'var(--warn)',lane=el('button','lane'+(selEpic===e[1]?' sel':''));
+  lane.innerHTML='<div class="nm">'+esc(e[1])+'<small>'+e[0]+' · '+e[5]+' tickets</small></div><div class="track"><div class="gb" style="left:'+pos(e[2])+'%;width:'+Math.max(2,pos(e[3])-pos(e[2]))+'%"><i style="background:'+col+';opacity:.85"></i><span>'+e[4]+'%</span></div></div>';
+  lane.onclick=function(){if(!hold&&onPick)onPick(e)};body.appendChild(lane);var bar=$('.gb i',lane);setTimeout(function(){bar.style.width=e[4]+'%'},60+Math.min(i,12)*50)});
+ var t=el('div','today');t.style.left='calc(202px + (100% - 202px) * '+(pos(NOW)/100)+')';t.style.top='-6px';body.appendChild(t)}
+
+/* ===================== shell ===================== */
+var GROUPS=[['dash','board'],['delivery','sa','lead','biz','review','stake'],['machines','users','know','integ','proj']];
+function vname(id){return VIEWS.filter(function(v){return v[0]===id})[0][1]}
+function renderTabs(){var b=$('#tabs');b.innerHTML='';var first=true;
+ GROUPS.forEach(function(g){var ids=g.filter(allowed);if(!ids.length)return;if(!first)b.appendChild(el('span','div'));first=false;
+  ids.forEach(function(id){var x=el('button','tab'+(id==='dash'||id==='board'?' key':''),vname(id));x.setAttribute('role','tab');x.setAttribute('aria-selected',S.page===id);
+   if(id==='review'){var n=openQueue().length;if(n)x.innerHTML+='<span class="badge">'+n+'</span>'}x.onclick=function(){go(id)};b.appendChild(x)})})}
+function go(id){if(!allowed(id))id=VIEWS.filter(function(v){return allowed(v[0])})[0][0];S.page=id;closePop();closeDrawer();renderTabs();$$('.page').forEach(function(p){p.hidden=p.dataset.page!==id});renderPage(id);window.scrollTo(0,0)}
+function renderPage(id){({dash:pDash,board:pBoard,delivery:pDelivery,sa:pSA,lead:pLead,biz:pBiz,review:pReview,stake:pStake,machines:pMachines,users:pUsers,know:pKnow,integ:pInteg,proj:pProj})[id]()}
+function refresh(){renderPage(S.page)}
+function projBar(withAll,extra){return '<div class="pagehead"><div class="row">'+pickerButton(S.bp,withAll)+(extra||'')+'</div></div>'}
+function bindProjBar(root,withAll){bindPickers(root,S.bp,withAll,function(k){S.bp=k;S.epic='';store('bp',k);refresh()})}
+
+/* ===================== Dashboard: work and AI in one place ===================== */
+function pDash(){var s=page('dash','<div class="pagehead"><div class="subtabs" role="group" aria-label="Dashboard sections"><button data-v="work" aria-pressed="'+(S.dview==='work')+'">Work</button>'+(allowed('machines')||allowed('sa')?'<button data-v="ai" aria-pressed="'+(S.dview==='ai')+'">AI and machines</button>':'')+'</div>'
+ +(S.dview==='work'?'<div class="subtabs" role="group" aria-label="Which projects"><button data-sc="starred" aria-pressed="'+(S.dscope==='starred')+'">★ My projects ('+PLIST.filter(function(p){return p.star}).length+')</button><button data-sc="all" aria-pressed="'+(S.dscope==='all')+'">All projects ('+PLIST.length+')</button></div>':'')+'</div>'
+ +(S.dview==='work'?'<section class="kpis" id="kpis" aria-label="Summary"></section><section class="main"><div style="display:grid;gap:12px;min-width:0"><div class="card"><h2>Flow at a glance <span>select a step to open the Work board</span></h2><div class="funnel" id="mini"></div></div><div class="card" id="projcard"></div><div class="card"><h2>What is being built, and how far along <span class="hint" id="gnote"></span></h2><div class="gwrap" id="gantt"></div></div></div><div class="card" style="position:sticky;top:12px"><h2>Waiting for you <span id="askCount"></span></h2><div class="ask" id="ask"></div><h2 style="margin-top:18px">Just happened</h2><div class="feed" id="feed"></div></div></section>'
+  :'<section class="kpis" id="aik"></section><section class="card chart"><h2>AI usage <span id="usageNote"></span></h2><div class="legend" id="legend"></div><div id="usage"></div><div class="tip" id="tip"></div><h2 style="margin:16px 0 8px">Share of usage</h2><div id="share"></div></section><section class="card"><h2>Quota by AI <span>every account, with its reset time, tokens and cost</span></h2><div class="qa" id="qa"></div></section><section class="card"><div id="msum"></div></section>'));
+ $$('[data-v]',s).forEach(function(b){b.onclick=function(){S.dview=b.dataset.v;pDash()}});$$('[data-sc]',s).forEach(function(b){b.onclick=function(){S.dscope=b.dataset.sc;pDash()}});
+ if(S.dview==='work'){var keys=scopeKeys();kpiCards(keys,'#kpis');miniFlow(keys);projTable();dashAsk(keys);feedInit();var gk=keys.slice(0,3);ganttInto('#gantt',gk,function(e){S.bp=e[0];S.epic=e[1];store('bp',S.bp);go('board')});$('#gnote').textContent=keys.length>3?'Showing the first 3 of '+keys.length+' projects':'Select a bar to open the Work board on that epic'}
+ else{aiTop();usageChart();quotaCards();machSummary()}}
+function miniFlow(keys){var c=counts(keys),mx=Math.max.apply(null,c.slice(0,6).concat([1])),m=$('#mini');m.innerHTML='';
+ STAGES.forEach(function(n,i){var r=el('button','fr'),col=i===5?'var(--warn)':i===6?'var(--ok)':i===3||i===4?'var(--codex)':'var(--faint)';r.innerHTML='<span>'+n+'</span><div class="b"><i data-w="'+(i===6?100:Math.max(3,c[i]/mx*100))+'" style="background:'+col+'"></i></div><b>'+c[i].toLocaleString('en-US')+'</b>';r.onclick=function(){S.bp=keys.length===1?keys[0]:'ALL';go('board')};m.appendChild(r)});animBars(m)}
+function projData(k){var p=PROJ[k],c=p.counts,tot=c.reduce(function(a,b){return a+b},0);return{p:p,prog:Math.round(c[6]/Math.max(1,tot)*100),flight:c[3]+c[4]+c[5],wait:openQueue([k]).length,last:p.last}}
+function projTable(){var keys=scopeKeys(),rows=keys.map(projData),q=S.pq.toLowerCase();rows=rows.filter(function(r){return !q||(r.p.key+' '+r.p.name).toLowerCase().indexOf(q)>-1});
+ var f={prog:function(r){return r.prog},flight:function(r){return r.flight},wait:function(r){return r.wait},last:function(r){return r.last},name:function(r){return r.p.key}}[S.sort];
+ rows.sort(function(a,b){var x=f(a),y=f(b);return(x<y?-1:x>y?1:0)*S.sortDir});var shown=rows.slice(0,S.pshow);
+ var th=function(id,l){return '<th class="sortable" data-s="'+id+'">'+l+(S.sort===id?(S.sortDir<0?' ▾':' ▴'):'')+'</th>'};
+ var c=$('#projcard');c.innerHTML='<h2>Projects <span>'+rows.length+' shown</span></h2><div class="bar-tools"><input type="search" id="pqi" placeholder="Find a project" value="'+esc(S.pq)+'" aria-label="Find a project" style="width:220px"></div><div class="scroll"><table class="dt"><thead><tr>'+th('name','Project')+th('prog','Done')+th('flight','In flight')+th('wait','Waiting for you')+th('last','Last activity')+'<th>State</th></tr></thead><tbody>'
+  +shown.map(function(r){return '<tr class="projrow" data-k="'+r.p.key+'"><td><span class="star'+(r.p.star?' on':'')+'" data-st="'+r.p.key+'" role="button" aria-label="Star">'+(r.p.star?'★':'☆')+'</span> <b class="mono">'+r.p.key+'</b> <span class="mut">'+esc(r.p.name)+'</span></td><td style="min-width:140px">'+useBar(r.prog,'var(--ok)')+'</td><td class="num">'+r.flight+'</td><td class="num">'+(r.wait?'<b style="color:var(--warn)">'+r.wait+'</b>':'—')+'</td><td class="num mut">'+ago(r.last)+'</td><td>'+pill(r.p.state==='Running'?'Running':'Paused',r.p.state==='Running'?'ok':'warn')+'</td></tr>'}).join('')+'</tbody></table></div>'
+  +(rows.length>shown.length?'<div class="row" style="margin-top:10px"><button class="btn" id="more">Show '+Math.min(20,rows.length-shown.length)+' more</button><span class="mut">'+(rows.length-shown.length)+' not shown</span></div>':'');
+ $$('th.sortable',c).forEach(function(h){h.onclick=function(){if(S.sort===h.dataset.s)S.sortDir*=-1;else{S.sort=h.dataset.s;S.sortDir=-1}projTable()}});
+ $$('.projrow',c).forEach(function(r){r.onclick=function(e){if(e.target.dataset.st){var p=PROJ[e.target.dataset.st];p.star=!p.star;store('stars',PLIST.filter(function(x){return x.star}).map(function(x){return x.key}));pDash();return}S.bp=r.dataset.k;S.epic='';store('bp',S.bp);go('board')}});
+ var inp=$('#pqi');inp.oninput=function(){S.pq=this.value;S.pshow=8;var p=this.selectionStart;projTable();var n=$('#pqi');n.focus();n.setSelectionRange(p,p)};var more=$('#more');if(more)more.onclick=function(){S.pshow+=20;projTable()}}
+function dashAsk(keys){var b=$('#ask');b.innerHTML='';var list=openQueue(keys);$('#askCount').textContent=list.length?list.length+' open':'nothing open';
+ if(!list.length){b.appendChild(el('div','empty','Nothing needs you right now. The flow keeps going on its own.'));return}
+ list.slice(0,4).forEach(function(a){var q=el('div','q');q.innerHTML='<div class="top"><span class="mono">'+a.k+'</span><span class="tag '+a.tone+'">'+a.kind+'</span></div><p>'+esc(a.title)+'</p><div class="act"><button class="btn primary">Open</button></div>';$('button',q).onclick=function(){S.focus=a.id;go('review')};b.appendChild(q)});
+ if(list.length>4){var m=el('button','btn','See all '+list.length);m.onclick=function(){go('review')};b.appendChild(m)}}
+function feedInit(){if(!S.feed.length){feed('<b>codex-03</b> is verifying JAIF-218');feed('<b>claude-03</b> started JAIF-109');feed('<b>codex-02</b> started JAIF-184')}else{var f=$('#feed');f.innerHTML='';S.feed.forEach(function(x){f.appendChild(el('div','',x))})}}
+function aiTop(){var tot=sumTok(ACCS),cost=sumCost(ACCS),busy=NODES.reduce(function(a,n){return a+n.busy},0),b=$('#aik');b.innerHTML='';
+ [['Machines online','3<small>of 3</small>',busy+' of 24 AI sessions busy',''],['AI accounts ready','9<small>of 12</small>','1 low on quota · 3 failing their check','hot'],['Tokens today',tot.toFixed(1)+'<small>M</small>','all accounts',''],['Spend today','$'+cost.toFixed(2),'at list price','']].forEach(function(t){b.appendChild(el('div','card k '+t[3],'<div class="lab">'+t[0]+'</div><div class="val mono">'+t[1]+'</div><div class="sub"><span>'+t[2]+'</span></div>'))})}
+function machSummary(){var m=$('#msum');m.innerHTML='<h2>Machines <span>'+(allowed('machines')?'':'')+'</span></h2>'+tbl(['Machine','State','AI sessions','Accounts','Tokens today','Cost today'],NODES.map(function(n){var l=ACCS.filter(function(a){return a.node===n.n});return ['<b class="mono">'+n.n+'</b>',pill(n.state,n.state==='Online'?'ok':'warn'),'<div class="usebar"><div class="b"><i style="width:'+(n.busy/8*100)+'%;background:var(--codex)"></i></div>'+n.busy+' of 8</div>',l.length,{n:sumTok(l).toFixed(1)+' M'},{n:'$'+sumCost(l).toFixed(2)}]}))+(allowed('machines')?'<div class="row" style="margin-top:12px"><button class="btn primary" id="gom">Manage machines and AI accounts</button></div>':'');if(allowed('machines'))$('#gom').onclick=function(){go('machines')}}
+
+/* ===================== Work board: pick a project, get its board ===================== */
+function pBoard(){var keys=boardKeys(),eps=[];keys.forEach(function(k){PROJ[k].epics.forEach(function(e){if(e[5]>0)eps.push(e)})});if(S.epic&&!eps.some(function(e){return e[1]===S.epic}))S.epic='';
+ var p=S.bp==='ALL'?null:PROJ[S.bp],c=counts(keys),total=c.reduce(function(a,b){return a+b},0);
+ var s=page('board','<section class="card" id="kanban"><div class="pagehead" style="margin-bottom:10px"><div class="row">'+pickerButton(S.bp,true)+(p?pill(p.state,p.state==='Running'?'ok':'warn'):'')+'<span class="mut" style="font-size:13px">'+total.toLocaleString('en-US')+' tickets'+(openQueue(keys).length?' · <b style="color:var(--warn)">'+openQueue(keys).length+' waiting for you</b>':'')+'</span></div></div>'
+  +'<div class="bar-tools"><select id="epicSel" aria-label="Epic"><option value="">All epics ('+eps.length+')</option>'+eps.map(function(e){return '<option value="'+esc(e[1])+'"'+(S.epic===e[1]?' selected':'')+'>'+(S.bp==='ALL'?e[0]+' · ':'')+esc(e[1])+'</option>'}).join('')+'</select><select id="aiSel" aria-label="AI"><option value="">Any AI</option>'+Object.keys(P).map(function(k){return '<option value="'+k+'"'+(S.ai===k?' selected':'')+'>'+P[k].n+'</option>'}).join('')+'</select><input id="srch" type="search" placeholder="Find a ticket" value="'+esc(S.q)+'" aria-label="Find a ticket"><span id="fl"></span></div>'
+  +'<div class="leg"><span>Dot colour = the AI working on it:</span>'+Object.keys(P).map(function(k){return '<span><i style="background:'+P[k].h+'"></i>'+P[k].n+'</span>'}).join('')+'<span>A moving line = being worked on right now</span></div><div class="pipe" id="pipe"></div></section>');
+ bindProjBar(s,true);$('#epicSel').onchange=function(){S.epic=this.value;pBoard()};$('#aiSel').onchange=function(){S.ai=this.value;drawBoard(keys)};
+ $('#srch').oninput=function(){S.q=this.value;drawBoard(keys)};drawBoard(keys)}
+function drawBoard(keys){var c=counts(keys),root=$('#pipe');root.innerHTML='';var q=S.q.toLowerCase(),list=TICKETS.filter(function(t){return keys.indexOf(t.pr)>-1&&(!S.epic||t.e===S.epic)&&(!S.ai||t.p===S.ai)&&(!q||(t.k+' '+t.t).toLowerCase().indexOf(q)>-1)}),filt=S.epic||S.ai||q;
+ STAGES.forEach(function(name,si){var col=el('div','col'+(si===5&&c[5]?' attn':'')),inCol=list.filter(function(t){return t.s===si}),total=filt?inCol.length:c[si];
+  col.innerHTML='<h3><span>'+name+'</span><b>'+total.toLocaleString('en-US')+'</b></h3><div class="stack"></div>';var st=$('.stack',col);if(!inCol.length)st.appendChild(el('div','none','Nothing here'));
+  inCol.slice(0,40).forEach(function(t,i){var b=el('button','tk'+(t.s===3?' run':'')),pv=t.p?P[t.p]:null;b.title=t.k+' · '+t.t;
+   b.innerHTML='<div class="id"><span>'+t.k+'</span><span>'+(t.age<90?t.age+' m':Math.round(t.age/60)+' h')+'</span></div><div class="ti">'+esc(t.t)+'</div><div class="ft">'+(pv?'<i style="background:'+pv.h+'"></i>'+pv.n:'<span class="fnt">no AI yet</span>')+'</div>';b.style.animationDelay=Math.min(i,10)*30+'ms';b.onclick=function(){openTicket(t)};st.appendChild(b)});
+  var hidden=Math.max(0,total-Math.min(inCol.length,40));if(hidden&&!filt)st.appendChild(el('div','older','+'+hidden.toLocaleString('en-US')+' older ones, open Jira to see all'));root.appendChild(col)});
+ $('#fl').innerHTML=S.epic?'<span class="fl">Epic: '+esc(S.epic)+' <button aria-label="Clear epic filter" id="clr">×</button></span>':'';if(S.epic)$('#clr').onclick=function(){S.epic='';pBoard()}}
+
+/* ===================== Human review: act, ask back, and see how often AI needs a person ===================== */
+function stackChart(series,labels,colors){var W=760,H=210,L=30,B=22,T=8,n=labels.length,bw=(W-L)/n,tot=labels.map(function(_,i){return series.reduce(function(s,a){return s+a[i]},0)}),mx=Math.max(8,Math.ceil(Math.max.apply(null,tot)/8)*8);
+ var s='<svg viewBox="0 0 '+W+' '+H+'" width="100%" role="img" aria-label="People needed per week">';for(var g=0;g<=4;g++){var y=T+(H-B-T)*(1-g/4);s+='<line x1="'+L+'" x2="'+W+'" y1="'+y+'" y2="'+y+'" stroke="#2d2a26" stroke-dasharray="2 4"/><text x="0" y="'+(y+3)+'">'+Math.round(mx*g/4)+'</text>'}
+ labels.forEach(function(lb,i){var x=L+i*bw+bw*.2,w=bw*.6,y=H-B;series.forEach(function(a,si){var h=a[i]/mx*(H-B-T);y-=h;s+='<rect x="'+x+'" y="'+(H-B)+'" width="'+w+'" height="0" rx="2" fill="'+colors[si]+'"><animate attributeName="y" from="'+(H-B)+'" to="'+y+'" dur=".7s" begin="'+(i*.05)+'s" fill="freeze"/><animate attributeName="height" from="0" to="'+h+'" dur=".7s" begin="'+(i*.05)+'s" fill="freeze"/></rect>'});s+='<text x="'+(L+i*bw+bw/2)+'" y="'+(H-6)+'" text-anchor="middle">'+lb+'</text><text x="'+(L+i*bw+bw/2)+'" y="'+(y-5)+'" text-anchor="middle" style="fill:#ece7df">'+tot[i]+'</text>'});return s+'</svg>'}
+var REPLY={review:'Thanks. The change only touches what the ticket lists, and every check passed on the exact commit that would be merged. I can split it into two pull requests if that is easier to review.',question:'Understood. I will carry on with what is already in the repository and add the missing checksum file. Tell me if you would rather have a fresh build.',decision:'Noted. I will keep the current setup in place until you decide and record the reason on the ticket.'};
+function pReview(){var n=HW.weeks.length-1,tot=function(i){return HW.q[i]+HW.d[i]+HW.r[i]+HW.b[i]},open=openQueue();if(S.role==='Reviewer')open=open.filter(function(q){return q.review});
+ var s=page('review','<p class="lead">Everything that needs a person, what you can do about it, and how often the AI needs you at all. The goal is that this number keeps falling.</p>'
+ +'<div class="statgrid"><div class="card k"><div class="lab">People needed this week</div><div class="val mono">'+tot(n)+'<small class="up">from '+tot(0)+' in 8 weeks</small></div><div class="sub"><span>questions, decisions, reviews</span></div></div>'
+ +'<div class="card k"><div class="lab">Finished with no person</div><div class="val mono">91%<small class="up">+12 pts</small></div><div class="sub"><span>of tickets this month</span></div></div>'
+ +'<div class="card k"><div class="lab">Time a person waits</div><div class="val mono">42<small>min median</small></div><div class="sub"><span>from request to answer</span></div></div>'
+ +'<div class="card k"><div class="lab">Approved first time</div><div class="val mono">71%</div><div class="sub"><span>of reviews before merge</span></div></div>'
+ +'<div class="card k"><div class="lab">Sent back or rejected</div><div class="val mono">29%</div><div class="sub"><span>19% sent back · 4% rejected · 6% asked back</span></div></div></div>'
+ +'<div class="grid2"><div class="card"><h2>People needed per week <span>why</span></h2>'+stackChart([HW.q,HW.d,HW.r,HW.b],HW.weeks,['#e46e5e','#e6bb52','#58c4a3','#b69df2'])+'<div class="keyl"><span><i style="background:#e46e5e"></i>Question from the AI</span><span><i style="background:#e6bb52"></i>Decision needed</span><span><i style="background:#58c4a3"></i>Review before merge</span><span><i style="background:#b69df2"></i>Blocked</span></div></div>'
+ +'<div class="card"><h2>What to change so the AI asks less <span>this week against last week</span></h2>'+tbl(['Reason','Now','Before','Idea'],[['Question from the AI',{n:HW.q[n]},{n:HW.q[n-1]},'Put the missing detail in the ticket template'],['Decision needed',{n:HW.d[n]},{n:HW.d[n-1]},'Write the rule once as a policy'],['Review before merge',{n:HW.r[n]},{n:HW.r[n-1]},'Auto-merge low-risk changes'],['Blocked',{n:HW.b[n]},{n:HW.b[n-1]},'Fix the tool or access that is missing']])+'<div class="mut" style="margin-top:10px;font-size:13px">Busiest projects: <b>JOOWP</b> 9 · <b>JAIF</b> 5 · <b>JOOC</b> 1</div></div></div>'
+ +'<div class="pagehead"><h2 style="margin:6px 0 0">Waiting for you <span>'+open.length+' open</span></h2></div>'
+ +(open.length?open.map(function(q){return reviewCard(q)}).join(''):'<div class="empty">Nothing is waiting for a person. The flow keeps going on its own.</div>'));
+ open.forEach(function(q){wireReview(s,q)});if(S.focus){var f=$('#rc-'+S.focus);if(f){f.scrollIntoView({block:'center'});f.style.borderColor='var(--warn)'}S.focus=null}}
+function reviewCard(q){var acts=q.review?'<button class="btn primary" data-a="approve">Approve and merge</button><button class="btn" data-a="rework">Send back for rework</button><button class="btn" data-a="ask">Ask the AI a question</button><button class="btn danger" data-a="reject">Reject</button>'
+  :q.kind==='Decision needed'?'<button class="btn primary" data-a="approve">Approve</button><button class="btn" data-a="decline">Decline</button><button class="btn" data-a="ask">Ask for more detail</button><button class="btn danger" data-a="reject">Reject the request</button>'
+  :'<button class="btn primary" data-a="answer">Send my answer</button><button class="btn" data-a="ask">Ask back</button><button class="btn" data-a="skip">Skip this gate</button><button class="btn danger" data-a="reject">Reject the request</button>';
+ return '<div class="card rev" id="rc-'+q.id+'"><div class="hd"><span>'+q.k+' · '+q.pr+' · waiting '+q.age+'</span><span class="tag '+q.tone+'">'+q.kind+'</span></div><h3>'+esc(q.title)+'</h3><div class="mut">'+esc(q.body)+'</div><div class="thread" id="th-'+q.id+'">'+q.thread.map(msgHtml).join('')+'</div>'
+  +'<label class="fld">'+(q.review?'Comment (needed to send back or reject)':'Your answer or question')+'<input class="in" id="in-'+q.id+'" placeholder="Write here" autocomplete="off"></label><div class="acts2">'+acts+'</div><div class="row"><button class="btn sm" data-a="jira">Open in Jira</button>'+(q.review?'<button class="btn sm" data-a="diff">View the change</button>':'')+'</div></div>'}
+function msgHtml(m){return '<div class="msg '+(m.me?'me':'ai')+'"><small>'+(m.me?'You':'AI')+'</small>'+esc(m.t)+'</div>'}
+function wireReview(root,q){var c=$('#rc-'+q.id,root);if(!c)return;$$('[data-a]',c).forEach(function(b){b.onclick=function(){var a=b.dataset.a,inp=$('#in-'+q.id),v=inp.value.trim();
+  function done(msg){S.handled[q.id]=1;feed('<b>You</b> '+msg+' '+q.k);toast(q.k+' '+msg+' (demo)');renderTabs();pReview()}
+  if(a==='jira'||a==='diff'){toast(a==='jira'?'Opens '+q.k+' in Jira (demo)':'Opens the change (demo)');return}
+  if((a==='rework'||a==='reject'||a==='ask'||a==='answer')&&!v){toast(a==='ask'?'Write your question first':a==='answer'?'Write your answer first':'Write a short reason first');inp.focus();return}
+  if(a==='ask'){q.thread.push({me:1,t:v});$('#th-'+q.id).innerHTML=q.thread.map(msgHtml).join('');inp.value='';setTimeout(function(){q.thread.push({t:REPLY[q.review?'review':q.kind==='Decision needed'?'decision':'question']});var t=$('#th-'+q.id);if(t)t.innerHTML=q.thread.map(msgHtml).join('')},1300);return}
+  if(a==='approve')done(q.review?'merged':'approved');else if(a==='decline')done('declined');else if(a==='answer')done('answered');else if(a==='skip')done('skipped the gate for');else if(a==='rework')done('sent back for rework');else if(a==='reject')done('rejected')}})}
+
+/* ===================== Delivery, SA, Team Lead, Business, Stakeholder ===================== */
+function pDelivery(){var keys=boardKeys(),cols=['var(--faint)','#8a7f70','#a89a86','var(--codex)','#7fd6bc','var(--warn)','var(--ok)'],list=keys.map(function(k){return PROJ[k]}).sort(function(a,b){return b.counts[3]+b.counts[4]+b.counts[5]-(a.counts[3]+a.counts[4]+a.counts[5])}).slice(0,8);
+ var wait=openQueue(keys).map(function(q){return ['<b class="mono">'+q.k+'</b>',pill('Waiting for you','warn'),esc(q.title),'<span class="mono">'+q.age+'</span>']});
+ if(keys.indexOf('JAIF')>-1)wait.push(['<b class="mono">JAIF-130</b>',pill('Sent back for rework'),'Verification failed because tests had no database; fixed, retrying','<span class="mono">1 h</span>']);
+ var s=page('delivery',projBar(true)+'<p class="lead">Where every ticket sits in its life, and what is stuck.</p><div class="card"><h2>Tickets by step <span>'+(S.bp==='ALL'?'busiest projects':'this project')+'</span></h2>'+list.map(function(p){var c=p.counts,tot=c.reduce(function(a,b){return a+b},0);return '<div style="margin-bottom:14px"><div class="row" style="justify-content:space-between;margin-bottom:6px"><b><span class="mono">'+p.key+'</span> · '+esc(p.name)+'</b><span class="mono mut">'+tot+' tickets</span></div><div class="stk">'+c.map(function(v,i){return '<i data-w="'+(v/tot*100)+'" style="background:'+cols[i]+'" title="'+STAGES[i]+': '+v+'"></i>'}).join('')+'</div></div>'}).join('')+'<div class="keyl">'+STAGES.map(function(n,i){return '<span><i style="background:'+cols[i]+'"></i>'+n+'</span>'}).join('')+'</div></div>'
+ +'<div class="grid2"><div class="card"><h2>Stuck or waiting <span>'+wait.length+' tickets</span></h2>'+(wait.length?tbl(['Ticket','State','Why','For'],wait):'<div class="empty">Nothing is stuck.</div>')+'</div><div class="card"><h2>Average time in each step <span>last 7 days</span></h2><div class="hbars">'+[['Intake',40,'3 min'],['Development',100,'31 min'],['Verification',45,'11 min'],['Rework rounds',12,'0.4 per ticket'],['Human review',95,'2 h 10 min']].map(function(x){return '<div class="hb"><span>'+x[0]+'</span><div class="b"><i data-w="'+x[1]+'" style="background:var(--claude)"></i></div><span>'+x[2]+'</span></div>'}).join('')+'</div></div></div>');
+ bindProjBar(s,true);animBars(s)}
+function pSA(){var checks=[['Control API','2 copies answering','38 ms'],['Database','accepting connections','4 ms'],['Queue and locks','healthy','2 ms'],['Logs and metrics','receiving events','61 ms'],['Public address','reachable through the gateway','112 ms'],['Certificate','valid until 20 Jan 2027','—']],inc=[['opencode-01, -02, -03','Failing their check','The free model does not answer in time. Not used unless a ticket asks for it.','warn'],['grok-01, -02, -03','Reported signed out by mistake','They answer correctly. A fix is merged (JAIF-218).','ok'],['Machines','PHP tools missing for WordPress','Installing automatically; Composer is fixed on all machines.','ok']];
+ page('sa','<p class="lead">Is the system healthy, and is anything running out. Anything unusual is explained in plain words.</p><div class="grid2"><div class="card"><h2>Checks <span>every 20 seconds</span></h2>'+tbl(['Check','State','Answer time'],checks.map(function(c){return [c[0],pill('Healthy','ok')+' <span class="mut">'+c[1]+'</span>',{n:c[2]}]}))+'</div><div class="card"><h2>Open notices <span>'+inc.length+'</span></h2><div class="assess">'+inc.map(function(i){return '<div class="crit2"><div class="row" style="justify-content:space-between"><b>'+i[0]+'</b>'+pill(i[1],i[3])+'</div><span class="mut">'+i[2]+'</span></div>'}).join('')+'</div></div></div><div class="card"><h2>Capacity <span>advice</span></h2><p style="margin:0" class="mut">20 of 24 AI sessions are busy at peak. One more machine would let two more tickets run at the same time. codex-02 is at 74% of its weekly limit and resets Saturday 22:30.</p></div>')}
+function pLead(){var keys=boardKeys(),rows=[];keys.forEach(function(k){PROJ[k].epics.filter(function(e){return e[5]>0}).forEach(function(e){rows.push(['<b>'+esc(e[1])+'</b> <span class="fnt">'+e[0]+'</span>',{n:e[5]},useBar(e[4],e[4]===100?'var(--ok)':'var(--warn)'),useBar(Math.min(100,e[4]+6),'var(--codex)')])})});
+ var s=page('lead',projBar(true)+'<p class="lead">Does the finished work cover what was asked? Each epic is checked against its acceptance criteria.</p><div class="card"><h2>Epic coverage <span>'+rows.length+' epics</span></h2>'+(rows.length?tbl(['Epic','Tickets','Done','Acceptance criteria covered'],rows):'<div class="empty">No epics yet.</div>')+'<div class="row" style="margin-top:12px"><button class="btn primary" id="csv">Download as spreadsheet</button><button class="btn" id="prn">Open printable report</button></div></div>');
+ bindProjBar(s,true);$('#csv').onclick=function(){toast('Spreadsheet prepared (demo)')};$('#prn').onclick=function(){toast('Printable report opened (demo)')}}
+function pBiz(){var keys=boardKeys(),eps=[];keys.forEach(function(k){PROJ[k].epics.filter(function(e){return e[5]>0}).forEach(function(e){eps.push(e)})});
+ var s=page('biz',projBar(true)+'<p class="lead">Follow the work by epic, answer questions, and ask for changes.</p><div class="grid3">'+eps.slice(0,6).map(function(e){return '<div class="card"><div class="row" style="justify-content:space-between"><b>'+esc(e[1])+'</b><span class="mono mut">'+e[0]+'</span></div><div class="mono" style="font-size:28px;font-weight:800;margin:6px 0">'+e[4]+'%</div><div class="stk"><i data-w="'+e[4]+'" style="background:'+(e[4]===100?'var(--ok)':'var(--warn)')+'"></i></div><div class="mut" style="font-size:12px;margin-top:6px">'+Math.round(e[5]*e[4]/100)+' of '+e[5]+' tickets done</div></div>'}).join('')+'</div>'+(eps.length>6?'<div class="mut">Showing 6 of '+eps.length+' epics. Pick one project to see them all.</div>':'')
+ +'<div class="card"><h2>Send a change request <span>an AI tells you the size and the risk first</span></h2><div class="grid2"><form class="assess" id="crf"><label class="fld">Title<input id="crt" value="Dark theme for the public blog" autocomplete="off"></label><label class="fld">Epic<select id="cre">'+eps.map(function(e){return '<option value="'+esc(e[1])+'">'+e[0]+' · '+esc(e[1])+'</option>'}).join('')+'</select></label><label class="fld">What should change<textarea id="crd">Visitors can switch between light and dark and the choice is remembered.</textarea></label><div class="row"><button class="btn primary" type="submit">Ask for an assessment</button></div></form><div class="assess" id="as"><div class="crit2 mut">The assessment appears here.</div></div></div></div>');
+ bindProjBar(s,true);animBars(s);$('#crf').onsubmit=function(e){e.preventDefault();var a=$('#as');a.innerHTML='<div class="crit2"><div class="mut">An AI is reading the open work…</div><div class="shimmer"></div><div class="shimmer" style="width:70%"></div></div>';
+  setTimeout(function(){a.innerHTML='<div class="crit2"><b>'+esc($('#crt').value||'Untitled request')+'</b><div class="row">'+pill('Size M','warn')+'<span class="mut">about 9 tickets · 2 to 3 days of AI time</span></div></div><div class="crit2"><b>Touches</b><span class="mut">'+esc($('#cre').value)+'</span></div><div class="crit2"><b>Risk</b><span class="mut">A similar change is already over its performance budget.</span></div><div class="crit2"><b>Conflict</b><span class="mut">Responsive work is in progress on the same templates.</span></div><div class="row"><button class="btn primary" id="go1" type="button">Send to intake</button><button class="btn" id="no1" type="button">Not now</button></div>';
+   $('#go1').onclick=function(){a.innerHTML='<div class="crit2" style="border-color:var(--ok)"><b style="color:var(--ok)">Sent to intake</b><span class="mut">It will be rewritten with acceptance criteria and queued.</span></div>'};$('#no1').onclick=function(){a.innerHTML='<div class="crit2 mut">Kept as a draft in the backlog.</div>'}},1200)}}
+function pStake(){var s=page('stake','<p class="lead">Try the running product and say whether it is accepted.</p><div class="grid2">'+[['Staging','Latest develop, updated after every merge','https://staging.example.com'],['Preview','Work in progress for review','https://preview.example.com']].map(function(e,i){return '<div class="card"><h2>'+e[0]+' <span>'+e[1]+'</span></h2><div class="cmd">'+e[2]+'</div><div class="row" style="margin-top:10px"><button class="btn" data-o="'+i+'">Open</button></div></div>'}).join('')+'</div><div class="card"><h2>Acceptance <span>recorded on the ticket</span></h2><div class="grid2"><label class="fld">Ticket<select class="in" id="stk">'+TICKETS.filter(function(t){return t.s===6&&!t.gen}).slice(0,12).map(function(t){return '<option>'+t.k+' · '+esc(t.t)+'</option>'}).join('')+'</select></label><label class="fld">Feedback<input class="in" placeholder="Optional" autocomplete="off"></label></div><div class="row" style="margin-top:12px"><button class="btn primary" id="acc">Accept</button><button class="btn" id="rej">Not yet</button></div></div>');
+ $$('[data-o]',s).forEach(function(b){b.onclick=function(){toast('Opens the environment (demo)')}});$('#acc').onclick=function(){toast('Accepted and written to the ticket (demo)')};$('#rej').onclick=function(){toast('Feedback written to the ticket (demo)')}}
+
+/* ===================== Machines and AI: add a machine, add AI accounts, tune them ===================== */
+var ROLE_CHIPS=['develop','verify','intake','master'];
+function accStateM(a){return a.paused?pill('Paused','warn'):accState(a.state)}
+function pMachines(){S.addNode=S.addNode||false;S.addAcc=S.addAcc||false;clearInterval(pMachines.t);
+ var s=page('machines','<p class="lead">Add machines, add AI accounts to them, and decide how much each one may do. Everything is done on screen; nothing needs a terminal except the one command that joins a new machine.</p><div class="row"><button class="btn primary" id="am">Add a machine</button><button class="btn" id="aa">Add an AI account</button></div>'+(S.addNode?addNodeCard():'')+(S.addAcc?addAccCard():'')+NODES.map(nodeCard).join(''));
+ $('#am').onclick=function(){S.addNode=!S.addNode;S.addAcc=false;pMachines()};$('#aa').onclick=function(){S.addAcc=!S.addAcc;S.addNode=false;pMachines()};
+ if(S.addNode)wireAddNode(s);if(S.addAcc)wireAddAcc(s);
+ $$('[data-nact]',s).forEach(function(b){b.onclick=function(){var n=NODES.filter(function(x){return x.n===b.dataset.n})[0],a=b.dataset.nact;
+  if(a==='addai'){S.addAcc=true;S.addNode=false;S.accNode=n.n;pMachines();return}
+  if(a==='drain'){n.state=n.state==='Draining'?'Online':'Draining';toast(n.n+(n.state==='Draining'?' finishes its current tickets and takes no new ones':' takes new tickets again')+' (demo)');pMachines();return}
+  if(a==='remove'){if(!b.dataset.c){b.dataset.c=1;b.textContent='Click again to remove';return}NODES.splice(NODES.indexOf(n),1);for(var i=ACCS.length-1;i>=0;i--)if(ACCS[i].node===n.n)ACCS.splice(i,1);toast(n.n+' removed (demo)');pMachines()}}});
+ $$('[data-step]',s).forEach(function(b){b.onclick=function(){var a=ACCS.filter(function(x){return x.id===b.dataset.id})[0],d=+b.dataset.step,used=ACCS.filter(function(x){return x.node===a.node}).reduce(function(t,x){return t+x.par},0);if(d>0&&used>=8){toast('A machine runs at most 8 AI sessions');return}a.par=Math.max(1,a.par+d);pMachines()}});
+ $$('[data-role]',s).forEach(function(b){b.onclick=function(){var a=ACCS.filter(function(x){return x.id===b.dataset.id})[0],r=b.dataset.role,i=a.roles.indexOf(r);if(i>-1){if(a.roles.length===1){toast('An account needs at least one job');return}a.roles.splice(i,1)}else a.roles.push(r);pMachines()}});
+ $$('[data-aact]',s).forEach(function(b){b.onclick=function(){var a=ACCS.filter(function(x){return x.id===b.dataset.id})[0],k=b.dataset.aact;if(k==='signin')toast('A new sign-in link was created for '+a.id+' (demo)');else if(k==='pause'){a.paused=!a.paused;toast(a.id+(a.paused?' paused':' resumed')+' (demo)');pMachines()}else if(k==='remove'){if(!b.dataset.c){b.dataset.c=1;b.textContent='Confirm';return}ACCS.splice(ACCS.indexOf(a),1);toast(a.id+' removed (demo)');pMachines()}}})}
+function nodeCard(n){var accs=ACCS.filter(function(a){return a.node===n.n}),sess=accs.reduce(function(t,a){return t+a.par},0);
+ return '<div class="card mcard"><div class="mhead"><div class="row"><b class="mono" style="font-size:16px">'+n.n+'</b>'+pill(n.state,n.state==='Online'?'ok':'warn')+'<span class="mut">'+n.busy+' of 8 sessions busy · '+sess+' of 8 assigned · '+n.gb+' GB · '+n.cpu+' processors</span></div><div class="acts2"><button class="btn sm" data-nact="addai" data-n="'+n.n+'">Add an AI account</button><button class="btn sm" data-nact="drain" data-n="'+n.n+'">'+(n.state==='Draining'?'Take work again':'Stop new work')+'</button><button class="btn sm danger" data-nact="remove" data-n="'+n.n+'">Remove machine</button></div></div>'
+ +(accs.length?'<div class="scroll"><table class="dt"><thead><tr><th>Account</th><th>Sessions at once</th><th>Does</th><th>Quota used</th><th>Resets</th><th>Tokens</th><th>Cost</th><th>State</th><th></th></tr></thead><tbody>'
+  +accs.map(function(a){return '<tr><td><b class="mono">'+a.id+'</b><div class="fnt" style="font-size:11px">'+P[a.ai].n+'</div></td><td><div class="stepper"><button data-step="-1" data-id="'+a.id+'" aria-label="Fewer">−</button><span>'+a.par+'</span><button data-step="1" data-id="'+a.id+'" aria-label="More">+</button></div></td><td>'+ROLE_CHIPS.map(function(r){var on=a.roles.indexOf(r)>-1;return '<button class="chip2" data-role="'+r+'" data-id="'+a.id+'" aria-pressed="'+on+'" style="'+(on?'border-color:var(--warn);color:var(--text)':'')+'">'+(on?'✓ ':'')+r+'</button>'}).join('')+'</td><td style="min-width:120px">'+useBar(a.used,P[a.ai].h)+'</td><td>'+(a.reset==='—'?'<span class="fnt">—</span>':a.reset)+'</td><td class="num">'+a.tok.toFixed(1)+' M</td><td class="num">$'+a.cost.toFixed(2)+'</td><td>'+accStateM(a)+'</td><td><div class="acts2"><button class="btn sm" data-aact="signin" data-id="'+a.id+'">Sign in again</button><button class="btn sm" data-aact="pause" data-id="'+a.id+'">'+(a.paused?'Resume':'Pause')+'</button><button class="btn sm danger" data-aact="remove" data-id="'+a.id+'">Remove</button></div></td></tr>'}).join('')+'</tbody></table></div>':'<div class="empty">No AI account on this machine yet.</div>')+'</div>'}
+function addNodeCard(){return '<div class="card mcard"><h2>Add a machine <span>one command, valid for 5 minutes</span></h2><p class="mut" style="margin:0">Run this on a fresh Ubuntu machine. It joins the flow and installs what it needs. Then add its AI accounts below.</p><div class="cmd">curl -fsSL https://ai-cc.example.com/v1/install.sh | sudo sh -s -- --token ••••••••</div><div class="row"><button class="btn primary" id="cp">Copy the command</button><span class="mono mut" id="cd">5:00 left</span></div><div class="wait"><span class="spin"></span>Waiting for the machine to join…</div><div class="row"><button class="btn" id="sj">Demo: the machine joins</button><button class="btn" id="cn">Cancel</button></div></div>'}
+function wireAddNode(root){var t=300;pMachines.t=setInterval(function(){t--;var c=$('#cd');if(!c||t<0){clearInterval(pMachines.t);return}c.textContent=Math.floor(t/60)+':'+('0'+t%60).slice(-2)+' left'},1000);
+ $('#cp').onclick=function(){toast('Copied (demo)')};$('#cn').onclick=function(){S.addNode=false;pMachines()};$('#sj').onclick=function(){var n='node'+(NODES.length+1);NODES.push({n:n,gb:16,cpu:8,busy:0,state:'Online'});S.addNode=false;toast(n+' joined and is online (demo). Add its AI accounts next.');S.addAcc=true;S.accNode=n;pMachines()}}
+function addAccCard(){var node=S.accNode||NODES[0].n,ai=S.accAI||'claude',used=ACCS.filter(function(x){return x.node===node}).reduce(function(t,x){return t+x.par},0);S.accPar=S.accPar||2;
+ return '<div class="card mcard"><h2>Add an AI account <span>sign in once, then the machine can use it</span></h2><div class="grid3"><label class="fld">Machine<select class="in" id="aaN">'+NODES.map(function(n){return '<option'+(n.n===node?' selected':'')+'>'+n.n+'</option>'}).join('')+'</select></label><label class="fld">AI<select class="in" id="aaA">'+Object.keys(P).map(function(k){return '<option value="'+k+'"'+(k===ai?' selected':'')+'>'+P[k].n+'</option>'}).join('')+'</select></label><label class="fld">Sessions at once <span class="fnt" style="text-transform:none;letter-spacing:0">('+used+' of 8 used on this machine)</span><div class="stepper" style="width:max-content"><button id="aaM" type="button">−</button><span id="aaP">'+S.accPar+'</span><button id="aaPl" type="button">+</button></div></label></div>'
+  +'<div><div class="fld" style="margin-bottom:6px">What it does</div>'+ROLE_CHIPS.map(function(r){return '<label class="chip2" style="cursor:pointer"><input type="checkbox" class="aar" value="'+r+'" '+(r==='develop'||r==='verify'?'checked':'')+' style="accent-color:var(--warn)"> '+r+'</label>'}).join('')+'</div>'
+  +'<div class="row"><button class="btn primary" id="aaGo">Create a sign-in link</button><button class="btn" id="aaCn">Cancel</button></div><div id="aaOut"></div></div>'}
+function wireAddAcc(root){$('#aaN').onchange=function(){S.accNode=this.value;pMachines()};$('#aaA').onchange=function(){S.accAI=this.value};$('#aaM').onclick=function(){S.accPar=Math.max(1,S.accPar-1);$('#aaP').textContent=S.accPar};$('#aaPl').onclick=function(){S.accPar=Math.min(8,S.accPar+1);$('#aaP').textContent=S.accPar};$('#aaCn').onclick=function(){S.addAcc=false;pMachines()};
+ $('#aaGo').onclick=function(){var node=$('#aaN').value,ai=$('#aaA').value,roles=$$('.aar').filter(function(x){return x.checked}).map(function(x){return x.value});if(!roles.length){toast('Choose at least one job');return}
+  var num=ACCS.filter(function(a){return a.ai===ai}).length+1,id=ai+'-'+('0'+num).slice(-2),out=$('#aaOut');$('#aaGo').disabled=true;
+  out.innerHTML='<div class="crit2" style="margin-top:10px"><b>Sign in as '+id+'</b><span class="mut">Open this link on any device and sign in with the AI account you want to use.</span><div class="cmd">https://ai-cc.example.com/signin/k7q2-9xd4</div><div class="row"><span class="mono">Code: WXYZ-1234</span><button class="btn sm" id="cpl">Copy link</button></div><div class="wait"><span class="spin"></span>Waiting for you to sign in…</div></div>';$('#cpl').onclick=function(){toast('Copied (demo)')};
+  setTimeout(function(){if(!$('#aaOut'))return;ACCS.push({id:id,ai:ai,node:node,par:S.accPar,roles:roles,used:0,reset:ai==='grok'?'no reset':'Mon 09:00',tok:0,cost:0,state:'ready'});S.addAcc=false;S.accAI=null;toast(id+' is signed in and ready on '+node+' (demo)');pMachines()},2800)}}
+
+/* ===================== Users and roles ===================== */
+S.users=USERS.map(function(u){return u.slice()});S.audit=[['today 09:12','Viet Vu','Invited Khanh Do as Stakeholder on JOOWP'],['yesterday','Viet Vu','Gave Hoa Vo the role Delivery'],['3 days ago','Viet Vu','Created the role Business with 3 views']];S.uv='people';
+function renderRoleSel(){var sel=$('#roleSel');sel.innerHTML=Object.keys(ROLEDEF).map(function(r){return '<option'+(r===S.role?' selected':'')+'>'+r+'</option>'}).join('')}
+function audit(m){S.audit.unshift(['just now','Viet Vu',m])}
+function pUsers(){var s=page('users','<div class="pagehead"><div class="subtabs" role="group"><button data-u="people" aria-pressed="'+(S.uv==='people')+'">People</button><button data-u="roles" aria-pressed="'+(S.uv==='roles')+'">Roles and what each can see</button><button data-u="history" aria-pressed="'+(S.uv==='history')+'">History</button></div></div><div id="ub"></div>');
+ $$('[data-u]',s).forEach(function(b){b.onclick=function(){S.uv=b.dataset.u;pUsers()}});({people:uPeople,roles:uRoles,history:uHistory})[S.uv]()}
+function uPeople(){var roles=Object.keys(ROLEDEF),b=$('#ub');
+ b.innerHTML='<div class="card"><h2>People <span>'+S.users.length+'</span></h2><div class="scroll"><table class="dt"><thead><tr><th>Person</th><th>Roles</th><th>Projects</th><th>Last sign-in</th><th>State</th><th></th></tr></thead><tbody>'
+  +S.users.map(function(u,i){var ed=S.ue===i;return '<tr><td><div class="row" style="flex-wrap:nowrap"><span class="avatar" style="background:'+u[6]+'">'+u[0].split(' ').map(function(x){return x[0]}).join('')+'</span><div><b>'+esc(u[0])+'</b><div class="fnt" style="font-size:12px">'+esc(u[1])+'</div></div></div></td><td>'+u[2].map(function(r){return '<span class="chip2">'+esc(r)+'</span>'}).join('')+'</td><td>'+esc(u[3])+'</td><td class="mut">'+u[4]+'</td><td>'+pill(u[5],u[5]==='Active'?'ok':u[5]==='Invited'?'warn':'crit')+'</td><td><div class="acts2"><button class="btn sm" data-ed="'+i+'">Edit roles</button>'+(u[2].indexOf('Administrator')>-1?'':'<button class="btn sm danger" data-ds="'+i+'">'+(u[5]==='Disabled'?'Enable':'Disable')+'</button>')+'</div></td></tr>'+(ed?'<tr><td colspan="6" style="background:var(--panel2)"><div class="assess"><div class="fld">Roles</div><div>'+roles.map(function(r){return '<label class="chip2" style="cursor:pointer"><input type="checkbox" class="ur" value="'+esc(r)+'" '+(u[2].indexOf(r)>-1?'checked':'')+' style="accent-color:var(--warn)"> '+esc(r)+'</label>'}).join('')+'</div><div class="row"><button class="btn primary sm" id="usv">Save</button><button class="btn sm" id="ucn">Cancel</button></div></div></td></tr>':'')}).join('')+'</tbody></table></div></div>'
+  +'<div class="card"><h2>Invite a person <span>they receive an email with a sign-in link</span></h2><div class="grid3"><label class="fld">Email<input class="in" id="iem" placeholder="name@example.com" autocomplete="off"></label><label class="fld">Projects<select class="in" id="ipr"><option>All projects</option><option>Only the projects I choose later</option></select></label><div><div class="fld" style="margin-bottom:6px">Roles</div>'+roles.map(function(r){return '<label class="chip2" style="cursor:pointer"><input type="checkbox" class="ir" value="'+esc(r)+'" style="accent-color:var(--warn)"> '+esc(r)+'</label>'}).join('')+'</div></div><div class="row" style="margin-top:12px"><button class="btn primary" id="inv">Send invitation</button></div></div>';
+ $$('[data-ed]',b).forEach(function(x){x.onclick=function(){S.ue=S.ue===+x.dataset.ed?null:+x.dataset.ed;uPeople()}});$$('[data-ds]',b).forEach(function(x){x.onclick=function(){var u=S.users[+x.dataset.ds];u[5]=u[5]==='Disabled'?'Active':'Disabled';audit((u[5]==='Disabled'?'Disabled ':'Enabled ')+u[0]);toast(u[0]+(u[5]==='Disabled'?' can no longer sign in':' can sign in again')+' (demo)');uPeople()}});
+ if(S.ue!=null){$('#usv').onclick=function(){var u=S.users[S.ue],r=$$('.ur',b).filter(function(c){return c.checked}).map(function(c){return c.value});if(!r.length){toast('A person needs at least one role');return}u[2]=r;audit('Set the roles of '+u[0]+' to '+r.join(', '));S.ue=null;toast('Roles saved (demo)');uPeople()};$('#ucn').onclick=function(){S.ue=null;uPeople()}}
+ $('#inv').onclick=function(){var em=$('#iem').value.trim(),r=$$('.ir',b).filter(function(c){return c.checked}).map(function(c){return c.value});if(!/^\S+@\S+\.\S+$/.test(em)){toast('Enter a valid email address');return}if(!r.length){toast('Choose at least one role');return}S.users.push([em.split('@')[0],em,r,$('#ipr').value==='All projects'?'All projects':'None yet','never','Invited','#a89a86']);audit('Invited '+em+' as '+r.join(', '));toast('Invitation sent to '+em+' (demo)');uPeople()}}
+function uRoles(){var roles=Object.keys(ROLEDEF),b=$('#ub');
+ b.innerHTML='<div class="card"><h2>What each role can open <span>a person sees the union of their roles</span></h2><div class="scroll"><table class="mx"><thead><tr><th>View</th>'+roles.map(function(r){return '<th>'+esc(r)+'</th>'}).join('')+'</tr></thead><tbody>'+VIEWS.map(function(v){return '<tr><td>'+v[1]+'</td>'+roles.map(function(r){var on=ROLEDEF[r].indexOf(v[0])>-1;return '<td><input type="checkbox" data-r="'+esc(r)+'" data-v="'+v[0]+'" '+(on?'checked':'')+(r==='Administrator'?' disabled':'')+' aria-label="'+esc(r)+' can open '+v[1]+'"></td>'}).join('')+'</tr>'}).join('')+'</tbody></table></div><p class="mut" style="margin:10px 0 0;font-size:13px">The Administrator role always sees everything and cannot be changed. Changes take effect the next time a person opens the page. The API refuses what the role cannot see.</p></div>'
+  +'<div class="card"><h2>Add a role</h2><div class="row"><input class="in" id="nrn" placeholder="For example Finance" style="max-width:260px" autocomplete="off"><button class="btn primary" id="nra">Add role</button></div></div>';
+ $$('input[data-r]',b).forEach(function(c){c.onchange=function(){var r=c.dataset.r,v=c.dataset.v,l=ROLEDEF[r],i=l.indexOf(v);if(c.checked&&i<0)l.push(v);else if(!c.checked&&i>-1)l.splice(i,1);audit((c.checked?'Allowed ':'Removed ')+vname(v)+' for '+r);renderRoleSel();renderTabs()}});
+ $('#nra').onclick=function(){var n=$('#nrn').value.trim();if(!n||ROLEDEF[n]){toast(n?'That role exists':'Enter a name');return}ROLEDEF[n]=['dash','board'];audit('Created the role '+n);renderRoleSel();toast('Role '+n+' added (demo)');uRoles()}}
+function uHistory(){$('#ub').innerHTML='<div class="card"><h2>Who changed what <span>every change to people and roles</span></h2>'+tbl(['When','Who','Change'],S.audit.map(function(a){return [{n:a[0]},a[1],esc(a[2])]}))+'</div>'}
+/* ----- Knowledge: what AI Flow has learned and hands to every new session ----- */
+var KN=[
+ ['Verification failed: the tests need a database on the machine','Study case','JAIF','Project','JAIF-218',14,'today','Approved','Cause: the machines had no test PostgreSQL or Redis, so every verification failed and the ticket went back for rework.','Fix: every machine now runs both test services.','Avoid: check the services a project needs before its first verification.'],
+ ['Composer cannot install when the service has no HOME','Study case','JAIF','General','JAIF-221',9,'today','Approved','Cause: the node agent runs without HOME and the installer refuses to start.','Fix: give installers an explicit home directory.','Avoid: never rely on the caller environment for installers.'],
+ ['The login gate blocked the worker policy hook','Study case','JAIF','Project','JAIF-109',6,'today','Needs review','Cause: routes that check a token inside the handler were refused by the gate, so no AI could run a tool.','Fix: serve machines on an internal address without the gate.','Avoid: test the gate with a worker bearer request.'],
+ ['Grok prints its answer as text events, not result events','Decision','JAIF','Project','JAIF-218',3,'today','Approved','The adapter reads the field data of text events and records cost from the end event.','','Reason: the installed Grok version changed its output.'],
+ ['Claude accounts use Sonnet only','Convention','JAIF','General','Owner',31,'today','Approved','Opus is not used for any role.','','Set by the owner on 23 October.'],
+ ['Nothing is released or tagged until the owner says so','Convention','JAIF','Project','JAIF-112',8,'2 days ago','Approved','Work stays on develop; no tags, no merge to master.','',''],
+ ['Themes never use inline styles; colours come from tokens','Convention','JOOWP','Project','JOOWP-157',42,'last week','Approved','Every colour and spacing value is a design token.','','Checked by the lint step.'],
+ ['Layout shift budget fails when images have no size','Study case','JOOWP','Project','JOOWP-301',5,'3 days ago','Approved','Cause: images without width and height reserve no space.','Fix: always output the size attributes.','Avoid: add the size check to the theme tests.'],
+ ['The MCP OAuth screen must ask the site owner to consent','Decision','JOOWP','Project','JOOWP-308',4,'yesterday','Approved','Clients are never auto-approved.','','Security rule from the hardening epic.'],
+ ['Ask which number format to use before translating strings','Study case','JOOWP','General','JOOWP-277',2,'yesterday','Needs review','Cause: Vietnamese and English formats were mixed in one catalogue.','Fix: fix the format in the ticket first.','Avoid: put the format in the ticket template.']];
+function pKnow(){S.kq=S.kq||'';S.ks=S.ks||'';S.ko=S.ko===undefined?-1:S.ko;
+ var sc=boardKeys(),items=KN.filter(function(k){return(sc.indexOf(k[2])>-1||k[3]==='General')&&(!S.ks||k[3]===S.ks)&&(!S.kq||(k[0]+' '+k[1]+' '+k[4]).toLowerCase().indexOf(S.kq.toLowerCase())>-1)});
+ var kinds={};KN.forEach(function(k){kinds[k[1]]=(kinds[k[1]]||0)+1});
+ var tk=TICKETS.filter(function(t){return t.s===3&&!t.gen&&sc.indexOf(t.pr)>-1}),sel=S.kt&&tk.filter(function(t){return t.k===S.kt})[0]||tk[0];
+ var rel=sel?KN.filter(function(k){return k[2]===sel.pr||k[3]==='General'}).slice(0,3):[];
+ var s=page('know',projBar(true)+'<p class="lead">Everything AI Flow has learned, saved automatically after every run. A new session receives the part that matters for its ticket, so mistakes are not repeated.</p>'
+ +'<div class="kpis"><div class="card k"><div class="lab">Items saved</div><div class="val mono">1,284<small class="up">+37 today</small></div><div class="sub"><span>study cases, decisions, conventions, guides</span></div></div>'
+ +'<div class="card k"><div class="lab">Runs given context</div><div class="val mono">96%<small>of runs</small></div><div class="sub"><span>received a context pack when they started</span></div></div>'
+ +'<div class="card k"><div class="lab">Known mistakes repeated</div><div class="val mono">2<small class="up">down from 7</small></div><div class="sub"><span>this week, against last week</span></div></div>'
+ +'<div class="card k"><div class="lab">Rework rounds</div><div class="val mono">0.4<small class="up">was 0.9</small></div><div class="sub"><span>per ticket, last 7 days</span></div></div></div>'
+ +'<div class="main" style="grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)"><div class="card"><h2>Library <span>'+items.length+' shown · '+Object.keys(kinds).map(function(k){return kinds[k]+' '+k.toLowerCase()+'s'}).join(' · ')+'</span></h2>'
+ +'<div class="bar-tools"><input class="in" id="kq" style="width:220px" placeholder="Search knowledge" value="'+esc(S.kq)+'"><select class="in" id="ks" style="width:auto"><option value="">Project and general</option><option'+(S.ks==='Project'?' selected':'')+'>Project</option><option'+(S.ks==='General'?' selected':'')+'>General</option></select></div>'
+ +'<div class="scroll"><table class="dt"><thead><tr><th>Title</th><th>Kind</th><th>Shared with</th><th>Used</th><th>State</th></tr></thead><tbody>'
+ +items.map(function(k){var i=KN.indexOf(k),open=S.ko===i;return '<tr data-k="'+i+'" style="cursor:pointer"><td><b>'+esc(k[0])+'</b><div style="color:var(--faint);font-size:12px">from '+k[4]+' · '+k[6]+'</div></td><td>'+pill(k[1])+'</td><td>'+(k[3]==='General'?'All projects':k[2])+'</td><td class="num">'+k[5]+' runs</td><td>'+pill(k[7],k[7]==='Approved'?'ok':'warn')+'</td></tr>'+(open?'<tr><td colspan="5" style="background:var(--panel2);border-radius:8px"><div class="assess"><div>'+esc(k[8])+'</div>'+(k[9]?'<div>'+esc(k[9])+'</div>':'')+(k[10]?'<div style="color:var(--muted)">'+esc(k[10])+'</div>':'')+'<div class="row"><button class="btn" data-a="Approved">Approve</button><button class="btn" data-a="merged">Merge duplicates</button><button class="btn" data-a="retired">Retire</button></div></div></td></tr>':'')}).join('')
+ +'</tbody></table></div></div>'
+ +'<div class="card"><h2>What a new session receives <span>context pack</span></h2><label class="fld">Ticket<select class="in" id="kt">'+tk.map(function(t){return '<option value="'+t.k+'"'+(sel&&sel.k===t.k?' selected':'')+'>'+t.k+' · '+esc(t.t)+'</option>'}).join('')+'</select></label>'
+ +(sel?'<div class="assess" style="margin-top:12px"><div class="crit2"><b>Project</b><span style="color:var(--muted)">'+(sel.pr==='JAIF'?'AI Flow: Jira-driven, many machines, AI writes and verifies the code.':'WordPress: a core engine, the jooservices theme and an MCP plugin.')+'</span></div>'
+ +'<div class="crit2"><b>Working rules</b><span style="color:var(--muted)">Work on develop · different AI verifies · nothing is released without the owner</span></div>'
+ +'<div class="crit2"><b>Latest decisions</b><span style="color:var(--muted)">'+(sel.pr==='JAIF'?'Claude uses Sonnet only · token routes bypass the login gate on the internal address':'MCP consent is never automatic · themes use tokens only')+'</span></div>'
+ +'<div class="crit2"><b>History of '+sel.k+'</b><span style="color:var(--muted)">Written, rewritten by intake, started '+(sel.age<90?sel.age+' min':Math.round(sel.age/60)+' h')+' ago</span></div>'
+ +'<div class="crit2"><b>Study cases handed over</b>'+rel.map(function(k,i){return '<span style="color:var(--muted)">'+esc(k[0])+' <span class="mono">'+(94-i*7)+'% match</span></span>'}).join('')+'</div></div>':'<div class="empty" style="margin-top:12px">No ticket is being developed right now.</div>')+'</div></div>'
+ +'<div class="card"><h2>Just saved <span>automatic, nobody wrote these</span></h2><div class="assess">'+[['2 min ago','JAIF-218','Run finished: study case saved about missing test services'],['9 min ago','JOOWP-310','Decision saved: refresh tokens rotate on every use'],['14 min ago','JAIF-109','Verification failed: study case saved about the login gate'],['31 min ago','JOOWP-253','Run finished: list of API symbols used by themes saved']].map(function(r){return '<div class="crit2"><div class="row" style="justify-content:space-between"><b class="mono">'+r[1]+'</b><span style="color:var(--faint)">'+r[0]+'</span></div><span style="color:var(--muted)">'+r[2]+'</span></div>'}).join('')+'</div></div>');
+ bindProjBar(s,true);$('#kq').oninput=function(){S.kq=this.value;var p=this.selectionStart;pKnow();var n=$('#kq');n.focus();n.setSelectionRange(p,p)};$('#ks').onchange=function(){S.ks=this.value;pKnow()};if($('#kt'))$('#kt').onchange=function(){S.kt=this.value;pKnow()};
+ $$('tr[data-k]',s).forEach(function(r){r.onclick=function(){var i=+r.dataset.k;S.ko=S.ko===i?-1:i;pKnow()}});
+ $$('[data-a]',s).forEach(function(b){b.onclick=function(e){e.stopPropagation();toast(b.dataset.a==='Approved'?'Approved (demo)':b.dataset.a==='merged'?'Duplicates merged (demo)':'Retired: no AI will receive it (demo)')}})}
+
+/* ===================== Integrations and Projects ===================== */
+function pInteg(){var conns=S.conns=S.conns||[['Jira Cloud','Email and API token','jooservices.atlassian.net','—','Connected'],['GitHub','GitHub App','jooservices (organization)','36 repositories','Connected']];
+ var s=page('integ','<p class="lead">Where AI Flow gets tickets and where it puts code. Credentials are kept by Command Center only; machines never store them.</p><div class="card"><h2>Connections <span>'+conns.length+'</span></h2>'+tbl(['Service','Credential','Account','Reach','State',''],conns.map(function(c,i){return ['<b>'+c[0]+'</b>',c[1],c[2],c[3],pill(c[4],'ok'),'<button class="btn sm" data-t="'+i+'">Test</button>']}))+'</div>'
+ +'<div class="card"><h2>Add a connection <span>for another GitHub account</span></h2><div class="grid3"><label class="fld">Type<select class="in" id="ct"><option>GitHub App (recommended)</option><option>Access token</option></select></label><label class="fld">Account or organization<input class="in" id="ca" placeholder="my-organization" autocomplete="off"></label><label class="fld" id="cw">Token<input class="in" id="ck" type="password" placeholder="Paste a token. It is never shown again." autocomplete="off"></label></div><div class="row" style="margin-top:12px"><button class="btn primary" id="cadd">Verify and add</button></div></div>');
+ $$('[data-t]',s).forEach(function(b){b.onclick=function(){toast('Connection works (demo)')}});function sync(){$('#cw').style.display=$('#ct').value.indexOf('token')>-1?'':'none'}$('#ct').onchange=sync;sync();
+ $('#cadd').onclick=function(){var a=$('#ca').value.trim();if(!a){toast('Enter the account first');return}S.conns.push(['GitHub',$('#ct').value.indexOf('token')>-1?'Access token':'GitHub App',a,'checking…','Connected']);toast('Added '+a+' (demo)');pInteg()}}
+var REPOS=['jooservices/ai-flow','jooservices/wordpress-core','jooservices/wordpress-mcp','jooservices/aiflow-control','jooservices/javmeta','jooservices/crawlerx'];
+function repoOf(k){return k==='JAIF'?'jooservices/ai-flow':k==='JOOWP'?'jooservices/wordpress-core':'jooservices/'+PROJ[k].name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}
+function pProj(){S.pjq=S.pjq||'';S.pjshow=S.pjshow||10;S.pjSel=S.pjSel||(S.bp!=='ALL'?S.bp:'JAIF');S.map=S.map||{};S.padd=S.padd||false;
+ var q=S.pjq.toLowerCase(),rows=sortedProjects().filter(function(p){return !q||(p.key+' '+p.name).toLowerCase().indexOf(q)>-1}),shown=rows.slice(0,S.pjshow),sel=PROJ[S.pjSel];
+ var s=page('proj','<p class="lead">Add projects and choose which repository each epic uses. Everything here is done on screen; no files or commands.</p><div class="card"><div class="pagehead"><h2 style="margin:0">Projects <span>'+rows.length+' of '+PLIST.length+'</span></h2><div class="row"><input class="in" id="pjq" placeholder="Find a project" value="'+esc(S.pjq)+'" style="width:220px" aria-label="Find a project"><button class="btn primary" id="padd">Add a project</button></div></div>'
+ +'<div class="scroll"><table class="dt"><thead><tr><th>Project</th><th>Repository</th><th>Priority</th><th>Tickets in parallel</th><th>Running</th></tr></thead><tbody>'+shown.map(function(p,i){return '<tr class="projrow" data-k="'+p.key+'"><td><b class="mono">'+p.key+'</b> <span class="mut">'+esc(p.name)+'</span></td><td class="mono mut">'+repoOf(p.key)+(p.key==='JOOWP'?' <span class="fnt">+ 1 by epic</span>':'')+'</td><td class="num">'+(1+i%5)+'</td><td class="num">'+(p.key==='JAIF'?6:p.key==='JOOWP'?4:2)+'</td><td><button class="toggle" data-p="'+p.key+'" aria-pressed="'+(p.state==='Running')+'" aria-label="Running"></button></td></tr>'}).join('')+'</tbody></table></div>'+(rows.length>shown.length?'<div class="row" style="margin-top:10px"><button class="btn" id="pmore">Show 10 more</button><span class="mut">'+(rows.length-shown.length)+' not shown</span></div>':'')+'</div>'
+ +(S.padd?'<div class="card mcard"><h2>Add a project <span>checked before it is saved</span></h2><div class="grid3"><label class="fld">Jira project<select class="in" id="ajp"><option>JOOS · JOOservices</option><option>JOOUA2 · Useragent v2</option><option>PLAYG · Playground</option></select></label><label class="fld">Repository<select class="in" id="ajr">'+REPOS.map(function(r){return '<option>'+r+'</option>'}).join('')+'</select></label><label class="fld">Base branch<input class="in" id="ajb" value="develop" autocomplete="off"></label></div><div class="row"><button class="btn" id="apf">Run the check</button><button class="btn primary" id="aad" disabled>Add the project</button><button class="btn" id="acn">Cancel</button></div><div id="apo"></div></div>':'')
+ +'<div class="card"><div class="pagehead"><h2 style="margin:0">Repository of each epic <span>a ticket is built, verified and merged in the repository of its epic</span></h2>'+pickerButton(S.pjSel,false)+'</div>'
+ +tbl(['Epic','Repository'],sel.epics.map(function(e){var key=sel.key+'|'+e[1],cur=S.map[key]||(sel.key==='JOOWP'&&e[1]==='MCP plugin'?'jooservices/wordpress-mcp':repoOf(sel.key));return [esc(e[1]),'<select class="in" data-e="'+esc(key)+'" style="max-width:340px">'+REPOS.concat(REPOS.indexOf(repoOf(sel.key))<0?[repoOf(sel.key)]:[]).map(function(r){return '<option'+(cur===r?' selected':'')+'>'+r+'</option>'}).join('')+'</select>']}))+'<p class="mut" style="margin:10px 0 0;font-size:13px">An epic without its own repository uses the project default: <b class="mono">'+repoOf(sel.key)+'</b>.</p></div>');
+ $('#pjq').oninput=function(){S.pjq=this.value;S.pjshow=10;var p=this.selectionStart;pProj();var n=$('#pjq');n.focus();n.setSelectionRange(p,p)};var pm=$('#pmore');if(pm)pm.onclick=function(){S.pjshow+=10;pProj()};
+ $$('[data-p]',s).forEach(function(b){b.onclick=function(e){e.stopPropagation();var p=PROJ[b.dataset.p];p.state=p.state==='Running'?'Paused':'Running';b.setAttribute('aria-pressed',p.state==='Running');toast(p.key+(p.state==='Running'?' is running':' is paused')+' (demo)')}});
+ $$('[data-e]',s).forEach(function(x){x.onchange=function(){S.map[x.dataset.e]=x.value;toast('Saved (demo)')}});
+ $$('[data-pick]',s).forEach(function(b){b.onclick=function(){openPicker(b,S.pjSel,false,function(k){S.pjSel=k;pProj()})}});
+ $('#padd').onclick=function(){S.padd=!S.padd;pProj()};
+ if(S.padd){$('#acn').onclick=function(){S.padd=false;pProj()};$('#apf').onclick=function(){var o=$('#apo');o.innerHTML='<div class="wait" style="margin-top:10px"><span class="spin"></span>Checking Jira, GitHub and the machines…</div>';setTimeout(function(){o.innerHTML='<div class="assess" style="margin-top:10px"><div class="crit2">'+pill('Passed','ok')+' All required Jira statuses exist</div><div class="crit2">'+pill('Passed','ok')+' Branch <b class="mono">'+esc($('#ajb').value)+'</b> exists in '+esc($('#ajr').value)+'</div><div class="crit2">'+pill('Passed','ok')+' 3 of 3 machines have the tools this project needs</div></div>';$('#aad').disabled=false},1300)};
+  $('#aad').onclick=function(){var v=$('#ajp').value.split(' · '),k=v[0];if(PROJ[k]){toast(k+' is already added');return}var o={key:k,name:v[1],star:false,state:'Running',epics:[],last:0,counts:[0,0,0,0,0,0,0]};PROJ[k]=o;PLIST.push(o);S.padd=false;audit('Added the project '+k);toast(k+' added and running (demo)');pProj()}}}
+
+/* ===================== quiet background activity so the demo feels alive ===================== */
+function simulate(){if(document.hidden)return;var cand=TICKETS.filter(function(t){return !t.gen&&t.s>=2&&t.s<6&&(t.pr==='JAIF'||t.pr==='JOOWP')});if(!cand.length)return;var t=cand[Math.floor(R()*cand.length)],from=t.s,to=from+1;if(from===4){var r=R();to=r<.2?2:r<.35?5:6}
+ t.s=to;var c=PROJ[t.pr].counts;c[from]--;c[to]++;if(to>=3&&to<=5&&!t.p)t.p=['codex','claude'][Math.floor(R()*2)];
+ feed('<b>'+t.k+'</b> '+({3:'started',4:'is being verified',5:'passed verification, waiting for a person',6:'merged into develop',2:'went back for rework'}[to]));
+ if(S.page==='board'&&!popEl)drawBoard(boardKeys());else if(S.page==='dash'&&S.dview==='work'){miniFlow(scopeKeys())}}
+
+/* ===================== start ===================== */
+renderRoleSel();$('#roleSel').onchange=function(){S.role=this.value;go(S.page)};$('#cmdBtn').onclick=openCmd;
+go(store('page')&&allowed(store('page'))?'dash':'dash');setInterval(simulate,3200);
+})();
+</script>

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .. import VERSION
+from ..core.controlrepo import epic_for_ticket
 from ..core.toolchains import missing_tools, toolchain_gaps
 from .sa import dashboard_data, thresholds
 
@@ -115,6 +116,11 @@ def snapshot(ctx) -> dict[str, Any]:
                        "pr_url": r["pr_url"], "ended_age_s": _age(r["ended_at"])})
     tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, jira_updated"
                      " FROM tickets ORDER BY project, key")
+    ticket_index = {ticket["key"]: ticket for ticket in tickets}
+    for ticket in tickets:
+        ticket["epic"] = epic_for_ticket(ticket, ticket_index)
+        project = repo.projects.get(ticket["project"])
+        ticket["repository"] = project.repo_for(ticket) if project else ""
     by_status: dict[str, dict[str, int]] = {}
     for t in tickets:
         by_status.setdefault(t["project"], {}).setdefault(t["status"], 0)
@@ -145,7 +151,8 @@ def snapshot(ctx) -> dict[str, Any]:
         total = sum(counts.values())
         current = lifecycle.get(p.key, {})
         closed = current.get("status") == "closed"
-        projects.append({"key": p.key, "repo": p.repo, "base": p.base, "environments": p.environments,
+        projects.append({"key": p.key, "repo": p.repo, "repositories": p.configured_repositories,
+                         "base": p.base, "environments": p.environments,
                          "work_minutes": p.work_minutes(), "counts": counts,
                          "status": "closed" if closed else "open", "closed": closed,
                          "closed_at": _iso(current.get("closed_at")), "closed_by": current.get("closed_by", ""),

@@ -43,6 +43,18 @@ def mount_ui(app: FastAPI, ctx) -> None:
         t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
         if not t:
             raise HTTPException(404, "unknown ticket")
+        from ...core.controlrepo import epic_for_ticket
+        project = ctx.repo().projects.get(t["project"])
+        ancestors = [t]
+        parent = str(t.get("parent_key") or "")
+        while parent and len(ancestors) < 8:
+            ancestor = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+            if not ancestor:
+                break
+            ancestors.append(ancestor)
+            parent = str(ancestor.get("parent_key") or "")
+        t["epic"] = epic_for_ticket(t, {item["key"]: item for item in ancestors})
+        t["repository"] = project.repo_for(t) if project else ""
         runs = ctx.db.all("SELECT id, step, account_id, provider, model, node, fence, status, outcome, error_kind,"
                           " started_at, ended_at, tokens_in, tokens_out, cost_usd, branch, pr_url, head_sha, summary"
                           " FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 20", (key,))
@@ -54,7 +66,8 @@ def mount_ui(app: FastAPI, ctx) -> None:
             r["id"] = str(r["id"])
             r["cost_usd"] = float(r["cost_usd"])
         from ..timeline import timeline
-        return {"ticket": t, "runs": runs, "events": events, "writes": writes, "timeline": timeline(ctx.db, key),
+        return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
+                "writes": writes, "timeline": timeline(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
     @app.get("/v1/services")

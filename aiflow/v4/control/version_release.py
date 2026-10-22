@@ -14,9 +14,11 @@ import re
 import string
 import time
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from .db import J
+from ..core.controlrepo import epic_for_ticket
 
 log = logging.getLogger(__name__)
 
@@ -258,7 +260,7 @@ def _resumed_release_data(ctx, project: Any, tracker: str, version: dict[str, An
 
 def post_merge_resume(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any] | None:
     """Offer a retry for a durable merge without reopening the already-completed ticket gate."""
-    state = _tracker_row(ctx, project.key, version["id"])
+    state = _tracker_row(ctx, project, version["id"])
     if not state or not state.get("tracker_key"):
         return None
     tracker = str(state["tracker_key"])
@@ -289,13 +291,32 @@ def post_merge_resume(ctx, project: Any, version: dict[str, Any]) -> dict[str, A
     return result
 
 
-def _tracker_row(ctx, project: str, version_id: str) -> dict | None:
-    return ctx.db.one("SELECT * FROM version_releases WHERE project=%s AND version_id=%s", (project, version_id))
+def _tracker_row(ctx, project: Any, version_id: str) -> dict | None:
+    project_key = project.key if hasattr(project, "key") else str(project)
+    repository = str(getattr(project, "repo", "") or "")
+    if not repository:
+        return ctx.db.one("SELECT * FROM version_releases WHERE project=%s AND version_id=%s"
+                          " ORDER BY repository LIMIT 1", (project_key, version_id))
+    row = ctx.db.one("SELECT * FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
+                     (project_key, version_id, repository))
+    if row:
+        return row
+    # Rows created before repository scoping belong to the project's default repository.
+    configured = ctx.repo().projects.get(project_key) if hasattr(ctx, "repo") else None
+    if configured and configured.repo.lower() == repository.lower():
+        legacy = ctx.db.one("SELECT * FROM version_releases WHERE project=%s AND version_id=%s AND repository=''",
+                            (project_key, version_id))
+        if legacy:
+            ctx.db.run("UPDATE version_releases SET repository=%s WHERE project=%s AND version_id=%s AND repository=''",
+                       (repository, project_key, version_id))
+            legacy["repository"] = repository
+            return legacy
+    return None
 
 
 def ensure_tracker(ctx, project: Any, version: dict[str, Any]) -> str:
-    """Create one Jira Release tracker per configured version, outside its fixVersion membership."""
-    row = _tracker_row(ctx, project.key, version["id"])
+    """Create one Jira Release tracker per repository and configured version."""
+    row = _tracker_row(ctx, project, version["id"])
     if row and row["tracker_key"]:
         return str(row["tracker_key"])
     issue_type = str(config(project).get("issue_type") or "Release")
@@ -303,11 +324,11 @@ def ensure_tracker(ctx, project: Any, version: dict[str, Any]) -> str:
                                 f"AI-managed release tracker for Jira version {version['name']} "
                                 f"(version id {version['id']}).", issuetype=issue_type,
                                 labels=["aiflow-version-release"], version_field=version["name"])
-    ctx.db.run("INSERT INTO version_releases (project, version_id, version_name, tracker_key)"
-               " VALUES (%s,%s,%s,%s) ON CONFLICT (project,version_id) DO UPDATE SET"
+    ctx.db.run("INSERT INTO version_releases (project, version_id, version_name, tracker_key, repository)"
+               " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (project,version_id,repository) DO UPDATE SET"
                " version_name=EXCLUDED.version_name, tracker_key=CASE WHEN version_releases.tracker_key='' "
                "THEN EXCLUDED.tracker_key ELSE version_releases.tracker_key END, updated_at=now()",
-               (project.key, version["id"], version["name"], key))
+               (project.key, version["id"], version["name"], key, project.repo))
     return key
 
 
@@ -321,7 +342,54 @@ def configured_versions(ctx, project: Any) -> list[dict[str, Any]]:
 
 def project_versions(ctx, project: Any) -> list[dict[str, Any]]:
     """Return configured versions that Jira still considers unreleased."""
-    return [version for version in configured_versions(ctx, project) if not version.get("released")]
+    out = []
+    for version in configured_versions(ctx, project):
+        if version.get("released"):
+            continue
+        enriched = dict(version)
+        enriched["repositories"] = repositories_for_version(ctx, project, version)
+        enriched["repository"] = enriched["repositories"][0] if enriched["repositories"] else project.repo
+        out.append(enriched)
+    return out
+
+
+def repositories_for_version(ctx, project: Any, version: dict[str, Any]) -> list[str]:
+    """Find repositories represented by the current Jira version membership using each ticket's epic."""
+    if not ctx.jira:
+        return [project.repo]
+    issues = ctx.jira.version_issues(project.key, str(version["id"]))
+    tickets = ctx.db.all("SELECT key,type,parent_key FROM tickets WHERE project=%s", (project.key,))
+    by_key = {ticket["key"]: ticket for ticket in tickets}
+    names = []
+    for issue in issues:
+        fields = issue.get("fields") or {}
+        key = str(issue.get("key") or "")
+        if not key:
+            continue
+        cached = by_key.get(key) or {}
+        issue_type = str((fields.get("issuetype") or {}).get("name") or cached.get("type") or "")
+        parent_key = str((fields.get("parent") or {}).get("key") or cached.get("parent_key") or "")
+        item = {"key": key, "type": issue_type, "parent_key": parent_key}
+        epic = epic_for_ticket(item, by_key)
+        name = project.repo_for({**item, "epic": epic})
+        if name not in names:
+            names.append(name)
+    return names or [project.repo]
+
+
+def project_for_version(ctx, project: Any, version: dict[str, Any]) -> Any:
+    """Return a project view with the repository-specific defaults for one Jira version."""
+    names = version.get("repositories")
+    if not names and not version.get("repository") and version.get("id"):
+        names = repositories_for_version(ctx, project, version)
+    name = str(version.get("repository") or (names[0] if names else project.repo))
+    settings = project.settings_for_repo(name)
+    values = {"repo": settings["repo"], "default_repo": project.default_repo or project.repo,
+              "base": settings["base"], "checks": settings["checks"],
+              "stack": settings["stack"]}
+    if not project.version_release:
+        values["version_release"] = config(project)
+    return replace(project, **values)
 
 
 def _successful_evidence(ctx, key: str) -> tuple[bool, bool, bool]:
@@ -347,11 +415,24 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
     """Return a live Jira membership snapshot and every missing gate for each ticket."""
     issues = ctx.jira.version_issues(project.key, version["id"])
     tickets = []
+    repositories: list[str] = []
+    hierarchy = ctx.db.all("SELECT key,type,parent_key FROM tickets WHERE project=%s", (project.key,))
+    by_key = {row["key"]: row for row in hierarchy}
     for issue in issues:
         fields = issue.get("fields") or {}
         key = str(issue.get("key") or "")
         status = str((fields.get("status") or {}).get("name") or "")
         reviewer, qa, qc = _successful_evidence(ctx, key)
+        cached = by_key.get(key) or {}
+        item = {"key": key, "type": str((fields.get("issuetype") or {}).get("name") or cached.get("type") or ""),
+                "parent_key": str((fields.get("parent") or {}).get("key") or cached.get("parent_key") or "")}
+        # Resolve the full parent chain from the ticket mirror so subtasks inherit their epic's repository.
+        epic = epic_for_ticket(item, by_key)
+        repository = project.repo_for({**item, "epic": epic})
+        if repository != str(version.get("repository") or project.repo):
+            continue
+        if repository not in repositories:
+            repositories.append(repository)
         missing = []
         if status != "Done":
             missing.append("Done")
@@ -368,10 +449,14 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
         reasons = ["no tickets are currently assigned to this Jira version"]
     else:
         reasons = [f"{t['key']}: missing {', '.join(t['missing'])}" for t in tickets if t["missing"]]
+    selected_repository = str(version.get("repository") or (repositories[0] if repositories else project.repo))
+    if selected_repository != project.repo:
+        project = project_for_version(ctx, project, {**version, "repository": selected_repository})
     if not check_commands(project):
         reasons.append("no full project check commands are configured")
     reasons.extend(_failure_reasons(ctx, project, version, tickets))
     return {"project": project.key, "version_id": str(version["id"]), "version": version["name"],
+            "repository": selected_repository,
             "tickets": tickets, "ready": bool(tickets) and not reasons, "reasons": reasons}
 
 
@@ -387,7 +472,7 @@ def _failure_reasons(ctx, project: Any, version: dict[str, Any], tickets: list[d
     only their own status must reach Done before the full release checks are retried. Publication follow-up
     Tasks also stay outside the version and only have to reach Done.
     """
-    row = _tracker_row(ctx, project.key, version["id"])
+    row = _tracker_row(ctx, project, version["id"])
     if not row or row["status"] != "failed" or not row["tracker_key"]:
         return []
     last = _last_failure(ctx, row["tracker_key"])
@@ -428,14 +513,15 @@ def _snapshot_text(snapshot: dict[str, Any]) -> str:
 def record_gate(ctx, project: Any, version: dict[str, Any], snapshot: dict[str, Any], fence: int = 0) -> None:
     """Persist the live snapshot and leave an auditable Jira comment when the gate changes."""
     tracker = ensure_tracker(ctx, project, version)
-    row = _tracker_row(ctx, project.key, version["id"])
+    row = _tracker_row(ctx, project, version["id"])
     detail = _snapshot_text(snapshot)
     prior_detail = row["gate_detail"] if row else ""
     prior_status = row["status"] if row else "pending"
     status = prior_status if prior_status in ("checking", "released", "failed") else ("pending" if snapshot["ready"] else "blocked")
     ctx.db.run("UPDATE version_releases SET version_name=%s, status=%s, gate_detail=%s, ticket_snapshot=%s,"
-               " updated_at=now() WHERE project=%s AND version_id=%s",
-               (version["name"], status, detail, J(snapshot["tickets"]), project.key, version["id"]))
+               " updated_at=now() WHERE project=%s AND version_id=%s AND repository=%s",
+               (version["name"], status, detail, J(snapshot["tickets"]), project.key, version["id"],
+                project.repo))
     if detail != prior_detail:
         ctx.jira.comment(tracker, f"AI Flow version release check · {version['name']}\n{detail}\n"
                          f"Current tickets: {', '.join(t['key'] for t in snapshot['tickets']) or '(none)'}")
@@ -456,26 +542,30 @@ def scan(ctx) -> int:
     for project in ctx.repo().projects.values():
         if project.paused or not enabled(project):
             continue
-        for version in configured_versions(ctx, project):
-            lock_key = version_identity(project.key, version["id"])
-            run_id = str(uuid.uuid4())
-            claim = ctx.leases.claim(lock_key, run_id, 300_000)
-            if not claim.ok:
-                continue
-            try:
-                if version.get("released"):
-                    if ctx.leases.valid(lock_key, run_id, claim.fence):
-                        run = {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""}
-                        if reconcile_released_version(ctx, project, version, run):
-                            scanned += 1
+        for original in configured_versions(ctx, project):
+            repositories = repositories_for_version(ctx, project, original)
+            for repository in repositories:
+                version = {**original, "repositories": repositories, "repository": repository}
+                target_project = project_for_version(ctx, project, version)
+                lock_key = version_identity(project.key, version["id"])
+                run_id = str(uuid.uuid4())
+                claim = ctx.leases.claim(lock_key, run_id, 300_000)
+                if not claim.ok:
                     continue
-                snapshot = evaluate(ctx, project, version)
-                if not ctx.leases.valid(lock_key, run_id, claim.fence):
-                    continue
-                record_gate(ctx, project, version, snapshot, claim.fence)
-                scanned += 1
-            finally:
-                ctx.leases.release(lock_key, run_id, claim.fence)
+                try:
+                    if version.get("released"):
+                        if ctx.leases.valid(lock_key, run_id, claim.fence):
+                            run = {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""}
+                            if reconcile_released_version(ctx, target_project, version, run):
+                                scanned += 1
+                        continue
+                    snapshot = evaluate(ctx, target_project, version)
+                    if not ctx.leases.valid(lock_key, run_id, claim.fence):
+                        continue
+                    record_gate(ctx, target_project, version, snapshot, claim.fence)
+                    scanned += 1
+                finally:
+                    ctx.leases.release(lock_key, run_id, claim.fence)
         reconcile_merge_backs(ctx, project)
     return scanned
 
@@ -492,7 +582,7 @@ def reconcile_released_version(ctx, project: Any, version: dict[str, Any], run: 
     audit records. Those writes happen before the Jira Released call, so they provide enough durable data to
     finish the registry record without repeating publication.
     """
-    row = _tracker_row(ctx, project.key, version["id"])
+    row = _tracker_row(ctx, project, version["id"])
     if not version.get("released") or not row or not row["tracker_key"]:
         return False
     tracker = str(row["tracker_key"])
@@ -519,7 +609,7 @@ def reconcile_released_version(ctx, project: Any, version: dict[str, Any], run: 
     detail = f"Released at {tag} ({master_sha}); registry state reconciled from publication audit."
     if (row["status"] != "released" or row.get("master_sha") != master_sha or row.get("tag") != tag
             or row.get("github_release_url") != release_url):
-        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=checked_sha,
+        _set_state(ctx, project, version["id"], status="released", checked_develop_sha=checked_sha,
                    master_sha=master_sha, tag=tag, github_release_url=release_url, gate_detail=detail)
 
     if not _release_audit(ctx, tracker, "jira-version-released"):
@@ -556,7 +646,8 @@ def reconcile_merge_backs(ctx, project: Any) -> int:
             continue
         try:
             if ctx.leases.valid(lock_key, run_id, claim.fence):
-                merge_back(ctx, project, row["tracker_key"], row["version_name"], row["tag"],
+                target_project = project_for_version(ctx, project, {"repository": row.get("repository") or project.repo})
+                merge_back(ctx, target_project, row["tracker_key"], row["version_name"], row["tag"],
                            {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""})
                 done += 1
         except Exception:  # noqa: BLE001 - nothing was recorded, so the next scan retries
@@ -577,30 +668,34 @@ def candidates(ctx, account: str, node: str) -> list[dict[str, Any]]:
     for project in repo.projects.values():
         if project.key not in allowed_projects or project.paused or not enabled(project):
             continue
-        for version in project_versions(ctx, project):
-            state = _tracker_row(ctx, project.key, version["id"])
-            if state and state["status"] == "released":
-                continue
-            if state and state["status"] == "checking":
-                running = ctx.db.one("SELECT 1 AS active FROM runs WHERE ticket_key=%s AND step='version_release'"
-                                     " AND status='running' LIMIT 1",
-                                     (version_identity(project.key, version["id"]),))
-                if running:
+        for original in project_versions(ctx, project):
+            repositories = original.get("repositories") or [project.repo]
+            for repository in repositories:
+                version = {**original, "repository": repository, "repositories": repositories}
+                target_project = project_for_version(ctx, project, version)
+                state = _tracker_row(ctx, target_project, version["id"])
+                if state and state["status"] == "released":
                     continue
-                _set_state(ctx, project.key, version["id"], status="pending")
-            resumed = post_merge_resume(ctx, project, version)
-            if resumed:
-                if resumed["ready"]:
-                    out.append(resumed)
-                continue
-            snapshot = evaluate(ctx, project, version)
-            if snapshot["ready"]:
-                out.append({**snapshot, "tracker_key": state["tracker_key"] if state else ""})
+                if state and state["status"] == "checking":
+                    running = ctx.db.one("SELECT 1 AS active FROM runs WHERE ticket_key=%s AND step='version_release'"
+                                         " AND status='running' LIMIT 1",
+                                         (version_identity(project.key, version["id"]),))
+                    if running:
+                        continue
+                    _set_state(ctx, target_project, version["id"], status="pending")
+                resumed = post_merge_resume(ctx, target_project, version)
+                if resumed:
+                    if resumed["ready"]:
+                        out.append({**resumed, "repository": repository})
+                    continue
+                snapshot = evaluate(ctx, target_project, version)
+                if snapshot["ready"]:
+                    out.append({**snapshot, "tracker_key": state["tracker_key"] if state else ""})
     return out
 
 
 def tracker_for(ctx, project: Any, version_id: str, version_name: str) -> str:
-    row = _tracker_row(ctx, project.key, version_id)
+    row = _tracker_row(ctx, project, version_id)
     if row and row["tracker_key"]:
         return row["tracker_key"]
     return ensure_tracker(ctx, project, {"id": version_id, "name": version_name})
@@ -635,10 +730,40 @@ def _audit(ctx, project: Any, tracker: str, run: dict, action: str, result: str,
                 run["fence"], run["account_id"], result[:500], J(payload)))
 
 
-def _set_state(ctx, project: str, version_id: str, **values: Any) -> None:
+def _set_state(ctx, project: Any, version_id: str, **values: Any) -> None:
     columns = ", ".join(f"{name}=%s" for name in values)
-    ctx.db.run(f"UPDATE version_releases SET {columns}, updated_at=now() WHERE project=%s AND version_id=%s",
-               (*values.values(), project, version_id))
+    project_key = project.key if hasattr(project, "key") else str(project)
+    repository = str(getattr(project, "repo", "") or "")
+    if repository:
+        ctx.db.run(f"UPDATE version_releases SET {columns}, updated_at=now()"
+                   " WHERE project=%s AND version_id=%s AND repository=%s",
+                   (*values.values(), project_key, version_id, repository))
+    else:
+        ctx.db.run(f"UPDATE version_releases SET {columns}, updated_at=now() WHERE project=%s AND version_id=%s",
+                   (*values.values(), project_key, version_id))
+
+
+def mark_jira_version_released_when_all_repositories_finish(ctx, project: Any,
+                                                            version: dict[str, Any], *,
+                                                            current_repository_complete: bool = False) -> bool:
+    """Mark Jira's shared version released only after every represented repository has finished.
+
+    The caller can check after GitHub publication but before saving this repository's state. That keeps the Jira
+    release durable if the registry write then fails, while counting the current publication as complete.
+    """
+    repositories = version.get("repositories") or [project.repo]
+    for repository in repositories:
+        if current_repository_complete and repository.lower() == project.repo.lower():
+            continue
+        target_project = project_for_version(ctx, project, {"repository": repository})
+        row = _tracker_row(ctx, target_project, version["id"])
+        if not row or row.get("status") != "released":
+            return False
+    latest = next((item for item in ctx.jira.versions(project.key)
+                   if str(item["id"]) == str(version["id"])), version)
+    if not latest.get("released") or not latest.get("release_date"):
+        ctx.jira.release_version(version["id"])
+    return True
 
 
 def _failed_checks(ctx, project: Any, version: dict[str, Any], tracker: str, run: dict,
@@ -671,8 +796,8 @@ def _failed_checks(ctx, project: Any, version: dict[str, Any], tracker: str, run
             + ", ".join(bug["key"] for bug in bugs))
     ctx.jira.comment(tracker, text)
     ctx.db.run("UPDATE version_releases SET status='failed', checked_develop_sha=%s, gate_detail=%s,"
-               " updated_at=now() WHERE project=%s AND version_id=%s",
-               (run.get("head_sha") or "", text, project.key, version["id"]))
+               " updated_at=now() WHERE project=%s AND version_id=%s AND repository=%s",
+               (run.get("head_sha") or "", text, project.key, version["id"], project.repo))
     _audit(ctx, project, tracker, run, "jira-release-check-failed", text, {"bugs": bugs, "failures": failures})
     ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
                     run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
@@ -690,7 +815,7 @@ def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: E
     tracker = tracker_for(ctx, project, version["id"], version["name"])
     error = str(exc)[:1000]
     message = f"Automatic publication stopped at an integration error: {error}"
-    row = _tracker_row(ctx, project.key, version["id"])
+    row = _tracker_row(ctx, project, version["id"])
     if row and row["status"] == "released":
         return {"released": True, "status": "released", "reason": message}
     try:
@@ -706,7 +831,7 @@ def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: E
             log.exception("release registry reconciliation failed for %s %s", project.key, version["name"])
         return {"released": False, "status": "reconciling",
                 "reason": "Jira reports Released; registry reconciliation will retry on the next scan."}
-    _set_state(ctx, project.key, version["id"], status="failed", gate_detail=message)
+    _set_state(ctx, project, version["id"], status="failed", gate_detail=message)
     last = _last_failure(ctx, tracker)
     prior = (last["payload"] or {}) if last and last["action"] == "jira-release-publish-failed" else {}
     same_error = prior.get("error") == error
@@ -771,29 +896,33 @@ def _publish_after_merge(ctx, project: Any, version: dict[str, Any], tracker: st
     ctx.events.emit("version_release.github_release", ticket=tracker, project=project.key, step="version_release",
                     run_id=str(run["id"]), fence=run["fence"], outcome="created" if release_created else "existing",
                     reason=release_url or tag, data={"tag": tag, "sha": master_sha, "url": release_url})
-    latest_version = next((v for v in ctx.jira.versions(project.key) if v["id"] == version["id"]), version)
-    if not latest_version.get("released") or not latest_version.get("release_date"):
-        ctx.jira.release_version(version["id"])
     try:
-        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=source_sha,
+        all_repositories_released = mark_jira_version_released_when_all_repositories_finish(
+            ctx, project, version, current_repository_complete=True)
+        _set_state(ctx, project, version["id"], status="released", checked_develop_sha=source_sha,
                    master_sha=master_sha, tag=tag, github_release_url=release_url,
                    gate_detail=f"Released at {tag} ({master_sha}).")
         _audit(ctx, project, tracker, run, "jira-version-released", "Released",
-               {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
+               {"version_id": version["id"], "repository": project.repo, "commit": master_sha,
+                "tag": tag, "release_url": release_url,
                 "tickets": snapshot["tickets"]})
         ctx.events.emit("version_release.jira_version", ticket=tracker, project=project.key, step="version_release",
-                        run_id=str(run["id"]), fence=run["fence"], outcome="Released", reason=version["name"],
+                        run_id=str(run["id"]), fence=run["fence"], outcome="Released",
+                        reason=f"{version['name']} in {project.repo}",
                         data={"version_id": version["id"], "tag": tag, "master_sha": master_sha,
-                              "release_url": release_url})
+                              "repository": project.repo, "release_url": release_url,
+                              "jira_version_released": all_repositories_released})
         ctx.jira.comment(tracker, f"Version released.\nChecked tickets: {', '.join(t['key'] for t in snapshot['tickets'])}\n"
                          f"Checks passed on {source} commit: {source_sha}\nCommit on {target}: {master_sha}\n"
                          f"Pull request: {pr.get('html_url', '')}\nTag: {tag}\nGitHub Release: {release_url or tag}\n"
-                         "Jira version: Released")
+                         + ("Jira version: Released" if all_repositories_released else
+                            f"Jira version remains unreleased until the other repositories are released."))
         ctx.events.emit("version_release.completed", ticket=tracker, project=project.key, step="version_release",
                         run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
-                        outcome="released", reason=f"{tag} {release_url}",
+                        outcome="released", reason=f"{project.repo} {tag} {release_url}",
                         data={"tickets": snapshot["tickets"], "checked_sha": source_sha, "master_sha": master_sha,
-                              "tag": tag, "release_url": release_url, "jira_version": "Released"})
+                              "repository": project.repo, "tag": tag, "release_url": release_url,
+                              "jira_version": "Released" if all_repositories_released else "Pending"})
     finally:
         merge_back(ctx, project, tracker, version["name"], tag, run)
     return {"released": True, "status": "released", "tag": tag, "sha": master_sha,
@@ -803,7 +932,7 @@ def _publish_after_merge(ctx, project: Any, version: dict[str, Any], tracker: st
 def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict[str, Any]) -> dict[str, Any]:
     """Accept a fenced check report and finish publication from the checked snapshot that produced its merge."""
     tracker = tracker_for(ctx, project, version["id"], version["name"])
-    saved = _tracker_row(ctx, project.key, version["id"])
+    saved = _tracker_row(ctx, project, version["id"])
     if saved and saved["status"] == "released" and saved.get("tag") and saved.get("master_sha"):
         if ctx.github is not None:
             merge_back(ctx, project, tracker, version["name"], saved["tag"], run)
@@ -835,7 +964,7 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     snapshot = evaluate(ctx, project, version)
     if not snapshot["ready"]:
         detail = _snapshot_text(snapshot)
-        _set_state(ctx, project.key, version["id"], status="blocked", gate_detail=detail,
+        _set_state(ctx, project, version["id"], status="blocked", gate_detail=detail,
                    ticket_snapshot=J(snapshot["tickets"]))
         ctx.jira.comment(tracker, f"Release stopped before publication because the live version gate changed.\n{detail}")
         ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
@@ -863,7 +992,7 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     current_source = ctx.github.branch_sha(repo, source)
     if current_source.lower() != source_sha.lower():
         detail = f"{source} moved during the full check ({source_sha[:12]} checked, {current_source[:12]} now); retrying."
-        _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=source_sha, gate_detail=detail)
+        _set_state(ctx, project, version["id"], status="pending", checked_develop_sha=source_sha, gate_detail=detail)
         ctx.jira.comment(tracker, f"Full checks passed but publication stopped: {detail}")
         ctx.events.emit("version_release.check", ticket=tracker, project=project.key, step="version_release",
                         run_id=str(run["id"]), fence=run["fence"], outcome="stale", reason=detail,
@@ -876,7 +1005,7 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     current_release_head = ctx.github.branch_sha(repo, branch)
     if current_release_head.lower() != checked_head.lower():
         detail = f"release branch {branch} moved during the full check; retrying."
-        _set_state(ctx, project.key, version["id"], status="pending", checked_develop_sha=source_sha,
+        _set_state(ctx, project, version["id"], status="pending", checked_develop_sha=source_sha,
                    gate_detail=detail)
         return {"released": False, "status": "stale", "reason": detail}
 

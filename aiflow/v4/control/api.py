@@ -37,7 +37,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, support_bundle, tooling, version_release
+from . import business, jira_connect, knowledge, memory, role_health, rollout, support_bundle, tooling, version_release
 from . import review_metrics
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
@@ -378,6 +378,11 @@ class PRBody(BaseModel):
     title: str
     body: str = ""
     draft: bool = True
+
+
+class RoleHealthSettingsBody(BaseModel):
+    window_runs: int
+    failure_percent: int
 
 
 class ProbeBody(BaseModel):
@@ -2384,6 +2389,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
+        # a role switched off for this account (docs/v4/role-health.md) takes only its daily probation ticket
+        modes = role_health.modes(ctx.db, acc.id, sorted(roles))
+
+        def allowed(role: str, t: dict) -> bool:
+            return modes.get(role) == "on" or (modes.get(role) == "probation" and role_health.probation_ticket(t))
+
+        def probation(role: str) -> bool:
+            return modes.get(role) == "probation"
+
         held = set(ctx.leases.held_keys())
         out: list[dict] = []
         if not projects:
@@ -2402,7 +2416,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "verify"})
+                if not allowed("verify", t):
+                    continue
+                out.append({**t, "step": "verify", "probation": probation("verify")})
         if "master" in roles:
             triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
@@ -2415,7 +2431,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "triage"})
+                if not allowed("master", t):
+                    continue
+                out.append({**t, "step": "triage", "probation": probation("master")})
         if "intake_refiner" in roles:
             def backoff(step: str) -> set[str]:
                 return {r["ticket_key"] for r in ctx.db.all(INTAKE_BACKOFF_SQL, {"step": step})
@@ -2429,7 +2447,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "intake"})
+                if not allowed("intake_refiner", t):
+                    continue
+                out.append({**t, "step": "intake", "probation": probation("intake_refiner")})
             # change requests from the Business view: assess the impact once, while they wait in Backlog
             waiting = backoff("impact")
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
@@ -2441,7 +2461,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
-                out.append({**t, "step": "impact"})
+                if not allowed("intake_refiner", t):
+                    continue
+                out.append({**t, "step": "impact", "probation": probation("intake_refiner")})
         out.sort(key=lambda t: (prio.get(t["project"], 5), t["jira_created"] or utcnow()))
         if "dev" in roles:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
@@ -2457,7 +2479,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if acc.explicit_only and f"ai-{acc.provider}" not in labels:
                     continue
-                dev_rows.append({**t, "step": "dev"})
+                if not allowed("dev", t):
+                    continue
+                dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
@@ -2478,6 +2502,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not account or account.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if "master" not in (account.roles or []) or not master_ready(account_id, node):
+            return None
+        if (account_id, "master") in role_health.disabled_roles(ctx.db):  # no ticket to try on: probation uses triage
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -2568,8 +2594,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             if prior_pr_match:
                 triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
         run_id = str(uuid.uuid4())
+        probation_id = None
+        if t.get("probation"):  # the one easy ticket a day of a switched-off role
+            probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
+            if probation_id is None:
+                return JSONResponse({"claimed": False, "reason": "today's probation ticket is already assigned"},
+                                    status_code=409)
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:
+            if probation_id is not None:
+                role_health.drop_probation(ctx.db, probation_id)
             return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
         model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
         run_token = secrets.token_urlsafe(32)
@@ -2592,6 +2626,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
+        if probation_id is not None:
+            role_health.attach_probation_run(ctx.db, probation_id, run_id)
+            ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
+                            account=acc.id, outcome="assigned",
+                            reason=f"probation ticket for role {role_health.role_of(body.step)}")
         ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
                    (acc.id,))
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -2865,6 +2904,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                         node=node, duration_ms=dur, outcome=body.outcome, reason=body.error_kind or body.summary[:200],
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
+        try:  # quality by role: this result may switch the role off or settle a probation ticket
+            role_health.evaluate(ctx, run["account_id"])
+            if run["step"] == "verify":  # a verdict also decides the dev run it judged
+                dev = last_dev(run["ticket_key"])
+                if dev and dev["account_id"] != run["account_id"]:
+                    role_health.evaluate(ctx, dev["account_id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("role health after run %s failed: %s", run_id, e)
         return {"ok": True, "still_owner": still_owner}
 
     @app.post("/v1/runs/{run_id}/release")
@@ -4044,6 +4091,24 @@ def create_app(ctx: Ctx) -> FastAPI:
         if tl is None:
             raise HTTPException(404, "unknown ticket")
         return tl
+
+    @app.get("/v1/role-health")
+    def role_health_state() -> dict:
+        return role_health.summary(ctx)
+
+    @app.put("/v1/role-health/settings")
+    def role_health_settings(body: RoleHealthSettingsBody, request: Request) -> dict:
+        user = console_user(request, {"console.manage"}, target="aiflow-control", action="role_health_settings")
+        try:
+            role_health.set_settings(ctx.db, body.window_runs, body.failure_percent, user.subject)
+        except ValueError as e:
+            audit("aiflow-control", "role_health_settings", "", "", None, user.subject, False, str(e), body.model_dump())
+            raise HTTPException(422, str(e)) from e
+        audit("aiflow-control", "role_health_settings", "", "", None, user.subject, True, "saved", body.model_dump())
+        ctx.events.emit("role.settings", account=user.subject, outcome="saved",
+                        reason=f"window {body.window_runs} runs, failure score above {body.failure_percent}%")
+        role_health.evaluate(ctx)
+        return role_health.summary(ctx)
 
     @app.get("/v1/analytics/daily")
     def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:

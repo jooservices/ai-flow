@@ -1698,7 +1698,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", release):
             raise HTTPException(503, "no signed AI Flow release is deployed")
         return {"name": row["node_name"], "role": row["role"], "project": row["project"],
-                "stack": project.stack, "release": release}
+                "stack": project.stack, "stacks": project.stacks, "release": release}
 
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
@@ -1725,7 +1725,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         project = repo.projects[row["projects"][0]]
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
-                "stack": project.stack, "release": current_release(), "node_token": token,
+                "stack": project.stack, "stacks": project.stacks, "release": current_release(), "node_token": token,
                 "accounts": [a.id for a in repo.accounts_on(row["name"])]}
 
     @app.post("/v1/nodes/{name}/heartbeat")
@@ -1788,6 +1788,27 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "projects": node_projects,
                             "project_stacks": project_stacks,
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
+
+    @app.get("/v1/nodes/{name}/health")
+    def node_health(name: str, node: str = Depends(node_auth)) -> dict:
+        """What an installer needs to call a new node healthy: a fresh heartbeat and a green project preflight."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        row = ctx.db.one("SELECT status,tools,projects,dynamic,"
+                         " extract(epoch FROM now()-last_heartbeat) AS age FROM nodes WHERE name=%s", (node,)) or {}
+        repo = ctx.repo()
+        node_projects = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
+        tools = row.get("tools") or {}
+        gaps = missing_tools(tools, repo.tools_for_node(node, node_projects))
+        for key in node_projects:
+            project = repo.projects.get(key)
+            if project and project.stacks:
+                gaps += toolchain_gaps(tools, project.tools, repo.versions, project.stacks, require_pins=True)
+        gaps = list(dict.fromkeys(gaps))
+        age = row.get("age")
+        return {"node": node, "status": row.get("status", "unknown"),
+                "heartbeat_age_seconds": None if age is None else float(age),
+                "projects": node_projects, "missing_tools": gaps, "preflight_ok": not gaps}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
     def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:

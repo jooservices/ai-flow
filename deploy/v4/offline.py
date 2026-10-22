@@ -47,6 +47,10 @@ LOCK_ALIASES = {
     "python3": ("python3", "python"),
 }
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+# Project stacks whose tools ship inside the bundle (Python and Node.js runtimes). The node agent installs every
+# other stack's tools (PHP, Composer, WP-CLI, Playwright) from public registries, so such nodes are refused.
+OFFLINE_STACKS = frozenset({"python-3.12", "node-24"})
+APT_PACKAGES = ["git", "docker.io", "ca-certificates", "passwd", "util-linux"]
 SAFE_NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@\[\]-]+\Z")
 
@@ -320,6 +324,42 @@ def _github_asset(repository: str, tag: str, asset_name: str, destination: Path)
     return data
 
 
+def _deb_control(deb: Path) -> dict[str, str]:
+    """Package, Depends, Pre-Depends and Provides fields of one .deb."""
+    fields: dict[str, str] = {}
+    for field in ("Package", "Depends", "Pre-Depends", "Provides"):
+        fields[field] = _run(["dpkg-deb", "--field", str(deb), field])
+    return fields
+
+
+def verify_apt_closure(apt_debs: list[Path], package_debs: list[Path],
+                       control: Callable[[Path], dict[str, str]]) -> None:
+    """Every dependency of every bundled .deb must be provided by a bundled .deb or be the AI Flow packages.
+
+    The target has nothing installed except its base image, so the bundle must carry the full closure; a
+    missing alternative group is a build error rather than an `apt-get --no-download` failure on the target.
+    """
+    records = [control(deb) for deb in apt_debs + package_debs]
+    provided: set[str] = set()
+    for record in records:
+        provided.add(record.get("Package", "").strip())
+        for item in record.get("Provides", "").split(","):
+            name = item.split("(")[0].strip().split(":")[0]
+            if name:
+                provided.add(name)
+    unresolved: set[str] = set()
+    for record in records:
+        for field in ("Depends", "Pre-Depends"):
+            for group in filter(None, (g.strip() for g in record.get(field, "").split(","))):
+                names = [alt.split("(")[0].split("[")[0].split("<")[0].strip().split(":")[0]
+                         for alt in group.split("|")]
+                if not any(name in provided for name in names):
+                    unresolved.add(" | ".join(names))
+    if unresolved:
+        raise OfflineError("apt bundle is not a complete dependency closure for a clean target: "
+                           + ", ".join(sorted(unresolved)[:10]))
+
+
 def _build_debs(packages_dir: Path, version: str) -> None:
     """Build architecture-independent agent and worker packages with their systemd units."""
     deb_version = version.removeprefix("v")
@@ -505,9 +545,15 @@ def _build_bundle(args: argparse.Namespace) -> Path:
     apt_cache = bundle / "apt"
     (apt_cache / "partial").mkdir(parents=True, exist_ok=True)
     _run(["apt-get", "update", "-qq"])
-    _run(["apt-get", "--download-only", "--reinstall", "--yes", "--no-install-recommends",
-          "-o", f"Dir::Cache::archives={apt_cache}", "install", "git", "docker.io", "ca-certificates",
-          "passwd", "util-linux"])
+    # Resolve against an empty dpkg status so packages already installed on this builder are still downloaded:
+    # a clean target has none of them. The closure is then checked from the .deb control data.
+    with tempfile.TemporaryDirectory(prefix="aiflow4-offline-apt-") as clean:
+        empty_status = Path(clean) / "status"
+        empty_status.write_text("", encoding="utf-8")
+        _run(["apt-get", "--download-only", "--yes", "--no-install-recommends",
+              "-o", f"Dir::Cache::archives={apt_cache}", "-o", f"Dir::State::status={empty_status}",
+              "-o", "APT::Get::Assume-Yes=true", "install", *APT_PACKAGES])
+    verify_apt_closure(sorted(apt_cache.glob("*.deb")), sorted((bundle / "packages").glob("*.deb")), _deb_control)
     python_version = _run([str(python_path), "--version"]).split()[-1]
     write_manifest(bundle, version=version, target=target,
                    versions={**versions, "uv": uv_actual.split()[-1], "node": node_version,
@@ -524,12 +570,14 @@ class OfflineInstaller:
 
     def __init__(self, bundle: Path, *, root: Path = Path("/"), target: dict[str, str] | None = None,
                  runner: Callable[..., Any] | None = None,
-                 post_json: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None):
+                 post_json: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None,
+                 get_json: Callable[[str, str, str], dict[str, Any]] | None = None):
         self.bundle = bundle.resolve()
         self.root = root
         self.target = target or target_platform()
         self.runner = runner or subprocess.run
         self.post_json = post_json or _post_json
+        self.get_json = get_json or _get_json
         self.manifest: dict[str, Any] = {}
 
     def path(self, absolute: str) -> Path:
@@ -547,7 +595,7 @@ class OfflineInstaller:
         shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
 
     def install(self, *, control_url: str, join_token_file: Path, slots: int = 2,
-                wait_seconds: int = 90) -> str:
+                wait_seconds: int = 90, health_wait_seconds: int = 600) -> str:
         self.manifest = verify_bundle(self.bundle)
         if self.manifest["target"] != self.target:
             raise OfflineError("bundle target does not match this operating system and architecture")
@@ -668,6 +716,15 @@ class OfflineInstaller:
             raise OfflineError("control API returned an invalid node name")
         if inspected.get("release") != version:
             raise OfflineError("join grant does not target the release included in this offline bundle")
+        stacks = inspected.get("stacks", inspected.get("stack", []))
+        stacks = [stacks] if isinstance(stacks, str) and stacks else stacks
+        if not isinstance(stacks, list) or any(not isinstance(s, str) for s in stacks):
+            raise OfflineError("control API returned an invalid project stack list")
+        unsupported = sorted(set(stacks) - OFFLINE_STACKS)
+        if unsupported:
+            # Checked before joining so the single-use token is not consumed by a node that could never go green.
+            raise OfflineError("the offline bundle cannot provide the tools of project stack(s) "
+                               + ", ".join(unsupported) + "; use an online install for this project")
         joined = self.post_json(base_url, "/v1/nodes/join", {"join_token": join_token})
         if joined.get("node") != node_name or joined.get("release") != version:
             raise OfflineError("join response does not match the node grant and bundled release")
@@ -734,7 +791,35 @@ class OfflineInstaller:
             time_sleep(2)
         if not active:
             raise OfflineError("aiflow4-node-agent or an assigned worker service did not become active")
-        return node_name
+        # Active units are not enough: the agent must have heartbeated and the project preflight must be green.
+        health: dict[str, Any] = {}
+        for _ in range(max(1, health_wait_seconds // 2)):
+            try:
+                health = self.get_json(base_url, f"/v1/nodes/{node_name}/health", token)
+            except OfflineError:
+                health = {}
+            age = health.get("heartbeat_age_seconds")
+            if (health.get("status") == "online" and isinstance(age, (int, float)) and age <= 60
+                    and health.get("preflight_ok") is True):
+                return node_name
+            time_sleep(2)
+        age = health.get("heartbeat_age_seconds")
+        if health.get("status") != "online" or not isinstance(age, (int, float)) or age > 60:
+            raise OfflineError("node agent is running but has not reported a healthy heartbeat to the control API")
+        missing = ", ".join(str(t) for t in health.get("missing_tools", [])) or "unknown"
+        raise OfflineError(f"node is online but project preflight is not green; missing or mismatched tools: {missing}")
+
+
+def _get_json(base_url: str, path: str, token: str) -> dict[str, Any]:
+    request = urllib.request.Request(base_url + path, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise OfflineError(f"could not read node health ({type(exc).__name__})") from exc
+    if not isinstance(result, dict):
+        raise OfflineError("control API returned an invalid node health response")
+    return result
 
 
 def time_sleep(seconds: int) -> None:

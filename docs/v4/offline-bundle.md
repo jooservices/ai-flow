@@ -66,5 +66,26 @@ the agent and assigned worker units with `systemctl status aiflow4-node-agent` a
 `systemctl status 'aiflow4-worker@<account>'`. The node needs only internal control-plane connectivity to report
 healthy. AI-provider credentials can be added later.
 
+## Clean-target apt closure
+
+The builder resolves the apt packages against an empty dpkg status (`Dir::State::status`), so a package that is
+already installed on the build machine is still downloaded; `--reinstall` is not used. It then reads each bundled
+`.deb` (`dpkg-deb --field`) and fails the build if any `Depends`/`Pre-Depends` group has no provider among the
+bundled packages. A bundle that finishes building therefore installs on a bare image with `apt-get --no-download`.
+
+## Supported project stacks
+
+The bundle ships the Python 3.12 and Node.js 24 runtimes and the AI CLIs. The tools of the `php-8.3` stack (PHP,
+Composer, WP-CLI) and the `playwright` stack are not bundled, and the node agent would try to download them from
+public registries. `install` therefore reads the joining project's stacks while inspecting the join token and
+refuses a project with any other stack, before redeeming the token, so the token stays valid for an online install.
+
+## Install success means a healthy node
+
+After the systemd units are active, `install` polls the node-authenticated `GET /v1/nodes/<name>/health`. It
+returns success only when the node is `online`, its last heartbeat is at most 60 seconds old and
+`preflight_ok` is true (no required tool missing or off its `versions.lock` pin). Otherwise it exits with an
+error that names the missing tools, or says that no healthy heartbeat arrived.
+
 The bundle checksum manifest detects damaged or incomplete transfers. Transfer the checksum file through the
 same trusted administrative channel as the bundle; SHA-256 by itself does not authenticate who built it.

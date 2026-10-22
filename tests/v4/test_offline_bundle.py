@@ -141,6 +141,8 @@ def test_bundle_builder_assembles_locked_tools_runtime_image_wheels_and_checksum
 
     monkeypatch.setattr(offline, "_github_asset", github_asset)
 
+    apt_calls: list[list[str]] = []
+
     def run(argv, *, env=None, cwd=None):
         argv = [str(value) for value in argv]
         name = Path(argv[0]).name
@@ -189,6 +191,7 @@ def test_bundle_builder_assembles_locked_tools_runtime_image_wheels_and_checksum
             Path(argv[argv.index("--output") + 1]).write_bytes(b"image archive")
             return ""
         if argv[0] == "apt-get" and "--download-only" in argv:
+            apt_calls.append(argv)
             archive_dir = Path(argv[argv.index("-o") + 1].split("=", 1)[1])
             (archive_dir / "git_2.deb").write_bytes(b"apt package")
         return ""
@@ -213,6 +216,9 @@ def test_bundle_builder_assembles_locked_tools_runtime_image_wheels_and_checksum
     assert "image/control-api.tar" in manifest["files"]
     assert "wheels/fastapi-0.115.0-py3-none-any.whl" in manifest["files"]
     assert "wheels/ai_flow-4.1.0-py3-none-any.whl" in manifest["files"]
+    # apt resolves against an empty dpkg status (no builder-installed package is skipped), never --reinstall
+    assert len(apt_calls) == 1 and "--reinstall" not in apt_calls[0]
+    assert any(a.startswith("Dir::State::status=") for a in apt_calls[0])
 
 
 def test_bundle_checksum_manifest_covers_release_image_wheels_and_pinned_cli_payloads(tmp_path):
@@ -267,7 +273,11 @@ def test_deb_packages_install_agent_and_worker_units_user_and_directories(tmp_pa
     assert "/srv/aiflow/cache/ai/tmp" in postinst
 
 
-def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
+HEALTHY = {"status": "online", "heartbeat_age_seconds": 3.0, "preflight_ok": True, "missing_tools": []}
+
+
+def _install(tmp_path, *, inspected_extra=None, health=None, joins=None):
+    """Run the installer against fake system commands and a fake control API; returns (node, calls, joins, root)."""
     bundle = _bundle(tmp_path)
     calls: list[list[str]] = []
 
@@ -288,12 +298,14 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
             return subprocess.CompletedProcess(argv, 0, "active", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    joins: list[tuple[str, str, dict]] = []
+    joins = [] if joins is None else joins
+    health_calls: list[tuple[str, str]] = []
 
     def post_json(base_url, path, payload):
         joins.append((base_url, path, payload))
         if path.endswith("inspect"):
-            return {"name": "offline-node", "release": "v4.1.0"}
+            return {"name": "offline-node", "release": "v4.1.0", "stacks": ["python-3.12"],
+                    **(inspected_extra or {})}
         return {"node": "offline-node", "release": "v4.1.0", "node_token": "private-node-token",
                 "accounts": ["codex-01"]}
 
@@ -303,8 +315,17 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
     installer = offline.OfflineInstaller(
         bundle, root=root,
         target={"distribution": "ubuntu", "version": "24.04", "architecture": "amd64"},
-        runner=runner, post_json=post_json)
-    assert installer.install(control_url="http://control.internal", join_token_file=token_file, wait_seconds=2) == "offline-node"
+        runner=runner, post_json=post_json,
+        get_json=lambda _base, path, token: (health_calls.append((path, token)), health or HEALTHY)[1])
+    node = installer.install(control_url="http://control.internal", join_token_file=token_file,
+                             wait_seconds=2, health_wait_seconds=2)
+    return node, calls, joins, root, health_calls
+
+
+def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
+    node, calls, joins, root, health_calls = _install(tmp_path)
+    assert node == "offline-node"
+    assert health_calls == [("/v1/nodes/offline-node/health", "private-node-token")]
     assert [call[1] for call in joins] == ["/v1/nodes/join-tokens/inspect", "/v1/nodes/join"]
     assert (root / "srv/aiflow/releases/v4.1.0/RELEASE").read_text().strip() == "v4.1.0"
     assert (root / "srv/aiflow/current").is_symlink()
@@ -317,4 +338,50 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
     assert any(call[:2] == ["docker", "load"] for call in calls)
     assert any(call[-1:] == ["aiflow4-worker@codex-01.service"] for call in calls)
     assert not any(Path(call[0]).name in {"curl", "npm", "pip", "wget"} for call in calls)
+
+
+def test_install_fails_when_units_are_active_but_node_never_heartbeats(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "time_sleep", lambda _s: None)
+    with pytest.raises(offline.OfflineError, match="healthy heartbeat"):
+        _install(tmp_path, health={"status": "joined", "heartbeat_age_seconds": None, "preflight_ok": False,
+                                   "missing_tools": []})
+
+
+def test_install_fails_when_heartbeat_is_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "time_sleep", lambda _s: None)
+    with pytest.raises(offline.OfflineError, match="healthy heartbeat"):
+        _install(tmp_path, health={**HEALTHY, "heartbeat_age_seconds": 600})
+
+
+def test_install_fails_when_node_is_online_but_preflight_is_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "time_sleep", lambda _s: None)
+    with pytest.raises(offline.OfflineError, match="preflight is not green.*composer"):
+        _install(tmp_path, health={**HEALTHY, "preflight_ok": False, "missing_tools": ["composer"]})
+
+
+@pytest.mark.parametrize("stacks", [["php-8.3"], ["python-3.12", "playwright"]])
+def test_install_rejects_stacks_the_bundle_cannot_provide_without_consuming_the_join_token(tmp_path, stacks):
+    joins: list = []
+    with pytest.raises(offline.OfflineError, match="cannot provide"):
+        _install(tmp_path, inspected_extra={"stacks": stacks}, joins=joins)
+    assert [path for _base, path, _payload in joins] == ["/v1/nodes/join-tokens/inspect"]
+
+
+def _control(records):
+    return lambda deb: records[deb.name]
+
+
+def test_apt_closure_accepts_complete_set_with_alternatives_and_provides(tmp_path):
+    records = {
+        "a.deb": {"Package": "a", "Depends": "libx (>= 1), b | zzz", "Pre-Depends": "", "Provides": ""},
+        "b.deb": {"Package": "b", "Depends": "virt:any", "Pre-Depends": "", "Provides": ""},
+        "c.deb": {"Package": "libx", "Depends": "", "Pre-Depends": "", "Provides": "virt (= 1)"},
+    }
+    offline.verify_apt_closure([tmp_path / n for n in records], [], _control(records))
+
+
+def test_apt_closure_rejects_dependency_missing_from_bundle(tmp_path):
+    records = {"a.deb": {"Package": "a", "Depends": "libc6 (>= 2.35), git", "Pre-Depends": "", "Provides": ""}}
+    with pytest.raises(offline.OfflineError, match="libc6"):
+        offline.verify_apt_closure([tmp_path / "a.deb"], [], _control(records))
 

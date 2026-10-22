@@ -3,8 +3,8 @@
 The Ansible wrapper prepares a control host and joins node hosts to an existing AI Flow v4 control plane. It
 uses the pinned `jooservices/server-installer` v1.1.0 CLI for OS modules with `--preflight`; the signed
 AI Flow `/v1/install.sh` bootstrap owns the AI Flow user, agent, worker, AI CLIs, release verification and
-join. The control role only prepares its OS. After that, deploy the signed control release with the existing
-TESTFLOW-70 control deployment flow.
+join. The control role only prepares its OS. After that, install the signed control release with
+`aiflow4 install control` ([Install the control plane](control-install.md)).
 
 ## Ansible inventory and run
 

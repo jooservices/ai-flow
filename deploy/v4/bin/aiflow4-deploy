@@ -9,6 +9,8 @@ if [ $# -ne 1 ] || [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9]
 fi
 exec 9>/run/aiflow4-deploy.lock
 flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }
+# Settings written by `aiflow4 install control` (domain, join URL, node agent on/off); no secrets.
+[ -r /etc/aiflow/control.env ] && { set -a; . /etc/aiflow/control.env; set +a; }
 
 REPO=/srv/aiflow/control/repos/ai-flow
 RELEASES=/srv/aiflow/control/releases
@@ -26,10 +28,17 @@ fi
 
 WORK=$(mktemp -d "$RELEASES/.download-$VERSION.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
-gh release download "$VERSION" --repo jooservices/ai-flow --dir "$WORK" \
-  --pattern "aiflow4-$VERSION.tar.gz" \
-  --pattern "aiflow4-$VERSION.tar.gz.sigstore.json" \
-  --pattern SHA256SUMS
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  gh release download "$VERSION" --repo jooservices/ai-flow --dir "$WORK" \
+    --pattern "aiflow4-$VERSION.tar.gz" \
+    --pattern "aiflow4-$VERSION.tar.gz.sigstore.json" \
+    --pattern SHA256SUMS
+else  # a new control host without a signed-in gh: the public release assets, checked below either way
+  for asset in "aiflow4-$VERSION.tar.gz" "aiflow4-$VERSION.tar.gz.sigstore.json" SHA256SUMS; do
+    curl -fsSL --max-time 600 -o "$WORK/$asset" \
+      "https://github.com/jooservices/ai-flow/releases/download/$VERSION/$asset"
+  done
+fi
 TAR="$WORK/aiflow4-$VERSION.tar.gz"
 BUNDLE="$TAR.sigstore.json"
 (cd "$WORK" && sha256sum --check SHA256SUMS)
@@ -95,14 +104,20 @@ AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERS
 install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" \
   "$B/deploy/v4/bin/aiflow4-autodeploy" "$B/deploy/v4/bin/aiflow4-develop-install" \
   "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" /usr/local/sbin/
+[ ! -f "$B/deploy/v4/bin/aiflow4-control-install" ] ||
+  install -m 0755 "$B/deploy/v4/bin/aiflow4-control-install" /usr/local/sbin/
 install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/
 systemctl daemon-reload && systemctl enable -q --now aiflow4-autodeploy.timer
 mkdir -p /root/.bridge/out/release
 rm -f /root/.bridge/out/release/*.tar.gz*
 cp "$TAR" "$BUNDLE" "$WORK/SHA256SUMS" /root/.bridge/out/release/
 printf '%s\n' "$VERSION" > /root/.bridge/out/release/VERSION
-aiflow4-node-install "$RELEASES/$VERSION/$(basename "$TAR")" "$VERSION" \
-  "$RELEASES/$VERSION/$(basename "$BUNDLE")" "$(awk 'NR==1 {print $1}' "$WORK/SHA256SUMS")"
+# A control host set up by `aiflow4 install control` runs no node agent until it is joined as a node
+# (AIFLOW4_DEPLOY_NODE_AGENT=0 in /etc/aiflow/control.env).
+if [ "${AIFLOW4_DEPLOY_NODE_AGENT:-1}" != 0 ]; then
+  aiflow4-node-install "$RELEASES/$VERSION/$(basename "$TAR")" "$VERSION" \
+    "$RELEASES/$VERSION/$(basename "$BUNDLE")" "$(awk 'NR==1 {print $1}' "$WORK/SHA256SUMS")"
+fi
 printf '%s\n' "$VERSION" > "$RELEASES/CURRENT.tmp"
 mv -f "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT"
 ls -1dt "$RELEASES"/v[0-9]*.[0-9]*.[0-9]*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf

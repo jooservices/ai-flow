@@ -130,9 +130,11 @@ class GitHubApp:
             self._cache[cache_key] = (data["token"], exp.timestamp())
             return data["token"], exp
 
-    def api(self, method: str, path: str, body: Any = None, repo: str | None = None, ok=(200, 201, 202, 204)) -> Any:
-        tok, _ = self.token(repo, {"contents": "write", "pull_requests": "write", "metadata": "read",
-                                   "checks": "read", "statuses": "read"} if repo else None)
+    def api(self, method: str, path: str, body: Any = None, repo: str | None = None,
+            ok=(200, 201, 202, 204), permissions: dict[str, str] | None = None) -> Any:
+        default = {"contents": "write", "pull_requests": "write", "metadata": "read",
+                   "checks": "read", "statuses": "read"} if repo else None
+        tok, _ = self.token(repo, permissions if permissions is not None else default)
         return self._req(method, path, tok, body, ok)
 
     # --- pull requests --------------------------------------------------------------------------------------
@@ -270,6 +272,52 @@ class GitHubApp:
             state = {"success": "success", "pending": "pending"}.get(c["state"], "failure")
             out.append({"name": c["context"], "state": state, "url": c.get("target_url", "")})
         return out
+
+    # --- project version releases ---------------------------------------------------------------------------
+    def branch_sha(self, repo: str, branch: str) -> str:
+        """Return the current head SHA for a configured branch."""
+        data = self.api("GET", f"/repos/{self.org}/{repo}/branches/{quote(branch, safe='')}", repo=repo)
+        return str(data["commit"]["sha"])
+
+    def merge_branch(self, repo: str, base: str, head: str, message: str) -> dict:
+        """Merge one configured branch into another through GitHub's merge API."""
+        return self.api("POST", f"/repos/{self.org}/{repo}/merges",
+                        {"base": base, "head": head, "commit_message": message[:500]}, repo=repo,
+                        ok=(200, 201, 204)) or {"sha": "", "merged": False}
+
+    def tag_sha(self, repo: str, tag: str) -> str | None:
+        """Return a tag ref's target commit, resolving annotated tags when needed."""
+        path = f"/repos/{self.org}/{repo}/git/ref/tags/{quote(tag, safe='/')}"
+        try:
+            ref = self.api("GET", path, repo=repo)
+        except GitHubError as exc:
+            if "-> 404:" in str(exc):
+                return None
+            raise
+        obj = ref["object"]
+        if obj.get("type") == "tag":
+            obj = self.api("GET", f"/repos/{self.org}/{repo}/git/tags/{obj['sha']}", repo=repo)["object"]
+        return str(obj.get("sha") or "")
+
+    def create_tag(self, repo: str, tag: str, sha: str) -> None:
+        """Create a lightweight version tag on an exact commit."""
+        self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
+                 {"ref": f"refs/tags/{tag}", "sha": sha}, repo=repo, ok=(201,))
+
+    def release_by_tag(self, repo: str, tag: str) -> dict | None:
+        path = f"/repos/{self.org}/{repo}/releases/tags/{quote(tag, safe='')}"
+        try:
+            return self.api("GET", path, repo=repo)
+        except GitHubError as exc:
+            if "-> 404:" in str(exc):
+                return None
+            raise
+
+    def create_release(self, repo: str, tag: str, name: str, notes: str) -> dict:
+        return self.api("POST", f"/repos/{self.org}/{repo}/releases",
+                        {"tag_name": tag, "name": name, "body": notes, "draft": False,
+                         "prerelease": "-alpha" in name or "-beta" in name}, repo=repo, ok=(201,),
+                        permissions={"contents": "write", "metadata": "read", "workflows": "write"})
 
     def bot_identity(self) -> tuple[str, str]:
         slug = self.meta["slug"]

@@ -2892,6 +2892,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"project": project, "jira_site": ctx.settings.jira_site, "epics": business.epics(ctx.db, project),
                 "change_requests": business.change_requests(ctx.db, project, ctx.settings.jira_site)}
 
+    @app.get("/v1/business/{key}/release-readiness")
+    def business_release_readiness(key: str) -> dict:
+        project = business_project(key)
+        return {"project": project, "versions": business.release_readiness(ctx.db, project)}
+
     @app.post("/v1/business/{key}/change-requests")
     def business_change_request(key: str, body: ChangeRequestBody) -> dict:
         project = business_project(key)

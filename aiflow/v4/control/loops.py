@@ -144,7 +144,9 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
         for project in keys
         for row in ctx.db.all("SELECT key FROM tickets WHERE project=%s", (project,))
     }
-    for issue in ctx.jira.search(jql + " ORDER BY updated DESC"):
+    # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
+    search = getattr(ctx.jira, "search_history", ctx.jira.search)
+    for issue in search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
         old = ctx.db.one("SELECT status, labels, parent_key FROM tickets WHERE key=%s", (t["key"],))
         if not old:
@@ -174,6 +176,14 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
             " CROSS JOIN (SELECT count(*) FROM removed) AS deletion_done"
             " ON CONFLICT (ticket_key, version_id) DO NOTHING",
             (t["key"], t["key"], t["fix_versions"]))
+        # Jira change history: when each Fix version was attached, and the first move to In Progress.
+        for version_id, added_at in (t.get("fix_version_added") or {}).items():
+            ctx.db.run("INSERT INTO ticket_version_added (ticket_key, version_id, added_at) VALUES (%s,%s,%s)"
+                       " ON CONFLICT (ticket_key, version_id) DO UPDATE SET added_at=EXCLUDED.added_at",
+                       (t["key"], version_id, added_at))
+        if t.get("first_in_progress"):
+            ctx.db.run("UPDATE tickets SET first_in_progress_at=LEAST(first_in_progress_at, %s) WHERE key=%s",
+                       (t["first_in_progress"], t["key"]))
         if not old:
             project_lifecycle.reopen_for_new_ticket(ctx, t["project"], t["key"])
         if t["type"] == "Epic" and t["status"] == "Done" and (not old or old["status"] != "Done"):

@@ -1064,7 +1064,7 @@ function renderCC() {
   });
   h += '</tbody></table></div></section>';
 
-  h += readinessPanel(d.release_readiness || [], 'en', 'p-ready');
+  h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
 
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
 
@@ -1798,15 +1798,71 @@ var READY_TEXT = {
         not_done: function (r) { return r.ticket + ': not Done (status ' + r.status + ')'; },
         rework: function (r) { return r.ticket + ': in rework'; },
         not_verified: function (r) { return r.ticket + ': Done but not verified'; },
-        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; } },
+        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; },
+        release_running: function () { return 'The release check is running'; },
+        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); } },
   vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
         none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
         empty: function () { return 'Version rỗng: chưa có ticket nào'; },
         not_done: function (r) { return r.ticket + ': chưa Done (đang ở ' + r.status + ')'; },
         rework: function (r) { return r.ticket + ': đang rework'; },
         not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
-        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; } }
+        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; },
+        release_running: function () { return 'Kiểm tra release đang chạy'; },
+        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); } }
 };
+/* Release progress per Jira version (/v1/state release_progress): x/y Done, open tickets, tickets added late with
+   the date, why the version is not ready, and the release outcome. Command Center (detail) also lists the release
+   steps with run ID and node; Business (compact) keeps x/y, late tickets, reasons, tag and GitHub Release link. */
+var PROG_TEXT = {
+  en: { title: 'Release progress', hint: 'Jira Fix versions: Done of total, open tickets, tickets added late, why not ready, release steps',
+        none: 'No Jira version.', ready: 'Ready', notReady: 'Not ready', released: 'Released', running: 'Release running',
+        failed: 'Release failed', blocked: 'Blocked', done: 'Done', open: 'Open', late: 'added late', on: 'on',
+        tag: 'Tag', link: 'GitHub Release', run: 'run', node: 'node', noSteps: 'No release run yet',
+        steps: { check: 'Check', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } },
+  vi: { title: 'Tiến độ release', hint: 'Jira Fix version: số ticket Done trên tổng, ticket thêm sau, lý do chưa sẵn sàng, tag và GitHub Release',
+        none: 'Chưa có Jira version nào.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', released: 'Đã release', running: 'Đang release',
+        failed: 'Release lỗi', blocked: 'Bị chặn', done: 'Done', open: 'Còn mở', late: 'thêm sau', on: 'ngày',
+        tag: 'Tag', link: 'GitHub Release', run: 'run', node: 'node', noSteps: 'Chưa có lần release nào',
+        steps: { check: 'Kiểm tra', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } }
+};
+function safeUrl(u) { return /^https?:\/\//.test(u || '') ? u : ''; }
+function releaseState(v) {
+  var s = v.release && v.release.status;
+  return v.released ? 'released' : s === 'checking' ? 'running' : s === 'failed' ? 'failed' : v.ready ? 'ready' : 'notReady';
+}
+function releaseLink(v, t) {
+  var rel = v.release || {}, h = '';
+  if (rel.tag) h += '<span class="mono">' + esc(t.tag) + ' ' + esc(rel.tag) + '</span>';
+  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(rel.github_release_url) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
+  return h;
+}
+function releaseSteps(v, t) {
+  var steps = (v.release && v.release.steps) || [];
+  if (!steps.length) return '<div class="muted">' + esc(t.noSteps) + '</div>';
+  return '<ol class="d release-steps">' + steps.map(function (s) {
+    var who = (s.run_id ? ' · ' + t.run + ' <span class="mono">' + esc(String(s.run_id).slice(0, 8)) + '</span>' : '') + (s.node ? ' · ' + t.node + ' <span class="mono">' + esc(s.node) + '</span>' : '');
+    var link = safeUrl(s.url) ? ' <a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
+    return '<li data-step="' + esc(s.step) + '" data-state="' + esc(s.state) + '"><b>' + esc(t.steps[s.step] || s.step) + '</b> · ' + esc(s.state) + link + who + '</li>';
+  }).join('') + '</ol>';
+}
+function progressPanel(versions, lang, id, detail) {
+  var t = PROG_TEXT[lang] || PROG_TEXT.en, rt = READY_TEXT[lang] || READY_TEXT.en;
+  var h = '<section class="panel" id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">' + esc(t.title) + '</h2><span class="hint">' + esc(t.hint) + '</span></div>';
+  if (!versions.length) return h + '<div class="empty">' + esc(t.none) + '</div></section>';
+  versions.forEach(function (v) {
+    var st = releaseState(v), tone = st === 'released' || st === 'ready' ? 'ok' : st === 'failed' ? 'crit' : 'warn';
+    h += '<div class="att-item" data-version="' + esc(v.version_id) + '" data-state="' + st + '"><span class="flag" data-tone="' + tone + '">' + esc(t[st]) + '</span>';
+    h += '<span style="min-width:0"><div class="t"><span class="mono muted">' + esc(v.project) + '</span> ' + esc(v.version) + ' · ' + v.done_count + ' / ' + v.ticket_count + ' ' + esc(t.done) + '</div>';
+    if (v.released) h += '<div class="d">' + releaseLink(v, t) + '</div>';
+    if (v.late_tickets && v.late_tickets.length) h += '<ul class="d late">' + v.late_tickets.map(function (x) { return '<li data-late="' + esc(x.key) + '">' + esc(x.key) + ' · ' + esc(t.late) + (x.added_at ? ' ' + esc(t.on) + ' ' + esc(String(x.added_at).slice(0, 10)) : '') + '</li>'; }).join('') + '</ul>';
+    if (v.open_tickets && v.open_tickets.length) h += '<div class="d open-tickets">' + esc(t.open) + ': ' + v.open_tickets.map(function (x) { return '<span class="mono" data-open="' + esc(x.key) + '">' + esc(x.key) + '</span>' + (detail ? ' ' + esc(x.status) : ''); }).join(', ') + '</div>';
+    if (v.reasons && v.reasons.length) h += '<ul class="d reasons">' + v.reasons.map(function (r) { return '<li data-cause="' + esc(r.cause) + '">' + esc(readinessReason(r, lang)) + '</li>'; }).join('') + '</ul>';
+    if (detail) h += releaseSteps(v, t);
+    h += '</span></div>';
+  });
+  return h + '</section>';
+}
 function readinessReason(r, lang) { var t = READY_TEXT[lang] || READY_TEXT.en; return (t[r.cause] || function () { return (r.ticket || '') + ': ' + r.cause; })(r); }
 function readinessPanel(versions, lang, id) {
   var t = READY_TEXT[lang] || READY_TEXT.en;
@@ -1825,7 +1881,7 @@ function renderBBody() {
   var all = projTickets();
   var h = epicsPanel(all, 'open-ticket', 'b-epics') || '<section class="panel" id="b-epics"><div class="panel-h"><h2>Epics</h2></div><div class="empty">Project này chưa có epic.</div></section>';
   var wait = needsOwner(all);
-  h += readinessPanel((D().release_readiness || []).filter(function (v) { return v.project === S.project; }), 'vi', 'b-ready');
+  h += progressPanel((D().release_progress || []).filter(function (v) { return v.project === S.project; }), 'vi', 'b-ready', false);
   h += '<section class="panel" id="b-answer" aria-labelledby="h-b-answer"><div class="panel-h"><h2 id="h-b-answer">Cần bạn trả lời</h2><span class="hint">Ticket ở Needs owner: câu hỏi của intake và việc triage chuyển lên owner. Trả lời trong Jira.</span></div><div class="att">';
   if (!wait.length) h += '<div class="col-empty">Không có ticket nào chờ bạn trả lời</div>';
   wait.forEach(function (w) {

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -7,6 +8,7 @@ from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.control import notify
+from aiflow.v4.control.review_metrics import calculate_review_metrics
 from aiflow.v4.core.controlrepo import Project
 from aiflow.v4.core.settings import Settings
 
@@ -139,11 +141,27 @@ def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):
     assert ctx.github.merged == [("test-aiflow-wp", 42, "TESTWP-83: Summary of TESTWP-83", "squash")]
     assert ctx.jira.status_of["TESTWP-83"] == "Done"
     assert any(key == "TESTWP-83" and "approved" in body for key, body in ctx.jira.comments)
+    assert any(number == 42 and "approved" in body for number, body in ctx.github.comments)
     assert ctx.db.one("SELECT step, outcome FROM runs WHERE ticket_key='TESTWP-83' AND account_id='reviewer-console'") == {
         "step": "qa", "outcome": "merged"}
     audit = ctx.db.one("SELECT target, action, accepted, fence FROM write_audit WHERE ticket='TESTWP-83'"
                        " AND action='merge' ORDER BY id DESC LIMIT 1")
     assert audit == {"target": "github", "action": "merge", "accepted": True, "fence": 1}
+
+
+def test_refused_approval_is_recorded_on_jira_pr_and_audit(client, ctx, monkeypatch):
+    key = "TESTWP-101"
+    add_review_ticket(ctx, key)
+    monkeypatch.setattr(ctx.github, "merge_pr", lambda *_args, **_kwargs:
+                        {"merged": False, "message": "required checks are pending"})
+
+    response = client.post(f"/v1/reviews/{key}/approve", headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 200 and response.json()["merged"] is False
+    assert any(ticket == key and "checks are pending" in body for ticket, body in ctx.jira.comments)
+    assert any(number == 42 and "checks are pending" in body for number, body in ctx.github.comments)
+    assert ctx.db.one("SELECT accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
+                      (key,))["accepted"] is False
 
 
 def test_reviewer_rework_records_comment_label_and_returns_ticket_to_todo(client, ctx):
@@ -155,6 +173,9 @@ def test_reviewer_rework_records_comment_label_and_returns_ticket_to_todo(client
     assert ("TESTWP-84", "Human review requested rework:\n\nPlease add coverage for retries.") in ctx.jira.comments
     ticket = ctx.db.one("SELECT status, labels FROM tickets WHERE key='TESTWP-84'")
     assert ticket["status"] == "To Do" and "rework" in ticket["labels"]
+    assert any(number == 42 and "requested rework" in body for number, body in ctx.github.comments)
+    assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket='TESTWP-84' AND target='human-review'") == {
+        "action": "rework", "accepted": True}
 
 
 def test_reviewer_rework_comment_reaches_the_next_dev_claim(client, ctx):
@@ -226,3 +247,265 @@ def test_reviewer_actions_fail_closed_when_reviewer_token_is_unconfigured(client
     qa_runs = ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'", (key,))
     assert qa_runs["n"] == 0
     assert ctx.leases.holder(key) is None
+
+
+def test_reviewer_reject_requires_reason_and_closes_pr_with_audited_jira_and_github_writes(client, ctx):
+    key = "TESTWP-89"
+    add_review_ticket(ctx, key)
+    headers = {"Authorization": "Bearer review-secret"}
+
+    missing = client.post(f"/v1/reviews/{key}/reject", json={"reason": " "}, headers=headers)
+    assert missing.status_code == 400 and "reason" in missing.json()["detail"]
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'",
+                      (key,))["n"] == 0
+
+    response = client.post(f"/v1/reviews/{key}/reject", json={"reason": "The change exceeds the approved scope."},
+                           headers=headers)
+
+    assert response.status_code == 200 and response.json() == {"status": "Done", "closed": True}
+    assert ctx.github.pr_by_number[42]["state"] == "closed"
+    assert any(ticket == key and "exceeds the approved scope" in body for ticket, body in ctx.jira.comments)
+    assert any(number == 42 and "exceeds the approved scope" in body for number, body in ctx.github.comments)
+    assert "rejected" in ctx.db.one("SELECT labels FROM tickets WHERE key=%s", (key,))["labels"]
+    assert ctx.db.one("SELECT target,action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
+                      (key,)) == {"target": "human-review", "action": "reject", "accepted": True}
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE ticket=%s AND target IN ('jira','github')"
+                      " AND action IN ('comment','close','transition','fields') AND accepted=true", (key,))["n"] >= 5
+
+
+def test_reviewer_ask_ai_moves_item_to_triage_and_exposes_question_thread(client, ctx):
+    key = "TESTWP-90"
+    add_review_ticket(ctx, key)
+    response = client.post(f"/v1/reviews/{key}/ask-ai", json={"question": "Does this change preserve retries?"},
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 200 and response.json()["status"] == "Needs owner"
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Needs owner"
+    assert any(key == ticket and "preserve retries" in body for ticket, body in ctx.jira.comments)
+    assert any(number == 42 and "preserve retries" in body for number, body in ctx.github.comments)
+    item = next(t for t in client.get("/v1/reviews").json()["tickets"] if t["key"] == key)
+    assert item["kind"] == "question_from_ai"
+    assert item["thread"][0]["kind"] == "question" and "preserve retries" in item["thread"][0]["text"]
+    assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
+                      (key,)) == {"action": "ask-ai", "accepted": True}
+    node = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {node['node_token']}"}
+    candidates = client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"]
+    assert any(candidate["key"] == key and candidate["step"] == "triage" for candidate in candidates)
+    claimed = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "triage"},
+                          headers=headers).json()
+    assert claimed["claimed"] and claimed["last_dev_summary"] == "Reviewer question: Does this change preserve retries?"
+    assert claimed["pr"]["number"] == 42
+    ctx.db.run("UPDATE runs SET status='finished',outcome='answered',summary=%s,details=%s,ended_at=now() WHERE id=%s",
+               ("Yes, retry handling is preserved.", J({"answer": "Yes, retry handling is preserved."}), claimed["run_id"]))
+    ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (key,))
+    saved_thread = next(t for t in client.get("/v1/reviews").json()["threads"] if t["key"] == key)["thread"]
+    assert any(line["kind"] == "ai_answer" and "retry handling is preserved" in line["text"]
+               for line in saved_thread)
+
+
+def test_reviewer_answer_clears_owner_escalation_and_writes_to_jira_pr_and_audit(client, ctx):
+    key = "TESTWP-91"
+    add_ticket(ctx.db, key, status="Needs owner", labels=("owner-escalated",))
+    add_review_run(ctx, key)
+    response = client.post(f"/v1/reviews/{key}/answer", json={"answer": "Use the shared cache."},
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 200 and response.json()["status"] == "To Do"
+    ticket = ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,))
+    assert ticket["status"] == "To Do" and "owner-escalated" not in ticket["labels"]
+    assert any(key == ticket_key and "Use the shared cache" in body for ticket_key, body in ctx.jira.comments)
+    assert any(number == 42 and "Use the shared cache" in body for number, body in ctx.github.comments)
+    assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
+                      (key,)) == {"action": "answer", "accepted": True}
+
+
+def test_reviewer_answer_rejects_blocked_item_before_claiming_run(client, ctx):
+    key = "TESTWP-103"
+    blocker = "TESTWP-104"
+    add_ticket(ctx.db, blocker, status="In Progress")
+    add_ticket(ctx.db, key, status="Needs owner", labels=("owner-escalated",), blocked_by=(blocker,))
+    add_review_run(ctx, key)
+
+    response = client.post(f"/v1/reviews/{key}/answer", json={"answer": "Use the shared cache."},
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 409
+    assert "current human review item" in response.json()["detail"]
+    assert ctx.db.one("SELECT status,labels FROM tickets WHERE key=%s", (key,)) == {
+        "status": "Needs owner", "labels": ["owner-escalated"]}
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE ticket_key=%s AND account_id='reviewer-console'",
+                      (key,))["n"] == 0
+    assert ctx.leases.holder(key) is None
+    assert ctx.jira.comments == []
+    assert getattr(ctx.github, "comments", []) == []
+
+
+def test_reviewer_skip_gate_merges_and_removes_the_gate_label(client, ctx):
+    key = "TESTWP-92"
+    add_review_ticket(ctx, key)
+    response = client.post(f"/v1/reviews/{key}/skip-gate", headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 200 and response.json()["merged"] is True
+    assert ctx.github.merged and ctx.github.merged[-1][1] == 42
+    assert "require-human" not in ctx.db.one("SELECT labels FROM tickets WHERE key=%s", (key,))["labels"]
+    assert any(ticket == key and "gate skipped" in body for ticket, body in ctx.jira.comments)
+    assert any(number == 42 and "gate skipped" in body for number, body in ctx.github.comments)
+    assert ctx.db.one("SELECT action,accepted FROM write_audit WHERE ticket=%s AND target='human-review'",
+                      (key,)) == {"action": "skip-gate", "accepted": True}
+
+
+def test_review_queue_offers_actions_by_waiting_item_kind(client, ctx):
+    add_review_ticket(ctx, "TESTWP-96")
+    add_ticket(ctx.db, "TESTWP-97", status="Needs owner", labels=("owner-escalated",))
+    add_review_run(ctx, "TESTWP-97")
+    add_ticket(ctx.db, "TESTWP-98", status="Needs owner")
+    add_review_run(ctx, "TESTWP-98", step="dev", pr_url="", outcome="blocked", summary="Which cache? ")
+    add_ticket(ctx.db, "TESTWP-99", status="To Do")
+    add_ticket(ctx.db, "TESTWP-100", status="In Progress", blocked_by=("TESTWP-99",))
+
+    items = {ticket["key"]: ticket for ticket in client.get("/v1/reviews").json()["tickets"]}
+
+    assert items["TESTWP-96"]["actions"] == ["approve", "reject", "rework", "ask-ai", "skip-gate"]
+    assert items["TESTWP-97"]["kind"] == "decision_needed"
+    assert items["TESTWP-97"]["actions"] == ["answer", "ask-ai"]
+    assert items["TESTWP-98"]["kind"] == "question_from_ai"
+    assert items["TESTWP-98"]["actions"] == ["answer", "ask-ai"]
+    assert items["TESTWP-100"]["kind"] == "blocked"
+    assert items["TESTWP-100"]["actions"] == ["ask-ai"]
+
+
+def test_review_queue_hides_pull_request_actions_when_no_pr_exists(client, ctx):
+    key = "TESTWP-105"
+    add_ticket(ctx.db, key, status="Human review", labels=("require-human",))
+    add_review_run(ctx, key, pr_url="")
+
+    item = next(ticket for ticket in client.get("/v1/reviews").json()["tickets"] if ticket["key"] == key)
+
+    assert item["pr"]["number"] is None
+    assert item["actions"] == ["rework", "ask-ai"]
+
+
+def test_reviewer_action_required_text_is_validated_before_claiming_a_fenced_run(client, ctx):
+    key = "TESTWP-93"
+    add_review_ticket(ctx, key)
+    headers = {"Authorization": "Bearer review-secret"}
+    for action, body in (("rework", {"comment": " "}), ("reject", {"reason": " "}),
+                         ("ask-ai", {"question": " "})):
+        response = client.post(f"/v1/reviews/{key}/{action}", json=body, headers=headers)
+        assert response.status_code == 400
+    add_ticket(ctx.db, "TESTWP-94", status="Needs owner")
+    add_review_run(ctx, "TESTWP-94")
+    response = client.post("/v1/reviews/TESTWP-94/answer", json={"answer": " "}, headers=headers)
+    assert response.status_code == 400
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='reviewer-console'")["n"] == 0
+
+
+def test_review_metrics_project_filter_and_csv_export(client, ctx):
+    add_review_ticket(ctx, "TESTWP-95")
+    add_ticket(ctx.db, "OTHER-1", status="Human review", labels=("require-human",))
+    add_review_run(ctx, "OTHER-1")
+    ctx.repo().projects["OTHER"] = ctx.repo().projects["TESTWP"]
+
+    response = client.get("/v1/reviews?project=TESTWP")
+    assert response.status_code == 200
+    assert {ticket["key"] for ticket in response.json()["tickets"]} == {"TESTWP-95"}
+    assert response.json()["metrics"]["people_needed_this_week"] == 1
+    assert client.get("/v1/reviews").json()["metrics"]["people_needed_this_week"] == 2
+    assert client.get("/v1/reviews?project=NOTCONFIGURED").status_code == 400
+    export = client.get("/v1/reviews/export.csv?project=TESTWP")
+    assert export.status_code == 200 and "text/csv" in export.headers["content-type"]
+    assert "people_needed_this_week" in export.text and "question_from_ai" in export.text
+    assert ",TESTWP" in export.text
+
+
+def test_review_metric_calculations_and_weekly_reason_split():
+    now = datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
+    monday = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    eight_weeks_before = monday - timedelta(weeks=8)
+    tickets = [
+        {"key": "T-1", "status": "Done", "labels": [], "blocked_by": [], "done_at": now - timedelta(days=1)},
+        {"key": "T-2", "status": "Done", "labels": [], "blocked_by": [], "done_at": now - timedelta(days=1)},
+        {"key": "T-3", "status": "In Progress", "labels": [], "blocked_by": [], "done_at": None},
+        {"key": "T-4", "status": "Needs owner", "labels": ["owner-escalated"], "blocked_by": [],
+         "done_at": None},
+        {"key": "T-5", "status": "Human review", "labels": ["require-human"], "blocked_by": [],
+         "done_at": None},
+        {"key": "T-6", "status": "In Progress", "labels": [], "blocked_by": ["T-99"],
+         "jira_updated": now - timedelta(days=1)},
+    ]
+    events = [
+        {"type": "jira.transition", "ticket": "T-1", "outcome": "Human review", "ts": monday + timedelta(minutes=1)},
+        {"type": "jira.transition", "ticket": "T-1", "outcome": "Done", "ts": monday + timedelta(minutes=21)},
+        {"type": "jira.transition", "ticket": "T-3", "outcome": "Needs owner", "ts": eight_weeks_before},
+        {"type": "jira.transition", "ticket": "T-3", "outcome": "To Do", "ts": eight_weeks_before + timedelta(minutes=40)},
+        {"type": "jira.transition", "ticket": "T-4", "outcome": "Needs owner", "ts": monday + timedelta(hours=2)},
+        {"type": "jira.transition", "ticket": "T-5", "outcome": "Human review", "ts": monday + timedelta(hours=3)},
+    ]
+    runs = [
+        {"ticket_key": "T-3", "step": "dev", "outcome": "blocked", "account_id": "codex-01",
+         "started_at": eight_weeks_before - timedelta(hours=1)},
+        {"ticket_key": "T-5", "step": "dev", "outcome": "done", "account_id": "codex-01",
+         "started_at": monday - timedelta(days=1)},
+        {"ticket_key": "T-5", "step": "qa", "outcome": "rework", "account_id": "reviewer-console",
+         "started_at": monday},
+    ]
+    audits = [
+        {"ticket": "T-1", "target": "jira", "action": "transition", "accepted": True,
+         "ts": monday + timedelta(minutes=1, seconds=1), "payload": {"to": "Human review"}},
+        {"ticket": "T-1", "target": "jira", "action": "transition", "accepted": True,
+         "ts": monday + timedelta(minutes=21, seconds=1), "payload": {"to": "Done"}},
+        {"ticket": "T-1", "target": "human-review", "action": "rework", "accepted": True,
+         "ts": monday + timedelta(minutes=1)},
+        {"ticket": "T-1", "target": "human-review", "action": "approve", "accepted": True,
+         "ts": monday + timedelta(minutes=2)},
+        {"ticket": "T-5", "target": "human-review", "action": "approve", "accepted": True,
+         "ts": monday + timedelta(minutes=3)},
+    ]
+    result = calculate_review_metrics(tickets, events, runs, audits, now)
+
+    assert result["people_needed_this_week"] == 4
+    assert result["people_needed_eight_weeks_ago"] == 1
+    assert result["weekly"][-1]["by_reason"] == {
+        "question_from_ai": 0, "decision_needed": 1, "review_before_merge": 2, "blocked": 1}
+    assert result["weekly"][0]["by_reason"]["question_from_ai"] == 1
+    assert result["finished_with_no_person_pct"] == 50
+    assert result["median_wait_minutes"] == 1730
+    assert result["approved_first_time_pct"] == 50
+    assert result["sent_back_or_rejected_pct"] == 50
+
+
+def test_review_metrics_use_transition_audits_and_require_human_labels_when_events_are_missing():
+    now = datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
+    result = calculate_review_metrics(
+        [{"key": "T-10", "status": "Done", "labels": ["require-human"], "blocked_by": [],
+          "done_at": now - timedelta(days=1)},
+         {"key": "T-11", "status": "Done", "labels": ["require-human"], "blocked_by": [],
+          "done_at": now - timedelta(days=1)}],
+        [], [],
+        [{"ticket": "T-10", "target": "jira", "action": "transition", "accepted": True,
+          "ts": now - timedelta(days=2), "payload": {"to": "Human review"}}],
+        now,
+    )
+
+    assert result["people_needed_this_week"] == 1
+    assert result["weekly"][-1]["by_reason"]["review_before_merge"] == 1
+    assert result["finished_with_no_person_pct"] == 0
+
+
+def test_review_metrics_do_not_count_ai_handoff_as_a_person_wait():
+    now = datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
+    asked_at = now - timedelta(minutes=5)
+    result = calculate_review_metrics(
+        [{"key": "T-12", "status": "To Do", "labels": [], "blocked_by": []}],
+        [{"type": "jira.transition", "ticket": "T-12", "outcome": "Needs owner", "reason": "reviewer asked the AI",
+          "ts": asked_at},
+         {"type": "jira.transition", "ticket": "T-12", "outcome": "To Do", "ts": now - timedelta(minutes=1)}],
+        [],
+        [{"ticket": "T-12", "target": "jira", "action": "transition", "accepted": True,
+          "ts": asked_at + timedelta(seconds=1), "payload": {"to": "Needs owner"}}],
+        now,
+    )
+
+    assert result["people_needed_this_week"] == 0
+    assert result["median_wait_minutes"] is None

@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
+- [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy

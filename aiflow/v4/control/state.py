@@ -8,6 +8,7 @@ from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
+from . import role_health
 from . import tooling
 from .sa import dashboard_data, thresholds
 
@@ -182,7 +183,7 @@ def snapshot(ctx) -> dict[str, Any]:
         "projects": projects, "tickets": tickets,
         "release_readiness": release_readiness.all_versions(db, repo.projects),
         "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
-        "events": events, "sa": sa, "rollout": rollout.summary(db),
+        "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),

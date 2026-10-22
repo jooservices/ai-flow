@@ -1134,6 +1134,11 @@ def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal()
     assert "Control+K" in page and "Meta+K" in page and "Tab" in page
     assert "overflow-x:auto" in style and "@media (max-width:900px)" in style
     assert "@media (max-width:640px)" in style and "prefers-reduced-motion: reduce" in style
+    tabs_rule = re.search(r"\.tabs\s*\{([^}]*)\}", style)
+    tab_rule = re.search(r"\.tab\s*\{([^}]*)\}", style)
+    assert tabs_rule and "min-width:0" in tabs_rule.group(1) and "overflow-x:auto" in tabs_rule.group(1)
+    assert tab_rule and "flex:0 0 auto" in tab_rule.group(1) and "white-space:nowrap" in tab_rule.group(1)
+    assert ".tabs{max-width:100%;width:100%}" in style
     for old_blue in ("#2453D6", "#88AAFF", "#0A0F1E", "#111933", "#7b6cff"):
         assert old_blue.lower() not in style.lower()
     assert 'data-view="cc">Command Center</button>' not in page

@@ -166,14 +166,14 @@ READINESS = [
 
 def test_business_screen_lists_each_reason_with_ticket_and_cause():
     out = business("renderBBody(); console.log(JSON.stringify({biz: el('#bbody').innerHTML}));",
-                   state={**STATE, "release_readiness": READINESS})["biz"]
-    assert 'id="b-ready"' in out and "Sẵn sàng release" in out
+                   state={**STATE, "release_progress": READINESS})["biz"]
+    assert 'id="b-ready"' in out and "Tiến độ release" in out
     assert "TESTFLOW-11: chưa Done (đang ở In Verify)" in out
     assert "TESTFLOW-12: đang rework" in out
     assert "TESTFLOW-13: đã Done nhưng chưa qua verify" in out
     assert "TESTFLOW-14: bị Bug release-qa TESTFLOW-90 chặn" in out
     assert "Version rỗng: chưa có ticket nào" in out
-    assert "3 / 4 Done" in out and 'data-ready="no"' in out
+    assert "3 / 4 Done" in out and 'data-state="notReady"' in out
     assert "3.0" not in out  # other project's version stays on its own tab
 
 
@@ -194,4 +194,4 @@ def test_command_center_renders_the_readiness_panel():
     from test_console import PAGE
     page = PAGE.read_text()
     render_cc = page[page.index("function renderCC()"):page.index("function renderNodeJoin(")]
-    assert "readinessPanel(d.release_readiness || [], 'en', 'p-ready')" in render_cc
+    assert "progressPanel(d.release_progress || [], 'en', 'p-ready', true)" in render_cc

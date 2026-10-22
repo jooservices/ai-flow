@@ -105,12 +105,17 @@ def ensure_tracker(ctx, project: Any, version: dict[str, Any]) -> str:
     return key
 
 
-def project_versions(ctx, project: Any) -> list[dict[str, Any]]:
+def configured_versions(ctx, project: Any) -> list[dict[str, Any]]:
     if not ctx.jira or not enabled(project):
         return []
     allowed = configured_names(project)
     return [version for version in ctx.jira.versions(project.key)
-            if version["name"] in allowed and not version.get("released") and not version.get("archived")]
+            if version["name"] in allowed and not version.get("archived")]
+
+
+def project_versions(ctx, project: Any) -> list[dict[str, Any]]:
+    """Return configured versions that Jira still considers unreleased."""
+    return [version for version in configured_versions(ctx, project) if not version.get("released")]
 
 
 def _successful_evidence(ctx, key: str) -> tuple[bool, bool, bool]:
@@ -233,20 +238,26 @@ def record_gate(ctx, project: Any, version: dict[str, Any], snapshot: dict[str, 
 
 
 def scan(ctx) -> int:
-    """Refresh every configured unreleased Jira version under a per-version Redis fence."""
+    """Refresh configured versions and reconcile releases under a per-version Redis fence."""
     if not ctx.jira:
         return 0
     scanned = 0
     for project in ctx.repo().projects.values():
         if project.paused or not enabled(project):
             continue
-        for version in project_versions(ctx, project):
+        for version in configured_versions(ctx, project):
             lock_key = version_identity(project.key, version["id"])
             run_id = str(uuid.uuid4())
             claim = ctx.leases.claim(lock_key, run_id, 300_000)
             if not claim.ok:
                 continue
             try:
+                if version.get("released"):
+                    if ctx.leases.valid(lock_key, run_id, claim.fence):
+                        run = {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""}
+                        if reconcile_released_version(ctx, project, version, run):
+                            scanned += 1
+                    continue
                 snapshot = evaluate(ctx, project, version)
                 if not ctx.leases.valid(lock_key, run_id, claim.fence):
                     continue
@@ -256,6 +267,62 @@ def scan(ctx) -> int:
                 ctx.leases.release(lock_key, run_id, claim.fence)
         reconcile_merge_backs(ctx, project)
     return scanned
+
+
+def _release_audit(ctx, tracker: str, action: str) -> dict | None:
+    return ctx.db.one("SELECT result,payload FROM write_audit WHERE ticket=%s AND action=%s"
+                      " ORDER BY id DESC LIMIT 1", (tracker, action))
+
+
+def reconcile_released_version(ctx, project: Any, version: dict[str, Any], run: dict) -> bool:
+    """Repair registry state after Jira reports a release whose final registry write was interrupted.
+
+    A version is considered one of ours only when the tracker has the preceding GitHub merge, tag, and Release
+    audit records. Those writes happen before the Jira Released call, so they provide enough durable data to
+    finish the registry record without repeating publication.
+    """
+    row = _tracker_row(ctx, project.key, version["id"])
+    if not version.get("released") or not row or not row["tracker_key"]:
+        return False
+    tracker = str(row["tracker_key"])
+    merge = _release_audit(ctx, tracker, "github-merge")
+    tag_audit = _release_audit(ctx, tracker, "github-tag")
+    release_audit = _release_audit(ctx, tracker, "github-release")
+    if not merge or not tag_audit or not release_audit:
+        return False
+
+    merge_payload = merge["payload"] or {}
+    tag_payload = tag_audit["payload"] or {}
+    release_payload = release_audit["payload"] or {}
+    master_sha = str(merge.get("result") or "")
+    tag = str(tag_payload.get("tag") or "")
+    if (not master_sha or not tag or str(release_payload.get("tag") or "") != tag
+            or str(tag_payload.get("sha") or "").lower() != master_sha.lower()
+            or str(release_payload.get("sha") or "").lower() != master_sha.lower()):
+        return False
+
+    release_url = str(release_audit.get("result") or "")
+    if release_url == tag:
+        release_url = ""
+    checked_sha = str(merge_payload.get("checked_sha") or row.get("checked_develop_sha") or "")
+    detail = f"Released at {tag} ({master_sha}); registry state reconciled from publication audit."
+    if (row["status"] != "released" or row.get("master_sha") != master_sha or row.get("tag") != tag
+            or row.get("github_release_url") != release_url):
+        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=checked_sha,
+                   master_sha=master_sha, tag=tag, github_release_url=release_url, gate_detail=detail)
+
+    if not _release_audit(ctx, tracker, "jira-version-released"):
+        payload = {"version_id": version["id"], "commit": master_sha, "tag": tag,
+                   "release_url": release_url, "tickets": row.get("ticket_snapshot") or []}
+        _audit(ctx, project, tracker, run, "jira-version-released", "Released", payload)
+        _best_effort("release reconciliation event", ctx.events.emit, "version_release.jira_version",
+                     ticket=tracker, project=project.key, step="version_release", run_id=str(run["id"]),
+                     fence=run["fence"], outcome="Released", reason=version["name"], data=payload)
+        _best_effort("release reconciliation comment", ctx.jira.comment, tracker,
+                     f"Recovered release registry state from the completed publication.\n"
+                     f"Commit on {target_branch(project)}: {master_sha}\nTag: {tag}\n"
+                     f"GitHub Release: {release_url or tag}\nJira version: Released")
+    return True
 
 
 def reconcile_merge_backs(ctx, project: Any) -> int:
@@ -398,6 +465,19 @@ def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: E
     row = _tracker_row(ctx, project.key, version["id"])
     if row and row["status"] == "released":
         return {"released": True, "status": "released", "reason": message}
+    try:
+        latest_version = next((item for item in ctx.jira.versions(project.key)
+                               if str(item["id"]) == str(version["id"])), version)
+    except Exception:  # noqa: BLE001 - retain the normal failure path if Jira cannot confirm Released
+        latest_version = version
+    if latest_version.get("released"):
+        try:
+            if reconcile_released_version(ctx, project, latest_version, run):
+                return {"released": True, "status": "released", "reason": "Jira release reconciled"}
+        except Exception:  # noqa: BLE001 - the scheduled scan will retry this durable reconciliation
+            log.exception("release registry reconciliation failed for %s %s", project.key, version["name"])
+        return {"released": False, "status": "reconciling",
+                "reason": "Jira reports Released; registry reconciliation will retry on the next scan."}
     _set_state(ctx, project.key, version["id"], status="failed", gate_detail=message)
     last = _last_failure(ctx, tracker)
     prior = (last["payload"] or {}) if last and last["action"] == "jira-release-publish-failed" else {}
@@ -509,12 +589,13 @@ def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict
     latest_version = next((v for v in ctx.jira.versions(project.key) if v["id"] == version["id"]), version)
     if not latest_version.get("released"):
         ctx.jira.release_version(version["id"])
-    _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=sha,
-               master_sha=master_sha, tag=tag, github_release_url=release_url,
-               gate_detail=f"Released at {tag} ({master_sha}).")
     # Merge-back runs even when a post-release write below fails; it audits itself, and the scan retries it for
-    # any released version without a merge-back record (`reconcile_merge_backs`).
+    # any released version without a merge-back record (`reconcile_merge_backs`). Keep the registry write inside
+    # this block so a failure there cannot skip merge-back.
     try:
+        _set_state(ctx, project.key, version["id"], status="released", checked_develop_sha=sha,
+                   master_sha=master_sha, tag=tag, github_release_url=release_url,
+                   gate_detail=f"Released at {tag} ({master_sha}).")
         _audit(ctx, project, tracker, run, "jira-version-released", "Released",
                {"version_id": version["id"], "commit": master_sha, "tag": tag, "release_url": release_url,
                 "tickets": snapshot["tickets"]})

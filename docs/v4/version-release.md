@@ -59,8 +59,10 @@ existing tag must point to the same release commit, and an existing GitHub Relea
 control plane then merges the destination back into the source. If that merge fails, it creates a Jira follow-up
 Task and comments its key on the Release tracker. Merge-back is attempted even when a write after Jira Released
 (audit, event, or tracker comment) fails, and its outcome is recorded once in `write_audit` (`github-merge-back`
-or `jira-merge-back-task`). If neither could be recorded, the periodic version scan retries merge-back under the
-version lease for every `released` registry row without such a record, so develop never stays behind master.
+or `jira-merge-back-task`). If Jira reports Released but the final registry write was interrupted, the periodic
+version scan reconstructs the release state from the preceding merge, tag, and GitHub Release audit records.
+It then retries merge-back under the version lease for every released registry row without a merge-back record,
+so this failure window does not hide a completed release or leave develop behind master.
 
 The version lease fences worker reports and publication writes. A completion is accepted only from the run that
 holds the lease of the Jira version named in the URL; a run claimed for another version is refused before any

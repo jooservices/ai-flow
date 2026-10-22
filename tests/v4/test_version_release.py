@@ -380,6 +380,52 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert len(ctx.github.tags) == len(ctx.github.releases) == 1
 
 
+def test_scan_repairs_jira_released_version_after_registry_write_failure(client, ctx, monkeypatch):
+    configure(ctx)
+    evidence(ctx, "TESTWP-55")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    headers = node_headers(client)
+    claim = claim_release(client, headers)
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    set_state = version_release._set_state
+    failed_writes = 0
+
+    def fail_released_state_twice(context, project_key, version_id, **values):
+        nonlocal failed_writes
+        if values.get("status") == "released" and failed_writes < 2:
+            failed_writes += 1
+            raise RuntimeError("temporary registry write failure")
+        return set_state(context, project_key, version_id, **values)
+
+    monkeypatch.setattr(version_release, "_set_state", fail_released_state_twice)
+    response = client.post("/v1/version-releases/101/complete",
+                           json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                                 "checks": [{"command": "composer install", "passed": True},
+                                            {"command": "vendor/bin/phpunit", "passed": True}]},
+                           headers=headers)
+
+    assert response.status_code == 200 and response.json()["status"] == "reconciling"
+    assert ctx.jira.released_versions == ["101"]
+    assert ctx.db.one("SELECT status FROM version_releases WHERE project='TESTWP' AND version_id='101'")["status"] == "checking"
+    assert not [row for row in ctx.jira.created if row["issuetype"] == "Task"]
+    assert [merge[1:3] for merge in ctx.github.merges] == [("master", "develop"), ("develop", "master")]
+    client.post(f"/v1/runs/{run['run_id']}/release", json={"fence": run["fence"]}, headers=headers)
+
+    monkeypatch.setattr(version_release, "_set_state", set_state)
+    assert version_release.scan(ctx) == 1
+    state = ctx.db.one("SELECT status,master_sha,tag FROM version_releases"
+                       " WHERE project='TESTWP' AND version_id='101'")
+    assert state == {"status": "released", "master_sha": "merged-0001", "tag": "testwp-core-0.5.0-beta"}
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-version-released'")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='github-merge-back'")["n"] == 1
+
+    version_release.scan(ctx)
+    assert len(ctx.github.merges) == 2
+    assert len(ctx.github.tags) == len(ctx.github.releases) == 1
+    assert ctx.jira.released_versions == ["101"]
+
+
 def test_core_and_theme_versions_in_one_repo_get_distinct_tags_and_releases(ctx):
     configure(ctx, versions=(("101", CORE), ("102", THEME)))
     evidence(ctx, "TESTWP-60", version_id="101")

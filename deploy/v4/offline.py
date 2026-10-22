@@ -14,6 +14,7 @@ import platform
 import pwd
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -53,6 +54,45 @@ OFFLINE_STACKS = frozenset({"python-3.12", "node-24"})
 APT_PACKAGES = ["systemd", "git", "docker.io", "ca-certificates", "passwd", "util-linux"]
 SAFE_NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SAFE_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@\[\]-]+\Z")
+INSTALLER_BOOTSTRAP = """#!/bin/sh
+set -eu
+INSTALLER_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+BUNDLE_DIR=$(CDPATH= cd -- "$INSTALLER_DIR/.." && pwd -P)
+if ! (cd "$BUNDLE_DIR" && sha256sum --check --status -- SHA256SUMS); then
+  echo "aiflow4-offline: bundle checksum verification failed" >&2
+  exit 1
+fi
+PYTHON_PATH=
+for candidate in "$BUNDLE_DIR"/python/runtime/cpython-3.12.*/bin/python3.12; do
+  if [ -x "$candidate" ]; then
+    if [ -n "$PYTHON_PATH" ]; then
+      echo "aiflow4-offline: bundle has more than one Python runtime" >&2
+      exit 1
+    fi
+    PYTHON_PATH=$candidate
+  fi
+done
+if [ -z "$PYTHON_PATH" ]; then
+  echo "aiflow4-offline: bundle Python 3.12 runtime is missing" >&2
+  exit 1
+fi
+exec "$PYTHON_PATH" "$INSTALLER_DIR/offline.py" "$@"
+"""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Control API redirects are rejected so enrollment credentials cannot be forwarded elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - stdlib hook signature
+        return None
+
+
+def _control_api_opener() -> urllib.request.OpenerDirector:
+    """Use system-trusted TLS certificates and reject redirects for credential-bearing API calls."""
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _NoRedirectHandler(),
+    )
 
 
 class OfflineError(RuntimeError):
@@ -438,7 +478,7 @@ def _build_bundle(args: argparse.Namespace) -> Path:
     shutil.copy2(lock_path, bundle / "metadata/versions.lock")
     shutil.copy2(ROOT / "deploy/v4/offline.py", bundle / "installer/offline.py")
     installer_entry = bundle / "installer/aiflow4-offline"
-    installer_entry.write_text("#!/usr/bin/env python3\nfrom offline import main\nraise SystemExit(main())\n", encoding="utf-8")
+    installer_entry.write_text(INSTALLER_BOOTSTRAP, encoding="utf-8")
     installer_entry.chmod(0o755)
     with tempfile.TemporaryDirectory(prefix="aiflow4-offline-src-") as temp:
         source = Path(temp) / "src"
@@ -608,8 +648,8 @@ class OfflineInstaller:
         if not 1 <= slots <= 1024:
             raise OfflineError("slots must be between 1 and 1024")
         parsed = urllib.parse.urlsplit(control_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise OfflineError("control URL must be an HTTP(S) URL without embedded credentials")
+        if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise OfflineError("control URL must be an HTTPS URL without embedded credentials")
         try:
             join_token = join_token_file.read_text(encoding="utf-8").strip()
         except OSError as exc:
@@ -816,7 +856,7 @@ class OfflineInstaller:
 def _get_json(base_url: str, path: str, token: str) -> dict[str, Any]:
     request = urllib.request.Request(base_url + path, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _control_api_opener().open(request, timeout=30) as response:
             result = json.load(response)
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise OfflineError(f"could not read node health ({type(exc).__name__})") from exc
@@ -834,7 +874,7 @@ def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, A
     request = urllib.request.Request(base_url + path, data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _control_api_opener().open(request, timeout=30) as response:
             result = json.load(response)
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise OfflineError(f"could not reach the configured control API ({type(exc).__name__})") from exc

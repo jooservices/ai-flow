@@ -40,6 +40,9 @@ Python runtime, which is installed from the same release and wheelhouse in the b
 ## Install on a host without public internet access
 
 The host needs Ubuntu 22.04/24.04 or Debian 12, systemd, `dpkg`, `apt`, and a route to the private control API.
+It does not need a host Python interpreter: the installer shell bootstrap verifies the bundle checksums and starts
+the bundled Python 3.12 runtime. The control API must be reachable over HTTPS with a certificate and hostname
+trusted by the host's CA store. Install any private CA certificate into that trust store before running the bundle.
 Create a one-use node join token in Command Center while the control API is reachable, place it in a root-readable
 file on the target host, then transfer the bundle and token through the site's approved offline media. The
 installer has no calls to public package, image or release services; its only network requests are to the
@@ -51,7 +54,7 @@ sudo /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64/installer/aiflow4-offline 
   verify /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64
 sudo /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64/installer/aiflow4-offline \
   install /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64 \
-  --control-url http://control.internal \
+  --control-url https://control.internal \
   --join-token-file /root/aiflow-join-token
 ```
 

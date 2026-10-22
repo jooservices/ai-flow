@@ -5,8 +5,11 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import ssl
 import subprocess
 import tarfile
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,7 +39,9 @@ def _bundle(tmp_path: Path) -> Path:
 
     (bundle / "image/control-api.tar").write_bytes(b"docker image archive")
     (bundle / "wheels/ai_flow-4.1.0-py3-none-any.whl").write_bytes(b"wheel")
-    (bundle / "python/runtime/cpython-3.12.3/bin/python3.12").write_text("python", encoding="utf-8")
+    bundled_python = bundle / "python/runtime/cpython-3.12.3/bin/python3.12"
+    bundled_python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@"\n', encoding="utf-8")
+    bundled_python.chmod(0o755)
     (bundle / "python/uv").write_text("uv", encoding="utf-8")
     node = bundle / "node/node-v24.4.0-linux-x64"
     (node / "bin/node").write_text("node", encoding="utf-8")
@@ -57,7 +62,8 @@ def _bundle(tmp_path: Path) -> Path:
     (bundle / "metadata/versions.lock").write_text(
         "schema: 1\ntools:\n  claude_code: 2.1.305\n  codex: 0.147.0\n  opencode: 1.2.3\n", encoding="utf-8")
     (bundle / "installer/offline.py").write_text("# bundled installer module\n", encoding="utf-8")
-    (bundle / "installer/aiflow4-offline").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (bundle / "installer/aiflow4-offline").write_text(offline.INSTALLER_BOOTSTRAP, encoding="utf-8")
+    (bundle / "installer/aiflow4-offline").chmod(0o755)
     offline.write_manifest(bundle, version="v4.1.0",
                            target={"distribution": "ubuntu", "version": "24.04", "architecture": "amd64"},
                            versions={"claude_code": "2.1.305", "codex": "0.147.0", "opencode": "1.2.3",
@@ -246,6 +252,50 @@ def test_bundle_archive_extracts_checked_internal_node_and_cli_symlinks(tmp_path
     assert (extracted / "node/node-v24.4.0-linux-x64/bin/npm").is_symlink()
 
 
+def test_installer_bootstraps_from_bundled_python_without_host_python(tmp_path):
+    bundle = _bundle(tmp_path)
+    host_tools = tmp_path / "host-tools"
+    host_tools.mkdir()
+    for tool in ("dirname", "sha256sum"):
+        executable = shutil.which(tool)
+        assert executable
+        (host_tools / tool).symlink_to(executable)
+
+    result = subprocess.run([str(bundle / "installer/aiflow4-offline"), "--bootstrap-check"],
+                            check=True, capture_output=True, text=True, env={"PATH": str(host_tools)})
+
+    assert result.stdout.splitlines() == [str(bundle / "installer/offline.py"), "--bootstrap-check"]
+
+
+def test_control_api_transport_uses_validated_tls_and_rejects_redirects():
+    opener = offline._control_api_opener()
+    https_handler = next(handler for handler in opener.handlers if isinstance(handler, urllib.request.HTTPSHandler))
+    assert https_handler._context.verify_mode == ssl.CERT_REQUIRED
+    assert https_handler._context.check_hostname is True
+    redirect_handler = next(handler for handler in opener.handlers if isinstance(handler, offline._NoRedirectHandler))
+    assert redirect_handler.redirect_request(None, None, 307, "Temporary Redirect", {}, "http://attacker.invalid/") is None
+
+
+def test_install_rejects_http_control_url_before_host_changes_or_token_submission(tmp_path):
+    bundle = _bundle(tmp_path)
+    token_file = tmp_path / "join-token"
+    token_file.write_text("one-use-token\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    joins: list[tuple[str, str, dict]] = []
+    installer = offline.OfflineInstaller(
+        bundle, root=tmp_path / "target",
+        target={"distribution": "ubuntu", "version": "24.04", "architecture": "amd64"},
+        runner=lambda argv, **kwargs: (calls.append(argv), subprocess.CompletedProcess(argv, 0, "", ""))[1],
+        post_json=lambda base, path, payload: (joins.append((base, path, payload)), {})[1],
+    )
+
+    with pytest.raises(offline.OfflineError, match="HTTPS"):
+        installer.install(control_url="http://control.internal", join_token_file=token_file)
+
+    assert calls == []
+    assert joins == []
+
+
 def test_deb_packages_install_agent_and_worker_units_user_and_directories(tmp_path):
     packages = tmp_path / "packages"
     packages.mkdir()
@@ -277,7 +327,7 @@ def test_deb_packages_install_agent_and_worker_units_user_and_directories(tmp_pa
 HEALTHY = {"status": "online", "heartbeat_age_seconds": 3.0, "preflight_ok": True, "missing_tools": []}
 
 
-def _install(tmp_path, *, inspected_extra=None, health=None, joins=None):
+def _install(tmp_path, *, inspected_extra=None, health=None, joins=None, control_url="https://control.internal"):
     """Run the installer against fake system commands and a fake control API; returns (node, calls, joins, root)."""
     bundle = _bundle(tmp_path)
     calls: list[list[str]] = []
@@ -318,7 +368,7 @@ def _install(tmp_path, *, inspected_extra=None, health=None, joins=None):
         target={"distribution": "ubuntu", "version": "24.04", "architecture": "amd64"},
         runner=runner, post_json=post_json,
         get_json=lambda _base, path, token: (health_calls.append((path, token)), health or HEALTHY)[1])
-    node = installer.install(control_url="http://control.internal", join_token_file=token_file,
+    node = installer.install(control_url=control_url, join_token_file=token_file,
                              wait_seconds=2, health_wait_seconds=2)
     return node, calls, joins, root, health_calls
 

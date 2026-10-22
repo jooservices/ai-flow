@@ -32,6 +32,36 @@ API_PAGE = "reference/api.md"
 # Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
 SCREEN_PAGE = "screens/{view}.md"
 
+# JavaScript renderers run outside the static <section> ranges. Keep this map beside the check so a renderer edit
+# requires the page for the screen it renders. `None` means the renderer is shared by every screen.
+SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
+    "renderGitHubIntegrations": ("integrations",),
+    "renderLive": None,
+    "renderCC": ("cc",),
+    "renderNodeJoin": ("cc",),
+    "renderSA": ("sa",),
+    "renderDHead": ("delivery",),
+    "renderDBody": ("delivery",),
+    "renderReviews": ("review",),
+    "renderKnowledge": ("knowledge",),
+    "renderJiraIntegrations": ("integrations",),
+    "renderIntegrations": ("integrations",),
+    "renderLead": ("lead",),
+    "renderBHead": ("business",),
+    "renderBBody": ("business",),
+    "renderBForm": ("business",),
+    "renderBCR": ("business",),
+    "renderBusiness": ("business",),
+    "renderStakeholderHead": ("stakeholder",),
+    "renderStakeholderBody": ("stakeholder",),
+    "renderStakeholder": ("stakeholder",),
+    "renderDrawer": None,
+    "renderFooter": None,
+    "renderProjects": ("projects",),
+    "render": None,
+    "renderHelp": None,
+}
+
 # A change to one of these needs a documentation change in the same pull request.
 SCREEN_PATHS = ("aiflow/v4/control/ui/",)
 DOC_PATHS = ("docs/guide/", "docs/v4/")
@@ -342,8 +372,24 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     return gaps
 
 
+def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    """Return 1-based line spans for top-level JavaScript function declarations in console.html."""
+    spans = {}
+    for start, line in enumerate(lines):
+        match = re.match(r"function\s+([A-Za-z_$][\w$]*)\s*\([^\n]*", line)
+        if not match:
+            continue
+        name = match.group(1)
+        end = start if line.rstrip().endswith("}") else next(
+            (row for row in range(start + 1, len(lines)) if lines[row] == "}"), None)
+        if end is None:
+            raise ValueError(f"could not find the end of JavaScript function {name} in the console")
+        spans[name] = (start + 1, end + 1)
+    return spans
+
+
 def changed_views(base: str) -> set[str]:
-    """Screens whose section of console.html changed; empty when the change lies outside every screen section."""
+    """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
@@ -353,10 +399,29 @@ def changed_views(base: str) -> set[str]:
         if m := re.search(r'<section class="view" id="view-([a-z]+)"', line):
             end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
             spans.append((i + 1, end + 1, m.group(1)))
+    functions = _function_spans(lines)
     touched: set[str] = set()
+    unmapped: set[int] = set()
     for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
         first, count = int(m.group(1)), int(m.group(2) or 1)
-        touched |= {v for lo, hi, v in spans if lo <= first + max(count, 1) - 1 and first <= hi}
+        last = first + max(count, 1) - 1
+        for line_no in range(max(first, 1), last + 1):
+            line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
+            for name, (lo, hi) in functions.items():
+                if lo <= line_no <= hi:
+                    if name not in SCREEN_RENDERER_VIEWS:
+                        line_views = set()
+                        break
+                    mapped = SCREEN_RENDERER_VIEWS[name]
+                    line_views |= set(console_views() if mapped is None else mapped)
+            if line_views:
+                touched |= line_views
+            else:
+                unmapped.add(line_no)
+    if unmapped:
+        lines_text = ", ".join(str(n) for n in sorted(unmapped))
+        raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text
+                         + "; add the renderer to SCREEN_RENDERER_VIEWS or keep screen content inside its view section")
     return touched
 
 
@@ -384,8 +449,16 @@ def main(argv: list[str] | None = None) -> int:
         gaps = documentation_gaps(args.files)
     else:
         files = changed_files(args.base)
-        views = changed_views(args.base) if UI.relative_to(ROOT).as_posix() in files else None
+        mapping_error = None
+        views = None
+        if UI.relative_to(ROOT).as_posix() in files:
+            try:
+                views = changed_views(args.base)
+            except ValueError as exc:
+                mapping_error = str(exc)
         gaps = documentation_gaps(files, views=views)
+        if mapping_error:
+            gaps.append(mapping_error)
     for gap in gaps:
         print("documentation check failed: " + gap, file=sys.stderr)
     if not gaps:

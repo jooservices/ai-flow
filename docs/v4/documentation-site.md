@@ -25,11 +25,14 @@ raise a new kind, add `docs/guide/runbooks/<kind>.md` (symptom, cause, fix) and 
 master AI's `incident_open` action only accepts these kinds (control answers 400 for any other), so every
 incident has a page.
 
-The CI check (`docsite check`) ties documentation to the change. A change in `aiflow/v4/control/ui/` needs a changed
-page under `docs/guide/screens/` (the page of each screen whose section changed, when the change is inside a screen
-section). A change in any control module that registers `/v1/...` routes (found from the app's routes, so
-`api.py`, `login.py` and `jira_connect.py` today) needs a changed page in `docs/guide/` or `docs/v4/` that names one
-of that module's routes. An unrelated documentation edit does not pass.
+The CI check (`docsite check`) ties documentation to the change. A change in `aiflow/v4/control/ui/` needs the
+changed screen page under `docs/guide/screens/`. For `console.html`, the check maps edits inside a view section and
+JavaScript renderers such as `renderProjects` to their screen pages. The renderer map lives in
+`SCREEN_RENDERER_VIEWS` in `aiflow/v4/core/docsite.py`. If a UI change cannot be mapped, the check fails until its
+screen mapping is added; an unrelated screen page cannot satisfy it. A change in any control module that registers
+`/v1/...` routes (found from the app's routes, so `api.py`, `login.py` and `jira_connect.py` today) needs a changed
+page in `docs/guide/` or `docs/v4/` that names one of that module's routes. An unrelated documentation edit does not
+count.
 
 ## Build
 
@@ -58,6 +61,6 @@ The `Documentation` job in `.github/workflows/ci.yml` builds the site and, on pu
 uv run --frozen python -m aiflow.v4.core.docsite check --base origin/<target branch>
 ```
 
-It fails when the pull request changes `aiflow/v4/control/ui/` or `aiflow/v4/control/api.py` and changes no `.md`
-file under `docs/guide/` or `docs/v4/`. It passes as soon as one such documentation file changes in the same
-pull request; reviewers judge whether the change is the right one.
+It fails when the pull request changes a mapped screen without changing its screen page, or changes a control API
+route without changing a page that names that route. Unmapped UI changes fail until they are mapped. Unrelated
+documentation edits do not satisfy the check.

@@ -12,7 +12,11 @@ Master accounts provide one control-wide monitoring cycle at a time. The worker 
 - Offline nodes.
 - Accounts in cooldown, signed out, error, or with an open `account_quota` or `quota_high` incident, including quota windows and reset data.
 
-The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to `POST /v1/master/actions`. Tool calls are denied for master runs so all writes stay behind the control API.
+The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to
+`POST /v1/master/actions`. This endpoint checks the active run and fence, applies the owner escalation policy, then
+performs allowed Jira, incident and notification actions and records the result in the audit log. An `incident_open`
+action must use a kind listed in the incident runbooks. Tool calls are denied for master runs so all writes stay
+behind the control API.
 
 ## Allowed actions and audit
 

@@ -134,10 +134,75 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     assert gaps(login, "docs/guide/admin/security.md") == []
 
 
+def test_changed_master_action_route_is_named_in_documentation():
+    api = "aiflow/v4/control/api.py"
+    docs = "docs/v4/master.md"
+    routes = docsite.api_routes_by_module()
+    assert "/v1/master/actions" in routes[api]
+    assert "POST /v1/master/actions" in (ROOT / docs).read_text()
+    assert docsite.documentation_gaps([api, docs], routes=routes) == []
+
+
 def test_route_modules_are_derived_from_the_registered_routes():
     modules = docsite.api_routes_by_module()
     assert {"aiflow/v4/control/api.py", "aiflow/v4/control/login.py",
             "aiflow/v4/control/jira_connect.py"} <= set(modules)
+
+
+def test_every_console_renderer_has_a_documentation_mapping():
+    functions = docsite._function_spans((ROOT / "aiflow/v4/control/ui/console.html").read_text().splitlines())
+    renderers = {name for name in functions if name.startswith("render")}
+    assert renderers <= set(docsite.SCREEN_RENDERER_VIEWS)
+    views = set(docsite.console_views())
+    assert all(mapped is None or set(mapped) <= views for mapped in docsite.SCREEN_RENDERER_VIEWS.values())
+
+
+def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsys):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    renderer_line = next(i for i, line in enumerate(source_lines, 1) if line.startswith("function renderProjects("))
+    docs = "docs/v4/master.md"
+    calls = {"docs": [docs]}
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if "--name-only" in command:
+            return Result("\n".join([ui, *calls["docs"]]) + "\n")
+        return Result(f"@@ -{renderer_line},1 +{renderer_line},1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.main(["check", "--base", "origin/develop"]) == 1
+    assert "docs/guide/screens/projects.md" in capsys.readouterr().err
+
+    calls["docs"] = ["docs/guide/screens/projects.md"]
+    assert docsite.main(["check", "--base", "origin/develop"]) == 0
+    assert "documentation check passed" in capsys.readouterr().out
+
+
+def test_ci_check_fails_closed_when_ui_hunk_cannot_be_mapped(monkeypatch, capsys):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    global_line = next(i for i, line in enumerate(source_lines, 1) if line.startswith("var S ="))
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if "--name-only" in command:
+            return Result(ui + "\ndocs/guide/screens/projects.md\n")
+        return Result(f"@@ -{global_line},1 +{global_line},1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.main(["check", "--base", "origin/develop"]) == 1
+    assert "could not be mapped to a screen" in capsys.readouterr().err
 
 
 def test_master_incident_open_accepts_only_documented_kinds(client, ctx):

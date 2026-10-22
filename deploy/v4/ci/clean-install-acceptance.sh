@@ -8,13 +8,13 @@
 #         ACCEPTANCE_PREVIOUS and ACCEPTANCE_TARGET name two published releases, the systemd containers
 #         (control-install-smoke.sh: install, rerun, failed upgrade, upgrade, rollback) and the real clean machines
 #         (clean-install-containers.sh: control plane and two machines in containers, sign-in on, backup and restore)
-# The output of every step goes to $ACCEPTANCE_LOG_DIR (default acceptance-logs) for the bug ticket.
+# The output of every step goes to $ACCEPTANCE_LOG_DIR (default aiflow-acceptance-logs in the runner temp directory, outside the repository) for the bug ticket.
 set -Eeuo pipefail
 
 MODE=${1:-}
 [[ $MODE == fast || $MODE == full ]] || { echo "usage: clean-install-acceptance.sh fast|full" >&2; exit 2; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
-LOGS=${ACCEPTANCE_LOG_DIR:-$ROOT/acceptance-logs}
+LOGS=${ACCEPTANCE_LOG_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/aiflow-acceptance-logs}
 mkdir -p "$LOGS"
 cd "$ROOT"
 

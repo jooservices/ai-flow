@@ -18,6 +18,7 @@ import io
 import json
 import os
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -81,10 +82,36 @@ def _add(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o600) -> Non
     tar.addfile(info, io.BytesIO(data))
 
 
+def _check_member(name: str, manifest: dict) -> None:
+    parts = name.split("/")
+    if name == "manifest.json":
+        return
+    if len(parts) == 2 and parts[0] == "db" and parts[1].endswith(".copy") and parts[1][:-5] in manifest["tables"]:
+        return
+    if (len(parts) == 3 and parts[0] == "secrets" and parts[1] in SECRET_DIRS
+            and parts[2] not in ("", ".", "..") and "\0" not in parts[2]):
+        return
+    raise BackupError(f"unexpected entry {name} in the backup")
+
+
 def create(database_url: str, out: Path, layout: Layout | None = None) -> dict:
     lay = layout or Layout()
     out = Path(out)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # a securely created temporary file next to the destination (mode 0600), then an atomic replace: an existing
+    # destination with looser permissions is never reused
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", dir=out.parent)
+    tmp = Path(tmp_name)
+    try:
+        manifest = _write(fd, database_url, lay)
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return manifest
+
+
+def _write(fd: int, database_url: str, lay: Layout) -> dict:
+    os.fchmod(fd, 0o600)
     counts: dict[str, int] = {}
     with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar, \
             psycopg.connect(database_url) as conn:
@@ -117,9 +144,11 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
         manifest = json.loads(tar.extractfile(members["manifest.json"]).read())
         if manifest.get("format") != FORMAT:
             raise BackupError(f"unsupported backup format {manifest.get('format')}")
-        for name in members:  # only the paths this module writes; no absolute or parent paths
-            if name != "manifest.json" and not (name.startswith(("db/", "secrets/")) and ".." not in name.split("/")):
-                raise BackupError(f"unexpected entry {name} in the backup")
+        for name in members:  # exactly the entries this module writes, all checked before anything is changed
+            _check_member(name, manifest)
+        for t in manifest["tables"]:
+            if f"db/{t}.copy" not in members:
+                raise BackupError(f"the backup lacks the data of table {t}")
         with psycopg.connect(database_url) as conn:
             existing = set(_tables(conn))
             missing = [t for t in manifest["tables"] if t not in existing]
@@ -138,6 +167,7 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
                 target_dir.mkdir(parents=True, exist_ok=True)
                 os.chmod(target_dir, 0o700)
                 fd = os.open(target_dir / fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.fchmod(fd, 0o600)  # also for a file that already existed with looser permissions
                 with os.fdopen(fd, "wb") as f:
                     f.write(tar.extractfile(m).read())
     return manifest

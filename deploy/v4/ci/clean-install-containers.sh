@@ -5,8 +5,9 @@
 #      --admin-email E`), which turns console sign-in on
 #   2. anonymous callers are refused (/v1/state 401, /cc redirects to /login); the Super Administrator signs in with
 #      the password the installer wrote to super-admin-password (it never leaves the container)
-#   3. each machine container redeems a one-use join token (the join command's HTTP call) and sends its heartbeat with
-#      only its node token: the sign-in gate must not block it; the nodes show in the signed-in state
+#   3. each machine container runs the documented join bootstrap (`curl .../v1/install.sh | sh -s -- --token-file F`
+#      with a one-use join token): it installs the signed release, and the node agent it starts heartbeats with only
+#      its node token (the sign-in gate must not block it); both nodes show online in the state
 #   4. the owner-token read of /v1/state that the deploy and canary scripts use answers 200
 #   5. `aiflow4 backup create`, the state is wiped, `aiflow4 backup restore`: the Super Administrator signs in again
 #      and the machines' tokens still work
@@ -42,8 +43,11 @@ start() {  # start <name> <alias> [extra docker args...]
 }
 start "$CONTROL" control --volume "$NAME-docker:/var/lib/docker" \
   --volume "$ROOT/deploy/v4/bin/aiflow4-control-install:/opt/aiflow4-control-install:ro"
-start "${NODES[0]}" node-a
-start "${NODES[1]}" node-b
+CONTROL_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$CONTROL")
+[[ -n $CONTROL_IP ]] || fail "no address for the control container"
+# the machines reach the control plane by its public name, as machines do in production
+start "${NODES[0]}" node-a --add-host "$DOMAIN:$CONTROL_IP"
+start "${NODES[1]}" node-b --add-host "$DOMAIN:$CONTROL_IP"
 
 in_control() { docker exec -i "$CONTROL" bash -se; }
 URL=http://127.0.0.1
@@ -68,32 +72,66 @@ body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "pa
 [[ \$(code -b "\$jar" $URL/v1/state) == 200 ]]
 CHECK
 
-echo "== 3. two machines join and send heartbeats with only their node token"
-for i in 0 1; do
-  node=${NODES[$i]}; machine="clean-node-$i"
-  in_control <<ISSUE > /dev/null || fail "join token for $machine"
+echo "== 3. two machines run the documented join bootstrap and heartbeat with only their node token"
+# The control repo of a clean install is empty: give it the project and the two machines (what Command Center's
+# Projects and Nodes screens commit to the control repository on a real installation).
+in_control <<REPO || fail "control repository"
 set -euo pipefail
-. /etc/aiflow/secrets/control/aiflow4.env
-curl -fsS -H '$HOSTHDR' -H 'Content-Type: application/json' \
-  --data "{\"provision_key\": \"\$AIFLOW4_JOIN_TOKEN\", \"name\": \"$machine\", \"role\": \"worker\", \"project\": \"CLEAN\"}" \
-  $URL/v1/nodes/join-tokens > /tmp/join-$i.json
-ISSUE
-  docker cp "$CONTROL:/tmp/join-$i.json" - | tar -xO | docker exec -i "$node" bash -se <<NODE || fail "$machine join"
-set -euo pipefail
-token=\$(python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
-joined=\$(curl -fsS -H '$HOSTHDR' -H 'Content-Type: application/json' --data "{\"join_token\": \"\$token\"}" http://control/v1/nodes/join)
-python3 -c 'import json,sys; print(json.load(sys.stdin)["node_token"])' <<<"\$joined" > /tmp/node.token
-chmod 600 /tmp/node.token
-curl -fsS -H '$HOSTHDR' -H "Authorization: Bearer \$(cat /tmp/node.token)" -H 'Content-Type: application/json' \
-  --data '{"slots_total": 1}' http://control/v1/nodes/$machine/heartbeat > /dev/null
-NODE
+repo=/srv/aiflow/control/repos/aiflow-control
+mkdir -p "\$repo/projects" "\$repo/nodes"
+cat > "\$repo/projects/CLEAN.yaml" <<'YAML'
+key: CLEAN
+repo: jooservices/clean-install
+base: main
+YAML
+for n in clean-node-0 clean-node-1; do
+  printf 'name: %s\nrole: worker\nslots: 1\nprojects: [CLEAN]\n' "\$n" > "\$repo/nodes/\$n.yaml"
 done
-in_control <<CHECK || fail "the machines are not in the state"
+REPO
+state_nodes() {  # the nodes of /v1/state, read with the owner token (name:status per line)
+  in_control <<STATE
 set -euo pipefail
 . /etc/aiflow/secrets/control/aiflow4.env
 curl -fsS -H '$HOSTHDR' -H "Authorization: Bearer \$AIFLOW4_OWNER_TOKEN" $URL/v1/state \
-  | python3 -c 'import json,sys; names={n["name"] for n in json.load(sys.stdin)["nodes"]}; assert {"clean-node-0","clean-node-1"} <= names, names'
-CHECK
+  | python3 -c 'import json,sys; [print(n["name"] + ":" + str(n.get("status"))) for n in json.load(sys.stdin)["nodes"]]'
+STATE
+}
+issue_token() {  # issue_token <machine> <file>: the one-use join token is written inside the control container
+  in_control <<ISSUE >/dev/null 2>&1
+set -euo pipefail
+. /etc/aiflow/secrets/control/aiflow4.env
+umask 077
+curl -fsS -H '$HOSTHDR' -H 'Content-Type: application/json' \
+  --data "{\"provision_key\": \"\$AIFLOW4_JOIN_TOKEN\", \"name\": \"$1\", \"role\": \"worker\", \"project\": \"CLEAN\"}" \
+  $URL/v1/nodes/join-tokens | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' > $2
+ISSUE
+}
+for i in 0 1; do
+  node=${NODES[$i]}; machine="clean-node-$i"; tokenfile="/tmp/join-$i.token"
+  issued=0
+  for _ in $(seq 1 30); do  # the control API reads the new repository files on its next refresh
+    if issue_token "$machine" "$tokenfile"; then issued=1; break; fi
+    sleep 2
+  done
+  [[ $issued == 1 ]] || fail "join token for $machine"
+  # the token is streamed from one container into a file of the other; the script text travels separately
+  docker exec "$CONTROL" cat "$tokenfile" \
+    | docker exec -i "$node" bash -c 'umask 077; cat > /root/join-token' || fail "$machine token delivery"
+  docker exec "$CONTROL" rm -f "$tokenfile"
+  # the documented join command; server-installer's OS setup is skipped (the container is already prepared)
+  docker exec "$node" bash -c \
+    "set -o pipefail; curl -fsSL http://$DOMAIN/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file /root/join-token" \
+    || fail "$machine join bootstrap"
+  [[ $(docker exec "$node" cat /srv/aiflow/current/RELEASE) == "$VERSION" ]] || fail "$machine does not run $VERSION"
+  docker exec "$node" systemctl is-active --quiet aiflow4-node-agent || fail "$machine node agent is not running"
+done
+online=0
+for _ in $(seq 1 60); do  # the agents heartbeat on their own
+  online=$(state_nodes | grep -cE '^clean-node-[01]:online$' || true)
+  [[ $online == 2 ]] && break
+  sleep 3
+done
+[[ $online == 2 ]] || { state_nodes >&2 || true; fail "the node agents did not both report online"; }
 
 echo "== 4. the owner-token read of the deploy and canary scripts"
 in_control <<CHECK || fail "owner-token state read"

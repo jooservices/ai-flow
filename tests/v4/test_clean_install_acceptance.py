@@ -153,10 +153,27 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
 
-    ctx.jira.search = lambda _jql: iter([issue("NEWAPP-1", "Sample ticket", "Intake", []),
-                                         issue("NEWAPP-2", "Needs a human", "To Do", ["aiflow-ready", "require-human"])])
-    assert jira_sync(ctx) == 2
-    ctx.jira.search = lambda _jql: iter([])
+    # Jira (the fake) is the source of truth: the registry only mirrors what the sync reads from it
+    jira_now = {"NEWAPP-1": issue("NEWAPP-1", "Sample ticket", "Intake", []),
+                "NEWAPP-2": issue("NEWAPP-2", "Needs a human", "To Do", ["aiflow-ready", "require-human"])}
+    ctx.jira.status_of.update({"NEWAPP-1": "Intake", "NEWAPP-2": "To Do"})
+
+    def resync():
+        for key, row in jira_now.items():
+            row["fields"]["status"] = {"name": ctx.jira.status_of[key]}
+        ctx.jira.search = lambda _jql: iter(list(jira_now.values()))
+        jira_sync(ctx)
+        ctx.jira.search = lambda _jql: iter([])
+
+    def move(run, headers, key, to):
+        out = client.post(f"/v1/jira/{key}/transition", json={"run_id": run["run_id"], "fence": run["fence"], "to": to},
+                          headers=headers)
+        assert out.status_code == 200 and out.json() == {"status": to}, out.text
+        assert ctx.jira.status_of[key] == to
+
+    resync()
+    assert {k: ctx.db.one("SELECT status FROM tickets WHERE key=%s", (k,))["status"] for k in jira_now} == {
+        "NEWAPP-1": "Intake", "NEWAPP-2": "To Do"}
 
     # Intake: the refiner rewrites the description through the fenced endpoint and the ticket becomes ready
     cands = client.get("/v1/work/candidates", params={"account": "grok-01"}, headers=cc).json()["tickets"]
@@ -165,7 +182,11 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     rewrite = "Business requirement: x\nAcceptance criteria:\n- AC1: works\nTechnical notes: n\nDefinition of done:\n- tests"
     assert client.post("/v1/jira/NEWAPP-1/description", json={"run_id": r["run_id"], "fence": r["fence"], "body": rewrite},
                        headers=cc).json() == {"ok": True}
-    ctx.db.run("UPDATE tickets SET status='To Do', labels=%s WHERE key='NEWAPP-1'", (["aiflow-ready"],))
+    move(r, cc, "NEWAPP-1", "To Do")  # the refiner's fenced Jira transition: Intake -> To Do
+    jira_now["NEWAPP-1"]["fields"]["labels"] = ["aiflow-ready"]  # and the label it adds in Jira, which the next sync mirrors
+    resync()
+    ready = ctx.db.one("SELECT status, labels FROM tickets WHERE key='NEWAPP-1'")
+    assert ready["status"] == "To Do" and "aiflow-ready" in ready["labels"]
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "done", "summary": "refined"}, headers=cc)
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=cc)
 
@@ -176,8 +197,11 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
                                             "head": "NEWAPP-1-x", "base": "develop", "title": "NEWAPP-1: x"}, headers=cc).json()
     client.post(f"/v1/runs/{dev['run_id']}/result", json={"fence": dev["fence"], "outcome": "done", "pr_url": pr["url"],
                                                           "branch": "NEWAPP-1-x", "summary": "built"}, headers=cc)
+    move(dev, cc, "NEWAPP-1", "In Progress")  # development starts, then hands over to verification
+    move(dev, cc, "NEWAPP-1", "In Verify")
     client.post(f"/v1/runs/{dev['run_id']}/release", json={"fence": dev["fence"]}, headers=cc)
-    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='NEWAPP-1'")
+    resync()
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='NEWAPP-1'")["status"] == "In Verify"
 
     # verification on the other machine, then merge
     v = client.post("/v1/work/claim", json={"ticket": "NEWAPP-1", "account": "codex-01", "step": "verify"}, headers=n1).json()
@@ -185,6 +209,11 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     merged = client.post("/v1/github/merge", json={"run_id": v["run_id"], "fence": v["fence"], "number": pr["number"],
                                                    "title": "NEWAPP-1: x"}, headers=n1).json()
     assert merged["merged"] and ctx.github.merged[-1][1] == pr["number"]
+    move(v, n1, "NEWAPP-1", "Done")  # the verifier closes the merged ticket
+    resync()
+    assert ctx.db.one("SELECT status, done_at FROM tickets WHERE key='NEWAPP-1'")["done_at"] is not None
+    assert [t for t in ctx.jira.transitions if t[0] == "NEWAPP-1"] == [
+        ("NEWAPP-1", "To Do"), ("NEWAPP-1", "In Progress"), ("NEWAPP-1", "In Verify"), ("NEWAPP-1", "Done")]
 
     # the second ticket (label require-human) travels the same workflow: development, a pull request, verification;
     # the verifier hands it to a person through the fenced Jira transition, and the Human review screen lists it
@@ -195,8 +224,12 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
                                              "head": "NEWAPP-2-x", "base": "develop", "title": "NEWAPP-2: x"}, headers=cc).json()
     client.post(f"/v1/runs/{dev2['run_id']}/result", json={"fence": dev2["fence"], "outcome": "done", "pr_url": pr2["url"],
                                                            "branch": "NEWAPP-2-x", "summary": "built"}, headers=cc)
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='NEWAPP-2'")["status"] == "To Do"  # not moved behind Jira's back
+    move(dev2, cc, "NEWAPP-2", "In Progress")
+    move(dev2, cc, "NEWAPP-2", "In Verify")
     client.post(f"/v1/runs/{dev2['run_id']}/release", json={"fence": dev2["fence"]}, headers=cc)
-    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='NEWAPP-2'")  # what the dev outcome moves in Jira
+    resync()
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='NEWAPP-2'")["status"] == "In Verify"
     v2 = client.post("/v1/work/claim", json={"ticket": "NEWAPP-2", "account": "codex-01", "step": "verify"}, headers=n1).json()
     assert v2["claimed"]
     moved = client.post("/v1/jira/NEWAPP-2/transition", json={"run_id": v2["run_id"], "fence": v2["fence"],
@@ -395,6 +428,39 @@ def test_restore_refuses_a_file_that_is_not_a_backup_and_the_backup_command_chec
     assert cli.main(["backup", "create"]) == 2 and cli.main(["backup", "restore"]) == 2  # usage errors, no side effects
 
 
+@pytest.mark.parametrize("member", ["secrets/control//etc/passwd", "secrets/control/../x", "secrets/other/f",
+                                    "secrets/control/sub/f", "secrets/control/..", "/etc/passwd", "db/unknown.copy",
+                                    "db/../x.copy"])
+def test_restore_refuses_members_outside_the_allowlist_before_changing_anything(fresh, test_database_url, tmp_path, member):
+    lay = Layout(fresh.machine.root)
+    good = tmp_path / "good.tar.gz"
+    made = backup.create(test_database_url, good, lay)
+    evil = tmp_path / "evil.tar.gz"
+    with tarfile.open(good) as src, tarfile.open(evil, "w:gz") as dst:
+        for m in src.getmembers():
+            dst.addfile(m, src.extractfile(m))
+        info = tarfile.TarInfo(member)
+        info.size = 3
+        dst.addfile(info, io.BytesIO(b"bad"))
+    users = fresh.ctx.db.one("SELECT count(*) AS n FROM console_users")["n"]
+    env = fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env")
+    env_before = env.read_bytes()
+    with pytest.raises(backup.BackupError, match="unexpected entry"):
+        backup.restore(test_database_url, evil, lay)
+    assert fresh.ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == users and made["tables"]
+    assert env.read_bytes() == env_before
+    assert not (fresh.machine.root / "etc/passwd").exists()
+
+
+def test_backup_over_an_existing_world_readable_file_ends_with_mode_0600(fresh, test_database_url, tmp_path):
+    out = tmp_path / "old-backup.tar.gz"
+    out.write_bytes(b"old")
+    out.chmod(0o644)
+    backup.create(test_database_url, out, Layout(fresh.machine.root))
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert tarfile.is_tarfile(out) and not list(tmp_path.glob(".old-backup*"))
+
+
 
 
 # --- AC3: upgrade and rollback ----------------------------------------------------------------------------------------
@@ -471,10 +537,28 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
 def test_the_real_machine_run_installs_with_sign_in_and_is_part_of_the_full_run():
     script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
-    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/nodes/join-tokens", "/v1/nodes/join",
-                 "/heartbeat", "backup create", "backup restore", "super-admin-password"):
+    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/nodes/join-tokens",
+                 "backup create", "backup restore", "super-admin-password"):
         assert step in script, step
     assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
+    # the machines run the documented join bootstrap (the signed release is installed by it), not hand-made HTTP calls
+    assert "/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file" in script
+    assert "aiflow4-node-agent" in script and "/srv/aiflow/current/RELEASE" in script and ":online" in script
+    assert not re.search(r"curl [^\n]*/v1/nodes/\$machine/heartbeat", script)
+    # the join token reaches the node as its own stdin, never under a heredoc that replaces the pipe
+    assert not re.search(r"docker exec -i \"\$node\" bash -se <<", script)
+
+
+def test_the_signed_candidate_run_before_publishing_has_sign_in_on():
+    smoke = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
+    assert "AIFLOW4_CONSOLE_LOGIN=1" in smoke and "console-user seed" in smoke and "/v1/auth/login" in smoke
+    assert "!= 401" not in smoke and "$anon == 401" in smoke and "$anon == 302" in smoke
+    assert not re.search(r"curl [^\n]*18080/v1/state", smoke)  # every state read carries the owner token (state_read)
+    steps = _workflow("release-v4.yml")["jobs"]["release"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    smoke_step = next(i for i, n in enumerate(names) if n == "Install release on Ubuntu systemd control and two nodes")
+    assert "install-smoke.sh" in steps[smoke_step]["run"]
+    assert smoke_step < next(i for i, n in enumerate(names) if "GitHub Release" in n or "GHCR" in n)  # before publishing
     assert "clean-install-containers.sh" in (ROOT / "deploy/v4/ci/clean-install-acceptance.sh").read_text()
 
 

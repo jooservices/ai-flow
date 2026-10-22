@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 
 TITLE=${1:?usage: open-bug-ticket.sh "<title>"}
-LOGS=${ACCEPTANCE_LOG_DIR:-acceptance-logs}
+LOGS=${ACCEPTANCE_LOG_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/aiflow-acceptance-logs}
 RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-0}"
 BODY=$(mktemp)
 FULL=$(mktemp)

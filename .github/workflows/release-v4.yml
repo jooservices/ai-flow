@@ -168,6 +168,9 @@ jobs:
             --bundle "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
             "dist/aiflow4-$VERSION.tar.gz"
 
+      # Console sign-in is on in this run: anonymous callers are refused, the Super Administrator signs in, and the
+      # machines join and heartbeat with their node tokens only (docs/v4/clean-install-acceptance.md). It runs against
+      # the signed candidate and before anything is published.
       - name: Install release on Ubuntu systemd control and two nodes
         env:
           VERSION: ${{ steps.release.outputs.version }}

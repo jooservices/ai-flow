@@ -45,9 +45,11 @@ The real-machine tier needs Docker and a published release:
 
 - `deploy/v4/ci/clean-install-containers.sh vX.Y.Z` builds a clean control machine and two clean machines (Ubuntu
   systemd containers on a private network), installs the control plane with the documented command and
-  `--admin-email`, checks that anonymous callers are refused, signs in with the password file, joins both machines
-  with one-use join tokens and sends their heartbeats with the node token only, reads `/v1/state` with the owner token,
-  then runs the backup, a wipe and the restore.
+  `--admin-email`, checks that anonymous callers are refused, signs in with the password file, runs the documented join bootstrap (`curl .../v1/install.sh | sh -s -- --token-file F`, with a one-use join token) on both machines, which installs the signed release and starts the node agent,
+  checks that both agents report online with their node token only, reads `/v1/state` with the owner token,
+  then runs the backup, a wipe and the restore. The restore refuses, before changing anything, an archive with any
+  entry other than `manifest.json`, `db/<table>.copy` of a listed table and `secrets/{control,console}/<file name>`;
+  `backup create` writes through a private temporary file, so the archive is `0600` even over an older file.
 - `deploy/v4/ci/control-install-smoke.sh` (install, rerun, failed upgrade, upgrade, rollback) and
   `deploy/v4/ci/install-smoke.sh` (signed release, two nodes, canary, failed install and rollback,
   [Release installation smoke test](install.md)).
@@ -73,7 +75,7 @@ caches that are rebuilt.
 ## When it runs
 
 `deploy/v4/ci/clean-install-acceptance.sh fast|full` is the single entry point; it keeps one log per step in
-`acceptance-logs/`.
+`aiflow-acceptance-logs/` in the runner temp directory.
 
 | Run | Trigger | Content |
 |---|---|---|
@@ -83,7 +85,7 @@ caches that are rebuilt.
 
 `clean-install-containers.sh` installs a published release, so the release acceptance job cannot pass it the tag being
 released before that tag is published. The release job instead runs `install-smoke.sh` with the signed candidate
-tarball and its signature bundle in clean Ubuntu systemd containers, including a control plane and two machines,
+tarball and its signature bundle in clean Ubuntu systemd containers, including a control plane and two machines, with console sign-in on (anonymous callers refused, the Super Administrator signs in, machines join and heartbeat with their node tokens only, owner-token state reads),
 before it creates the GitHub Release or pushes the control image. The sign-in-enabled `clean-install-containers.sh`
 run is part of the nightly full test when two published releases are available, against the newer release.
 

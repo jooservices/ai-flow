@@ -10,6 +10,7 @@ from aiflow.v4.control.api import create_app
 from aiflow.v4.control.console_auth import (CANONICAL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS,
                                              has_permission, issue_session, landing_page, normalize_roles)
 from aiflow.v4.core.controlrepo import Project
+from conftest import add_ticket
 
 
 SESSION_SECRET = "test-console-role-secret-with-at-least-32-bytes"
@@ -158,6 +159,33 @@ def test_project_restriction_filters_dashboard_and_refuses_other_project_apis(ct
                         ("limited@example.test",))
     assert {row["payload"]["path"] for row in denied} >= {
         "/v1/business/OTHER/release-readiness", "/v1/tickets/OTHER-1/timeline", "/v1/analytics/daily"}
+
+
+def test_project_restriction_scopes_human_review_queue_metrics_and_export(ctx):
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    add_ticket(ctx.db, "TESTWP-96", status="Human review", labels=("require-human",))
+    add_ticket(ctx.db, "OTHER-1", status="Human review", labels=("require-human",))
+    login.seed_user(ctx.db, "review-limited@example.test", "reviewer")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               (["TESTWP"], "review-limited@example.test"))
+    client = role_client(ctx, "reviewer", "review-limited@example.test")
+
+    queue = client.get("/v1/reviews")
+    assert queue.status_code == 200
+    assert [ticket["key"] for ticket in queue.json()["tickets"]] == ["TESTWP-96"]
+    assert queue.json()["projects"] == ["TESTWP"]
+    assert queue.json()["metrics"]["people_needed_this_week"] == 1
+    exported = client.get("/v1/reviews/export.csv")
+    assert exported.status_code == 200 and ",all" in exported.text
+    assert "OTHER" not in exported.text
+
+    for path in ("/v1/reviews?project=OTHER", "/v1/reviews/export.csv?project=OTHER"):
+        refused = client.get(path)
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == "not available for your role"
+    denied = ctx.db.all("SELECT actor,payload FROM write_audit WHERE action='access_denied' AND actor=%s",
+                        ("review-limited@example.test",))
+    assert {row["payload"]["path"] for row in denied} >= {"/v1/reviews", "/v1/reviews/export.csv"}
 
 
 def test_administrator_can_add_edit_disable_and_audit_people_and_old_role_names(ctx):

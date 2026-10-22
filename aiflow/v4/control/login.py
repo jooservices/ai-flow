@@ -449,7 +449,9 @@ def install_login(app: FastAPI, ctx) -> None:
         if match:
             row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (match.group(1),))
             return str((row or {}).get("project") or "")
-        return request.query_params.get("project", "") if path.startswith(("/v1/analytics/", "/v1/memory/")) else ""
+        if path.startswith(("/v1/analytics/", "/v1/memory/")) or path in ("/v1/reviews", "/v1/reviews/export.csv"):
+            return request.query_params.get("project", "")
+        return ""
 
     def audit_refusal(user: ConsoleUser, request: Request, reason: str = "not available for your role") -> None:
         ctx.db.run("INSERT INTO write_audit (target,action,ticket,run_id,fence,actor,accepted,result,payload)"

@@ -191,12 +191,14 @@ def write_study_case(db, *, project: str, title: str, situation: str, cause: str
     cause = cause.strip()[:5000]
     signature = _signature(cause)
     repeated = False
-    if signature and ticket_key:
+    if signature:
         repeated = bool(db.one(
-            "SELECT 1 FROM knowledge_items k JOIN knowledge_deliveries d ON d.item_id=k.id "
-            "WHERE k.project=%s AND k.kind='study_case' AND k.mistake_signature=%s AND d.ticket_key=%s "
-            "AND (%s='' OR d.run_id<>%s) LIMIT 1",
-            (project, signature, ticket_key, run_id, run_id)))
+            "SELECT 1 FROM knowledge_items k WHERE k.kind='study_case' AND k.mistake_signature=%s "
+            "AND k.status<>'retired' AND (%s='' OR k.run_id<>%s) AND ("
+            "(k.scope='project' AND k.project=%s) OR (k.scope='general' AND %s='') OR EXISTS ("
+            "SELECT 1 FROM knowledge_deliveries d WHERE d.item_id=k.id AND d.project=%s "
+            "AND (%s='' OR d.run_id::text<>%s))) LIMIT 1",
+            (signature, run_id, run_id, project, project, project, run_id, run_id)))
     body = _redact_sensitive(f"Situation: {situation.strip()[:5000]}\nCause: {cause}\nFix: {fix.strip()[:5000]}\n"
                              f"Avoid next time: {prevention.strip()[:5000]}")
     try:
@@ -378,16 +380,21 @@ def dashboard(db, project: str = "", q: str = "", include_retired: bool = True) 
     visible_scope = "scope='general'" if not project else "(scope='general' OR (scope='project' AND project=%s))"
     scope_params = () if not project else (project,)
     counts = db.all("SELECT CASE WHEN scope='general' THEN 'general' ELSE project END AS project,kind,count(*)::int AS count "
-                    "FROM knowledge_items WHERE status<>'retired' GROUP BY 1,2 ORDER BY 1,2")
+                    "FROM knowledge_items WHERE " + visible_scope + " AND status<>'retired' GROUP BY 1,2 ORDER BY 1,2",
+                    scope_params)
     newest = db.all("SELECT * FROM knowledge_items WHERE " + visible_scope +
                     " AND status<>'retired' ORDER BY created_at DESC,id DESC LIMIT 8", scope_params)
     most_used = db.all("SELECT * FROM knowledge_items WHERE " + visible_scope +
                        " AND status<>'retired' ORDER BY handed_count DESC,created_at DESC LIMIT 8", scope_params)
-    deliveries = db.one("SELECT count(*)::int AS count FROM knowledge_context_packs") or {"count": 0}
-    repeated = db.one("SELECT count(*)::int AS count FROM knowledge_items WHERE repeated_mistake=true") or {"count": 0}
+    deliveries = db.one("SELECT count(*)::int AS count FROM knowledge_context_packs WHERE project=%s OR project=''",
+                        (project,)) or {"count": 0}
+    repeated = db.one("SELECT count(*)::int AS count FROM knowledge_items WHERE repeated_mistake=true AND " + visible_scope,
+                      scope_params) or {"count": 0}
     rework = db.all("SELECT date_trunc('week',started_at)::date::text AS week,count(*)::int AS rounds,"
-                    "count(DISTINCT ticket_key)::int AS tickets FROM runs WHERE step='verify' AND outcome='rework' "
-                    "GROUP BY 1 ORDER BY 1 DESC LIMIT 12")
+                    "count(DISTINCT ticket_key)::int AS tickets,"
+                    "round(count(*)::numeric / NULLIF(count(DISTINCT ticket_key),0),2) AS rounds_per_ticket "
+                    "FROM runs WHERE (project=%s OR project='') AND step='verify' AND outcome='rework' "
+                    "GROUP BY 1 ORDER BY 1 DESC LIMIT 12", (project,))
     visible = search_items(db, project=project, q=q, limit=100, include_retired=include_retired)
     return {"counts": counts, "newest": [_pack_item(r) for r in newest],
             "most_used": [_pack_item(r) for r in most_used], "items": [_pack_item(r) for r in visible],
@@ -418,7 +425,7 @@ def moderate_item(db, item_id: int, *, action: str, actor: str = "", content: st
                             source_ref=f"{item_id}:{row['updated_at'].isoformat()}", source_url=row["source_url"],
                             ticket_key=row["ticket_key"], run_id=row["run_id"], pr_url=row["pr_url"], approved=True,
                             approved_by=actor)
-        db.run("UPDATE knowledge_items SET status='stale',updated_at=now() WHERE id=%s", (item_id,))
+        db.run("UPDATE knowledge_items SET status='retired',updated_at=now() WHERE id=%s", (item_id,))
         return revised
     elif action == "merge":
         other = db.one("SELECT * FROM knowledge_items WHERE id=%s", (duplicate_id,)) if duplicate_id else None

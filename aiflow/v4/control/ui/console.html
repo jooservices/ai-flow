@@ -1645,7 +1645,7 @@ function renderLearningKnowledge(k, canManage) {
   (d.counts || []).forEach(function (row) { h += '<div class="small"><span class="mono">' + esc(row.project) + '</span> · ' + esc(KNOWLEDGE_TYPES[row.kind] || row.kind) + ': ' + Number(row.count) + '</div>'; });
   if (!(d.counts || []).length) h += '<div class="empty">No captured knowledge yet.</div>';
   h += '</div><h3 style="margin-top:14px">Rework rounds per week</h3><div class="knowledge-list">';
-  (stats.rework_by_week || []).forEach(function (row) { h += '<div class="small">' + esc(row.week) + ' · ' + Number(row.rounds) + ' rounds across ' + Number(row.tickets) + ' tickets</div>'; });
+  (stats.rework_by_week || []).forEach(function (row) { h += '<div class="small">' + esc(row.week) + ' · ' + Number(row.rounds) + ' rounds across ' + Number(row.tickets) + ' tickets · ' + Number(row.rounds_per_ticket || 0) + ' rounds per ticket</div>'; });
   if (!(stats.rework_by_week || []).length) h += '<div class="small">No verification rework recorded.</div>';
   h += '</div><h3 style="margin-top:14px">Newest</h3><div class="knowledge-list">';
   (d.newest || []).forEach(function (item) { h += '<div class="small">' + esc(item.title) + ' · ' + esc(item.kind) + '</div>'; });

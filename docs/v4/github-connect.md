@@ -71,3 +71,45 @@ Workers continue to receive the same short lived installation tokens as before, 
 and required permissions. Tokens are returned only to the authenticated worker request; they are not included in
 the UI, audit payloads or application log messages. The App configuration is shared between the API replicas and
 reloaded when it changes, so a successful connection is available without restarting the control plane.
+
+## Several connections: accounts, organizations and tokens
+
+Owners can hold more than one GitHub connection, for example the organization `jooservices` through a GitHub App
+and a personal account through an access token. **Integrations** lists every connection with its account or
+organization, credential type (GitHub App or access token), status and the repositories it reaches, and offers
+**Test**, **Replace** (a new token, or **Replace App** which runs the App flow again for that connection) and
+**Remove** for each. Nodes never store any of these credentials.
+
+- The installation you already have is the first connection, `default`; nothing changes for single-App installations.
+  Its files stay in `AIFLOW4_GITHUB_APP_DIR`.
+- **Add an access token**: paste a personal or fine-grained token, optionally the account or organization it is for
+  (blank: the token owner) and a label. AI Flow verifies the token with GitHub, keeps it in the secret store
+  (`connections/<id>/token`, owner-only) and never shows it again. The UI recommends GitHub Apps and warns on every
+  token connection: a token reaches more, has no bot identity and cannot be limited per run.
+- **Add a GitHub App**: use the same **Connect GitHub** manifest flow or **Use an existing GitHub App** (App ID and
+  PEM) as before. When a connection exists, the new App is added as another connection (`connections/<id>/app.json`
+  and `app.pem`) instead of replacing the first one.
+- A connection serves the repositories of one account or organization that it lists.
+
+### Which connection a repository uses
+
+Each repository uses its assigned connection, or else the first connection of its owner that reaches it. On
+**Projects**, **Repositories** shows a **GitHub connection** per repository (default repository, epic repositories
+and any other) with the connections able to reach it; choosing one and saving records the assignment in the secret
+store (`assignments.json`, by repository) and in the audit log (`assign_connection`). The control repository
+`projects/<KEY>.yaml` never contains connection details. A repository no connection reaches, or an assigned
+connection that cannot reach it, is refused (HTTP 409 on the run, 422 when saving); AI Flow does not fall back to
+another account. A connection assigned to repositories cannot be removed until they are reassigned.
+
+Command Center performs pull request, comment, merge, branch, release and checks operations with the
+connection assigned to the repository. For a GitHub App connection a node still receives only the short lived
+installation token limited to that repository (`POST /v1/github/token`). An access token cannot be narrowed or
+shortened, so it is never handed to a node: that endpoint answers 409 for a repository on a token connection, and
+workers cannot clone or push it. Assign such a repository a GitHub App connection for worker use; token
+connections serve Command Center operations and repository listing.
+
+### Audit
+
+Every GitHub write in `write_audit` (target `github`, and `aiflow-control` for control repository commits)
+carries `connection` in its payload: `default` or the connection id. Token and key values never appear in the
+UI, logs, Jira, events or audit rows.

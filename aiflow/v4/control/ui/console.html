@@ -529,7 +529,8 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
+  consoleUser: null, autonomy: { data: null, error: '', busy: false, saving: false },
+  nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
@@ -601,6 +602,28 @@ function consoleCan(permission) {
 }
 function consoleOwner() { return consoleCan('console.manage') || consoleCan('integrations.manage'); }
 function consoleReader() { return consoleCan('console.read'); }
+function loadMasterAutonomy(force) {
+  if (!consoleReader() || S.autonomy.busy || (S.autonomy.data && !force)) return;
+  S.autonomy.busy = true;
+  fetch('/v1/master/autonomy', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { S.autonomy.data = d; S.autonomy.error = ''; })
+    .catch(function (err) { S.autonomy.error = String(err.message || err); })
+    .then(function () { S.autonomy.busy = false; if (S.view === 'cc') renderCC(); });
+}
+function saveMasterBudget() {
+  var input = $('[data-master-budget]'), value = input ? Number(input.value) : NaN;
+  if (!Number.isInteger(value) || value < 0 || value > 1440) {
+    S.autonomy.error = 'Enter a daily budget from 0 to 1,440 minutes.'; renderCC(); return;
+  }
+  S.autonomy.saving = true; S.autonomy.error = ''; renderCC();
+  fetch('/v1/master/autonomy/budget', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ daily_budget_minutes: value }) }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { if (S.autonomy.data) S.autonomy.data.budget = d.budget; })
+    .catch(function (err) { S.autonomy.error = String(err.message || err); })
+    .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
+}
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
@@ -656,6 +679,7 @@ function pollConsoleSession() {
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null;
     render();
+    if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
@@ -1009,6 +1033,33 @@ function renderLive() {
 }
 
 /* ---------- Command Center ---------- */
+function masterAutonomyPanel() {
+  if (!consoleReader()) return '<section class="panel"><div class="panel-h"><h2>Master autonomy</h2></div><div class="muted">Sign in to view the autonomy report and daily budget.</div></section>';
+  if (!S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
+  var data = S.autonomy.data, budget = data && data.budget, report = data && data.report;
+  var h = '<section class="panel" id="p-master-autonomy"><div class="panel-h"><h2>Master autonomy</h2><span class="hint">Weekly report and daily model time budget</span></div>';
+  if (S.autonomy.error) h += '<div class="stakeholder-error">' + esc(S.autonomy.error) + '</div>';
+  if (!data) return h + '<div class="muted">' + (S.autonomy.busy ? 'Loading autonomy report…' : 'Autonomy report unavailable.') + '</div></section>';
+  h += '<div class="grid-2"><div class="review-fact"><div class="label">Today · UTC</div><div class="value">' + esc(budget.used_minutes) + ' / ' + esc(budget.daily_budget_minutes) + ' minutes used · ' + esc(budget.remaining_minutes) + ' remaining</div></div>';
+  h += '<div class="review-fact"><div class="label">Daily budget</div><div class="value">';
+  if (consoleCan('console.write')) h += '<label for="master-budget">Minutes <input id="master-budget" data-master-budget type="number" min="0" max="1440" step="1" value="' + esc(budget.daily_budget_minutes) + '" style="width:110px;min-height:36px;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:var(--surface-2)"></label> <button class="btn sm primary" data-act="master-budget-save"' + (S.autonomy.saving ? ' disabled' : '') + '>Save</button>';
+  else h += esc(budget.daily_budget_minutes) + ' minutes';
+  h += '</div></div></div>';
+  h += '<div class="panel-h"><h3 style="margin:4px 0">Weekly autonomy · week of ' + esc(report.week_start) + '</h3></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Finished without a person</th><th>Person needed</th><th>Repeated failures</th></tr></thead><tbody>';
+  (report.trend || []).forEach(function (row) { h += '<tr><td class="mono">' + esc(row.week_start) + '</td><td>' + esc(row.finished_without_person) + '</td><td>' + esc(row.needed_person) + '</td><td>' + esc(row.repeated_failures) + '</td></tr>'; });
+  h += '</tbody></table></div>';
+  h += '<div class="grid-2"><div><h3>Tickets finished without a person</h3>';
+  if (!(report.finished_without_person || []).length) h += '<div class="muted">No AI-finished tickets recorded this week.</div>';
+  else (report.finished_without_person || []).forEach(function (t) { h += '<div class="feed"><button class="btn sm" data-act="open-ticket" data-key="' + esc(t.key) + '">' + esc(t.key) + '</button> ' + esc(t.summary || '') + '</div>'; });
+  h += '</div><div><h3>When a person was needed</h3>';
+  if (!(report.needed_person || []).length) h += '<div class="muted">No owner decisions requested this week.</div>';
+  else (report.needed_person || []).forEach(function (item) { h += '<div class="review-fact"><div class="label">' + esc(item.ticket || item.observation_key) + ' · ' + esc(when(item.sent_at)) + '</div><div class="value">' + esc(item.reason) + '</div><div class="muted">Options: ' + esc((item.options || []).join(' · ')) + '</div></div>'; });
+  h += '</div></div><div><h3>Repeated flow failures</h3>';
+  if (!(report.repeated_failures || []).length) h += '<div class="muted">No repeated failure Bugs updated this week.</div>';
+  else (report.repeated_failures || []).forEach(function (item) { h += '<div class="review-fact"><b class="mono">' + esc(item.ticket_key) + '</b> · ' + esc(item.summary || item.signature) + ' · ' + esc(item.repeat_count) + ' additional runs</div>'; });
+  return h + '</div></section>';
+}
 function renderCC() {
   var d = D();
   var online = d.nodes.filter(function (n) { return n.status === 'online'; });
@@ -1047,6 +1098,8 @@ function renderCC() {
   }
 
   h += toolWaitsPanel(d);
+  h += masterAutonomyPanel();
+
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
   if (!d.nodes.length) h += '<div class="empty">No node has joined. Create a one-use join command below and run it on the new machine.</div>';
@@ -2676,6 +2729,7 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'master-budget-save') saveMasterBudget();
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }

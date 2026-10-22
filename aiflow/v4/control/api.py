@@ -495,6 +495,26 @@ class KnowledgeRestoreBody(BaseModel):
     actor: str
 
 
+class KnowledgeItemBody(BaseModel):
+    project: str = Field(default="", max_length=32)
+    scope: str = Field(default="project", max_length=16)
+    epic: str = Field(default="", max_length=100)
+    kind: str
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=30_000)
+    actor: str = Field(default="", max_length=200)
+
+
+class KnowledgeItemActionBody(BaseModel):
+    actor: str = Field(default="", max_length=200)
+    project: str = Field(default="", max_length=32)
+    scope: str = Field(default="", max_length=16)
+    epic: str = Field(default="", max_length=100)
+    title: str = Field(default="", max_length=200)
+    content: str = Field(default="", max_length=30_000)
+    duplicate_id: int | None = None
+
+
 class StakeholderVerdictBody(BaseModel):
     change_key: str
     target_key: str = ""
@@ -725,6 +745,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     def finish_reviewer_run(key: str, run_id: str, fence: int, outcome: str, summary: str) -> None:
         ctx.db.run("UPDATE runs SET status='finished', outcome=%s, summary=%s, ended_at=now() WHERE id=%s",
                    (outcome, summary[:2000], run_id))
+        try:
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+        except Exception as exc:  # noqa: BLE001 - learning must not block a review action
+            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         ctx.leases.release(key, run_id, fence)
         ctx.events.emit("run.finished", ticket=key, project=key.split("-", 1)[0], step="qa", run_id=run_id,
                         fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
@@ -2633,6 +2658,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             extra["master_scope"] = "global"
         else:
             extra["related"] = related_hits(t)
+        try:
+            ticket_context = f"{t.get('summary', '')}\n{t.get('description', '')}"[:12_000]
+            extra["context_pack"] = knowledge.context_pack(ctx.db, project=t.get("project", ""), ticket=t["key"],
+                                                           epic=epic or "", query=ticket_context, run_id=run_id)
+        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
+            log.warning("knowledge context pack for %s failed: %s", t["key"], type(exc).__name__)
+            extra["context_pack"] = {"project": t.get("project", ""), "ticket": t["key"], "items": []}
         project_data = ({"key": "", "repo": "", "base": "", "hotfix_base": "", "checks": [], "stack": "",
                          "node": node,
                          "work_minutes": {"target": 30, "warn": 45, "hard": 60},
@@ -2756,10 +2788,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
                   "description": f"Run full configured project checks on {release_branch}, cut from {source_branch}.",
                   "labels": [], "priority": "Highest", "type": "Release"}
+        try:
+            context_pack = knowledge.context_pack(ctx.db, project=project.key, ticket=key,
+                                                  query=f"{ticket['summary']}\n{ticket['description']}", run_id=run_id)
+        except Exception as exc:  # noqa: BLE001 - a local search failure cannot prevent a lease
+            log.warning("knowledge context pack for release %s failed: %s", version["name"], type(exc).__name__)
+            context_pack = {"project": project.key, "ticket": key, "items": []}
         return {"claimed": True, "step": "version_release", "run_id": run_id, "fence": lease.fence,
                 "run_token": secrets.token_urlsafe(32), "lease_ms": ctx.settings.lease_ms,
                 "provider": acc.provider, "model": "", "effort": "", "account": acc.id,
-                "identity": bot_identity(), "ticket": ticket, "project": project_data,
+                "identity": bot_identity(), "ticket": ticket, "project": project_data, "context_pack": context_pack,
                 "version": version, "tracker_key": tracker, "tickets": snapshot["tickets"]}
 
     @app.post("/v1/version-releases/{version_id}/complete")
@@ -2844,6 +2882,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         if body.outcome == "tool_missing" and run["step"] == "dev":
             tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []], body.summary)
+        try:
+            knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
+            knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+        except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
+            log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
@@ -4079,6 +4122,35 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/memory/study-cases")
     def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
         return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
+
+    # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------
+    @app.get("/v1/knowledge/items")
+    def knowledge_items(request: Request, project: str = "", q: str = "", include_retired: bool = True) -> dict:
+        console_user(request, "knowledge.read")
+        return knowledge.dashboard(ctx.db, project, q, include_retired)
+
+    @app.post("/v1/knowledge/items")
+    def knowledge_item_save(body: KnowledgeItemBody, request: Request) -> dict:
+        user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
+        try:
+            item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
+                                       title=body.title, content=body.content, actor=body.actor or user.subject)
+        except knowledge.Invalid as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return knowledge._pack_item(item)
+
+    @app.post("/v1/knowledge/items/{item_id}/{action}")
+    def knowledge_item_action(item_id: int, action: str, body: KnowledgeItemActionBody, request: Request) -> dict:
+        user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
+                            node=str(item_id))
+        try:
+            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=body.actor or user.subject,
+                                           content=body.content, title=body.title,
+                                           duplicate_id=body.duplicate_id, project=body.project,
+                                           scope=body.scope or None, epic=body.epic)
+        except knowledge.Invalid as exc:
+            raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
+        return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
     def load_managed_resources() -> None:

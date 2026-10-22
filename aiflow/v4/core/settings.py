@@ -47,6 +47,14 @@ class Settings:
     jira_email: str = ""
     jira_token: str = ""
     jira_projects: list[str] = field(default_factory=list)
+    # Jira connected on the Integrations screen (docs/v4/jira-connect.md): secrets live in files under this
+    # directory, never in the registry; the OAuth endpoints are Atlassian's unless overridden (tests, proxies).
+    jira_secret_dir: str = "/etc/aiflow/secrets/jira"
+    jira_oauth_authorize_url: str = "https://auth.atlassian.com/authorize"
+    jira_oauth_token_url: str = "https://auth.atlassian.com/oauth/token"
+    jira_oauth_revoke_url: str = "https://auth.atlassian.com/oauth/revoke"
+    jira_oauth_resources_url: str = "https://api.atlassian.com/oauth/token/accessible-resources"
+    jira_api_base: str = "https://api.atlassian.com/ex/jira"
     canary_bug_project: str = "TESTFLOW"
     github_org: str = "jooservices"
     github_app_dir: str = "/etc/aiflow/secrets/github"
@@ -84,6 +92,12 @@ class Settings:
         s.database_url = _env("DATABASE_URL", s.database_url)
         s.jira_site = _env("JIRA_SITE", s.jira_site)
         s.jira_projects = [p for p in _env("JIRA_PROJECTS", "").split(",") if p]  # empty: every project in the control repo
+        s.jira_secret_dir = _env("JIRA_SECRET_DIR", s.jira_secret_dir)
+        s.jira_oauth_authorize_url = _env("JIRA_OAUTH_AUTHORIZE_URL", s.jira_oauth_authorize_url)
+        s.jira_oauth_token_url = _env("JIRA_OAUTH_TOKEN_URL", s.jira_oauth_token_url)
+        s.jira_oauth_revoke_url = _env("JIRA_OAUTH_REVOKE_URL", s.jira_oauth_revoke_url)
+        s.jira_oauth_resources_url = _env("JIRA_OAUTH_RESOURCES_URL", s.jira_oauth_resources_url)
+        s.jira_api_base = _env("JIRA_API_BASE", s.jira_api_base)
         s.canary_bug_project = _env("CANARY_BUG_PROJECT", s.canary_bug_project)
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)

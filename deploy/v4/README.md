@@ -34,6 +34,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
+- [Connect Jira from the UI](../../docs/v4/jira-connect.md): owner-only OAuth 2.0 (3LO) or API-token connection on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 

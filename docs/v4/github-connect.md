@@ -7,11 +7,11 @@ and the control API continues to fence and audit GitHub writes.
 ## Before connecting
 
 GitHub must be able to redirect the browser back to the control plane after App creation and installation. Set
-`AIFLOW4_PUBLIC_URL` to the HTTPS URL owners use to open AI Flow before starting the v4 control services. The
-compose file passes this value through to the API containers. The manifest flow is disabled when that URL is not
-a valid HTTPS origin.
+`AIFLOW4_PUBLIC_URL` to the HTTPS URL owners use to open AI Flow in
+`/etc/aiflow/secrets/control/aiflow4.env`, which Compose loads into the control services. The manifest flow is
+disabled when that URL is not a valid HTTPS origin.
 
-For example, set the URL in the environment used by `docker compose`:
+For example, add this line to `/etc/aiflow/secrets/control/aiflow4.env`:
 
 ```sh
 AIFLOW4_PUBLIC_URL=https://control.example.com

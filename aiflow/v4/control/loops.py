@@ -1,7 +1,8 @@
 """Background loops of the control plane (process `aiflow4 control-loops`).
 
 jira_sync   every 20 s: tickets updated in the last 5 minutes; a full pass every 10 minutes. A changed status or
-            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline).
+            aiflow-ready label is recorded as a `ticket.status` event (the ticket timeline). Without a usable Jira
+            credential it stops and keeps the jira_auth incident open (jira_connect.sync_gate).
 watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs past the 30/45/60 minute clocks,
             accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
             alerts people on critical ones.
@@ -19,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import memory
+from . import jira_connect, memory
 from . import projects as project_lifecycle
 from . import rollout
 from ..core.toolchains import toolchain_gaps
@@ -120,10 +121,10 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
 
 def jira_sync(ctx: Ctx, full: bool = False) -> int:
     configured = ctx.repo().projects
-    # The control repo is authoritative when it contains project definitions: added projects join sync
-    # automatically and paused or removed projects stop being queried on the next pass.
+    # The control repo is authoritative: paused or removed projects must stop being queried on the next pass.
     keys = sorted(key for key, project in configured.items() if not project.paused)
-    if not ctx.jira or not keys:
+    # Without a usable credential (disconnected, refresh rejected), the jira_auth incident says why.
+    if not keys or not jira_connect.sync_gate(ctx):
         return 0
     projects = ",".join(keys)
     jql = f"project in ({projects})" + ("" if full else " AND updated >= -5m")

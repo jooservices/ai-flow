@@ -411,8 +411,8 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
       <button class="tab" role="tab" id="tab-review" aria-controls="view-review" aria-selected="false" data-act="view" data-view="review">Human review</button>
       <button class="tab" role="tab" id="tab-stakeholder" aria-controls="view-stakeholder" aria-selected="false" data-act="view" data-view="stakeholder">Stakeholder</button>
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-view="knowledge">Knowledge</button>
-      <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-view="integrations">Integrations</button>
+      <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-view="projects">Projects</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -442,8 +442,8 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
     <div id="sbody" class="view"></div>
   </section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
-  <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
+  <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -519,7 +519,8 @@ var S = {
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' },
-  knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' }
+  knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' },
+  integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
 function viewOf(path) {
   if (path.indexOf('/projects') === 0) return 'projects';
@@ -531,10 +532,11 @@ function viewOf(path) {
   if (path.indexOf('/review') === 0) return 'review';
   if (path.indexOf('/stakeholder') === 0) return 'stakeholder';
   if (path.indexOf('/knowledge') === 0) return 'knowledge';
+  if (path.indexOf('/integrations') === 0) return 'integrations';
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
@@ -668,7 +670,7 @@ function githubResponseError(response) {
     return Promise.reject(new Error(typeof detail === 'string' ? detail : 'GitHub connection could not be completed'));
   });
 }
-function loadIntegrations() {
+function loadGitHubIntegrations() {
   S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
   fetch('/v1/integrations/github', { cache: 'no-store' }).then(function (r) { return githubResponseError(r); })
     .then(function (d) { S.integrations.data = d; S.integrations.error = ''; })
@@ -714,12 +716,11 @@ function connectImportedGitHubApp() {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ installation_id: Number(S.integrations.selected) })
   }).then(function (r) { return githubResponseError(r); })
-    .then(function () { S.integrations.pending = null; S.integrations.notice = 'GitHub is connected.'; loadIntegrations(); })
+    .then(function () { S.integrations.pending = null; S.integrations.notice = 'GitHub is connected.'; loadGitHubIntegrations(); })
     .catch(function (e) { S.integrations.error = String(e.message || e); })
     .then(function () { S.integrations.busy = false; renderIntegrations(); });
 }
-function renderIntegrations() {
-  var root = $('#view-integrations'); if (!root) return;
+function renderGitHubIntegrations() {
   var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
   h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
   if (consoleOwner()) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
@@ -758,7 +759,7 @@ function renderIntegrations() {
     }
     h += '<p class="small">Private keys and short lived access tokens are never shown in this page. GitHub connection changes are audited.</p>';
   }
-  h += '</section>'; root.innerHTML = h;
+  h += '</section>'; return h;
 }
 function projectRequestBody() {
   var f = S.projectAdmin.form;
@@ -1566,6 +1567,96 @@ function approveKnowledge(proposalId) {
     .catch(function (err) { toast('Policy approval failed', String(err.message || err), 'crit'); });
 }
 
+/* ---------- Integrations: connect Jira (OAuth 2.0 3LO or API token fallback) ----------
+   Secrets typed here go straight to the secret store; the API never returns them and the fields are cleared. */
+var JIRA_SOURCE = { oauth: 'OAuth 2.0 (3LO)', api_token: 'Email and API token', owner_env: 'owner.env (legacy)', none: 'Not connected' };
+function integHeaders() {
+  var h = { 'Content-Type': 'application/json' };
+  if (S.integ.ownerToken) h.Authorization = 'Bearer ' + S.integ.ownerToken;
+  return h;
+}
+function integFetch(url, opts) {
+  return fetch(url, Object.assign({ cache: 'no-store', credentials: 'same-origin', headers: integHeaders() }, opts || {}))
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); });
+}
+function loadJiraIntegrations() {
+  var g = S.integ;
+  if (g.loading) return;
+  var q = /[?&]jira=([a-z]+)/.exec(location.search || '');
+  if (q) {
+    g.notice = { connected: 'Jira connected.', denied: 'Consent was not given on Atlassian.', failed: 'Atlassian refused the connection; check the OAuth app and try again.' }[q[1]] || '';
+    try { history.replaceState(null, '', '/integrations'); } catch (e) { /* file preview */ }
+  }
+  g.loading = true; g.error = '';
+  integFetch('/v1/integrations/jira').then(function (d) { g.jira = d; g.loading = false; if (S.view === 'integrations') renderIntegrations(); })
+    .catch(function (e) { g.error = String(e.message || e); g.loading = false; if (S.view === 'integrations') renderIntegrations(); });
+}
+function renderJiraIntegrations() {
+  var g = S.integ, j = g.jira;
+  var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Integrations</h1>' +
+    '<span class="hint">Connect AI Flow to Jira Cloud. Only the owner can connect or disconnect.</span><span class="spacer"></span>' +
+    '<button class="btn" data-act="integ-refresh">Refresh</button></div>' +
+    '<div class="knowledge-form"><label class="review-auth">Owner access token (not needed with an owner console session)<input type="password" autocomplete="new-password" data-integ-owner-token value="' + esc(g.ownerToken) + '" aria-label="Owner access token"></label></div>';
+  if (g.notice) h += '<div class="small" role="status">' + esc(g.notice) + '</div>';
+  if (g.error) h += '<div role="alert" style="color:var(--crit)">' + esc(g.error) + '</div>';
+  h += '</section>';
+  if (!j) return h + (g.loading ? '<div class="empty">Loading…</div>' : '');
+  h += '<div class="knowledge-grid"><section class="panel"><div class="panel-h"><h2 style="margin:0">Jira</h2><span class="pill" data-tone="' +
+    (j.needs_reconnect ? 'crit' : j.connected ? 'ok' : 'warn') + '">' + (j.needs_reconnect ? 'Reconnect needed' : j.connected ? 'Connected' : 'Not connected') + '</span></div>';
+  if (j.needs_reconnect) h += '<div role="alert" style="color:var(--crit)">The Jira token could not be refreshed' + (j.error ? ' (' + esc(j.error) + ')' : '') + '. Press Connect Jira again.</div>';
+  if (j.state === 'disconnected') h += '<div class="small">Disconnected by ' + esc(j.disconnected_by || 'owner') + ' · ' + esc(j.disconnected_at ? when(j.disconnected_at) : '') + '. jira_sync is stopped.</div>';
+  var rows = [['Credential', JIRA_SOURCE[j.source] || j.source], ['Site', j.site_name ? j.site_name + (j.site_url ? ' · ' + j.site_url : '') : '—'],
+    ['Cloud id', j.cloud_id || '—'], ['Account', j.account || '—'], ['Scopes', (j.scopes || []).join(' ') || '—'],
+    ['Expires at', j.expires_at ? when(j.expires_at) + ' (refreshed automatically)' : '—'],
+    ['Connected', j.connected_at ? when(j.connected_at) + (j.connected_by ? ' by ' + j.connected_by : '') : '—']];
+  h += '<dl class="knowledge-history">' + rows.map(function (r) { return '<div><dt class="small">' + esc(r[0]) + '</dt><dd style="margin:0">' + esc(r[1]) + '</dd></div>'; }).join('') + '</dl>';
+  if (j.source === 'owner_env') h += '<div class="small">Running on JIRA_EMAIL / JIRA_API_TOKEN from owner.env. Connect below; the UI credential then takes priority.</div>';
+  if (j.source === 'oauth' || j.source === 'api_token') h += '<div class="knowledge-actions"><button class="btn" data-act="integ-disconnect"' + (g.busy ? ' disabled' : '') + '>Disconnect</button></div>';
+  h += '</section><section class="panel"><div class="panel-h"><h2 style="margin:0">Connect Jira (OAuth 2.0)</h2></div><div class="knowledge-form">' +
+    '<div class="small">Create an OAuth 2.0 (3LO) app at developer.atlassian.com with callback URL <code>' + esc(j.redirect_uri) + '</code> and scopes <code>' + esc((j.requested_scopes || []).join(' ')) + '</code>.</div>' +
+    '<label>Client id<input data-integ-field="client_id" value="' + esc((j.oauth_app && j.oauth_app.client_id) || '') + '" autocomplete="off" spellcheck="false"></label>' +
+    '<label>Client secret' + (j.oauth_app && j.oauth_app.configured ? ' (stored; leave empty to keep it)' : '') + '<input type="password" data-integ-field="client_secret" autocomplete="new-password" spellcheck="false"></label>' +
+    '<div class="knowledge-actions"><button class="btn primary" data-act="integ-connect"' + (g.busy ? ' disabled' : '') + '>Connect Jira</button></div></div>' +
+    '<div class="panel-h" style="margin-top:14px"><h2 style="margin:0">Fallback: email and API token</h2></div><div class="knowledge-form">' +
+    '<div class="small">For a control plane without a public callback URL. The token is stored in the secret store and never shown again.</div>' +
+    '<label>Site<input data-integ-field="site" value="' + esc(j.site_url || '') + '" placeholder="https://your-site.atlassian.net" autocomplete="off"></label>' +
+    '<label>Atlassian email<input data-integ-field="email" autocomplete="off" spellcheck="false"></label>' +
+    '<label>API token<input type="password" data-integ-field="api_token" autocomplete="new-password" spellcheck="false"></label>' +
+    '<div class="knowledge-actions"><button class="btn" data-act="integ-api-token"' + (g.busy ? ' disabled' : '') + '>Save API token</button></div></div></section></div>';
+  return h;
+}
+function loadIntegrations() { loadGitHubIntegrations(); loadJiraIntegrations(); }
+function renderIntegrations() {
+  var root = $('#view-integrations'); if (!root) return;
+  root.innerHTML = renderGitHubIntegrations() + renderJiraIntegrations();
+}
+function integValue(name) { var el = $('[data-integ-field="' + name + '"]'); return el ? String(el.value || '').trim() : ''; }
+function integClearSecrets() { $$('#view-integrations input[type="password"][data-integ-field]').forEach(function (el) { el.value = ''; }); }
+function integConnect() {
+  var g = S.integ; g.busy = true;
+  var body = JSON.stringify({ client_id: integValue('client_id'), client_secret: integValue('client_secret') });
+  integClearSecrets();
+  integFetch('/v1/integrations/jira/oauth/start', { method: 'POST', body: body })
+    .then(function (d) { location.assign(d.authorize_url); })
+    .catch(function (e) { g.busy = false; toast('Connect Jira failed', String(e.message || e), 'crit'); renderIntegrations(); });
+}
+function integApiToken() {
+  var g = S.integ; g.busy = true;
+  var body = JSON.stringify({ site: integValue('site'), email: integValue('email'), api_token: integValue('api_token') });
+  integClearSecrets();
+  integFetch('/v1/integrations/jira/api-token', { method: 'POST', body: body })
+    .then(function (d) { g.busy = false; g.jira = d; toast('Jira connected', 'Email and API token stored.', 'ok'); renderIntegrations(); })
+    .catch(function (e) { g.busy = false; toast('API token refused', String(e.message || e), 'crit'); renderIntegrations(); });
+}
+function integDisconnect() {
+  var g = S.integ;
+  if (!window.confirm('Disconnect Jira? jira_sync and Jira writes stop until Jira is connected again.')) return;
+  g.busy = true;
+  integFetch('/v1/integrations/jira/disconnect', { method: 'POST', body: '{}' })
+    .then(function (d) { g.busy = false; g.jira = d; toast('Jira disconnected', d.revoked ? 'The token was revoked at Atlassian.' : 'The credential was deleted.', 'warn'); renderIntegrations(); })
+    .catch(function (e) { g.busy = false; toast('Disconnect failed', String(e.message || e), 'crit'); renderIntegrations(); });
+}
+
 /* ---------- Team Lead epic coverage and portable reports ---------- */
 function loadLeadReport(project, epic) {
   var current = S.leadReport;
@@ -2254,8 +2345,8 @@ function render() {
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
   else if (S.view === 'knowledge') renderKnowledge();
-  else if (S.view === 'projects') renderProjects();
   else if (S.view === 'integrations') renderIntegrations();
+  else if (S.view === 'projects') renderProjects();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -2275,7 +2366,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'projects', 'integrations'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
+  ['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) { $('#view-' + v).hidden = S.view !== v; });
 }
 function setView(v) {
   if (S.view === v) return;
@@ -2286,8 +2377,8 @@ function setView(v) {
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
-  if (v === 'projects') loadProjectList();
   if (v === 'integrations') loadIntegrations();
+  if (v === 'projects') loadProjectList();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -2302,7 +2393,7 @@ document.addEventListener('click', function (e) {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }
   else if (act === 'project-catalog-refresh') loadProjectCatalog(true);
-  else if (act === 'github-refresh') loadIntegrations();
+  else if (act === 'github-refresh') loadGitHubIntegrations();
   else if (act === 'github-manifest') {
     var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
     if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); }
@@ -2323,6 +2414,10 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
+  else if (act === 'integ-refresh') loadJiraIntegrations();
+  else if (act === 'integ-connect') integConnect();
+  else if (act === 'integ-api-token') integApiToken();
+  else if (act === 'integ-disconnect') integDisconnect();
   else if (act === 'knowledge-new') knowledgeNew();
   else if (act === 'knowledge-refresh') loadKnowledge(true);
   else if (act === 'knowledge-filter') { S.knowledge.filter = el.getAttribute('data-filter'); renderKnowledge(); }
@@ -2401,6 +2496,7 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
+  if (e.target && e.target.matches('[data-integ-owner-token]')) S.integ.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
     S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;

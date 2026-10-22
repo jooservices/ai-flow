@@ -12,15 +12,16 @@ x-app: &app
     AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
     AIFLOW4_JOIN_CONTROL_URL: ${AIFLOW4_JOIN_CONTROL_URL:-}
     AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
+    AIFLOW4_JIRA_SECRET_DIR: /etc/aiflow/secrets/jira  # Jira connected on the Integrations screen (writable)
     AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR: /var/cache/aiflow4-memory/fastembed
     HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
-    AIFLOW4_PUBLIC_URL: ${AIFLOW4_PUBLIC_URL:-http://127.0.0.1:18480}
     AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
     AIFLOW4_SMTP_PORT: "1025"
     OTEL_SERVICE_NAME: aiflow4-control
   volumes:
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
+    - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
     - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
     - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory

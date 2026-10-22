@@ -34,7 +34,7 @@ from ..core.controlrepo import ControlRepo
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -178,6 +178,7 @@ class Ctx:
     jira: Jira | None = None
     github: GitHubApp | None = None
     refresh_repo: Callable[[], None] | None = None
+    jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
 
 
 def github_gateway(ctx: Ctx) -> GitHubApp | None:
@@ -3179,4 +3180,5 @@ def create_app(ctx: Ctx) -> FastAPI:
                 log.warning("control repo refresh after policy merge failed")
         return {"merged": True, "sha": merged.get("sha", ""), "resource": resource}
 
+    jira_connect.mount(app, ctx)
     return app

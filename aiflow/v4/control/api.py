@@ -37,7 +37,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, memory, rollout, tooling, version_release
 from . import review_metrics
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
@@ -315,6 +315,17 @@ class GitHubInstallationBody(BaseModel):
 
 class ProjectPauseBody(BaseModel):
     paused: bool = True
+
+
+class CheckProbeBody(BaseModel):
+    project: str
+    signature: str
+    results: list[dict[str, Any]] = Field(default_factory=list, max_length=200)
+
+
+class CheckProbeTokenBody(BaseModel):
+    project: str
+    repo: str
 
 
 class FenceBody(BaseModel):
@@ -1524,11 +1535,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
+        probes = tooling.probe_report(ctx)
         return {"projects": [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
-                              "base": project.base, "stack": project.stack}
+                              "base": project.base, "stack": project.stack,
+                              "checks": probes.get(project.key, {})}
                              for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
 
     @app.get("/v1/projects/catalog")
@@ -1964,6 +1977,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "project_stacks": project_stacks,
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
+                            "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
@@ -2108,6 +2122,48 @@ def create_app(ctx: Ctx) -> FastAPI:
         for row in rows:
             row["id"] = str(row["id"])
         return {"node": name, "operations": rows}
+
+    def probe_project(name: str, key: str):
+        """The project when this machine serves it (a probe of anything else is refused)."""
+        repo = ctx.repo()
+        row = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (name,)) or {}
+        if key not in repo.projects_for_node(name, row.get("projects") or [], row.get("dynamic", False)):
+            raise HTTPException(403, "the node does not serve this project")
+        return repo.projects[key]
+
+    @app.post("/v1/nodes/{name}/check-probes/token")
+    def check_probe_token(name: str, body: CheckProbeTokenBody, node: str = Depends(node_auth)) -> dict:
+        """Read-only token for the clean checkout on which a node runs a project's check commands."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        project = probe_project(name, body.project)
+        if body.repo not in project.configured_repositories:
+            raise HTTPException(403, "repository does not belong to the project")
+        github = github_gateway(ctx)
+        if not github:
+            raise HTTPException(503, "GitHub App is not connected")
+        token, expires = github.token(body.repo.split("/", 1)[-1], {"contents": "read", "metadata": "read"})
+        audit("github", "check_probe_token", "", "", None, node, True, "issued",
+              {"repo": body.repo, "project": body.project, "expires": expires.isoformat()})
+        return {"token": token, "expires_at": expires.isoformat()}
+
+    @app.post("/v1/nodes/{name}/check-probes")
+    def save_check_probe(name: str, body: CheckProbeBody, node: str = Depends(node_auth)) -> dict:
+        """A node reports which check commands of a project ran on a clean checkout and which could not."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        project = probe_project(name, body.project)
+        if tooling.probe_signature(tooling.probe_items(project)) != body.signature:
+            raise HTTPException(409, "the project's check commands changed; run the probe again")
+        results = [{k: str(v)[:300] for k, v in item.items() if k in ("repo", "command", "status", "tool", "detail")}
+                   for item in body.results]
+        tooling.save_probe(ctx, name, body.project, body.signature, results)
+        blocked = [r for r in results if r.get("status") == "cannot_run"]
+        ctx.events.emit("project.checks_probed", project=body.project, node=node,
+                        outcome="cannot_run" if blocked else "ok",
+                        reason=("cannot run: " + "; ".join(f"{r.get('command', '')} ({r.get('tool', '')})" for r in blocked))[:300]
+                        if blocked else "")
+        return {"saved": True, "cannot_run": len(blocked)}
 
     @app.get("/v1/nodes/{name}/operations/next")
     def next_node_operation(name: str, node: str = Depends(node_auth)) -> dict:
@@ -2345,9 +2401,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
             dev_rows = []
+            parked = tooling.parked_tickets(ctx, node_row)  # waiting for a tool this machine lacks
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if t["key"] in held or t["key"] in cooling or any(b not in done for b in t["blocked_by"]):
+                if t["key"] in held or t["key"] in cooling or t["key"] in parked or any(b not in done for b in t["blocked_by"]):
                     continue
                 labels = set(t["labels"])
                 if "tier-senior" in labels and acc.tier != "senior":
@@ -2494,6 +2551,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
         extra: dict[str, Any] = {}
+        if body.step == "dev":
+            tooling.resolve_ticket(ctx, t["key"], node)
+            extra["machine_tools"] = tooling.machine_tools(
+                ctx.db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (node,)) or {})
         dev = prior_dev
         if body.step == "verify" and dev:
             extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
@@ -2742,6 +2803,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
                        " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
+        if body.outcome == "tool_missing" and run["step"] == "dev":
+            tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []], body.summary)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
         if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve

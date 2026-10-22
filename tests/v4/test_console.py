@@ -978,21 +978,28 @@ def test_command_center_menu_order_and_role_visibility():
         ("knowledge", "Knowledge"), ("integrations", "Integrations"), ("projects", "Projects"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
+    # Each role sees exactly the views its permissions in console_auth.py allow.
+    required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
+                "knowledge": "knowledge.read", "integrations": "integrations.manage", "projects": "projects.manage"}
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
   getAttribute: function () { return item.view; }, setAttribute: function () {}}; });
 document.querySelectorAll = function (selector) { return selector === '.tab[data-menu-view]' ? tabs.slice(2) : tabs; };
-var roles = {};
-['super_admin', 'owner', 'lead'].forEach(function (role) {
-  S.consoleUser = {role: role}; syncMenuVisibility();
+var sessions = %s, roles = {};
+Object.keys(sessions).forEach(function (role) {
+  S.consoleUser = sessions[role]; syncMenuVisibility();
   roles[role] = tabs.filter(function (tab) { return !tab.hidden; }).map(function (tab) { return tab.view; });
 });
 console.log(JSON.stringify(roles));
-"""))
-    # The first two menu views are deliberately available to all console roles.
-    assert all(visible[role][:2] == ["cc", "work"] for role in ("super_admin", "owner", "lead"))
+""" % json.dumps({role: console_session(role) for role in ROLE_PERMISSIONS})))
+    for role, granted in ROLE_PERMISSIONS.items():
+        expected = [view for view, _label in tabs
+                    if view not in required or "*" in granted or required[view] in granted]
+        assert visible[role] == expected, role
+        assert visible[role][:2] == ["cc", "work"]
+    # A lead keeps the read-only views it could open before.
+    assert {"knowledge", "machines"} <= set(visible["lead"])
     assert "users" in visible["super_admin"] and "users" not in visible["owner"] and "sa" not in visible["lead"]
-    assert "machines" not in visible["lead"] and "lead" in visible["lead"]
 
 
 def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():

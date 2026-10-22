@@ -608,23 +608,24 @@ var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To D
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
-  { view: 'cc', label: 'Dashboard', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'work', label: 'Work board', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'delivery', label: 'Delivery', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'sa', label: 'SA', roles: ['super_admin', 'owner'] },
-  { view: 'lead', label: 'Team Lead', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'business', label: 'Business', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'review', label: 'Human review', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'stakeholder', label: 'Stakeholder', roles: ['super_admin', 'owner', 'lead'] },
-  { view: 'machines', label: 'Machines and AI', roles: ['super_admin', 'owner'] },
-  { view: 'users', label: 'Users and roles', roles: ['super_admin'] },
-  { view: 'knowledge', label: 'Knowledge', roles: ['super_admin', 'owner'] },
-  { view: 'integrations', label: 'Integrations', roles: ['super_admin', 'owner'] },
-  { view: 'projects', label: 'Projects', roles: ['super_admin', 'owner'] }
+  { view: 'cc', label: 'Dashboard' },
+  { view: 'work', label: 'Work board' },
+  { view: 'delivery', label: 'Delivery' },
+  { view: 'sa', label: 'SA', permission: 'console.write' },
+  { view: 'lead', label: 'Team Lead' },
+  { view: 'business', label: 'Business' },
+  { view: 'review', label: 'Human review' },
+  { view: 'stakeholder', label: 'Stakeholder' },
+  { view: 'machines', label: 'Machines and AI', permission: 'node.operations.read' },
+  { view: 'users', label: 'Users and roles', permission: 'users.manage' },
+  { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
+  { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
+  { view: 'projects', label: 'Projects', permission: 'projects.manage' }
 ];
+// Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
 function viewAllowed(view, role) {
   var item = MENU_ITEMS.filter(function (x) { return x.view === view; })[0];
-  return !!item && item.roles.indexOf(role || '') >= 0;
+  return !!item && !!role && (!item.permission || consoleCan(item.permission));
 }
 function syncMenuVisibility() {
   var role = S.consoleUser && S.consoleUser.role;
@@ -2793,11 +2794,9 @@ function renderUsers() {
   h += '<section class="panel"><div class="panel-h"><h2>Your console access</h2><span class="hint">Authenticated session</span></div><div class="facts">';
   h += '<div class="fact"><span class="fl">Signed in as</span><span class="fv">' + esc(S.consoleUser && S.consoleUser.user || 'Unknown user') + '</span></div>';
   h += '<div class="fact"><span class="fl">Role</span><span class="fv">' + esc(roleLabels[role] || role) + '</span></div></div>';
-  h += '<div class="tablebox"><table><thead><tr><th>View</th><th>Super Administrator</th><th>Owner</th><th>Lead</th></tr></thead><tbody>';
+  h += '<div class="tablebox"><table><thead><tr><th>View</th><th>Your access</th></tr></thead><tbody>';
   MENU_ITEMS.forEach(function (item) {
-    h += '<tr><td>' + esc(item.label) + '</td>' + ['super_admin', 'owner', 'lead'].map(function (name) {
-      return '<td>' + (viewAllowed(item.view, name) ? 'Available' : 'Not available') + '</td>';
-    }).join('') + '</tr>';
+    h += '<tr><td>' + esc(item.label) + '</td><td>' + (viewAllowed(item.view, role) ? 'Available' : 'Not available') + '</td></tr>';
   });
   h += '</tbody></table></div><p class="small">Role assignment and account invitations are managed through the configured console login process.</p></section>';
   root.innerHTML = h;

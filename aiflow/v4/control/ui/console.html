@@ -573,10 +573,10 @@ function accBy(id) { return D().accounts.filter(function (x) { return x.id === i
 function ticketBy(k) { return D().tickets.filter(function (x) { return x.key === k; })[0]; }
 function incBy(id) { return D().incidents.concat(D().incidents_recent || []).filter(function (x) { return String(x.id) === String(id); })[0]; }
 function consoleCan(permission) {
-  var permissions = S.consoleUser && S.consoleUser.permissions;
-  return Array.isArray(permissions) && permissions.indexOf(permission) >= 0;
+  var permissions = S.consoleUser && S.consoleUser.permissions || [];
+  return Array.isArray(permissions) && (permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0);
 }
-function consoleOwner() { return consoleCan('console.manage'); }
+function consoleOwner() { return consoleCan('console.manage') || consoleCan('integrations.manage'); }
 function consoleReader() { return consoleCan('console.read'); }
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
@@ -633,8 +633,8 @@ function pollConsoleSession() {
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null;
     render();
-    if (S.drawer && S.drawer.kind === 'node' && consoleReader()) loadNodeOperations(S.drawer.id);
-    if (S.view === 'integrations' && consoleOwner() && !S.integrations.data && !S.integrations.busy) loadIntegrations();
+    if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
+    if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
   }).catch(function () { S.consoleUser = null; render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
@@ -757,9 +757,9 @@ function connectImportedGitHubApp() {
 function renderGitHubIntegrations() {
   var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
   h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
-  if (consoleOwner()) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
+  if (consoleCan('integrations.manage')) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
   h += '</div>';
-  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can manage integrations.</div>';
+  if (!consoleCan('integrations.manage')) h += '<div class="muted">Only an authenticated user with integration management permission can manage integrations.</div>';
   else {
     if (state.notice) h += '<div class="good" role="status">' + esc(state.notice) + '</div>';
     if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
@@ -835,7 +835,7 @@ function removeManagedProject(key) {
     .catch(function (e) { toast('Could not remove project', String(e.message || e), 'warn'); });
 }
 function loadNodeOperations(name) {
-  if (!consoleReader()) return;
+  if (!consoleCan('console.read')) return;
   fetch('/v1/nodes/' + encodeURIComponent(name) + '/operations', { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -1022,7 +1022,7 @@ function renderCC() {
   }
 
   h += '<div class="grid-2">';
-  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleOwner() ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
+  h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
   if (!d.nodes.length) h += '<div class="empty">No node has joined. Create a one-use join command below and run it on the new machine.</div>';
   d.nodes.forEach(function (n) {
     var accs = d.accounts.filter(function (a) { return a.node === n.name; });
@@ -1069,7 +1069,7 @@ function renderCC() {
   });
   h += '</tbody></table></div></section>';
 
-  h += readinessPanel(d.release_readiness || [], 'en', 'p-ready');
+  h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
 
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
 
@@ -1641,7 +1641,7 @@ function renderJiraIntegrations() {
   var g = S.integ, j = g.jira;
   if (!consoleOwner()) return '<section class="panel"><h1>Integrations</h1><div class="muted">Only a role with integration management permission can manage Jira.</div></section>';
   var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Integrations</h1>' +
-    '<span class="hint">Connect AI Flow to Jira Cloud. Only the owner can connect or disconnect.</span><span class="spacer"></span>' +
+    '<span class="hint">Connect AI Flow to Jira Cloud. Users with integration management permission can connect or disconnect.</span><span class="spacer"></span>' +
     '<button class="btn" data-act="integ-refresh">Refresh</button></div>' +
     '<div class="knowledge-form"><label class="review-auth">Owner access token (not needed with an owner console session)<input type="password" autocomplete="new-password" data-integ-owner-token value="' + esc(g.ownerToken) + '" aria-label="Owner access token"></label></div>';
   if (g.notice) h += '<div class="small" role="status">' + esc(g.notice) + '</div>';
@@ -1814,15 +1814,71 @@ var READY_TEXT = {
         not_done: function (r) { return r.ticket + ': not Done (status ' + r.status + ')'; },
         rework: function (r) { return r.ticket + ': in rework'; },
         not_verified: function (r) { return r.ticket + ': Done but not verified'; },
-        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; } },
+        blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; },
+        release_running: function () { return 'The release check is running'; },
+        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); } },
   vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
         none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
         empty: function () { return 'Version rỗng: chưa có ticket nào'; },
         not_done: function (r) { return r.ticket + ': chưa Done (đang ở ' + r.status + ')'; },
         rework: function (r) { return r.ticket + ': đang rework'; },
         not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
-        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; } }
+        blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; },
+        release_running: function () { return 'Kiểm tra release đang chạy'; },
+        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); } }
 };
+/* Release progress per Jira version (/v1/state release_progress): x/y Done, open tickets, tickets added late with
+   the date, why the version is not ready, and the release outcome. Command Center (detail) also lists the release
+   steps with run ID and node; Business (compact) keeps x/y, late tickets, reasons, tag and GitHub Release link. */
+var PROG_TEXT = {
+  en: { title: 'Release progress', hint: 'Jira Fix versions: Done of total, open tickets, tickets added late, why not ready, release steps',
+        none: 'No Jira version.', ready: 'Ready', notReady: 'Not ready', released: 'Released', running: 'Release running',
+        failed: 'Release failed', blocked: 'Blocked', done: 'Done', open: 'Open', late: 'added late', on: 'on',
+        tag: 'Tag', link: 'GitHub Release', run: 'run', node: 'node', noSteps: 'No release run yet',
+        steps: { check: 'Check', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } },
+  vi: { title: 'Tiến độ release', hint: 'Jira Fix version: số ticket Done trên tổng, ticket thêm sau, lý do chưa sẵn sàng, tag và GitHub Release',
+        none: 'Chưa có Jira version nào.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', released: 'Đã release', running: 'Đang release',
+        failed: 'Release lỗi', blocked: 'Bị chặn', done: 'Done', open: 'Còn mở', late: 'thêm sau', on: 'ngày',
+        tag: 'Tag', link: 'GitHub Release', run: 'run', node: 'node', noSteps: 'Chưa có lần release nào',
+        steps: { check: 'Kiểm tra', changelog: 'Changelog', pr: 'PR', merge: 'Merge', tag: 'Tag', release: 'GitHub Release' } }
+};
+function safeUrl(u) { return /^https?:\/\//.test(u || '') ? u : ''; }
+function releaseState(v) {
+  var s = v.release && v.release.status;
+  return v.released ? 'released' : s === 'checking' ? 'running' : s === 'failed' ? 'failed' : v.ready ? 'ready' : 'notReady';
+}
+function releaseLink(v, t) {
+  var rel = v.release || {}, h = '';
+  if (rel.tag) h += '<span class="mono">' + esc(t.tag) + ' ' + esc(rel.tag) + '</span>';
+  if (safeUrl(rel.github_release_url)) h += ' <a href="' + esc(rel.github_release_url) + '" target="_blank" rel="noopener">' + esc(t.link) + '</a>';
+  return h;
+}
+function releaseSteps(v, t) {
+  var steps = (v.release && v.release.steps) || [];
+  if (!steps.length) return '<div class="muted">' + esc(t.noSteps) + '</div>';
+  return '<ol class="d release-steps">' + steps.map(function (s) {
+    var who = (s.run_id ? ' · ' + t.run + ' <span class="mono">' + esc(String(s.run_id).slice(0, 8)) + '</span>' : '') + (s.node ? ' · ' + t.node + ' <span class="mono">' + esc(s.node) + '</span>' : '');
+    var link = safeUrl(s.url) ? ' <a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.detail || '') + '</a>' : (s.detail ? ' ' + esc(s.detail) : '');
+    return '<li data-step="' + esc(s.step) + '" data-state="' + esc(s.state) + '"><b>' + esc(t.steps[s.step] || s.step) + '</b> · ' + esc(s.state) + link + who + '</li>';
+  }).join('') + '</ol>';
+}
+function progressPanel(versions, lang, id, detail) {
+  var t = PROG_TEXT[lang] || PROG_TEXT.en, rt = READY_TEXT[lang] || READY_TEXT.en;
+  var h = '<section class="panel" id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">' + esc(t.title) + '</h2><span class="hint">' + esc(t.hint) + '</span></div>';
+  if (!versions.length) return h + '<div class="empty">' + esc(t.none) + '</div></section>';
+  versions.forEach(function (v) {
+    var st = releaseState(v), tone = st === 'released' || st === 'ready' ? 'ok' : st === 'failed' ? 'crit' : 'warn';
+    h += '<div class="att-item" data-version="' + esc(v.version_id) + '" data-state="' + st + '"><span class="flag" data-tone="' + tone + '">' + esc(t[st]) + '</span>';
+    h += '<span style="min-width:0"><div class="t"><span class="mono muted">' + esc(v.project) + '</span> ' + esc(v.version) + ' · ' + v.done_count + ' / ' + v.ticket_count + ' ' + esc(t.done) + '</div>';
+    if (v.released) h += '<div class="d">' + releaseLink(v, t) + '</div>';
+    if (v.late_tickets && v.late_tickets.length) h += '<ul class="d late">' + v.late_tickets.map(function (x) { return '<li data-late="' + esc(x.key) + '">' + esc(x.key) + ' · ' + esc(t.late) + (x.added_at ? ' ' + esc(t.on) + ' ' + esc(String(x.added_at).slice(0, 10)) : '') + '</li>'; }).join('') + '</ul>';
+    if (v.open_tickets && v.open_tickets.length) h += '<div class="d open-tickets">' + esc(t.open) + ': ' + v.open_tickets.map(function (x) { return '<span class="mono" data-open="' + esc(x.key) + '">' + esc(x.key) + '</span>' + (detail ? ' ' + esc(x.status) : ''); }).join(', ') + '</div>';
+    if (v.reasons && v.reasons.length) h += '<ul class="d reasons">' + v.reasons.map(function (r) { return '<li data-cause="' + esc(r.cause) + '">' + esc(readinessReason(r, lang)) + '</li>'; }).join('') + '</ul>';
+    if (detail) h += releaseSteps(v, t);
+    h += '</span></div>';
+  });
+  return h + '</section>';
+}
 function readinessReason(r, lang) { var t = READY_TEXT[lang] || READY_TEXT.en; return (t[r.cause] || function () { return (r.ticket || '') + ': ' + r.cause; })(r); }
 function readinessPanel(versions, lang, id) {
   var t = READY_TEXT[lang] || READY_TEXT.en;
@@ -1841,7 +1897,7 @@ function renderBBody() {
   var all = projTickets();
   var h = epicsPanel(all, 'open-ticket', 'b-epics') || '<section class="panel" id="b-epics"><div class="panel-h"><h2>Epics</h2></div><div class="empty">Project này chưa có epic.</div></section>';
   var wait = needsOwner(all);
-  h += readinessPanel((D().release_readiness || []).filter(function (v) { return v.project === S.project; }), 'vi', 'b-ready');
+  h += progressPanel((D().release_progress || []).filter(function (v) { return v.project === S.project; }), 'vi', 'b-ready', false);
   h += '<section class="panel" id="b-answer" aria-labelledby="h-b-answer"><div class="panel-h"><h2 id="h-b-answer">Cần bạn trả lời</h2><span class="hint">Ticket ở Needs owner: câu hỏi của intake và việc triage chuyển lên owner. Trả lời trong Jira.</span></div><div class="att">';
   if (!wait.length) h += '<div class="col-empty">Không có ticket nào chờ bạn trả lời</div>';
   wait.forEach(function (w) {
@@ -2180,7 +2236,7 @@ function drawerNode(name) {
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
   b += '</div>';
-  if (consoleOwner()) {
+  if (consoleCan('nodes.manage')) {
     b += '<div class="dsec"><h4>Install and repair</h4>';
     if (n.status === 'online' && n.has_agent) {
       b += '<div class="small">Install only components missing from the required toolchain, or reconcile versions.lock and desired services.</div>';
@@ -2193,8 +2249,8 @@ function drawerNode(name) {
     var join = S.joinCommands[n.name];
     if (join) b += '<div class="small">Expires ' + when(join.expires_at) + ' · one use</div><pre class="report-md">' + esc(join.command) + '</pre><button class="btn sm" data-act="copy-join" data-node="' + esc(n.name) + '">Copy command</button>';
     b += '</div>';
-  } else if (consoleReader()) {
-    b += '<div class="dsec"><h4>Install and repair</h4><div class="small">Only an authenticated owner can install or repair a node.</div></div>';
+  } else if (S.consoleUser) {
+    b += '<div class="dsec"><h4>Install and repair</h4><div class="small">Only an authenticated user with node management permission can install or repair a node.</div></div>';
   }
   var desiredServices = n.desired_services || [];
   b += '<div class="dsec"><h4>Desired services</h4>';
@@ -2202,7 +2258,7 @@ function drawerNode(name) {
   else desiredServices.forEach(function (svc) { b += '<div class="small">' + esc(svc.name || svc.unit || 'service') + ' · ' + esc(svc.unit || 'unit missing') + (svc.healthcheck || svc.healthcheck_configured ? ' · health check configured' : ' · systemd active check') + '</div>'; });
   b += '</div>';
   if (n.status === 'online' && n.has_agent) b += '<div class="small">AI account authorization is handled separately; installation does not sign accounts in.</div>';
-  if (consoleReader()) {
+  if (consoleCan('console.read')) {
     var nodeOps = S.nodeOperations[n.name] || [];
     b += '<div class="dsec"><h4>Operation log</h4>';
     if (!nodeOps.length) b += '<div class="empty">No install or repair operations recorded.</div>';
@@ -2332,7 +2388,7 @@ function openDrawer(kind, id, opener) {
   lastFocus = opener || document.activeElement;
   S.drawer = { kind: kind, id: id };
   if (kind === 'ticket') loadTicket(id);
-  if (kind === 'node' && consoleReader()) loadNodeOperations(id);
+  if (kind === 'node' && consoleCan('console.read')) loadNodeOperations(id);
   renderDrawer();
   $('#overlay').setAttribute('data-open', ''); $('#drawer').setAttribute('data-open', ''); $('#drawer').setAttribute('aria-hidden', 'false');
   setTimeout(function () { var c = $('#drawer [data-act="close"]'); if (c) c.focus(); }, 60);
@@ -2360,7 +2416,7 @@ function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
   var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
   h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
-  if (consoleOwner()) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
+  if (consoleCan('projects.manage')) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
   h += '</div>';
   if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
@@ -2370,7 +2426,7 @@ function renderProjects() {
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
       h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td><div class="project-actions">';
-      if (consoleOwner()) {
+      if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
         h += '<button class="btn sm danger" data-act="project-remove" data-key="' + esc(p.key) + '">Remove</button>';
@@ -2379,9 +2435,9 @@ function renderProjects() {
     });
     h += '</tbody></table></div>';
   }
-  if (!consoleOwner()) h += '<div class="muted">Only an authenticated owner can add, pause, resume or remove projects.</div>';
+  if (!consoleCan('projects.manage')) h += '<div class="muted">Only an authenticated user with project management permission can add, pause, resume or remove projects.</div>';
   h += '</section>';
-  if (state.showForm && consoleOwner()) {
+  if (state.showForm && consoleCan('projects.manage')) {
     var form = state.form, catalog = state.catalog || {}, jiraProjects = catalog.jira_projects || [], repos = catalog.github_repos || [];
     h += '<section class="panel"><div class="panel-h"><h2>Add project</h2><span class="hint">Preflight runs before any control repo change.</span></div>';
     if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';

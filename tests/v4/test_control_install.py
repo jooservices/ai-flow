@@ -102,6 +102,8 @@ class FakeHost(ci.Host):
             return ok()
         if argv[:2] == ["docker", "login"]:
             return ok("Login Succeeded")
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return ok("172.28.9.15/16\n")
         if argv[:3] == ["docker", "image", "inspect"]:
             return ok() if argv[3] in self.images else fail()
         if argv[:2] == ["docker", "inspect"]:
@@ -173,7 +175,8 @@ def machine(tmp_path):
 
 
 def installer(host: FakeHost, out: list[str], **opts) -> ci.ControlInstaller:
-    opts = {"version": "v4.1.0", "domain": "aiflow.example.com", "health_timeout": 30} | opts
+    opts = {"version": "v4.1.0", "domain": "aiflow.example.com", "health_timeout": 30,
+            "admin_email": "jooservices@gmail.com"} | opts
     return ci.ControlInstaller(ci.Options(**opts), host=host, layout=ci.Layout(host.root),
                                out=out.append, err=out.append, source=ROOT)
 
@@ -205,17 +208,18 @@ def test_clean_install_runs_every_step_in_order_and_brings_the_control_plane_up(
     order = [index(machine, lambda a: a[1:2] == ["plan"]), index(machine, lambda a: a[1:2] == ["apply"]),
              index(machine, lambda a: a[-2:] == ["--stage-only", "v4.1.0"]),
              index(machine, lambda a: a[:2] == ["docker", "compose"] and a[3].endswith("infra/compose.yaml")),
+             index(machine, lambda a: a[:3] == ["docker", "network", "inspect"]),
              index(machine, lambda a: a[:2] == ["docker", "run"] and a[-1] == "migrate"),
              index(machine, lambda a: Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"])]
     assert order == sorted(order)
     assert {f"aiflow4-{c}" for c in INFRA | set(ci.APP_SERVICES)} <= set(machine.containers)
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.1.0"
-    assert out[-1] == "AI Flow control plane v4.1.0 is running and healthy. Command Center: http://aiflow.example.com/cc"
+    assert out[-1] == "AI Flow control plane v4.1.0 is running and healthy. Command Center: https://aiflow.example.com/cc"
     assert any(line.startswith("health: postgres ok, redis ok, traefik ok, openobserve ok, gatus ok") for line in out)
     # the control host does not run a node agent until it is joined
     assert sec.read_env(machine.p("/etc/aiflow/control.env")) == {
         "AIFLOW4_DOMAIN": "aiflow.example.com", "AIFLOW4_JOIN_CONTROL_URL": "http://aiflow.example.com",
-        "AIFLOW4_DEPLOY_NODE_AGENT": "0"}
+        "AIFLOW4_DEPLOY_NODE_AGENT": "0", "AIFLOW4_CONSOLE_ADMIN_EMAIL": "jooservices@gmail.com"}
     assert machine.p("/srv/aiflow/control/cli/current").resolve().name == "v4.1.0"
     for name in ("postgres", "redis", "openobserve"):
         assert machine.p(f"/srv/aiflow/control/data/{name}").is_dir()
@@ -235,8 +239,15 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
     for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
                 "O2_BASIC"):
         assert len(app[key]) >= 32
-    assert app["AIFLOW4_PUBLIC_URL"] == "http://aiflow.example.com"
+    assert app["AIFLOW4_PUBLIC_URL"] == "https://aiflow.example.com"
     assert app["AIFLOW4_GATUS_URL"] == "http://aiflow.example.com:8081/"
+    assert app["AIFLOW4_TRUSTED_PROXIES"] == "172.28.0.0/16"
+
+
+def test_trusted_proxy_cidrs_are_canonical_private_and_narrow():
+    assert ci.sanitize_proxy_cidrs(
+        "172.28.9.15/16\nfd00:abcd::5/64\n172.28.0.0/16\n0.0.0.0/0\n"
+        "203.0.113.0/24\nnot-a-cidr") == ["172.28.0.0/16", "fd00:abcd::/64"]
 
 
 @pytest.mark.parametrize("component", ["postgres", "redis", "traefik", "openobserve", "gatus", "control-api-b",
@@ -299,12 +310,66 @@ def test_second_run_keeps_secrets_data_and_containers(machine):
     assert second.steps == list(ci.STEPS)
 
 
+def console_seeds(host: FakeHost) -> list[list[str]]:
+    return [argv for argv, _, _ in host.calls if argv[:2] == ["docker", "run"] and "console-user" in argv]
+
+
+def test_install_creates_the_first_super_administrator_and_turns_console_login_on(machine):
+    out: list[str] = []
+    assert installer(machine, out).run() == 0
+    [seed] = console_seeds(machine)
+    image_at = next(i for i, a in enumerate(seed) if a.startswith(IMAGE + ":"))
+    assert seed[image_at:] == [f"{IMAGE}:v4.1.0", "console-user", "seed", "--email", "jooservices@gmail.com",
+                               "--role", "super_admin", "--password-file", "/run/aiflow4-console/super-admin-password"]
+    console_dir = machine.p("/etc/aiflow/secrets/console")
+    assert f"{console_dir}:/run/aiflow4-console" in seed and stat.S_IMODE(console_dir.stat().st_mode) == 0o700
+    # after the migration (the table exists) and before the deploy (the gate starts with a user to sign in)
+    assert (index(machine, lambda a: a[:2] == ["docker", "run"] and a[-1] == "migrate")
+            < index(machine, lambda a: "console-user" in a)
+            < index(machine, lambda a: Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"]))
+    assert sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))["AIFLOW4_CONSOLE_LOGIN"] == "1"
+    assert any("Super Administrator jooservices@gmail.com" in line and "super-admin-password" in line for line in out)
+    assert any("https://aiflow.example.com/login" in line for line in out)
+
+
+def test_rerun_remembers_the_admin_email_and_keeps_an_owner_choice_for_login(machine):
+    assert installer(machine, []).run() == 0
+    app_env = machine.p("/etc/aiflow/secrets/control/aiflow4.env")
+    sec.update_env(app_env, force={"AIFLOW4_CONSOLE_LOGIN": "0"})
+    assert installer(machine, [], admin_email="").run() == 0  # no --admin-email on a rerun
+    assert [s[s.index("--email") + 1] for s in console_seeds(machine)] == ["jooservices@gmail.com"] * 2
+    assert sec.read_env(app_env)["AIFLOW4_CONSOLE_LOGIN"] == "0"
+
+
+def test_first_install_without_an_admin_email_stops_before_any_change(machine):
+    out: list[str] = []
+    assert installer(machine, out, admin_email="").run() == ci.EXIT_USAGE
+    assert "--admin-email is required" in "\n".join(out) and machine.calls == []
+    assert installer(machine, out, admin_email="not an email").run() == ci.EXIT_USAGE
+
+
+def test_a_failed_admin_seed_stops_before_the_deploy(machine, monkeypatch):
+    real = machine.run
+
+    def run(argv, **kw):
+        if "console-user" in argv:
+            machine.calls.append((list(argv), {}, None))
+            return subprocess.CompletedProcess(argv, 2, "", "cannot open the password file")
+        return real(argv, **kw)
+
+    monkeypatch.setattr(machine, "run", run)
+    out: list[str] = []
+    assert installer(machine, out).run() == ci.EXIT_UNHEALTHY
+    assert not [a for a, _, _ in machine.calls if Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"]]
+    assert "could not create the first Super Administrator" in "\n".join(out)
+
+
 def test_rerun_with_a_new_domain_keeps_secrets_but_updates_the_urls(machine):
     assert installer(machine, []).run() == 0
     before = sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))
     assert installer(machine, [], domain="cc.example.org").run() == 0
     after = sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))
-    assert after["AIFLOW4_PUBLIC_URL"] == "http://cc.example.org"
+    assert after["AIFLOW4_PUBLIC_URL"] == "https://cc.example.org"
     assert {k: v for k, v in after.items() if "URL" not in k} == {k: v for k, v in before.items() if "URL" not in k}
 
 
@@ -396,7 +461,7 @@ def test_owner_rollback_returns_to_the_previous_staged_release(machine):
     deploys = [(a, e) for a, e, _ in machine.calls[calls_before:] if Path(a[0]).name == "aiflow4-deploy"]
     assert [a[1:] for a, _ in deploys] == [["v4.1.0"]] and deploys[0][1]["AIFLOW4_SKIP_UPGRADE_CHECK"] == "1"
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.1.0"
-    assert out[-1] == "rolled back to v4.1.0; the control plane is healthy. Command Center: http://aiflow.example.com/cc"
+    assert out[-1] == "rolled back to v4.1.0; the control plane is healthy. Command Center: https://aiflow.example.com/cc"
     # and once more to the release before it
     assert installer(machine, [], version="", domain="", rollback=True).run() == 0
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.0.3"

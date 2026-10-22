@@ -2,13 +2,17 @@
 import json
 import re
 import shutil
+import socket
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from aiflow.v4 import VERSION
+from aiflow.v4.control.console_auth import ROLE_PERMISSIONS
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -23,15 +27,13 @@ var localStorage = {getItem: function () { return null; }, setItem: function () 
 var fetch = function () {};
 var setInterval = function () {};
 """
-OWNER_PERMISSIONS = ["console.read", "console.manage", "node.operations.read", "knowledge.read",
-                     "knowledge.manage", "knowledge.approve"]
-LEAD_PERMISSIONS = ["console.read", "node.operations.read", "knowledge.read"]
+OWNER_PERMISSIONS = sorted(ROLE_PERMISSIONS["owner"])
+LEAD_PERMISSIONS = sorted(ROLE_PERMISSIONS["lead"])
 
 
 def console_session_user(role: str = "owner", permissions: list[str] | None = None) -> dict:
     return {"authenticated": True, "user": role + "@example.test", "role": role,
-            "permissions": permissions if permissions is not None else
-            (LEAD_PERMISSIONS if role == "lead" else OWNER_PERMISSIONS)}
+            "permissions": permissions if permissions is not None else sorted(ROLE_PERMISSIONS[role])}
 
 
 def run_script(driver: str, prelude: str = STUBS) -> str:
@@ -44,6 +46,11 @@ def run_script(driver: str, prelude: str = STUBS) -> str:
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def console_session(role: str) -> dict:
+    return {"authenticated": True, "user": role, "role": role,
+            "permissions": sorted(ROLE_PERMISSIONS[role])}
 
 
 def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
@@ -126,7 +133,7 @@ S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
 S.projectAdmin.repositoryEditor = {json.dumps(repository_editor)};
-S.consoleUser = {json.dumps(user or console_session_user())};
+S.consoleUser = {json.dumps(user or console_session("owner"))};
 renderProjects();
 console.log(projectsView.innerHTML);
 """
@@ -211,14 +218,14 @@ def test_node_drawer_exposes_owner_install_repair_join_and_lead_audit_view():
             "missing_tools": ["codex"], "has_agent": True, "required_tools": ["codex"],
             "desired_services": [{"name": "worker-api", "unit": "worker-api.service",
                                   "healthcheck_configured": True}], "projects": [], "heartbeat_age_s": 12}
-    owner = render_drawer(node, {"authenticated": True, "user": "owner", "role": "owner"})
+    owner = render_drawer(node, console_session("owner"))
     assert 'data-act="node-install"' in owner and 'data-act="node-repair"' in owner
     assert "worker-api.service" in owner and "health check configured" in owner
-    lead = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"})
+    lead = render_drawer(node, console_session("lead"))
     assert 'data-act="node-install"' not in lead and 'data-act="node-repair"' not in lead
-    assert "Only an authenticated owner can install or repair a node." in lead
+    assert "Only an authenticated user with node management permission can install or repair a node." in lead
     no_agent = dict(node, status="joined", has_agent=False)
-    join = render_drawer(no_agent, {"authenticated": True, "user": "owner", "role": "owner"})
+    join = render_drawer(no_agent, console_session("owner"))
     assert 'data-act="join-command"' in join
 
 
@@ -226,7 +233,7 @@ def test_node_operation_log_escapes_service_names_from_saved_results():
     service_name = '<img src=x onerror="alert(1)">'
     node = {"name": "node3", "ip": "192.0.2.55", "status": "online", "metrics": {}, "tools": {},
             "has_agent": True, "projects": [], "heartbeat_age_s": 12}
-    rendered = render_drawer(node, {"authenticated": True, "user": "lead", "role": "lead"}, [{
+    rendered = render_drawer(node, console_session("lead"), [{
         "status": "completed", "action": "repair", "actor": "owner", "created_at": None,
         "result": {"services": [{"name": service_name, "healthy": True}]},
     }])
@@ -468,8 +475,12 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
               "legacy_owner_env": False, "oauth_app": {"configured": True, "client_id": "client-1"},
               "redirect_uri": "https://control.example.test/v1/integrations/jira/oauth/callback",
               "requested_scopes": ["read:jira-work", "write:jira-work", "offline_access"]}
-    def render(data: dict) -> str:
-        return render_integrations(console_session_user(), data)
+    def render(data: dict, permissions: list[str] | None = None) -> str:
+        return run_script("var root = {innerHTML: ''};"
+                          " document.querySelector = function (s) { return s === '#view-integrations' ? root : null; };"
+                          f" S.view = 'integrations'; S.consoleUser = {{permissions: {json.dumps(permissions if permissions is not None else sorted(ROLE_PERMISSIONS['owner']))}}};"
+                          f" S.integ.jira = {json.dumps(data)}; renderIntegrations();"
+                          " console.log(root.innerHTML);")
 
     out = render(status)
     for text in ("Connect GitHub", "Create a GitHub App", "acme", "cloud-1", "bot@acme.test",
@@ -478,6 +489,7 @@ def test_integrations_view_shows_the_connected_site_and_never_renders_secret_val
     assert 'type="password" data-integ-field="client_secret"' in out and 'type="password" data-integ-field="api_token"' in out
     needs = render({**status, "connected": False, "needs_reconnect": True, "state": "needs_reconnect"})
     assert "Reconnect needed" in needs and "Press Connect Jira again" in needs
+    assert "Connect GitHub" in render(status, ["integrations.manage"])
 
 
 def test_knowledge_view_renders_resources_history_and_owner_approval_diff():
@@ -515,7 +527,7 @@ def test_super_admin_session_shows_github_connect_and_project_resume_controls(ct
     assert session.status_code == 200
     user = session.json()
     assert user["role"] == "super_admin"
-    assert "console.manage" in user["permissions"]
+    assert "*" in user["permissions"]
 
     jira = {"connected": False, "source": "none", "state": "disconnected", "needs_reconnect": False,
             "oauth_app": {"configured": False}, "site_url": "", "requested_scopes": [], "redirect_uri": ""}
@@ -536,12 +548,75 @@ def test_super_admin_session_shows_github_connect_and_project_resume_controls(ct
     }, user=user)
     assert ">Connect GitHub</button>" in integrations
     assert "Use an existing GitHub App" in integrations
+    assert "data-github-app-id" in integrations and "data-github-key-file" in integrations
     assert ">Connect Jira</button>" in integrations
     assert "Add project" in projects and ">Pause</button>" in projects
     assert "Resume</button>" in projects and "Remove</button>" in projects
     assert 'data-act="node-install"' in node and 'data-act="node-repair"' in node
     assert "New resource" in knowledge and 'data-act="knowledge-edit"' in knowledge
     assert 'data-act="knowledge-approve"' in knowledge
+
+
+def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browser(ctx):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error, sync_playwright
+    import uvicorn
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.api import create_app
+
+    try:
+        playwright = sync_playwright().start()
+    except Error as exc:
+        pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Error as exc:
+            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+
+        ctx.settings.console_login = True
+        ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.repo().projects["TESTWP"].paused = True
+        password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
+        assert password
+        app = create_app(ctx)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("127.0.0.1", 0))
+        server_socket.listen(128)
+        base_url = f"http://127.0.0.1:{server_socket.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
+        server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
+        try:
+            server_thread.start()
+            deadline = time.monotonic() + 10
+            while not server.started and server_thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert server.started, "console test server did not start"
+
+            page = browser.new_page()
+            page.goto(base_url + "/login?next=%2Fintegrations", wait_until="domcontentloaded")
+            page.get_by_label("Email").fill("browser-admin@example.test")
+            page.get_by_label("Password").fill(password)
+            page.get_by_role("button", name="Sign in").click()
+            page.wait_for_url("**/integrations")
+            page.get_by_role("button", name="Connect GitHub").wait_for(state="visible", timeout=10000)
+            existing_app = page.locator("#view-integrations summary").filter(has_text="Use an existing GitHub App")
+            existing_app.click()
+            page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
+            page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+
+            page.get_by_role("tab", name="Projects").click()
+            page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+        finally:
+            browser.close()
+            server.should_exit = True
+            if server_thread.is_alive():
+                server_thread.join(timeout=5)
+            server_socket.close()
+    finally:
+        playwright.stop()
 
 
 def test_lead_sees_only_read_permitted_controls():

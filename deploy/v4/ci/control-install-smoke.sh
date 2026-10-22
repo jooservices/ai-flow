@@ -56,7 +56,8 @@ expect_running() {  # expect_running <version>: CURRENT, Command Center and Gatu
 
 echo "== 1. clean install of $PREVIOUS"
 START=$SECONDS
-docker exec "$NAME" bash /opt/aiflow4-control-install --version "$PREVIOUS" --domain "$DOMAIN"
+docker exec "$NAME" bash /opt/aiflow4-control-install --version "$PREVIOUS" --domain "$DOMAIN" \
+  --admin-email smoke@example.test
 ELAPSED=$((SECONDS - START))
 echo "install took ${ELAPSED}s"
 ((ELAPSED <= 600)) || { echo "install of $PREVIOUS took longer than 10 minutes" >&2; exit 1; }

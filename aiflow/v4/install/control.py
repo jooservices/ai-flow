@@ -20,6 +20,10 @@ The install runs these steps in order (STEPS); docs/v4/control-install.md is the
 - infra: the release's deploy/v4/control/infra.yaml (PostgreSQL, Redis, Traefik, OpenObserve, Gatus, Mailpit) with
   `docker compose up -d`, which leaves unchanged containers running. Data lives under /srv/aiflow/control/data.
 - migrate: the pre-upgrade check (upgrades only), then `aiflow4 migrate` from the release image (forward only).
+- admin: `aiflow4 console-user seed` from the release image creates the first Super Administrator (--admin-email,
+  remembered in control.env) once; its generated password lands in /etc/aiflow/secrets/console (0600) and is never
+  printed. The secrets step turns console login on (AIFLOW4_CONSOLE_LOGIN=1), so after the install the owner only
+  uses the UI (docs/v4/console-login.md).
 - deploy: `aiflow4-deploy vX.Y.Z` (control-api a and b one at a time, control-loops, CURRENT). When CURRENT is already
   vX.Y.Z and the containers run that image, only `docker compose up -d` runs, so a second run recreates nothing.
 - health: every component; the failed ones are named. After an upgrade a failed check redeploys the previous
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import ipaddress
 import os
 import re
 import shutil
@@ -57,7 +62,11 @@ IMAGE = "ghcr.io/jooservices/ai-flow/control-api"
 REPO_URL = "https://github.com/jooservices/ai-flow.git"
 SERVER_INSTALLER_URL = f"https://github.com/jooservices/server-installer/archive/refs/tags/{SERVER_INSTALLER_VERSION}.tar.gz"
 SUPPORTED_UBUNTU = ("22.04", "24.04")
-STEPS = ("preflight", "os", "tools", "release", "secrets", "infra", "migrate", "deploy", "health", "cli")
+STEPS = ("preflight", "os", "tools", "release", "secrets", "infra", "migrate", "admin", "deploy", "health", "cli")
+ADMIN_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
+ADMIN_PASSWORD_FILE = "super-admin-password"  # in Layout.console_secrets; the CLI writes it 0600 and never prints it
+_TRUSTED_PROXY_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
 OS_MODULES = ("packages", "timesync", "swap", "ulimits", "docker", "docker_group")
 VPN_MODULES = ("tailscale", "wireguard")
 HOST_PACKAGES = ("ca-certificates", "curl", "git", "tar")
@@ -77,6 +86,25 @@ def version_key(v: str) -> tuple[int, int, int]:
     return (int(m[1]), int(m[2]), int(m[3])) if m else (-1, -1, -1)
 
 
+def sanitize_proxy_cidrs(values: str) -> list[str]:
+    """Canonicalize private Docker network CIDRs and discard malformed or overly broad ranges."""
+    result = set()
+    for value in re.split(r"[,\s]+", values.strip()):
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        minimum_prefix = 16 if network.version == 4 else 48
+        if network.prefixlen < minimum_prefix:
+            continue
+        if any(network.version == base.version and network.subnet_of(base)
+               for base in _TRUSTED_PROXY_PRIVATE_NETWORKS):
+            result.add(str(network))
+    return sorted(result)
+
+
 class InstallError(Exception):
     def __init__(self, message: str, code: int, step: str = "") -> None:
         super().__init__(message)
@@ -93,6 +121,8 @@ class Layout:
 
     @property
     def secrets(self) -> Path: return self.p("/etc/aiflow/secrets/control")
+    @property
+    def console_secrets(self) -> Path: return self.p("/etc/aiflow/secrets/console")
     @property
     def control_env(self) -> Path: return self.p("/etc/aiflow/control.env")
     @property
@@ -171,6 +201,7 @@ class Options:
     vpn: str = ""
     otel_collector: bool = False
     health_timeout: int = 300
+    admin_email: str = ""
 
 
 class ControlInstaller:
@@ -207,8 +238,11 @@ class ControlInstaller:
         self.write_secrets_and_config()
         self.step("infra")
         self.start_infra(v)
+        self.configure_trusted_proxies()
         self.step("migrate")
         checked = self.migrate(v, cur)
+        self.step("admin")
+        self.seed_admin(v, cur)
         self.step("deploy")
         rc = self.deploy(v, cur, skip_check=checked or self.is_downgrade(v, cur))
         self.step("health")
@@ -220,7 +254,7 @@ class ControlInstaller:
             raise InstallError(f"health check failed: {describe(failures)}", EXIT_UNHEALTHY, "health")
         self.step("cli")
         self.refresh_cli(v)
-        self.out(f"AI Flow control plane {v} is running and healthy. Command Center: http://{self.opt.domain}/cc")
+        self.out(f"AI Flow control plane {v} is running and healthy. Command Center: https://{self.opt.domain}/cc")
         return 0
 
     def roll_back_on_request(self) -> int:
@@ -236,7 +270,7 @@ class ControlInstaller:
         failures = self.health(prev) if rc == 0 else [("deploy", f"aiflow4-deploy {prev} exited {rc}")]
         if failures:
             raise InstallError(f"rollback to {prev} is unhealthy: {describe(failures)}", EXIT_ROLLBACK_FAILED, "health")
-        self.out(f"rolled back to {prev}; the control plane is healthy. Command Center: http://{self.domain()}/cc")
+        self.out(f"rolled back to {prev}; the control plane is healthy. Command Center: https://{self.domain()}/cc")
         return 0
 
     def roll_back_after_failure(self, prev: str, failed: str, failures: list[tuple[str, str]]) -> int:
@@ -267,6 +301,11 @@ class ControlInstaller:
             if not DOMAIN.match(o.domain or ""):
                 raise InstallError("--domain must be a host name or IPv4 address, for example aiflow.example.com",
                                    EXIT_USAGE)
+            if o.admin_email and not ADMIN_EMAIL.match(o.admin_email.strip()):
+                raise InstallError("--admin-email must be an email address, for example owner@example.com", EXIT_USAGE)
+            if not self.admin_email():
+                raise InstallError("--admin-email is required on the first install: it becomes the first Super "
+                                   "Administrator of Command Center", EXIT_USAGE)
         self.si_settings()  # validates --stack and --si
         if o.vpn and o.vpn not in VPN_MODULES:
             raise InstallError("--vpn must be tailscale or wireguard", EXIT_USAGE)
@@ -402,11 +441,12 @@ class ControlInstaller:
     def write_secrets_and_config(self) -> None:
         lay, d = self.layout, self.opt.domain
         sec.update_env(lay.control_env, header="AI Flow control plane settings (no secrets)", mode=0o644,
-                       force={"AIFLOW4_DOMAIN": d, "AIFLOW4_JOIN_CONTROL_URL": f"http://{d}"},
+                       force={"AIFLOW4_DOMAIN": d, "AIFLOW4_JOIN_CONTROL_URL": f"http://{d}",
+                              "AIFLOW4_CONSOLE_ADMIN_EMAIL": self.admin_email()},
                        keep={"AIFLOW4_DEPLOY_NODE_AGENT": "0"})
-        changed = sec.ensure_internal(lay.secrets, f"http://{d}", f"http://{d}:8081/")
+        changed = sec.ensure_internal(lay.secrets, f"https://{d}", f"http://{d}:8081/")
         for path, mode in ((lay.p("/etc/aiflow/secrets"), 0o700), (lay.p("/etc/aiflow/secrets/github"), 0o700),
-                           (lay.p("/etc/aiflow/secrets/jira"), 0o700)):
+                           (lay.p("/etc/aiflow/secrets/jira"), 0o700), (lay.console_secrets, 0o700)):
             sec.ensure_dir(path, mode)
         for path in (lay.control / "repos/aiflow-control", lay.control / "cache/aiflow4-memory", lay.releases):
             path.mkdir(parents=True, exist_ok=True)
@@ -435,6 +475,17 @@ class ControlInstaller:
         if failures:
             raise InstallError(f"health check failed: {describe(failures)}", EXIT_UNHEALTHY)
 
+    def configure_trusted_proxies(self) -> None:
+        """Trust only sanitized private CIDRs assigned to the local Traefik edge network."""
+        r = self.host.run(["docker", "network", "inspect", "--format",
+                           "{{range .IPAM.Config}}{{println .Subnet}}{{end}}", "aiflow4-edge"])
+        cidrs = sanitize_proxy_cidrs(r.stdout) if r.returncode == 0 else []
+        if not cidrs:
+            raise InstallError("could not determine a private CIDR for the aiflow4-edge proxy network",
+                               EXIT_UNHEALTHY, "infra")
+        sec.update_env(self.layout.secrets / sec.APP_ENV,
+                       force={"AIFLOW4_TRUSTED_PROXIES": ",".join(cidrs)}, mode=0o600)
+
     def migrate(self, v: str, cur: str) -> bool:
         """Run the pre-upgrade check (upgrades) and `aiflow4 migrate`; returns whether the check ran."""
         if self.is_downgrade(v, cur):
@@ -460,6 +511,25 @@ class ControlInstaller:
             raise InstallError(f"migrations of {v} failed (exit {r.returncode}); the control plane keeps "
                                f"{cur or 'no release'}", EXIT_UNHEALTHY)
         return checked
+
+    def seed_admin(self, v: str, cur: str) -> None:
+        """Create the first Super Administrator once; a rerun finds the user and changes nothing."""
+        if self.is_downgrade(v, cur):
+            self.out(f"{v} is older than {cur}: the Super Administrator already exists")
+            return
+        lay, email = self.layout, self.admin_email()
+        sec.ensure_dir(lay.console_secrets, 0o700)
+        inside = "/run/aiflow4-console"
+        r = self.host.run(["docker", "run", "--rm", "--network", "aiflow4-control",
+                           "--env-file", str(lay.secrets / sec.APP_ENV), "-v", f"{lay.console_secrets}:{inside}",
+                           f"{IMAGE}:{v}", "console-user", "seed", "--email", email, "--role", "super_admin",
+                           "--password-file", f"{inside}/{ADMIN_PASSWORD_FILE}"])
+        self.show(r)
+        if r.returncode:
+            raise InstallError(f"could not create the first Super Administrator {email} (exit {r.returncode})",
+                               EXIT_UNHEALTHY)
+        self.out(f"Super Administrator {email}: sign in at https://{self.opt.domain}/login; the first password is in "
+                 f"{lay.console_secrets / ADMIN_PASSWORD_FILE} (0600, written once)")
 
     def deploy(self, v: str, cur: str, skip_check: bool) -> int:
         if cur == v and self.app_on(v):
@@ -541,6 +611,11 @@ class ControlInstaller:
     def current(self) -> str:
         f = self.layout.releases / "CURRENT"
         return f.read_text().strip() if f.is_file() else ""
+
+    def admin_email(self) -> str:
+        """--admin-email, else the one a previous install remembered in control.env."""
+        return (self.opt.admin_email.strip().lower()
+                or sec.read_env(self.layout.control_env).get("AIFLOW4_CONSOLE_ADMIN_EMAIL", ""))
 
     def domain(self) -> str:
         return sec.read_env(self.layout.control_env).get("AIFLOW4_DOMAIN", "") or "<domain>"

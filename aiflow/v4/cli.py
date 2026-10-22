@@ -11,7 +11,8 @@
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
   aiflow4 worker --account ID           one AI account (root; AI runs as aiflow-worker)
-  aiflow4 install control --version vX.Y.Z --domain D   install, re-run or upgrade the control plane (root)
+  aiflow4 install control --version vX.Y.Z --domain D [--admin-email E]   install, re-run or upgrade the control plane (root)
+  aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)
   aiflow4 install control --rollback    return the control plane to the previous release (root)
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
   aiflow4 version
@@ -99,6 +100,41 @@ def build_ctx(s: Settings):
     return ctx
 
 
+def _console_user(a, s) -> int:
+    """`aiflow4 console-user seed|reset-password|list`: the generated password goes to a 0600 file, never to the output.
+
+    The file is written before the new password hash is committed; when writing fails the change is rolled back."""
+    from .control import login
+    from .control.db import DB
+    db = DB(s.database_url)
+    try:
+        db.migrate()
+        if a.action == "list":
+            for u in db.all("SELECT email, role, disabled, last_login_at FROM console_users ORDER BY email"):
+                print(f"{u['email']}\t{u['role']}\t{'disabled' if u['disabled'] else 'active'}\t{u['last_login_at'] or 'never'}")
+            return 0
+        if not a.email or not a.password_file:
+            print("--email and --password-file are required", file=sys.stderr)
+            return 2
+
+        def deliver(password: str) -> None:
+            login.write_password_file(a.password_file, password)
+
+        try:
+            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver) if a.action == "seed"
+                        else login.reset_password(db, a.email, deliver=deliver))
+        except (ValueError, OSError) as exc:
+            print(f"{exc}; nothing changed", file=sys.stderr)
+            return 2
+        if password is None:
+            print(f"{login.normalize_email(a.email)} already exists; nothing changed")
+            return 0
+        print(f"{login.normalize_email(a.email)}: password written to {a.password_file} (mode 0600)")
+        return 0
+    finally:
+        db.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=os.environ.get("AIFLOW4_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -162,17 +198,24 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--vpn", choices=["tailscale", "wireguard"], default="")
     pi.add_argument("--otel-collector", action="store_true")
     pi.add_argument("--health-timeout", type=int, default=300)
+    pi.add_argument("--admin-email", default="", help="the first Super Administrator of Command Center (first install)")
     ps = sub.add_parser("secret")
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
     ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
+    pu2 = sub.add_parser("console-user", help="create or reset a Command Center user (docs/v4/console-login.md)")
+    pu2.add_argument("action", choices=["seed", "reset-password", "list"])
+    pu2.add_argument("--email")
+    pu2.add_argument("--role", default="super_admin")
+    pu2.add_argument("--name", default="")
+    pu2.add_argument("--password-file", help="where the generated password is written (mode 0600); it is never printed")
     a = ap.parse_args(argv)
 
     if a.cmd == "install":
         from .install.control import ControlInstaller, Options
         return ControlInstaller(Options(version=a.release, domain=a.domain, rollback=a.rollback, stack=a.stack,
                                         si=a.si, vpn=a.vpn, otel_collector=a.otel_collector,
-                                        health_timeout=a.health_timeout)).run()
+                                        health_timeout=a.health_timeout, admin_email=a.admin_email)).run()
     if a.cmd == "secret":
         from .install.control import secret_command
         return secret_command(a.action, a.name, a.stdin)
@@ -196,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             db.close()
         return 0 if result["ok"] else 9
+    if a.cmd == "console-user":
+        return _console_user(a, s)
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)

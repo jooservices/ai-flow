@@ -1,8 +1,8 @@
 """Verify signed console sessions and define the permissions shown by the Command Center.
 
-The console login flow issues this small HS256 JWT contract in the ``aiflow4_session`` cookie: ``sub`` is the
-authenticated user, ``role`` is a known role, and ``exp`` is the Unix expiry time. The same role-to-permission
-map drives the UI and API authorization. We never trust identity or role headers from the request.
+The console login (control/login.py, docs/v4/console-login.md) issues this small HS256 JWT contract in the
+``aiflow4_session`` cookie: ``sub`` is the authenticated user, ``role`` is one of ``ROLE_PERMISSIONS``, and ``exp``
+is the Unix expiry time. We never trust identity or role headers from the request.
 """
 from __future__ import annotations
 
@@ -16,23 +16,36 @@ from dataclasses import dataclass
 
 
 COOKIE_NAME = "aiflow4_session"
-ROLE_PERMISSIONS = {
+# Role -> permissions. "*" is every permission. Call sites ask for permission identifiers, so a new role can be
+# given access by adding its permissions here without changing endpoint code.
+ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
+    "super_admin": frozenset({"*"}),
     "owner": frozenset({
-        "console.read", "console.manage", "node.operations.read", "knowledge.read", "knowledge.manage",
-        "knowledge.approve",
+        "console.read", "console.write", "console.manage", "integrations.manage", "nodes.manage", "projects.manage",
+        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve",
     }),
     "lead": frozenset({"console.read", "node.operations.read", "knowledge.read"}),
-    "super_admin": frozenset({
-        "console.read", "console.manage", "node.operations.read", "knowledge.read", "knowledge.manage",
-        "knowledge.approve",
-    }),
 }
+ROLE_LABELS = {"super_admin": "Super Administrator", "owner": "Owner", "lead": "Lead"}
 ALLOWED_ROLES = set(ROLE_PERMISSIONS)
 
 
+def role_satisfies(role: str, required: set[str] | frozenset[str]) -> bool:
+    """True when the role has at least one required permission identifier."""
+    granted = ROLE_PERMISSIONS.get(role, frozenset())
+    return "*" in granted or bool(granted.intersection(required))
+
+
 def has_permission(role: str, permission: str) -> bool:
-    """Return whether a known console role grants a permission."""
-    return permission in ROLE_PERMISSIONS.get(role, ())
+    granted = ROLE_PERMISSIONS.get(role, frozenset())
+    return "*" in granted or permission in granted
+
+
+def checks_bearer(endpoint):
+    """Mark a route handler that verifies the `Authorization` bearer token itself (not through a dependency), so
+    the console login gate (login.py) lets bearer requests reach it; the handler still refuses a wrong token."""
+    endpoint.checks_bearer = True
+    return endpoint
 
 
 @dataclass(frozen=True)

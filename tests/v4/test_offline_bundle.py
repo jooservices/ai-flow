@@ -540,7 +540,8 @@ def test_offline_install_default_runner_accepts_text_and_finishes(tmp_path, monk
             launcher.parent.mkdir(parents=True)
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o755)
-            (Path(args[-1]) / "lib/python3.12/site-packages").mkdir(parents=True)
+            # Exercise installer discovery when the venv layout differs from the bundle pin.
+            (Path(args[-1]) / "lib/python3.13/site-packages").mkdir(parents=True)
         elif args[0] == "curl":
             Path(args[args.index("--output") + 1]).write_text(json.dumps(state))
         elif args[0] == "systemctl" and "list-units" in args:
@@ -552,6 +553,7 @@ def test_offline_install_default_runner_accepts_text_and_finishes(tmp_path, monk
 
     assert result["healthy"] is True
     assert (root / "srv/aiflow/accounts/codex-01").is_dir()
+    assert (root / "srv/aiflow/releases/v4.2.0/.venv/lib/python3.13/site-packages/aiflow4-release.pth").is_file()
     assert any(args[0] == "dpkg" and "-i" in args for args, _ in calls)
     assert sum(args[0].endswith("/bin/uv") for args, _ in calls) == 2
     assert any(args[:2] == ["docker", "load"] for args, _ in calls)
@@ -578,7 +580,7 @@ def test_offline_install_default_runner_wraps_command_failures(tmp_path, monkeyp
             launcher.parent.mkdir(parents=True)
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o755)
-            (Path(args[-1]) / "lib/python3.12/site-packages").mkdir(parents=True)
+            (Path(args[-1]) / "lib/python3.13/site-packages").mkdir(parents=True)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(offline.subprocess, "run", run)

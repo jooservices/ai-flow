@@ -1,4 +1,5 @@
-"""Dashboards: Command Center (/cc), Delivery (/delivery), SA health (/sa), Team Lead (/lead),
+"""Dashboards: Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
+Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge) and
 Integrations (/integrations, control/jira_connect.py) and Backup (/backup), fed by /v1/state and relevant view APIs.
 
@@ -23,10 +24,14 @@ def mount_ui(app: FastAPI, ctx) -> None:
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
-        return RedirectResponse("/cc")
+        return RedirectResponse("/dashboard")
 
     @app.get("/cc", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False)
+    @app.get("/work", include_in_schema=False)
     @app.get("/delivery", include_in_schema=False)
+    @app.get("/machines", include_in_schema=False)
+    @app.get("/users", include_in_schema=False)
     @app.get("/sa", include_in_schema=False)
     @app.get("/lead", include_in_schema=False)
     @app.get("/business", include_in_schema=False)

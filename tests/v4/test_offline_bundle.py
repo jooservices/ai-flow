@@ -268,7 +268,7 @@ def _manylinux_2017_only_wheel(directory, machine):
 
 
 @pytest.mark.parametrize("machine", ["x86_64", "aarch64"])
-def test_wheelhouse_pip_command_accepts_wheels_tagged_only_manylinux_2_17(tmp_path, monkeypatch, machine):
+def test_wheelhouse_pip_command_accepts_wheels_tagged_only_manylinux_2_17(tmp_path, machine):
     candidates = [shutil.which("python3"), "/usr/bin/python3"]
     pip_python = next((candidate for candidate in candidates if candidate and Path(candidate).is_file() and
                        subprocess.run([candidate, "-m", "pip", "--version"], capture_output=True).returncode == 0),
@@ -289,11 +289,10 @@ def test_wheelhouse_pip_command_accepts_wheels_tagged_only_manylinux_2_17(tmp_pa
     assert result.returncode == 0, result.stderr
     assert (wheelhouse / wheel.name).is_file()
 
-    # The fixture really discriminates: the earlier single manylinux_2_28 tag rejects it.
-    monkeypatch.setattr(offline, "manylinux_platforms", lambda _arch: [f"manylinux_2_28_{machine}"])
-    single_tag = offline.pip_download_command(pip_python, requirements, tmp_path / "rejected", node_arch)
-    rejected = subprocess.run([*single_tag, *offline_flags], capture_output=True, text=True)
-    assert rejected.returncode != 0
+    # The command names the old tags itself instead of relying on pip to expand manylinux_2_28:
+    # older pip releases (Ubuntu 24.04) match --platform exactly, newer ones expand it.
+    platforms = [command[index + 1] for index, flag in enumerate(command) if flag == "--platform"]
+    assert {f"manylinux_2_17_{machine}", f"manylinux2014_{machine}"} <= set(platforms)
 
 
 def test_agent_and_worker_debs_include_systemd_user_directories_and_supported_architecture(tmp_path):

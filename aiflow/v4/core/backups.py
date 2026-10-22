@@ -199,16 +199,25 @@ def _secret_roots(settings) -> list[tuple[str, Path]]:
     return roots
 
 
-def _knowledge_rows(database_url: str) -> dict[str, list[dict]]:
+def _knowledge_rows_from_connection(conn) -> dict[str, list[dict]]:
     result = {}
-    with psycopg.connect(database_url, row_factory=dict_row) as conn:
-        for table in KNOWLEDGE_TABLES:
-            result[table] = [dict(row) for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY 1').fetchall()]
+    for table in KNOWLEDGE_TABLES:
+        result[table] = [dict(row) for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY 1').fetchall()]
     return result
+
+
+def _knowledge_rows(database_url: str) -> dict[str, list[dict]]:
+    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        return _knowledge_rows_from_connection(conn)
 
 
 def _knowledge_bytes(database_url: str) -> bytes:
     return json.dumps(_knowledge_rows(database_url), ensure_ascii=False, sort_keys=True, default=_safe_json,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _knowledge_bytes_from_connection(conn) -> bytes:
+    return json.dumps(_knowledge_rows_from_connection(conn), ensure_ascii=False, sort_keys=True, default=_safe_json,
                       separators=(",", ":")).encode("utf-8")
 
 
@@ -266,9 +275,17 @@ def create_archive(database_url: str, repo_root: str | Path, settings, target: P
     with tempfile.TemporaryDirectory(prefix="aiflow4-backup-") as tmp:
         tmpdir = Path(tmp)
         database = tmpdir / "database.dump"
-        with _database_cli_connection(database_url) as (safe_conninfo, env):
-            _run_db_command(["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--file", str(database),
-                             "--dbname", safe_conninfo], "database backup", env=env)
+        knowledge = tmpdir / "knowledge.json"
+        # Keep the exporting transaction open until pg_dump imports the snapshot and knowledge has been read.
+        # This gives both components the same MVCC view while control loops continue writing to the live DB.
+        with psycopg.connect(database_url, row_factory=dict_row) as snapshot_conn:
+            snapshot_conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            snapshot_id = snapshot_conn.execute("SELECT pg_export_snapshot()").fetchone()["pg_export_snapshot"]
+            with _database_cli_connection(database_url) as (safe_conninfo, env):
+                _run_db_command(["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--snapshot",
+                                 snapshot_id, "--file", str(database), "--dbname", safe_conninfo],
+                                "database backup", env=env)
+            knowledge.write_bytes(_knowledge_bytes_from_connection(snapshot_conn))
         repo_archive = tmpdir / "control-repository.tar.gz"
         with tarfile.open(repo_archive, "w:gz") as tar:
             _add_tree(tar, Path(repo_root), "repository")
@@ -277,8 +294,6 @@ def create_archive(database_url: str, repo_root: str | Path, settings, target: P
         with tarfile.open(secret_archive, "w:gz") as tar:
             for label, root in _secret_roots(settings):
                 _add_tree(tar, root, label, excluded)
-        knowledge = tmpdir / "knowledge.json"
-        knowledge.write_bytes(_knowledge_bytes(database_url))
         components = {"database": database, "stored_secrets": secret_archive,
                       "control_repository": repo_archive, "knowledge": knowledge}
         manifest = {

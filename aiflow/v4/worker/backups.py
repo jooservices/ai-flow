@@ -77,10 +77,10 @@ def _new_scratch_database(database_url: str) -> tuple[str, str]:
 def restore_test(ctx, source: str, now: datetime | None = None, config: dict | None = None) -> dict:
     """Restore to a temporary database and filesystem tree, then drop them regardless of the result."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    key = backups.read_key(ctx.settings.backup_key_file)
     db_name = ""
     admin_url = make_conninfo(ctx.settings.database_url, dbname="postgres")
     try:
+        key = backups.read_key(ctx.settings.backup_key_file)
         db_name, scratch_url = _new_scratch_database(ctx.settings.database_url)
         with tempfile.TemporaryDirectory(prefix="aiflow4-weekly-restore-test-") as root:
             base = Path(root)

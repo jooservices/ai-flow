@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -210,6 +211,85 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(target_name)))
 
 
+def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_database_url, control_repo, tmp_path,
+                                                          monkeypatch):
+    if not shutil.which("pg_dump") or not shutil.which("pg_restore"):
+        pytest.skip("PostgreSQL client tools are not installed")
+
+    source_roots = configure_paths(ctx, tmp_path / "real-source", control_repo)
+    ctx.settings.database_url = test_database_url
+    token = secrets.token_hex(8)
+    resource_id = f"snapshot-{token}"
+    memory_ref = f"snapshot-{token}"
+    with psycopg.connect(test_database_url) as source:
+        source.execute("INSERT INTO managed_resources (resource_type,resource_id,title,content,path,version,updated_by)"
+                       " VALUES ('knowledge',%s,'Snapshot resource','before dump','knowledge/snapshot.md',1,'test')",
+                       (resource_id,))
+        source.execute("INSERT INTO memory (project,kind,ref,text) VALUES ('SNAPSHOT','answer',%s,'before dump')",
+                       (memory_ref,))
+    (source_roots["control"] / "control-setting.env").write_text("CONTROL_SETTING=backed up\n")
+    (source_roots["console"] / "console-secret").write_text("console secret\n")
+    (source_roots["jira"] / "jira-secret").write_text("jira secret\n")
+    (source_roots["github"] / "github-secret").write_text("github secret\n")
+    (control_repo / "backup-settings.yaml").write_text("setting: original\n")
+    key = secrets.token_bytes(32)
+    backups.install_key(ctx.settings.backup_key_file, key)
+
+    actual_run_db_command = backups._run_db_command
+    changed_after_dump = False
+
+    def mutate_live_knowledge_after_dump(command, label, timeout=3600, env=None):
+        nonlocal changed_after_dump
+        actual_run_db_command(command, label, timeout=timeout, env=env)
+        if label == "database backup" and not changed_after_dump:
+            assert "--snapshot" in command
+            with psycopg.connect(test_database_url) as writer:
+                writer.execute("UPDATE managed_resources SET content='after dump' WHERE resource_id=%s", (resource_id,))
+                writer.execute("UPDATE memory SET text='after dump' WHERE ref=%s", (memory_ref,))
+            changed_after_dump = True
+
+    monkeypatch.setattr(backups, "_run_db_command", mutate_live_knowledge_after_dump)
+    destination = tmp_path / "real-backups"
+    config = {"destination_kind": "local", "destination_path": str(destination), "retention_days": 30}
+    made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key)
+    archive = destination / made["name"]
+    assert changed_after_dump is True
+    assert archive.is_file()
+    assert not archive.read_bytes().startswith(b"PGDMP")
+
+    target_name = "aiflow4_real_restore_" + secrets.token_hex(6)
+    admin_url = make_conninfo(test_database_url, dbname="postgres")
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_name)))
+    target_url = make_conninfo(test_database_url, dbname=target_name)
+    restore_base = tmp_path / "real-restored"
+    restore_roots = {name: restore_base / name for name in ("control", "console", "jira", "github", "repository")}
+    for path in restore_roots.values():
+        path.mkdir(parents=True)
+    try:
+        outcome = backups.restore_archive(str(archive), key, target_url, ctx.settings, restore_roots=restore_roots)
+        assert outcome["ok"] is True, outcome
+        assert {name: item["status"] for name, item in outcome["components"].items()} == {
+            "database": "restored", "stored_secrets": "restored", "control_repository": "restored",
+            "knowledge": "restored"}
+        with psycopg.connect(target_url, row_factory=dict_row) as restored:
+            resource = restored.execute("SELECT content FROM managed_resources WHERE resource_id=%s",
+                                        (resource_id,)).fetchone()
+            memory = restored.execute("SELECT text FROM memory WHERE ref=%s", (memory_ref,)).fetchone()
+            assert restored.execute("SELECT to_regclass('public.managed_resource_history') AS relation").fetchone()["relation"]
+            assert restored.execute("SELECT to_regclass('public.control_backup_config') AS relation").fetchone()["relation"]
+        assert resource == {"content": "before dump"}
+        assert memory == {"text": "before dump"}
+        assert (restore_roots["control"] / "control-setting.env").read_text() == "CONTROL_SETTING=backed up\n"
+        assert (restore_roots["console"] / "console-secret").read_text() == "console secret\n"
+        assert (restore_roots["jira"] / "jira-secret").read_text() == "jira secret\n"
+        assert (restore_roots["github"] / "github-secret").read_text() == "github secret\n"
+        assert (restore_roots["repository"] / "backup-settings.yaml").read_text() == "setting: original\n"
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(target_name)))
+
+
 def test_wrong_and_missing_encryption_key_are_rejected(tmp_path):
     key = secrets.token_bytes(32)
     wrong = secrets.token_bytes(32)
@@ -331,7 +411,8 @@ def test_retention_removes_only_expired_backups(tmp_path):
     assert (root / "not-a-backup.aiflow4").exists()
 
 
-def test_failing_weekly_restore_test_opens_an_incident(ctx, db, tmp_path, monkeypatch):
+def test_missing_key_weekly_restore_test_records_failure_and_opens_incident(ctx, db, tmp_path):
+    ctx.settings.backup_key_file = str(tmp_path / "missing-backup.key")
     config_path = tmp_path / "scheduled"
     config_path.mkdir()
     name = "aiflow4-20261020T000000Z-11111111.aiflow4"
@@ -339,14 +420,12 @@ def test_failing_weekly_restore_test_opens_an_incident(ctx, db, tmp_path, monkey
     db.run("UPDATE control_backup_config SET destination_kind='local',destination_path=%s,retention_days=30,last_test_at=NULL WHERE id=true",
            (str(config_path),))
     from aiflow.v4.worker import backups as backup_worker
-    monkeypatch.setattr(backup_worker, "restore_test", lambda *args, **kwargs: {
-        "ok": False, "error": "database restore failed", "components": {
-            "database": {"status": "failed", "detail": "database restore failed"},
-            "stored_secrets": {"status": "not_run", "detail": "not restored"},
-            "control_repository": {"status": "not_run", "detail": "not restored"},
-            "knowledge": {"status": "not_run", "detail": "not restored"}}})
     result = backup_worker.weekly_restore_test(ctx, datetime(2026, 10, 22, tzinfo=timezone.utc))
     assert result["ok"] is False
+    assert result["components"]["database"]["status"] == "failed"
+    saved = db.one("SELECT last_test_status,last_test_components FROM control_backup_config WHERE id=true")
+    assert saved["last_test_status"] == "failed"
+    assert saved["last_test_components"]["database"]["status"] == "failed"
     incident = db.one("SELECT kind,subject,title,closed_at FROM incidents WHERE kind='backup_restore_test' AND subject='weekly'")
     assert incident and incident["title"] == "Weekly backup restore test failed"
     assert incident["closed_at"] is None

@@ -618,7 +618,7 @@ var S = {
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' },
-  knowledge: { data: null, error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, owner: '', ownerToken: '', actor: '' },
+  knowledge: { data: null, learning: null, learningProject: '', search: '', error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, itemEditor: null, owner: '', ownerToken: '', actor: '' },
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
 function viewOf(path) {
@@ -784,6 +784,7 @@ function poll() {
     if (prefsChanged) savePrefs();
     notify(prevInc, prevRuns);
     render();
+    if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (S.view === 'business' && !S.bizLoading) loadBiz();  // assessments arrive while the page is open
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })
     .then(function () { setTimeout(poll, POLL_MS); });
@@ -1943,12 +1944,17 @@ var KNOWLEDGE_TYPES = { study_case: 'Study case', knowledge: 'Knowledge', skill:
 function loadKnowledge(force) {
   var k = S.knowledge;
   if (!consoleCan('knowledge.read')) return;
-  if (k.loading || (!force && k.data && Date.now() - k.loadedAt < 30000)) return;
+  var project = S.project || '';
+  if (k.loading || (!force && k.data && k.learning && k.learningProject === project && Date.now() - k.loadedAt < 30000)) return;
   k.loading = true; k.error = '';
-  fetch('/v1/knowledge/resources?include_archived=true', { cache: 'no-store' }).then(function (r) {
+  var resources = fetch('/v1/knowledge/resources?include_archived=true', { cache: 'no-store' }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
-  }).then(function (d) {
-    k.data = d; k.loadedAt = Date.now(); k.loading = false;
+  });
+  var learning = fetch('/v1/knowledge/items?project=' + encodeURIComponent(project) + '&q=' + encodeURIComponent(k.search || '') + '&include_retired=true', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+  Promise.all([resources, learning]).then(function (data) {
+    k.data = data[0]; k.learning = data[1]; k.learningProject = project; k.loadedAt = Date.now(); k.loading = false;
     if (S.view === 'knowledge') renderKnowledge();
   }).catch(function (e) {
     k.error = String(e.message || e); k.loading = false;
@@ -1971,6 +1977,58 @@ function knowledgeSlug(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
 }
 function knowledgeDate(value) { return value ? when(value) : '—'; }
+function renderLearningKnowledge(k, canManage) {
+  var d = k.learning || { counts: [], newest: [], most_used: [], items: [], effectiveness: {} };
+  var stats = d.effectiveness || {}, items = d.items || [];
+  var h = '<section class="panel"><div class="panel-h"><h2 style="margin:0">Learning and study cases</h2><span class="hint">Automatic run, ticket, rework and incident records for ' + esc(S.project || 'general knowledge') + '.</span></div>';
+  h += '<div class="lead-controls"><label>Search this project and general knowledge<input data-knowledge-search value="' + esc(k.search || '') + '" placeholder="Search by meaning or words"></label><button class="btn" data-act="knowledge-search">Search</button>';
+  if (canManage) h += '<button class="btn primary" data-act="knowledge-item-new">Add knowledge item</button>';
+  h += '</div><div class="knowledge-actions" style="margin:12px 0">' +
+    '<span class="pill">Runs with context pack: ' + Number(stats.runs_with_context_pack || 0) + '</span>' +
+    '<span class="pill">Known mistakes repeated: ' + Number(stats.known_mistakes_repeated || 0) + '</span>' +
+    '</div><div class="knowledge-grid"><div><h3>Counts by project and kind</h3><div class="knowledge-list">';
+  (d.counts || []).forEach(function (row) { h += '<div class="small"><span class="mono">' + esc(row.project) + '</span> · ' + esc(KNOWLEDGE_TYPES[row.kind] || row.kind) + ': ' + Number(row.count) + '</div>'; });
+  if (!(d.counts || []).length) h += '<div class="empty">No captured knowledge yet.</div>';
+  h += '</div><h3 style="margin-top:14px">Rework rounds per week</h3><div class="knowledge-list">';
+  (stats.rework_by_week || []).forEach(function (row) { h += '<div class="small">' + esc(row.week) + ' · ' + Number(row.rounds) + ' rounds across ' + Number(row.tickets) + ' tickets · ' + Number(row.rounds_per_ticket || 0) + ' rounds per ticket</div>'; });
+  if (!(stats.rework_by_week || []).length) h += '<div class="small">No verification rework recorded.</div>';
+  h += '</div><h3 style="margin-top:14px">Newest</h3><div class="knowledge-list">';
+  (d.newest || []).forEach(function (item) { h += '<div class="small">' + esc(item.title) + ' · ' + esc(item.kind) + '</div>'; });
+  h += '</div><h3 style="margin-top:14px">Most used</h3><div class="knowledge-list">';
+  (d.most_used || []).forEach(function (item) { h += '<div class="small">' + esc(item.title) + ' · handed to ' + Number(item.handed_count || 0) + ' runs</div>'; });
+  h += '</div></div><div><h3>Knowledge items · ' + items.length + '</h3><div class="knowledge-list">';
+  if (!items.length) h += '<div class="empty">No matching items in this project or general scope.</div>';
+  items.forEach(function (item) {
+    var scope = item.scope === 'general' ? 'General' : item.project + (item.epic ? ' · epic ' + item.epic : '');
+    var source = esc(item.source_type || 'manual') + (item.source_ref ? ' · ' + esc(item.source_ref) : '');
+    var statusTone = item.status === 'active' ? 'ok' : (item.status === 'stale' ? 'warn' : 'muted');
+    h += '<article class="knowledge-item"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>' + esc(item.title) + '</h3>' +
+      '<span class="pill" data-tone="' + statusTone + '">' + esc(item.status) + '</span><span class="pill">' + esc(KNOWLEDGE_TYPES[item.kind] || item.kind) + ' · ' + esc(scope) + '</span></div>' +
+      '<div class="small">' + esc(item.content) + '</div><div class="small">Source: ' + source + (item.source_url ? ' · <a href="' + esc(item.source_url) + '" target="_blank" rel="noopener">ticket</a>' : '') +
+      (item.run_id ? ' · <a href="/v1/tickets/' + encodeURIComponent(item.ticket_key) + '/timeline" target="_blank" rel="noopener">run ' + esc(item.run_id) + '</a>' : '') +
+      (item.pr_url ? ' · <a href="' + esc(item.pr_url) + '" target="_blank" rel="noopener">pull request</a>' : '') + '</div>' +
+      '<div class="small">Created by ' + esc(item.created_by || 'unknown') + ' · approved by ' + esc(item.approved_by || 'pending') + ' · handed to ' + Number(item.handed_count || 0) + ' runs</div>';
+    if (canManage) h += '<div class="knowledge-actions">' +
+      '<button class="btn sm" data-act="knowledge-item-edit" data-id="' + item.id + '">Correct</button>' +
+      ((!item.approved || item.status === 'stale') ? '<button class="btn sm" data-act="knowledge-item-approve" data-id="' + item.id + '">Approve / review</button>' : '') +
+      (item.status === 'active' ? '<button class="btn sm" data-act="knowledge-item-stale" data-id="' + item.id + '">Flag for review</button>' : '') +
+      (item.status !== 'retired' ? '<button class="btn sm" data-act="knowledge-item-retire" data-id="' + item.id + '">Retire</button>' : '') +
+      '<button class="btn sm" data-act="knowledge-item-merge" data-id="' + item.id + '">Merge duplicate…</button></div>';
+    h += '</article>';
+  });
+  h += '</div>';
+  var editor = k.itemEditor;
+  if (canManage && editor) {
+    h += '<div class="knowledge-form" style="margin-top:14px"><h3>' + (editor.id ? 'Correct item' : 'Add knowledge item') + '</h3>' +
+      '<label>Kind<select data-learning-field="kind">' + ['study_case','decision','convention','skill','guide'].map(function (kind) { return '<option value="' + kind + '"' + (editor.kind === kind ? ' selected' : '') + '>' + esc(KNOWLEDGE_TYPES[kind]) + '</option>'; }).join('') + '</select></label>' +
+      '<label>Scope<select data-learning-field="scope"><option value="project"' + (editor.scope !== 'general' ? ' selected' : '') + '>This project</option><option value="general"' + (editor.scope === 'general' ? ' selected' : '') + '>General, shared across projects</option></select></label>' +
+      '<label>Epic key (optional)<input data-learning-field="epic" value="' + esc(editor.epic || '') + '"></label>' +
+      '<label>Title<input data-learning-field="title" value="' + esc(editor.title || '') + '"></label>' +
+      '<label>Content<textarea data-learning-field="content">' + esc(editor.content || '') + '</textarea></label>' +
+      '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-item-save">Save item</button><button class="btn" data-act="knowledge-item-cancel">Cancel</button></div></div>';
+  }
+  return h + '</div></section>';
+}
 function renderKnowledge() {
   var root = $('#view-knowledge'); if (!root) return;
   if (!consoleCan('knowledge.read')) {
@@ -2047,6 +2105,7 @@ function renderKnowledge() {
       '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div>' : '') + '</article>';
   });
   h += '</section></div></div>';
+  h += renderLearningKnowledge(k, canManage);
   root.innerHTML = h;
 }
 function submitKnowledge() {
@@ -2096,6 +2155,26 @@ function approveKnowledge(proposalId) {
   }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
     .then(function (d) { if (!d.merged) throw new Error(d.message || 'GitHub refused the merge'); toast('Policy merged', 'The policy is now active.', 'ok'); loadKnowledge(true); })
     .catch(function (err) { toast('Policy approval failed', String(err.message || err), 'crit'); });
+}
+function knowledgeItemRequest(id, action, body) {
+  fetch('/v1/knowledge/items/' + encodeURIComponent(id) + '/' + encodeURIComponent(action), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+  }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function () { toast('Knowledge updated', 'The item was ' + (action === 'retire' ? 'retired' : action === 'merge' ? 'merged' : action === 'correct' ? 'corrected' : action === 'stale' ? 'flagged for review' : 'approved') + '.', 'ok'); loadKnowledge(true); })
+    .catch(function (err) { toast('Knowledge update failed', String(err.message || err), 'crit'); });
+}
+function submitLearningItem() {
+  var k = S.knowledge, e = k.itemEditor;
+  if (!e) return;
+  var body = { project: e.scope === 'general' ? '' : (S.project || ''), scope: e.scope || 'project',
+    epic: e.scope === 'general' ? '' : String(e.epic || '').trim().toUpperCase(), kind: e.kind,
+    title: String(e.title || '').trim(), content: String(e.content || '').trim(),
+    actor: String(k.actor || (S.consoleUser && S.consoleUser.user) || '').trim() };
+  var url = e.id ? '/v1/knowledge/items/' + encodeURIComponent(e.id) + '/correct' : '/v1/knowledge/items';
+  fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function () { k.itemEditor = null; toast('Knowledge saved', 'The item is in the Knowledge store.', 'ok'); loadKnowledge(true); })
+    .catch(function (err) { toast('Knowledge save failed', String(err.message || err), 'crit'); });
 }
 
 /* ---------- Integrations: connect Jira (OAuth 2.0 3LO or API token fallback) ----------
@@ -3386,6 +3465,24 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'knowledge-restore') restoreKnowledge(el.getAttribute('data-kind'), el.getAttribute('data-id'), el.getAttribute('data-version'));
   else if (act === 'knowledge-approve') approveKnowledge(el.getAttribute('data-proposal'));
+  else if (act === 'knowledge-search') { S.knowledge.search = ($('[data-knowledge-search]') || {}).value || ''; loadKnowledge(true); }
+  else if (act === 'knowledge-item-new') { S.knowledge.itemEditor = { kind: 'convention', scope: 'project', epic: '', title: '', content: '' }; renderKnowledge(); }
+  else if (act === 'knowledge-item-cancel') { S.knowledge.itemEditor = null; renderKnowledge(); }
+  else if (act === 'knowledge-item-save') submitLearningItem();
+  else if (act === 'knowledge-item-edit') {
+    var itemId = Number(el.getAttribute('data-id')), learningItems = (S.knowledge.learning && S.knowledge.learning.items) || [];
+    var selectedItem = learningItems.filter(function (x) { return Number(x.id) === itemId; })[0];
+    if (selectedItem) { S.knowledge.itemEditor = { id: selectedItem.id, kind: selectedItem.kind, scope: selectedItem.scope,
+      epic: selectedItem.epic, title: selectedItem.title, content: selectedItem.content }; renderKnowledge(); }
+  }
+  else if (act === 'knowledge-item-approve') knowledgeItemRequest(el.getAttribute('data-id'), 'approve', { actor: S.consoleUser && S.consoleUser.user || S.knowledge.actor });
+  else if (act === 'knowledge-item-stale') knowledgeItemRequest(el.getAttribute('data-id'), 'stale', { actor: S.consoleUser && S.consoleUser.user || S.knowledge.actor });
+  else if (act === 'knowledge-item-retire') knowledgeItemRequest(el.getAttribute('data-id'), 'retire', { actor: S.consoleUser && S.consoleUser.user || S.knowledge.actor });
+  else if (act === 'knowledge-item-merge') {
+    var duplicate = window.prompt('ID of the duplicate item to merge into this one');
+    if (duplicate && /^\d+$/.test(duplicate)) knowledgeItemRequest(el.getAttribute('data-id'), 'merge',
+      { duplicate_id: Number(duplicate), actor: S.consoleUser && S.consoleUser.user || S.knowledge.actor });
+  }
   else if (act === 'jump') flash(el.getAttribute('data-target'));
   else if (act === 'open-node') openDrawer('node', el.getAttribute('data-id'), el);
   else if (act === 'open-acc') openDrawer('acc', el.getAttribute('data-id'), el);
@@ -3461,6 +3558,10 @@ document.addEventListener('input', function (e) {
   }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
+  if (e.target && e.target.matches('[data-knowledge-search]')) S.knowledge.search = e.target.value;
+  if (e.target && e.target.matches('[data-learning-field]') && S.knowledge.itemEditor) {
+    S.knowledge.itemEditor[e.target.getAttribute('data-learning-field')] = e.target.value;
+  }
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-integ-owner-token]')) S.integ.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
@@ -3558,6 +3659,9 @@ document.addEventListener('input', function (e) {
 });
 document.addEventListener('change', function (e) {
   if (e.target.matches && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
+  if (e.target.matches && e.target.matches('[data-learning-field]') && S.knowledge.itemEditor) {
+    S.knowledge.itemEditor[e.target.getAttribute('data-learning-field')] = e.target.value;
+  }
   if (e.target.matches && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target.id === 'knowledge-kind') { S.knowledge.type = e.target.value; renderKnowledge(); }
   if (e.target.matches && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {

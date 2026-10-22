@@ -28,14 +28,15 @@ ticket already in `Human review` does not count as a detected transition.
 ## Reviewer actions
 
 The control API requires a dedicated reviewer bearer token before it will create a fenced review run. Configure
-`AIFLOW4_REVIEWER_TOKEN` in the control API's existing secret environment file. If no token is configured, both
+`AIFLOW4_REVIEWER_TOKEN` in the control API's existing secret environment file. If no token is configured, review
 actions fail closed with HTTP 503; missing or incorrect tokens receive HTTP 401. Enter the token in the password
 field on the Human review tab. The console keeps it in page memory and sends it only in the `Authorization`
-header for approve and rework requests.
+header for reviewer actions. Metrics, action availability, and the complete action list are documented in
+[Human review metrics and actions](human-review-metrics.md).
 
 **Approve and merge** acquires a ticket lease, creates a short lived QA run with a fencing token, and runs the
 same GitHub merge operation used by verify. When GitHub confirms the merge, control records a Jira comment and
 moves the ticket to `Done`. If the merge is refused, the ticket stays in review.
 
 **Send for rework** requires a comment, records it on the Jira ticket, adds the `rework` label, and moves the ticket
-to `To Do`. Both actions are recorded in `write_audit` with their run fence.
+to `To Do`. Reviewer actions are recorded in `write_audit` with their run fence.

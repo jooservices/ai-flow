@@ -31,3 +31,8 @@ The control API exposes `GET /v1/knowledge/resources`, `POST /v1/knowledge/resou
 `POST /v1/knowledge/resources/{type}/{id}/restore`. Policy proposals are listed with the resources and can be
 approved through `POST /v1/knowledge/proposals/{proposal_id}/approve` with an authorized console session or the
 configured owner bearer token.
+
+The Knowledge screen also shows automatically captured run and ticket records, incident and rework study cases,
+scoped project and general items, context-pack usage, search and learning effectiveness. Administrators can
+approve, correct, merge, flag stale and retire these records. Their storage, project isolation and claim-time
+context pack are documented in [Persistent learning and run context](knowledge-learning.md).

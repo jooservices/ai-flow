@@ -24,6 +24,7 @@ from . import jira_connect, memory
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
+from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
 from .incidents import check_idle_flow, check_stack_pins, close_incident, open_incident
 from .api import Ctx, notify_human_review
@@ -255,6 +256,24 @@ def watchdog(ctx: Ctx) -> None:
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_tools' AND closed_at IS NULL"):
         if i["subject"] not in tool_issues:
             close_incident(ctx, "node_tools", i["subject"], "tools are installed or the node no longer serves the project")
+    # declared test services (PostgreSQL, Redis): an unhealthy one keeps the node from taking that project's work
+    service_issues: set[str] = set()
+    for n in ctx.db.all("SELECT name, status, metrics, projects, dynamic FROM nodes WHERE status='online'"):
+        for key in repo.projects_for_node(n["name"], n["projects"] or [], n["dynamic"]):
+            project = repo.projects.get(key)
+            gaps = service_gaps((n["metrics"] or {}).get("services"), project.required_services) if project else {}
+            if not gaps:
+                continue
+            subject = f"{n['name']}:{key}"
+            service_issues.add(subject)
+            open_incident(ctx, "node_services", subject, "warning", f"node {n['name']} has unhealthy test services for {key}",
+                          f"{n['name']} takes no {key} work until its test services are healthy: "
+                          + "; ".join(f"{svc} ({why})" for svc, why in gaps.items())
+                          + ". The node agent recreates missing or stopped services; the incident closes when a later"
+                          " heartbeat reports them healthy.")
+    for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='node_services' AND closed_at IS NULL"):
+        if i["subject"] not in service_issues:
+            close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {a.node for a in repo.accounts}
     for n in ctx.db.all("SELECT name, status FROM nodes"):

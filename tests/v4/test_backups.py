@@ -5,8 +5,10 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import shutil
+import subprocess
 import tarfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -232,6 +234,12 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
                                                           monkeypatch):
     if not shutil.which("pg_dump") or not shutil.which("pg_restore"):
         pytest.skip("PostgreSQL client tools are not installed")
+    version_line = subprocess.run(["pg_dump", "--version"], capture_output=True, text=True, check=True).stdout
+    client_major = int(re.search(r"(\d+)", version_line.split(")")[-1]).group(1))
+    with psycopg.connect(test_database_url) as probe:
+        server_major = probe.info.server_version // 10000
+    if client_major < server_major:  # pg_dump refuses to dump a server newer than itself
+        pytest.skip(f"pg_dump {client_major} cannot dump PostgreSQL {server_major}")
 
     source_roots = configure_paths(ctx, tmp_path / "real-source", control_repo)
     ctx.settings.database_url = test_database_url

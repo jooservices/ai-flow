@@ -7,6 +7,8 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
+  aiflow4 control-state                  registry state (nodes, ...) as JSON, read directly; for the auto-deploy scripts
+  aiflow4 ci-state --repo O/R --sha S    GitHub CI state of a commit (pending|failed|ok|none), read-only App token
   aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
@@ -181,6 +183,10 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+    sub.add_parser("control-state")
+    pci = sub.add_parser("ci-state")
+    pci.add_argument("--repo", required=True)
+    pci.add_argument("--sha", required=True)
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -224,6 +230,24 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "version":
         print(VERSION)
         return 0
+    if a.cmd in ("control-state", "ci-state"):
+        # Run by the auto-deploy scripts through `docker exec` on the control machine: access to the container is the
+        # credential, so they need no console session while sign-in is on (docs/v4/canary-autodeploy.md).
+        ctx = build_ctx(s)
+        try:
+            if a.cmd == "control-state":
+                from .control.state import snapshot
+                print(json.dumps(snapshot(ctx), separators=(",", ":"), default=str))
+                return 0
+            from .control.canary import ci_state
+            if ctx.github is None:
+                print("GitHub App is not connected", file=sys.stderr)
+                return 1
+            print(ci_state(ctx.github, a.repo, a.sha))
+            return 0
+        finally:
+            ctx.db.close()
+            ctx.leases.r.close()
     if a.cmd == "upgrade-check":
         # Run from the new release before the control plane switches to it; exit 9 blocks the upgrade.
         from types import SimpleNamespace

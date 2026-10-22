@@ -32,7 +32,8 @@ with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
 
-control_state() { curl -fsS http://127.0.0.1/v1/state; }
+# /v1/state needs a console session when sign-in is on; the control container reads the registry directly
+control_state() { docker exec aiflow4-control-api-a aiflow4 control-state; }
 # aiflow4-deploy exits 9 when the pre-upgrade check refused TARGET; nothing changed on the control plane. Remember
 # the release so the timer does not retry it until a newer one is published.
 upgrade_blocked() {
@@ -170,7 +171,7 @@ else
     [ "$RC" -ne 9 ] || upgrade_blocked
     if [ "$RC" -eq 0 ]; then
       sleep 20
-      if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+      if curl -fsS http://127.0.0.1/healthz >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
          && curl -fsS -o /dev/null http://127.0.0.1/cc; then
         echo "deployed $TARGET"; alert "[INFO] AI Flow: deployed $TARGET" "Versioned release $TARGET passed the health checks (previous ${CUR:-none})."; exit 0
       fi
@@ -223,7 +224,7 @@ aiflow4-deploy "$TARGET"; RC=$?
 [ "$RC" -ne 9 ] || upgrade_blocked
 if [ "$RC" -eq 0 ]; then
   sleep 20
-  if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+  if curl -fsS http://127.0.0.1/healthz >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
      && curl -fsS -o /dev/null http://127.0.0.1/cc; then
     echo "deployed $TARGET to the control plane; remaining nodes will update from CURRENT"
     alert "[INFO] AI Flow: deployed $TARGET" "Canary on $NODE passed; release $TARGET is now desired by the fleet (previous $CUR)."

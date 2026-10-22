@@ -46,3 +46,12 @@ use another Jira project.
 
 The first tagged deploy from a legacy commit id keeps the existing control-plane health-check path because that
 commit cannot be restored through the signed node release protocol. Version-to-version deploys use the canary.
+
+## Console sign-in and CI state
+
+With console sign-in on, `/v1/state` refuses a request without a session. `aiflow4-autodeploy` and
+`aiflow4-autodeploy-develop` therefore read the registry with `docker exec aiflow4-control-api-a aiflow4 control-state`
+(access to the control container on the machine is the credential; no password or token file is needed). The develop
+flow reads the CI state of a commit with `aiflow4 ci-state --repo O/R --sha S` (`pending`, `failed`, `ok` or `none`),
+shipped in the release image and using the connected GitHub App with an installation token limited to read-only
+`checks`, `statuses` and `metadata`. No `aiflow4-gh`, `aiflow4-lab-session` or `autodeploy-lab` wrapper is needed.

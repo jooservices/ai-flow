@@ -221,3 +221,21 @@ def record_promotion(ctx, *, target: str, node: str, measurements: dict[str, Any
               f"Required completed runs: {required_runs}\n"
               "The release was promoted after the maximum canary duration.")
     return open_incident(ctx, "canary_under_observed", target, "info", title, detail)
+
+
+CI_READ_ONLY = {"checks": "read", "statuses": "read", "metadata": "read"}
+
+
+def ci_state(github, repo: str, sha: str) -> str:
+    """CI state of a commit from its check runs: pending | failed | ok | none (no check run at all).
+
+    Reads through the connected GitHub App with an installation token narrowed to read-only permissions."""
+    name = repo.split("/", 1)[-1]
+    data = github.api("GET", f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", repo=name,
+                      permissions=CI_READ_ONLY)
+    runs = data.get("check_runs", [])
+    if any(c.get("status") != "completed" for c in runs):
+        return "pending"
+    if any(c.get("conclusion") not in ("success", "skipped", "neutral") for c in runs):
+        return "failed"
+    return "ok" if runs else "none"

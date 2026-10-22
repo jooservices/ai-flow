@@ -28,7 +28,8 @@ m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow
 with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
-control_state() { curl -fsS http://127.0.0.1/v1/state; }
+# /v1/state needs a console session when sign-in is on; the control container reads the registry directly
+control_state() { docker exec aiflow4-control-api-a aiflow4 control-state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
@@ -124,7 +125,7 @@ P
       echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
       if aiflow4-deploy-develop "" "$TARGET"; then
         sleep 20
-        if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+        if curl -fsS http://127.0.0.1/healthz >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
            && curl -fsS -o /dev/null http://127.0.0.1/cc; then
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
           alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
@@ -151,11 +152,7 @@ if [ "$TARGET" = "$REJECTED" ]; then
   echo "develop $TARGET already failed its canary; waiting for a newer commit"
   exit 0
 fi
-CI=$(aiflow4-gh api GET "/repos/jooservices/ai-flow/commits/$FULL/check-runs" | python3 -c '
-import json,sys; d=json.load(sys.stdin); b=d.get("body") or d; cs=b.get("check_runs",[])
-if any(c["status"]!="completed" for c in cs): print("pending")
-elif any(c["conclusion"] not in ("success","skipped","neutral") for c in cs): print("failed")
-else: print("ok" if cs else "none")' 2>/dev/null || echo error)
+CI=$(docker exec aiflow4-control-api-a aiflow4 ci-state --repo jooservices/ai-flow --sha "$FULL" 2>/dev/null || echo error)
 AGE=$(( $(date +%s) - $(git -C "$R" log -1 --format=%ct "$FULL") ))
 case "$CI" in
   ok) ;;

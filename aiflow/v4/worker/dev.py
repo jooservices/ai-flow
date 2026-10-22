@@ -115,10 +115,13 @@ def related_block(hits: list[dict]) -> str:
 
 
 def pr_title(ticket: dict) -> str:
-    """Conventional-commit title with the ticket key, e.g. 'feat: Monorepo scaffold and Makefile (TESTWP-4)'."""
+    """Conventional title with the ticket key; ASCII subjects keep it at the end, others start with the key."""
     title = ticket["summary"].strip().rstrip(".")
     title = title[0].upper() + title[1:] if title else ticket["key"]
     kind = {"Bug": "fix", "Hotfix": "fix", "Chore": "chore", "Docs": "docs", "Tech Debt": "refactor"}.get(ticket.get("type", ""), "feat")
+    if not re.match(r"^[A-Z]", title):
+        prefix = f"{kind}: {ticket['key']}: "
+        return prefix + title[:100 - len(prefix)]
     suffix = f" ({ticket['key']})"
     return f"{kind}: {title}"[:100 - len(suffix)] + suffix
 

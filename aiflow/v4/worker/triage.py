@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
@@ -27,11 +27,12 @@ def build_prompt(c: Claimed) -> str:
             comments.append(f"- {item.get('created', '')} {item.get('author', 'unknown')}: {item.get('body', '')}")
         else:
             comments.append(f"- {item}")
-    return tpl.format(key=c.ticket["key"], project=c.ticket["project"], summary=c.ticket["summary"],
+    prompt = tpl.format(key=c.ticket["key"], project=c.ticket["project"], summary=c.ticket["summary"],
                       description=c.ticket.get("description") or "(no description)", base=c.project["base"],
                       repo=c.project["repo"], question=c.last_dev_summary or "(no summary recorded)",
                       verify_findings=c.verify_findings or "(none)",
                       comments="\n".join(comments) or "(no recent comments)")
+    return with_knowledge_context(prompt, c.context_pack)
 
 
 def parse_decision(text: str) -> dict[str, str] | None:

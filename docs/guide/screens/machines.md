@@ -8,6 +8,7 @@ Machines and AI (`/machines`) lists the machines that run AI work and the AI acc
 
 - **Nodes**: heartbeat health, load and how many work slots are in use.
 - **AI accounts** on each node: signed in or out, quota cooldown and credential checks.
+- **AI quality by role**: recent success, cost and rework for each account and role. An Owner can change the failure window and switch-off threshold; a role is paused for one account after repeated failures and returns after two successful probation tickets.
 
 ## Common tasks
 

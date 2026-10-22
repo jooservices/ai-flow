@@ -19,6 +19,7 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [run_slow](run_slow.md) | warning | A run passed its warning time |
 | [run_hard_limit](run_hard_limit.md) | critical | A run passed its hard time limit |
 | [account_quota](account_quota.md) | warning | An AI account is out of quota, signed out or failing |
+| [role_health](role_health.md) | warning | An AI account is switched off for a role after repeated failures |
 | [quota_high](quota_high.md) | warning or critical | An account's usage window is at 90% or more |
 | [role_coverage](role_coverage.md) | warning or critical | A role has fewer than two ready accounts |
 | [jira_auth](jira_auth.md) | warning or critical | Jira is not connected or must be reconnected |

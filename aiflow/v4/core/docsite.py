@@ -63,9 +63,23 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjects": ("projects",),
     "renderUsers": ("users",),
     "renderCommandSearchResults": None,
+    "renderRoleHealthSettings": ("machines",),
+    "roleHealthPanel": ("machines",),
     "render": None,
+    "helpUrl": None,
+    "hintSeen": None,
     "renderHelp": None,
+    "showView": None,
 }
+
+# These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
+# therefore requires the corresponding Help page to be reviewed for every screen. Individual hint strings below
+# `HINTS` are mapped to their own screen instead.
+SCREEN_SHARED_UI_PATTERNS = (
+    re.compile(r"^\s*\.firstuse\{"),
+    re.compile(r'\bid="(?:help-link|firstuse)"'),
+    re.compile(r"\bhint-dismiss\b"),
+)
 
 # A change to one of these needs a documentation change in the same pull request.
 SCREEN_PATHS = ("aiflow/v4/control/ui/",)
@@ -398,13 +412,22 @@ def changed_views(base: str) -> set[str]:
     rel = UI.relative_to(ROOT).as_posix()
     diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
                           capture_output=True, check=True).stdout
-    lines = UI.read_text(encoding="utf-8").splitlines()
+    # Diff coordinates refer to HEAD. During a merge, the worktree/index can already contain upstream edits that
+    # shift those coordinates, so map against the exact file version used by the diff.
+    source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
+    lines = source.splitlines()
+    all_views = set(console_views())
+    hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
+    hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
+        if hints_start is not None else None
     spans = []
     for i, line in enumerate(lines):
         if m := re.search(r'<section class="view" id="view-([a-z]+)"', line):
             end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
             spans.append((i + 1, end + 1, m.group(1)))
     functions = _function_spans(lines)
+    help_start = next((i for i, line in enumerate(lines) if line.startswith("/* Help: every screen")), None)
+    help_end = functions.get("renderHelp", (0, 0))[1] - 1
     touched: set[str] = set()
     unmapped: set[int] = set()
     for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
@@ -412,13 +435,28 @@ def changed_views(base: str) -> set[str]:
         last = first + max(count, 1) - 1
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
+            changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
+            hint_view = None
             for name, (lo, hi) in functions.items():
                 if lo <= line_no <= hi:
                     if name not in SCREEN_RENDERER_VIEWS:
                         line_views = set()
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
-                    line_views |= set(console_views() if mapped is None else mapped)
+                    line_views |= (all_views if mapped is None else set(mapped))
+            # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
+            # screen, including edits to the top-bar link, first-use container and dismiss behavior.
+            if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:
+                hint = re.match(r"\s*([a-z]+):\s*'", changed_line)
+                if hint:
+                    hint_view = hint.group(1)
+                    line_views.add(hint_view)
+                else:
+                    line_views |= all_views
+            if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
+                line_views |= all_views
+            if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
+                line_views |= all_views
             if line_views:
                 touched |= line_views
             else:

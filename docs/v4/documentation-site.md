@@ -27,7 +27,8 @@ incident has a page.
 
 The CI check (`docsite check`) ties documentation to the change. A change in `aiflow/v4/control/ui/` needs the
 changed screen page under `docs/guide/screens/`. For `console.html`, the check maps edits inside a view section and
-JavaScript renderers such as `renderProjects` to their screen pages. The renderer map lives in
+JavaScript renderers such as `renderProjects` to their screen pages. Shared Help links, first-use hints and Help
+plumbing map to every screen; an edit to one hint maps to that screen. The renderer map lives in
 `SCREEN_RENDERER_VIEWS` in `aiflow/v4/core/docsite.py`. If a UI change cannot be mapped, the check fails until its
 screen mapping is added; an unrelated screen page cannot satisfy it. A change in any control module that registers
 `/v1/...` routes (found from the app's routes, so `api.py`, `login.py` and `jira_connect.py` today) needs a changed

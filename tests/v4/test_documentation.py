@@ -157,6 +157,51 @@ def test_every_console_renderer_has_a_documentation_mapping():
     assert all(mapped is None or set(mapped) <= views for mapped in docsite.SCREEN_RENDERER_VIEWS.values())
 
 
+def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    shared_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".firstuse{")),
+        next(i for i, line in enumerate(source_lines, 1) if 'id="help-link"' in line),
+        next(i for i, line in enumerate(source_lines, 1) if 'id="firstuse"' in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("var HELP_BASE =")),
+        next(i for i, line in enumerate(source_lines, 1) if "short hint for first use" in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function renderHelp()")),
+        next(i for i, line in enumerate(source_lines, 1) if "hint-dismiss" in line),
+    ]
+    hint_line = next(i for i, line in enumerate(source_lines, 1) if line.startswith("  cc: '"))
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    current_lines = shared_lines + [hint_line]
+
+    def fake_run(command, **kwargs):
+        if "show" in command:
+            return Result("\n".join(source_lines) + "\n")
+        hunks = current_lines if "--name-only" not in command else []
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in hunks))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    views = docsite.changed_views("origin/develop")
+    assert views == set(docsite.console_views())
+    all_pages = ["aiflow/v4/control/ui/console.html", *(f"docs/guide/screens/{v}.md" for v in views)]
+    assert docsite.documentation_gaps(all_pages, views=views) == []
+    assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"], views=views)
+
+    current_lines = [hint_line]
+    assert docsite.changed_views("origin/develop") == {"cc"}
+
+
+def test_traefik_routes_console_help_to_control_api():
+    compose = (ROOT / "deploy/v4/control/compose.yaml").read_text()
+    api_rule = next(line for line in compose.splitlines() if "traefik.http.routers.api.rule:" in line)
+    assert "PathPrefix(`/help`)" in api_rule
+
+
 def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsys):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()
@@ -173,6 +218,8 @@ def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsy
     def fake_run(command, **kwargs):
         if "--name-only" in command:
             return Result("\n".join([ui, *calls["docs"]]) + "\n")
+        if "show" in command:
+            return Result("\n".join(source_lines) + "\n")
         return Result(f"@@ -{renderer_line},1 +{renderer_line},1 @@\n")
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
@@ -198,6 +245,8 @@ def test_ci_check_fails_closed_when_ui_hunk_cannot_be_mapped(monkeypatch, capsys
     def fake_run(command, **kwargs):
         if "--name-only" in command:
             return Result(ui + "\ndocs/guide/screens/projects.md\n")
+        if "show" in command:
+            return Result("\n".join(source_lines) + "\n")
         return Result(f"@@ -{global_line},1 +{global_line},1 @@\n")
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)

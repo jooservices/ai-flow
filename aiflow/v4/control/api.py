@@ -2834,8 +2834,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             result = "To Do"
         elif body.action == "incident_open":
             from .incidents import open_incident
+            from ..core.docsite import incident_kinds
             if not body.kind or not body.subject or body.severity not in ("info", "warning", "critical"):
                 reason = "incident_open requires kind, subject, and a valid severity"
+                audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
+                master_event("denied", reason)
+                raise HTTPException(400, reason)
+            if body.kind not in incident_kinds():
+                reason = "incident_open kind must be one of the documented incident kinds: " + ", ".join(sorted(incident_kinds()))
                 audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], False, reason)
                 master_event("denied", reason)
                 raise HTTPException(400, reason)

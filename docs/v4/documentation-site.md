@@ -21,8 +21,15 @@ Keep pages in plain language, and never put a secret, a token or the content of 
 A runbook page exists for every kind that the code in `aiflow/v4/control/*.py` passes to `open_incident` (a literal
 or a module constant such as `INCIDENT_KIND`). The test `tests/v4/test_documentation.py` finds the kinds by
 reading the code and fails when a kind has no page, a page has no kind, or the runbook index misses one. When you
-raise a new kind, add `docs/guide/runbooks/<kind>.md` (symptom, cause, fix) and a row in `runbooks/index.md`. Kinds
-chosen at run time by the master AI (`incident_open`) have no page.
+raise a new kind, add `docs/guide/runbooks/<kind>.md` (symptom, cause, fix) and a row in `runbooks/index.md`. The
+master AI's `incident_open` action only accepts these kinds (control answers 400 for any other), so every
+incident has a page.
+
+The CI check (`docsite check`) ties documentation to the change. A change in `aiflow/v4/control/ui/` needs a changed
+page under `docs/guide/screens/` (the page of each screen whose section changed, when the change is inside a screen
+section). A change in any control module that registers `/v1/...` routes (found from the app's routes, so
+`api.py`, `login.py` and `jira_connect.py` today) needs a changed page in `docs/guide/` or `docs/v4/` that names one
+of that module's routes. An unrelated documentation edit does not pass.
 
 ## Build
 

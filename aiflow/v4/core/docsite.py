@@ -34,7 +34,6 @@ SCREEN_PAGE = "screens/{view}.md"
 
 # A change to one of these needs a documentation change in the same pull request.
 SCREEN_PATHS = ("aiflow/v4/control/ui/",)
-API_PATHS = ("aiflow/v4/control/api.py",)
 DOC_PATHS = ("docs/guide/", "docs/v4/")
 
 
@@ -287,17 +286,78 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
-def documentation_gaps(changed: list[str]) -> list[str]:
-    """Reasons a change fails the check: a screen or the API changed and no documentation file changed."""
+def api_routes_by_module() -> dict[str, set[str]]:
+    """Repo-relative file of every module that registers control API routes -> the route paths it registers.
+    Derived from the routes of the running app, so a new route module is watched without editing this file."""
+    from unittest.mock import MagicMock
+
+    from ..control.api import create_app
+
+    found: dict[str, set[str]] = {}
+    for route in create_app(MagicMock()).routes:
+        code = getattr(getattr(route, "endpoint", None), "__code__", None)
+        path = getattr(route, "path", "")
+        if code is None or not path.startswith("/v1/"):
+            continue
+        file = Path(code.co_filename).resolve()
+        if ROOT in file.parents:
+            found.setdefault(file.relative_to(ROOT).as_posix(), set()).add(path)
+    return found
+
+
+def _mentions(text: str, paths: set[str]) -> bool:
+    """True when the text names one of the route paths (cut before the first `{parameter}`)."""
+    return any(re.sub(r"/\{.*$", "", p) in text for p in paths)
+
+
+def _read_doc(name: str) -> str:
+    try:
+        return (ROOT / name).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set[str]] | None = None,
+                       views: set[str] | None = None) -> list[str]:
+    """Reasons a change fails the check. A changed screen needs a change to a page of `docs/guide/screens/` (the
+    page of each changed screen when `views` names them); a changed API route module needs a changed page in
+    `docs/guide/` or `docs/v4/` that names one of the routes that module registers. Unrelated edits do not count."""
     files = [c.strip() for c in changed if c.strip()]
-    if any(f.startswith(DOC_PATHS) and f.endswith(".md") for f in files):
-        return []
+    docs = [f for f in files if f.startswith(DOC_PATHS) and f.endswith(".md")]
     gaps = []
     if any(f.startswith(SCREEN_PATHS) for f in files):
-        gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in docs/guide or docs/v4")
-    if any(f in API_PATHS for f in files):
-        gaps.append("the control API changed (aiflow/v4/control/api.py) without a change in docs/guide or docs/v4")
+        pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
+        wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
+        if not (wanted <= pages if wanted else pages):
+            gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
+                        + (", ".join(sorted(wanted - pages)) if wanted else "its page under docs/guide/screens"))
+    api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
+    if api_files:
+        routes = api_routes_by_module() if routes is None else routes
+        texts = [read(f) for f in docs]
+        for f in api_files:
+            if f in routes and not any(_mentions(t, routes[f]) for t in texts):
+                gaps.append(f"the control API changed ({f}) without a changed page in docs/guide or docs/v4 "
+                            "that names one of its routes")
     return gaps
+
+
+def changed_views(base: str) -> set[str]:
+    """Screens whose section of console.html changed; empty when the change lies outside every screen section."""
+    rel = UI.relative_to(ROOT).as_posix()
+    diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", rel], cwd=ROOT, text=True,
+                          capture_output=True, check=True).stdout
+    lines = UI.read_text(encoding="utf-8").splitlines()
+    spans = []
+    for i, line in enumerate(lines):
+        if m := re.search(r'<section class="view" id="view-([a-z]+)"', line):
+            end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
+            spans.append((i + 1, end + 1, m.group(1)))
+    touched: set[str] = set()
+    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
+        first, count = int(m.group(1)), int(m.group(2) or 1)
+        touched |= {v for lo, hi, v in spans if lo <= first + max(count, 1) - 1 and first <= hi}
+    return touched
 
 
 def changed_files(base: str) -> list[str]:
@@ -320,7 +380,12 @@ def main(argv: list[str] | None = None) -> int:
         pages = build(Path(args.out), args.version)
         print(f"documentation site: {len(pages)} pages in {args.out}")
         return 0
-    gaps = documentation_gaps(args.files if args.files is not None else changed_files(args.base))
+    if args.files is not None:
+        gaps = documentation_gaps(args.files)
+    else:
+        files = changed_files(args.base)
+        views = changed_views(args.base) if UI.relative_to(ROOT).as_posix() in files else None
+        gaps = documentation_gaps(files, views=views)
     for gap in gaps:
         print("documentation check failed: " + gap, file=sys.stderr)
     if not gaps:

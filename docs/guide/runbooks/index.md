@@ -30,8 +30,8 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [canary_under_observed](canary_under_observed.md) | info | A canary was promoted with too few runs |
 | [openobserve_delivery](openobserve_delivery.md) | warning | OpenObserve rejects event batches |
 
-The master AI can also open an incident with a kind of its own choosing (`incident_open`); those have no fixed
-page. Treat them as free text and read their detail.
+The master AI can also open an incident (`incident_open`), but only with one of the kinds in the table above. Control
+refuses any other kind, so every incident you see has a page here.
 
 ## If the page you need is not here
 

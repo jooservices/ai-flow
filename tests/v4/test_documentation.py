@@ -108,13 +108,49 @@ def test_build_fails_on_a_broken_link(tmp_path):
 def test_ci_check_fails_without_documentation_and_passes_with_it():
     ui = "aiflow/v4/control/ui/console.html"
     api = "aiflow/v4/control/api.py"
-    assert docsite.documentation_gaps([ui])
-    assert docsite.documentation_gaps([api])
-    assert docsite.documentation_gaps([api, "tests/v4/test_api.py"])
-    assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"]) == []
-    assert docsite.documentation_gaps([api, "docs/v4/knowledge.md"]) == []
-    assert docsite.documentation_gaps(["aiflow/v4/worker/dev.py"]) == []
-    assert docsite.documentation_gaps([ui, "docs/RUNBOOK.md"])  # the old flow's notes do not count
+    routes = {api: {"/v1/knowledge/{kind}", "/v1/cc"}, "aiflow/v4/control/login.py": {"/v1/auth/login"}}
+    texts = {"docs/v4/knowledge.md": "Lists items with `/v1/knowledge`.", "docs/v4/other.md": "Nothing about routes.",
+             "docs/guide/admin/security.md": "Sign in with POST /v1/auth/login."}
+
+    def gaps(*files, **kw):
+        return docsite.documentation_gaps(list(files), read=lambda f: texts.get(f, ""), routes=routes, **kw)
+
+    assert gaps(ui)
+    assert gaps(api)
+    assert gaps(api, "tests/v4/test_api.py")
+    assert gaps(ui, "docs/guide/screens/cc.md") == []
+    assert gaps(api, "docs/v4/knowledge.md") == []
+    assert gaps("aiflow/v4/worker/dev.py") == []
+    assert gaps(ui, "docs/RUNBOOK.md")  # the old flow's notes do not count
+    # unrelated documentation does not satisfy a screen or API change
+    assert gaps(ui, "docs/v4/knowledge.md")
+    assert gaps(api, "docs/v4/other.md")
+    assert gaps(api, "docs/guide/screens/cc.md")
+    assert gaps(ui, "docs/guide/screens/cc.md", views={"cc", "sa"})  # sa page missing
+    assert gaps(ui, "docs/guide/screens/cc.md", views={"cc"}) == []
+    # every module that registers routes is watched, not only api.py
+    login = "aiflow/v4/control/login.py"
+    assert gaps(login, "docs/v4/knowledge.md")
+    assert gaps(login, "docs/guide/admin/security.md") == []
+
+
+def test_route_modules_are_derived_from_the_registered_routes():
+    modules = docsite.api_routes_by_module()
+    assert {"aiflow/v4/control/api.py", "aiflow/v4/control/login.py",
+            "aiflow/v4/control/jira_connect.py"} <= set(modules)
+
+
+def test_master_incident_open_accepts_only_documented_kinds(client, ctx):
+    from test_master import action, claim_master, ready
+    cc = ready(client, "cc", "claude-01")
+    master = claim_master(client, cc, "claude-01").json()
+    bad = action(client, cc, master, action="incident_open", intent="record a problem", kind="made_up_kind",
+                 subject="x", severity="warning", title="t", detail="d")
+    assert bad.status_code == 400 and "documented incident kinds" in bad.text
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='made_up_kind'")["n"] == 0
+    good = action(client, cc, master, action="incident_open", intent="record a problem", kind="node_down",
+                  subject="x", severity="warning", title="t", detail="d")
+    assert good.status_code == 200
 
 
 def test_ci_check_command_exit_codes():

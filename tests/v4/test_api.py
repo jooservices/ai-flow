@@ -480,6 +480,83 @@ def test_probe_sets_account_state_and_quota_alerts(client, ctx):
                       " AND closed_at IS NULL")["n"] == 0
 
 
+def test_grok_recorded_stream_restores_probe_status_and_empty_answer_is_provider_failure(
+        client, ctx, tmp_path, monkeypatch):
+    import sys
+
+    from aiflow.v4.adapters.grok import GrokAdapter
+    from aiflow.v4.control.loops import watchdog
+    from aiflow.v4.core.controlrepo import Account
+    from aiflow.v4.worker import loop as worker_loop
+
+    ctx.repo().accounts.append(Account(id="grok-01", provider="grok", node="cc", tier="middle", roles=["dev"]))
+    client.app.state.sync_accounts()
+    auth = join(client, "cc")
+
+    # Start with the incident state produced by a real sign-in failure. A good streamed answer must clear it.
+    failed = client.post("/v1/accounts/grok-01/probe", json={
+        "ok": False, "error_kind": "auth", "summary": "not signed in; please run /login"}, headers=auth)
+    assert failed.status_code == 200
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='grok-01'")["status"] == "signed_out"
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='grok-01'"
+                      " AND closed_at IS NULL")["n"] == 1
+
+    fixture_dir = Path(__file__).parent / "fixtures"
+    adapter = GrokAdapter()
+    results = []
+
+    def use_fixture(fixture_name):
+        fixture = fixture_dir / fixture_name
+        script = tmp_path / f"{fixture.stem}.py"
+        script.write_text(f"from pathlib import Path\nprint(Path({str(fixture)!r}).read_text(), end='')\n")
+        adapter.argv = lambda _spec: [sys.executable, str(script)]
+
+    use_fixture("grok-streaming-json.jsonl")
+    run = adapter.run
+
+    def record_run(spec):
+        result = run(spec)
+        results.append(result)
+        return result
+
+    adapter.run = record_run
+    monkeypatch.setattr(worker_loop, "get_adapter", lambda _provider: adapter)
+    monkeypatch.setattr(worker_loop.Worker, "publish", lambda self, **fields: self.state.update(fields))
+    worker = worker_loop.Worker("grok-01", "http://testserver", "node-token", "cc", str(tmp_path), run_as=[])
+
+    def call_api(method, path, json=None, params=None):
+        response = client.request(method, path, json=json, params=params, headers=auth)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    worker.api.call = call_api
+    assert worker.probe() is True
+    assert results[0].final_text == "OK"
+    assert results[0].tokens_in == 10 and results[0].tokens_out == 1
+    assert results[0].cost_usd == 0.00123 and results[0].error_kind == ""
+    probe = ctx.db.one("SELECT outcome, data FROM events WHERE type='account.probe' AND account='grok-01'"
+                       " ORDER BY ts DESC LIMIT 1")
+    assert probe["outcome"] == "ok"
+    assert {key: probe["data"][key] for key in ("tokens_in", "tokens_out", "cost_usd")} == {
+        "tokens_in": 10, "tokens_out": 1, "cost_usd": 0.00123}
+    watchdog(ctx)
+    state = client.get("/v1/state").json()
+    account = next(account for account in state["accounts"] if account["id"] == "grok-01")
+    assert account["status"] == "idle"
+    assert "grok-01" not in {account["id"] for account in state["sa"]["provider_blocks"]}
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='grok-01'"
+                      " AND closed_at IS NULL")["n"] == 0
+
+    # No answer and no CLI error must be a provider failure, never a sign-out.
+    use_fixture("grok-streaming-json-no-answer.jsonl")
+    assert worker.probe() is False
+    assert results[1].error_kind == "provider"
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='grok-01'")["status"] == "error"
+    assert ctx.db.one("SELECT outcome FROM events WHERE type='account.probe' AND account='grok-01'"
+                      " ORDER BY ts DESC LIMIT 1")["outcome"] == "provider"
+
+
 def test_verify_goes_to_another_account_and_merges(client, ctx):
     cc = join(client, "cc")
     n1 = join(client, "node1")

@@ -1,0 +1,3 @@
+{"type":"available_commands","tools":[],"commands":[]}
+{"type":"thought","data":"No response text was produced."}
+{"type":"end","stopReason":"end_turn","sessionId":"recorded-session","requestId":"recorded-request","usage":{"input_tokens":7,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":0,"reasoning_tokens":0,"total_tokens":10},"num_turns":1,"total_cost_usd":0.0007}

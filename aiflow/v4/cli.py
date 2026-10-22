@@ -99,6 +99,39 @@ def build_ctx(s: Settings):
     return ctx
 
 
+
+def _console_user(a, s) -> int:
+    """`aiflow4 console-user seed|reset-password|list`: the generated password goes to a 0600 file, never to the output."""
+    import os
+    from .control import login
+    from .control.db import DB
+    db = DB(s.database_url)
+    try:
+        db.migrate()
+        if a.action == "list":
+            for u in db.all("SELECT email, role, disabled, last_login_at FROM console_users ORDER BY email"):
+                print(f"{u['email']}\t{u['role']}\t{'disabled' if u['disabled'] else 'active'}\t{u['last_login_at'] or 'never'}")
+            return 0
+        if not a.email or not a.password_file:
+            print("--email and --password-file are required", file=sys.stderr)
+            return 2
+        try:
+            password = (login.seed_user(db, a.email, a.role, a.name) if a.action == "seed"
+                        else login.reset_password(db, a.email))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if password is None:
+            print(f"{login.normalize_email(a.email)} already exists; nothing changed")
+            return 0
+        fd = os.open(a.password_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(password + "\n")
+        print(f"{login.normalize_email(a.email)}: password written to {a.password_file} (mode 0600)")
+        return 0
+    finally:
+        db.close()
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=os.environ.get("AIFLOW4_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -166,6 +199,12 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
     ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
+    pu2 = sub.add_parser("console-user", help="create or reset a Command Center user (docs/v4/console-login.md)")
+    pu2.add_argument("action", choices=["seed", "reset-password", "list"])
+    pu2.add_argument("--email")
+    pu2.add_argument("--role", default="super_admin")
+    pu2.add_argument("--name", default="")
+    pu2.add_argument("--password-file", help="where the generated password is written (mode 0600); it is never printed")
     a = ap.parse_args(argv)
 
     if a.cmd == "install":
@@ -196,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             db.close()
         return 0 if result["ok"] else 9
+    if a.cmd == "console-user":
+        return _console_user(a, s)
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)

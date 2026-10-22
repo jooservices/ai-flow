@@ -218,16 +218,19 @@ def test_non_owner_role_gets_endpoint_access_from_its_mapped_permissions(ctx, mo
     client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "integration_admin", EXP, SECRET))
     assert client.get("/v1/integrations/github").status_code == 200
     assert client.get("/v1/projects/catalog").status_code == 403
+    session = client.get("/v1/console/session")
+    assert session.status_code == 200 and session.json()["permissions"] == ["integrations.manage"]
 
 
-def test_super_administrator_sees_owner_and_reader_controls_in_console_ui():
+def test_console_ui_uses_session_permission_identifiers_for_controls():
     html = (Path(login.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
-    owner_check = ("function consoleOwner() { return S.consoleUser && (S.consoleUser.role === 'owner' || "
-                   "S.consoleUser.role === 'super_admin'); }")
-    reader_check = ("function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || "
-                    "S.consoleUser.role === 'lead' || S.consoleUser.role === 'super_admin'); }")
-    assert owner_check in html
-    assert reader_check in html
+    assert "function consoleCan(permission)" in html
+    assert "S.consoleUser && S.consoleUser.permissions" in html
+    assert "permissions.indexOf('*') >= 0 || permissions.indexOf(permission) >= 0" in html
+    assert all(f"consoleCan('{permission}')" in html for permission in (
+        "console.read", "integrations.manage", "nodes.manage", "projects.manage"))
+    assert "S.consoleUser.role === 'owner'" not in html
+    assert "S.consoleUser.role === 'lead'" not in html
 
 
 def test_owner_only_endpoints_accept_super_admin(ctx):
@@ -241,7 +244,8 @@ def test_owner_only_endpoints_accept_super_admin(ctx):
     assert get("owner") == 200 and get("super_admin") == 200
     assert get("lead", "/v1/integrations/jira") == 403 and get("super_admin", "/v1/integrations/jira") != 403
     client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "super_admin", EXP, SECRET))
-    assert client.get("/v1/console/session").json()["role"] == "super_admin"
+    session = client.get("/v1/console/session").json()
+    assert session["role"] == "super_admin" and session["permissions"] == ["*"]
 
 
 # --- AC6: the gate -----------------------------------------------------------------------------------------------------

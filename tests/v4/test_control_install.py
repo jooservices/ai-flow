@@ -102,6 +102,8 @@ class FakeHost(ci.Host):
             return ok()
         if argv[:2] == ["docker", "login"]:
             return ok("Login Succeeded")
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return ok("172.28.9.15/16\n")
         if argv[:3] == ["docker", "image", "inspect"]:
             return ok() if argv[3] in self.images else fail()
         if argv[:2] == ["docker", "inspect"]:
@@ -206,6 +208,7 @@ def test_clean_install_runs_every_step_in_order_and_brings_the_control_plane_up(
     order = [index(machine, lambda a: a[1:2] == ["plan"]), index(machine, lambda a: a[1:2] == ["apply"]),
              index(machine, lambda a: a[-2:] == ["--stage-only", "v4.1.0"]),
              index(machine, lambda a: a[:2] == ["docker", "compose"] and a[3].endswith("infra/compose.yaml")),
+             index(machine, lambda a: a[:3] == ["docker", "network", "inspect"]),
              index(machine, lambda a: a[:2] == ["docker", "run"] and a[-1] == "migrate"),
              index(machine, lambda a: Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"])]
     assert order == sorted(order)
@@ -238,6 +241,13 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
         assert len(app[key]) >= 32
     assert app["AIFLOW4_PUBLIC_URL"] == "https://aiflow.example.com"
     assert app["AIFLOW4_GATUS_URL"] == "http://aiflow.example.com:8081/"
+    assert app["AIFLOW4_TRUSTED_PROXIES"] == "172.28.0.0/16"
+
+
+def test_trusted_proxy_cidrs_are_canonical_private_and_narrow():
+    assert ci.sanitize_proxy_cidrs(
+        "172.28.9.15/16\nfd00:abcd::5/64\n172.28.0.0/16\n0.0.0.0/0\n"
+        "203.0.113.0/24\nnot-a-cidr") == ["172.28.0.0/16", "fd00:abcd::/64"]
 
 
 @pytest.mark.parametrize("component", ["postgres", "redis", "traefik", "openobserve", "gatus", "control-api-b",

@@ -45,6 +45,7 @@ installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cook
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |
+| `GET /v1/console/session` | the signed-in user, role and permission identifiers from `ROLE_PERMISSIONS` (including `*` for every permission) |
 
 Because the cookie is Strict, a console page reached from another site arrives without it; the sign-in page then
 asks `/v1/auth/me` (a same-site request that carries the cookie) and continues to `next` without a new sign-in.
@@ -54,9 +55,10 @@ asks `/v1/auth/me` (a same-site request that carries the cookie) and continues t
 - **Rate limits first.** Before any database lookup Redis counts attempts per client IP (30) and per IP+email (10)
   in a 15-minute window; above that the answer is 429 with `Retry-After`. Forwarding headers are used only when the
   socket peer matches a CIDR in `AIFLOW4_TRUSTED_PROXIES`; otherwise the socket peer address is used, even if a
-  direct-origin caller supplies `CF-Connecting-IP` or `X-Forwarded-For`. Configure only the proxy CIDRs that
-  sanitize these headers, and restrict origin ingress at the host/network firewall so only those proxies can reach
-  the published HTTP port.
+  direct-origin caller supplies `CF-Connecting-IP` or `X-Forwarded-For`. Installation discovers the private CIDR
+  assigned to the local Traefik edge network and writes its canonical value to `AIFLOW4_TRUSTED_PROXIES`, so
+  forwarded client addresses do not share one rate-limit bucket. Restrict origin ingress at the host/network
+  firewall so only the published proxy path can reach the HTTP port.
 - **Same answer.** Unknown email, wrong password, locked account and disabled account all answer
   `401 {"detail": "invalid email or password"}` after the same scrypt work (a dummy hash for unknown, locked and
   disabled users).

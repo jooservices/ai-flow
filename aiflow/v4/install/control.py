@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import ipaddress
 import os
 import re
 import shutil
@@ -64,6 +65,8 @@ SUPPORTED_UBUNTU = ("22.04", "24.04")
 STEPS = ("preflight", "os", "tools", "release", "secrets", "infra", "migrate", "admin", "deploy", "health", "cli")
 ADMIN_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 ADMIN_PASSWORD_FILE = "super-admin-password"  # in Layout.console_secrets; the CLI writes it 0600 and never prints it
+_TRUSTED_PROXY_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
 OS_MODULES = ("packages", "timesync", "swap", "ulimits", "docker", "docker_group")
 VPN_MODULES = ("tailscale", "wireguard")
 HOST_PACKAGES = ("ca-certificates", "curl", "git", "tar")
@@ -81,6 +84,25 @@ SOURCE = Path(__file__).resolve().parents[3]  # the release tree this CLI runs f
 def version_key(v: str) -> tuple[int, int, int]:
     m = RELEASE.match(v)
     return (int(m[1]), int(m[2]), int(m[3])) if m else (-1, -1, -1)
+
+
+def sanitize_proxy_cidrs(values: str) -> list[str]:
+    """Canonicalize private Docker network CIDRs and discard malformed or overly broad ranges."""
+    result = set()
+    for value in re.split(r"[,\s]+", values.strip()):
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        minimum_prefix = 16 if network.version == 4 else 48
+        if network.prefixlen < minimum_prefix:
+            continue
+        if any(network.version == base.version and network.subnet_of(base)
+               for base in _TRUSTED_PROXY_PRIVATE_NETWORKS):
+            result.add(str(network))
+    return sorted(result)
 
 
 class InstallError(Exception):
@@ -216,6 +238,7 @@ class ControlInstaller:
         self.write_secrets_and_config()
         self.step("infra")
         self.start_infra(v)
+        self.configure_trusted_proxies()
         self.step("migrate")
         checked = self.migrate(v, cur)
         self.step("admin")
@@ -451,6 +474,17 @@ class ControlInstaller:
                                       if f])
         if failures:
             raise InstallError(f"health check failed: {describe(failures)}", EXIT_UNHEALTHY)
+
+    def configure_trusted_proxies(self) -> None:
+        """Trust only sanitized private CIDRs assigned to the local Traefik edge network."""
+        r = self.host.run(["docker", "network", "inspect", "--format",
+                           "{{range .IPAM.Config}}{{println .Subnet}}{{end}}", "aiflow4-edge"])
+        cidrs = sanitize_proxy_cidrs(r.stdout) if r.returncode == 0 else []
+        if not cidrs:
+            raise InstallError("could not determine a private CIDR for the aiflow4-edge proxy network",
+                               EXIT_UNHEALTHY, "infra")
+        sec.update_env(self.layout.secrets / sec.APP_ENV,
+                       force={"AIFLOW4_TRUSTED_PROXIES": ",".join(cidrs)}, mode=0o600)
 
     def migrate(self, v: str, cur: str) -> bool:
         """Run the pre-upgrade check (upgrades) and `aiflow4 migrate`; returns whether the check ran."""

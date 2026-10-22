@@ -84,7 +84,7 @@ def test_untrusted_identity_headers_and_lead_cannot_install_but_lead_can_read_lo
 
     sign_in(client, ctx, "lead", "lead@example.test")
     assert client.get("/v1/console/session").json() == {
-        "authenticated": True, "user": "lead@example.test", "role": "lead"}
+        "authenticated": True, "user": "lead@example.test", "role": "lead", "permissions": ["console.read"]}
     refused = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert refused.status_code == 403
     assert client.get("/v1/nodes/node1/operations").status_code == 200

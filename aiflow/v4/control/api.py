@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
-from .console_auth import ConsoleUser, COOKIE_NAME, role_satisfies, verify_session
+from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
@@ -593,7 +593,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
 
-    def console_user(request: Request, permissions: set[str], target: str = "console", action: str = "read",
+    def console_user(request: Request, permissions: set[str] | None, target: str = "console", action: str = "read",
                      node: str = "") -> ConsoleUser:
         """Require a signed, unexpired console session. Role and subject headers are deliberately ignored."""
         secret = ctx.settings.console_session_secret
@@ -606,7 +606,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
-        if not role_satisfies(user.role, permissions):
+        if permissions is not None and not role_satisfies(user.role, permissions):
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
@@ -885,8 +885,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/v1/console/session")
     def console_session(request: Request) -> dict:
-        user = console_user(request, {"console.read"})
-        return {"authenticated": True, "user": user.subject, "role": user.role}
+        user = console_user(request, None)
+        return {"authenticated": True, "user": user.subject, "role": user.role,
+                "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
 
     @app.get("/healthz")
     def healthz() -> dict:

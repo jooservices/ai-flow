@@ -91,8 +91,8 @@ def snapshot(ctx) -> dict[str, Any]:
         "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
         "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
         "GROUP BY account_id")}
-    pending_sign_in = {row["id"] for row in db.all(
-        "SELECT id FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_code<>''")}
+    sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
+        "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
     for a in db.all("SELECT * FROM accounts ORDER BY node, provider, id"):
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
@@ -118,7 +118,8 @@ def snapshot(ctx) -> dict[str, Any]:
             "paused": bool(acc.paused), "jobs": [job for job, role in
                 (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))
                 if role in (acc.roles or [])],
-            "sign_in_pending": a["id"] in pending_sign_in,
+            "sign_in_pending": a["id"] in sign_in_states,
+            "sign_in_status": sign_in_states.get(a["id"], "idle"),
             "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
                                                     else "cooldown" if cool else a["status"]),
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,

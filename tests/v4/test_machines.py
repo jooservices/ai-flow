@@ -5,7 +5,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from conftest import add_ticket, join_node
@@ -102,7 +105,7 @@ def test_machine_join_command_waits_for_join_and_expires_after_five_minutes(clie
         "SELECT action FROM write_audit WHERE target='node' AND ticket='new-console-machine'")} >= {"join_command"}
 
 
-def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, ctx):
+def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, ctx, monkeypatch, tmp_path):
     owner_session(client, ctx)
     node_auth = {"Authorization": f"Bearer {join_node(client, 'node1').json()['node_token']}"}
     join_node(client, "node3")
@@ -111,7 +114,7 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
         "provider": "codex", "sessions": 2, "jobs": ["develop", "verify", "intake", "master"]})
     assert created.status_code == 200, created.text
     account_id = created.json()["account"]
-    assert created.json()["sign_in_url"].startswith("https://") and created.json()["code"]
+    assert created.json()["status"] == "queued" and not created.json()["sign_in_url"] and not created.json()["code"]
     assert set(created.json()["jobs"]) == {"develop", "verify", "intake", "master"}
 
     state = client.get("/v1/state").json()
@@ -121,13 +124,35 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     assert account["sign_in_pending"] is True
     assert machine["sessions_busy"] == 0 and machine["metrics"] == {}
 
-    # A sign-in is considered complete only after the node reports a successful provider probe.
+    # The machine starts the provider's own device flow and relays the provider-issued code to the console.
     again = client.post(f"/v1/accounts/{account_id}/sign-in")
-    assert again.status_code == 200 and again.json()["code"]
+    assert again.status_code == 200 and again.json()["status"] == "queued"
+    requested = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 8}, headers=node_auth)
+    handoff = next(item for item in requested.json()["desired"]["sign_ins"] if item["account"] == account_id)
+    assert handoff["provider"] == "codex" and handoff["request_id"]
+    assert account_id not in requested.json()["desired"]["accounts"]
+    from aiflow.v4.node import agent
+    provider_cli = "print('Open https://auth.openai.com/codex/device and enter code ABCD-EFGH')"
+    monkeypatch.setattr(agent, "ensure_account_home", lambda *_args: True)
+    monkeypatch.setattr(agent, "SIGN_IN_COMMANDS", {"codex": [sys.executable, "-c", provider_cli]})
+    monkeypatch.setattr(agent, "_SIGN_IN_RUN_AS", [])
+
+    class NodeAPI:
+        def call(self, method, path, body=None, **_kwargs):
+            response = client.request(method, path, json=body, headers=node_auth)
+            if not response.is_success:
+                raise RuntimeError(f"{method} {path} -> {response.status_code}")
+            return response.json()
+
+    agent.run_provider_sign_in(NodeAPI(), "node1", handoff, threading.Event(), str(tmp_path))
     details = client.get(f"/v1/accounts/{account_id}/sign-in")
-    assert details.status_code == 200 and details.json()["code"] == again.json()["code"]
+    assert details.status_code == 200 and details.json()["status"] == "completed"
+    assert details.json()["sign_in_url"] == "https://auth.openai.com/codex/device"
+    assert details.json()["code"] == "ABCD-EFGH"
     not_ready = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
     assert not_ready.status_code == 409
+    desired = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 8}, headers=node_auth)
+    assert account_id in desired.json()["desired"]["accounts"]
     probe = client.post(f"/v1/accounts/{account_id}/probe", json={"ok": True, "quota": {
         "windows": {"five_hour": {"utilization": 0.4, "resets_at": 1792561800},
                     "seven_day": {"utilization": 0.75, "resets_at": 1792638000}}}}, headers=node_auth)
@@ -203,3 +228,71 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     assert {("node", action) for action in ("stop_taking_work", "resume_work", "remove")} <= actions
     assert ("ai-account", "sign_in_complete") in {(row["target"], row["action"]) for row in ctx.db.all(
         "SELECT target,action FROM write_audit")}
+
+
+def test_removing_a_control_repo_account_tombstones_it_from_worker_scheduling(client, ctx):
+    owner_session(client, ctx)
+    node_token = join_node(client, "node1").json()["node_token"]
+    removed = client.request("DELETE", "/v1/accounts/codex-01", json={"confirm": True})
+    assert removed.status_code == 200
+    assert ctx.repo().account("codex-01") is None
+    heartbeat = client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 8},
+                            headers={"Authorization": f"Bearer {node_token}"})
+    assert heartbeat.status_code == 200
+    assert "codex-01" not in heartbeat.json()["desired"]["accounts"]
+    assert "codex-01" not in heartbeat.json()["desired"]["workers"]
+    assert not any(row["id"] == "codex-01" for row in client.get("/v1/state").json()["accounts"])
+
+
+def test_adding_after_removing_a_managed_account_uses_a_fresh_account_id(client, ctx):
+    owner_session(client, ctx)
+    join_node(client, "managed-readd")
+    first = client.post("/v1/machines/managed-readd/accounts", json={
+        "provider": "codex", "sessions": 1, "jobs": ["develop"]})
+    assert first.status_code == 200
+    removed = client.request("DELETE", f"/v1/accounts/{first.json()['account']}", json={"confirm": True})
+    assert removed.status_code == 200
+    second = client.post("/v1/machines/managed-readd/accounts", json={
+        "provider": "codex", "sessions": 1, "jobs": ["develop"]})
+    assert second.status_code == 200
+    assert second.json()["account"] != first.json()["account"]
+
+
+def test_machine_session_capacity_serializes_concurrent_adds_and_updates(ctx):
+    from fastapi.testclient import TestClient
+
+    first = TestClient(control_api.create_app(ctx))
+    second = TestClient(control_api.create_app(ctx))
+    owner_session(first, ctx)
+    owner_session(second, ctx)
+    join_node(first, "parallel-add")
+    barrier = threading.Barrier(2)
+
+    def add(client):
+        barrier.wait()
+        return client.post("/v1/machines/parallel-add/accounts", json={
+            "provider": "codex", "sessions": 5, "jobs": ["develop"]})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        added = list(pool.map(add, (first, second)))
+    assert sorted(response.status_code for response in added) == [200, 422]
+    assert sum(account.parallel for account in ctx.repo().accounts_on("parallel-add")) == 5
+
+    join_node(first, "parallel-update")
+    account_ids = []
+    for provider in ("codex", "grok"):
+        created = first.post(f"/v1/machines/parallel-update/accounts", json={
+            "provider": provider, "sessions": 2, "jobs": ["develop"]})
+        assert created.status_code == 200, created.text
+        account_ids.append(created.json()["account"])
+    barrier = threading.Barrier(2)
+
+    def update(client_account):
+        client, account_id = client_account
+        barrier.wait()
+        return client.patch(f"/v1/accounts/{account_id}", json={"sessions": 5})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        updated = list(pool.map(update, ((first, account_ids[0]), (second, account_ids[1]))))
+    assert sorted(response.status_code for response in updated) == [200, 422]
+    assert sum(account.parallel for account in ctx.repo().accounts_on("parallel-update")) == 7

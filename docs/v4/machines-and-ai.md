@@ -16,11 +16,11 @@ owns an active run.
 
 Choose a provider, one to eight concurrent sessions, and one or more jobs (develop, verify, intake, or master).
 The API enforces a total of at most eight configured sessions per machine. A new account stays in the pending
-sign-in section until the owner completes the provider sign-in and the node reports a successful provider probe.
-The screen gives the provider's sign-in link and a short-lived account code. Credentials remain in the account's
-own home on its machine and are not copied to the control plane. Existing provider sign-in remains local to the
-provider CLI. The owner finishes the handoff on screen after the successful probe; the account then appears with
-its live quota and usage.
+sign-in section while the assigned node runs that provider's login command inside the new account's private home.
+The console shows the authorization URL and code emitted by the provider CLI. The owner completes that provider
+flow in a browser, then finishes sign-in on screen after the node's account probe succeeds. Provider credentials
+stay in the account's home on the machine and are not copied to the control plane. The account then appears with
+its live quota and usage. If the handoff fails or expires at the provider, the owner can start a fresh sign-in.
 
 Owners can pause or resume an account, request another sign-in handoff, change sessions and jobs, or remove it.
 Paused accounts are removed from the node's desired worker set; session and job edits reach the node on its next
@@ -33,8 +33,12 @@ Changes use registry state and heartbeat reconciliation; they do not require a s
 
 ## Registry API
 
-- `POST /v1/machines/{name}/accounts` adds an account, enforces machine capacity, and returns the sign-in URL and code.
-- `GET|POST /v1/accounts/{account_id}/sign-in` reads the pending handoff or creates a new one.
+- `POST /v1/machines/{name}/accounts` adds an account, serializes the eight-session capacity check, and queues
+  provider sign-in on the assigned node.
+- `GET|POST /v1/accounts/{account_id}/sign-in` reads provider-generated authorization details or starts a new
+  provider login.
+- `POST /v1/accounts/{account_id}/sign-in/status` lets the assigned node report its provider login handoff and
+  completion; only the assigned node token can report it.
 - `PATCH /v1/accounts/{account_id}` changes jobs, sessions, or pause state.
 - `DELETE /v1/accounts/{account_id}` requires `{ "confirm": true }`.
 - `PUT /v1/nodes/{name}/work-acceptance?accepting_work=false` requires `{ "confirm": true }`.

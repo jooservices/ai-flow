@@ -88,11 +88,30 @@ def test_node_tool_versions_require_current_playwright_chromium_and_report_its_p
             return SimpleNamespace(returncode=0, stdout="Version 1.56.2\n", stderr="")
         if cmd == ["playwright", "install", "--dry-run", "chromium"]:
             return SimpleNamespace(returncode=0, stdout=f"Install location: {browser.parent.parent}\n", stderr="")
+        if cmd[0] == str(browser):  # headless launch without extra settings
+            assert "--headless" in cmd and "--no-sandbox" in cmd
+            return SimpleNamespace(returncode=0, stdout="<html></html>", stderr="")
         raise AssertionError(cmd)
 
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
     assert agent.tool_versions(["playwright", "playwright-browser"]) == {
         "playwright": "Version 1.56.2", "playwright-browser": "Playwright Chromium 1.56.2"}
+
+    def missing_library(cmd, **kwargs):
+        if cmd[0] == str(browser):
+            return SimpleNamespace(returncode=127, stdout="", stderr=(
+                f"{browser}: error while loading shared libraries: libnss3.so: cannot open shared object file\n"))
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(agent.subprocess, "run", missing_library)
+    result = agent.tool_versions(["playwright", "playwright-browser"])
+    assert result["playwright-browser"] == "broken: missing system library libnss3.so"
+    # A machine tool problem: the stack gap names the browser, so the watchdog opens a tool incident.
+    from aiflow.v4.core.toolchains import missing_tools, toolchain_gaps
+    required = ["playwright", "playwright-browser"]
+    assert missing_tools(result, required) == ["playwright-browser"]
+    assert toolchain_gaps(result, required, {"tools": {"playwright": "1.56"}}, ["playwright"],
+                          require_pins=True) == ["playwright-browser"]
 
     def stale_browser(cmd, **kwargs):
         if cmd == ["playwright", "--version"]:

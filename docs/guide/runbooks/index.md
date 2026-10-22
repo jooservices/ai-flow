@@ -14,6 +14,7 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [node_tools](node_tools.md) | warning | A node misses tools for a project or its AI accounts |
 | [node_services](node_services.md) | warning | A node's test services (PostgreSQL, Redis) are unhealthy |
 | [node_no_ai](node_no_ai.md) | warning | A node has no AI account |
+| [master_invalid_plan](master_invalid_plan.md) | critical | The master repeatedly returned an invalid action plan |
 | [ticket_stuck](ticket_stuck.md) | warning | A ticket failed three runs in a row |
 | [run_slow](run_slow.md) | warning | A run passed its warning time |
 | [run_hard_limit](run_hard_limit.md) | critical | A run passed its hard time limit |
@@ -30,8 +31,8 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [canary_under_observed](canary_under_observed.md) | info | A canary was promoted with too few runs |
 | [openobserve_delivery](openobserve_delivery.md) | warning | OpenObserve rejects event batches |
 
-The master AI can also open an incident (`incident_open`), but only with one of the kinds in the table above. Control
-refuses any other kind, so every incident you see has a page here.
+The control plane opens these incidents from health checks and recorded events. The master cannot open or close
+incidents directly. Every kind it can raise has a page in this list.
 
 ## If the page you need is not here
 

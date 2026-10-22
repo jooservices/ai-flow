@@ -205,17 +205,14 @@ def test_ci_check_fails_closed_when_ui_hunk_cannot_be_mapped(monkeypatch, capsys
     assert "could not be mapped to a screen" in capsys.readouterr().err
 
 
-def test_master_incident_open_accepts_only_documented_kinds(client, ctx):
+def test_master_cannot_open_incidents_directly(client, ctx):
     from test_master import action, claim_master, ready
     cc = ready(client, "cc", "claude-01")
     master = claim_master(client, cc, "claude-01").json()
-    bad = action(client, cc, master, action="incident_open", intent="record a problem", kind="made_up_kind",
-                 subject="x", severity="warning", title="t", detail="d")
-    assert bad.status_code == 400 and "documented incident kinds" in bad.text
-    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='made_up_kind'")["n"] == 0
-    good = action(client, cc, master, action="incident_open", intent="record a problem", kind="node_down",
-                  subject="x", severity="warning", title="t", detail="d")
-    assert good.status_code == 200
+    denied = action(client, cc, master, action="incident_open", intent="record a problem", kind="node_down",
+                    subject="x", severity="warning", title="t", detail="d")
+    assert denied.status_code == 403 and "not allowed" in denied.text
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='node_down'")["n"] == 0
 
 
 def test_ci_check_command_exit_codes():

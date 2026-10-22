@@ -457,6 +457,14 @@ def _process_node_operation_logged(api: ControlClient, node: str) -> None:
         log.warning("node operation poll failed: %s", type(operation_error).__name__)
 
 
+SERVICE_CHECK_S = 60  # how often declared test services are inspected, recreated when gone and reported
+
+
+def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str, dict]:
+    with lock:
+        return {k: dict(v) for k, v in state.items()}
+
+
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
     api = ControlClient(control_url, token, timeout=15)
@@ -471,6 +479,11 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     toolchain_signature = ""
     toolchain_result: dict[str, object] = {}
     toolchain_lock = threading.Lock()
+    service_thread: threading.Thread | None = None
+    service_state: dict[str, dict] = {}
+    service_names: list[str] = []
+    service_at = 0.0
+    service_lock = threading.Lock()
     try:
         while not stop.is_set():
             try:
@@ -483,6 +496,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
                     "release_protocol": 1,
                     "tools": tools,
+                    "services": _services_snapshot(service_state, service_lock),
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
                     "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
@@ -525,6 +539,26 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 if isinstance(prepared_tools, dict) and prepared_tools:
                     tools.update({str(k): str(v) for k, v in prepared_tools.items()})
                     tools_at = time.time()
+            wanted = sorted({str(s) for services in (desired.get("project_services") or {}).values()
+                             for s in services})
+            if wanted != service_names:
+                service_names = wanted
+                service_at = 0.0
+                with service_lock:  # a service no project declares any more is no longer reported
+                    for stale in set(service_state) - set(wanted):
+                        service_state.pop(stale, None)
+            if wanted and time.time() - service_at >= SERVICE_CHECK_S and (
+                    service_thread is None or not service_thread.is_alive()):
+                from .services import prepare_services
+
+                def check_services(names=list(wanted)):
+                    result = prepare_services(names)
+                    with service_lock:
+                        service_state.update(result)
+
+                service_at = time.time()
+                service_thread = threading.Thread(target=check_services, name=f"aiflow4-services-{name}", daemon=True)
+                service_thread.start()
             if pending_network_events:
                 try:
                     api.call("POST", "/v1/events", {"events": list(pending_network_events)})

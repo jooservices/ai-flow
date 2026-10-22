@@ -74,6 +74,9 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason):
         def mirror(self, *_a):
             return "mirror"
 
+        def foreign_worktree(self, *_a):
+            return None
+
         def worktree(self, _m, _p, _b, base):
             return "origin/" + base
 

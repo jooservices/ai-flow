@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
 - [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
+- [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
@@ -51,7 +52,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
-- [Command Center V2 design](../../docs/v4/command-center-v2.md): interactive prototype of the new console: dark theme, one Dashboard, Work board with a project picker, role views, machines and AI, users and roles, human review metrics
+- [Command Center V2](../../docs/v4/command-center-v2.md): implementation guide and design prototype for the warm theme, combined Dashboard, role views, Work board picker and Ctrl K search
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 

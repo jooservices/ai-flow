@@ -25,7 +25,7 @@ def test_tag_release_workflow_builds_signs_and_publishes_assets():
     workflow = Path(".github/workflows/release-v4.yml").read_text()
     for required in (
         'tags: ["v*"]',
-        "needs: v4-tests",
+        "needs: [v4-tests, acceptance]",
         "uv run --frozen pytest tests/v4 -q",
         "git merge-base --is-ancestor",
         "git archive --format=tar.gz",

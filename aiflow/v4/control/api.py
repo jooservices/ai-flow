@@ -3331,7 +3331,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}
 
     @app.get("/v1/state")
-    def state() -> dict:
+    def state(request: Request, authorization: str = Header(default="")) -> dict:
+        if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
+            owner_auth(request, authorization)
         from .state import snapshot
         return snapshot(ctx)
 

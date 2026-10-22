@@ -28,7 +28,12 @@ m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow
 with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
-control_state() { curl -fsS http://127.0.0.1/v1/state; }
+# With console sign-in on, /v1/state needs the owner token (kept in the control secret file, never printed).
+state_curl() {
+  local token; token=$(sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' /etc/aiflow/secrets/control/aiflow4.env 2>/dev/null | head -n1)
+  if [ -n "$token" ]; then curl -fsS -H @- "$@" <<<"Authorization: Bearer $token"; else curl -fsS "$@"; fi
+}
+control_state() { state_curl http://127.0.0.1/v1/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
@@ -124,7 +129,7 @@ P
       echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
       if aiflow4-deploy-develop "" "$TARGET"; then
         sleep 20
-        if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+        if curl -fsS http://127.0.0.1/healthz >/dev/null && state_curl http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
            && curl -fsS -o /dev/null http://127.0.0.1/cc; then
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
           alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."

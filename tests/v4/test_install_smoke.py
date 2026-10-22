@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_release_publication_waits_for_systemd_install_smoke():
     workflow = yaml.load((ROOT / ".github/workflows/release-v4.yml").read_text(), Loader=yaml.BaseLoader)
     release = workflow["jobs"]["release"]
-    assert release["needs"] == "v4-tests"
+    assert release["needs"] == ["v4-tests", "acceptance"]
     names = [step.get("name", "") for step in release["steps"]]
     smoke = names.index("Install release on Ubuntu systemd control and two nodes")
     image = names.index("Build and push control-api image to GHCR")

@@ -43,9 +43,44 @@ jobs:
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
         run: uv run --frozen pytest tests/v4 -q
 
+  # The clean-install acceptance test (docs/v4/clean-install-acceptance.md) gates the release: a failure stops the
+  # publication and release-bug opens a bug ticket.
+  acceptance:
+    name: Clean-install acceptance (full) before release
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:8.2.10-bookworm
+        ports: ["6379:6379"]
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg18-trixie
+        env:
+          POSTGRES_USER: aiflow
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aiflow4
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aiflow -d aiflow4"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+      - name: Acceptance test (full)
+        env:
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+        run: bash deploy/v4/ci/clean-install-acceptance.sh full
+
   release:
     name: Package, sign and publish v4 release
-    needs: v4-tests
+    needs: [v4-tests, acceptance]
     if: github.repository == 'jooservices/ai-flow'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -185,3 +220,23 @@ jobs:
             "dist/aiflow4-$VERSION.tar.gz" \
             "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
             dist/SHA256SUMS --clobber
+
+  release-bug:
+    name: Open a bug ticket for the failed release
+    needs: [v4-tests, acceptance, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open the bug ticket
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash deploy/v4/ci/open-bug-ticket.sh "Release ${GITHUB_REF_NAME} blocked by a failed clean-install acceptance test or install smoke"

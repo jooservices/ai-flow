@@ -492,6 +492,7 @@ def test_grok_recorded_stream_restores_probe_status_and_empty_answer_is_provider
     ctx.repo().accounts.append(Account(id="grok-01", provider="grok", node="cc", tier="middle", roles=["dev"]))
     client.app.state.sync_accounts()
     auth = join(client, "cc")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=auth)
 
     # Start with the incident state produced by a real sign-in failure. A good streamed answer must clear it.
     failed = client.post("/v1/accounts/grok-01/probe", json={

@@ -922,6 +922,18 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
     assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
 
 
+def test_projects_readiness_escapes_node_condition_names_and_actions():
+    rendered = render_projects([{
+        "key": "NEWAPP", "repo": "jooservices/new-app", "status": "active", "priority": 1,
+        "ticket_count": 0, "node_readiness": [{"name": "node1", "blocked": True, "conditions": [{
+            "name": '<img src=x onerror="alert(1)">', "action": '<svg onload="alert(2)">', "detail": "unsafe",
+        }]}],
+    }], {})
+    assert "<img" not in rendered and "<svg" not in rendered
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in rendered
+    assert "&lt;svg onload=&quot;alert(2)&quot;&gt;" in rendered
+
+
 def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     editor = {"key": "JOOWP", "busy": False, "saving": False, "error": "", "data": {
         "default_repo": "jooservices/wordpress-core",

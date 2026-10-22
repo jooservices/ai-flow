@@ -2978,7 +2978,8 @@ function renderProjects() {
       h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>';
       var readiness = p.node_readiness || [], blocked = readiness.filter(function (n) { return n.blocked; });
       if (blocked.length) blocked.forEach(function (n) {
-        h += '<div class="bad"><span class="mono">' + esc(n.name) + '</span>: ' + esc((n.conditions || []).map(function (c) { return c.name + ' — ' + (c.action || c.detail); }).join('; ')) + '</div>';
+        var reasons = (n.conditions || []).map(function (c) { return esc(c.name || c.id) + ' — ' + esc(c.action || c.detail); }).join('; ');
+        h += '<div class="bad"><span class="mono">' + esc(n.name) + '</span>: ' + reasons + '</div>';
       });
       else h += '<span class="good">' + (readiness.length ? 'Ready on ' + readiness.length + ' machine' + (readiness.length === 1 ? '' : 's') : 'No assigned machine') + '</span>';
       h += '</td><td><div class="project-actions">';

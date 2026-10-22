@@ -108,6 +108,16 @@ def test_all_four_results_and_action_text_are_reported_per_project(client, ctx):
 def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition(client, ctx, monkeypatch):
     notifications = []
     monkeypatch.setattr(notify, "send", lambda *args, **kwargs: notifications.append((args, kwargs)) or [])
+    diagnostic = {"result": "ready"}
+    build_project_conditions = system_check._project_conditions
+
+    def with_optional_diagnostic(*args, **kwargs):
+        rows = build_project_conditions(*args, **kwargs)
+        rows.append(condition("diagnostic-note", "Diagnostic note", diagnostic["result"], "Optional hint.",
+                              "Review the optional hint.", affects_work=False))
+        return rows
+
+    monkeypatch.setattr(system_check, "_project_conditions", with_optional_diagnostic)
     repo = ctx.repo()
     repo.projects["TESTWP"].stack = "php-8.3"
     repo.versions["tools"].update({"php": "8.3", "composer": "2.8", "wp": "2.12"})
@@ -118,13 +128,10 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
                                "The node can write its work and state directories."),
                      condition("control-network", "Control API network", "ready", "Heartbeat reached control."),
                      condition("repository-network", "Repository network", "ready", "GitHub is reachable.")]
-    ready = condition("diagnostic-note", "Diagnostic note", "ready", "Optional hint.", affects_work=False)
-    client.post("/v1/nodes/cc/heartbeat", json={"system_conditions": machine_ready + [ready]}, headers=headers)
+    client.post("/v1/nodes/cc/heartbeat", json={"system_conditions": machine_ready}, headers=headers)
     assert notifications == []
-    client.post("/v1/nodes/cc/heartbeat", json={
-        "system_conditions": machine_ready + [condition("diagnostic-note", "Diagnostic note", "needs_action",
-                                                          "Optional hint.", "Review the optional hint.",
-                                                          affects_work=False)]}, headers=headers)
+    diagnostic["result"] = "needs_action"
+    client.post("/v1/nodes/cc/heartbeat", json={"system_conditions": machine_ready}, headers=headers)
     assert notifications == []
 
     tools = ctx.db.one("SELECT tools FROM nodes WHERE name='cc'")["tools"]
@@ -170,7 +177,7 @@ def test_system_check_screen_and_clean_install_acceptance_include_results():
     assert 'id="view-system-check"' in page and "fetch('/v1/system-check'" in page
     assert "Ready" in page and "Fixed automatically" in page and "Needs an action" in page
     assert "Not possible on this machine" in page and "/v1/support-bundle" in page
-    assert "c.name + ' — ' + (c.action || c.detail)" in page
+    assert "esc(c.name || c.id) + ' — ' + esc(c.action || c.detail)" in page
     run_handler = page.split("else if (act === 'system-check-run') {", 1)[1].split("\n  else if", 1)[0]
     assert "fetch('/v1/system-check/run'" in run_handler
     assert "fetch('/v1/system-check', { cache: 'no-store' })" in run_handler
@@ -222,6 +229,65 @@ def test_credential_heartbeat_is_rebuilt_from_boolean_status_fields_and_bundle_i
     assert payload_secret not in json.dumps(bundle)
     assert bundle["system_check"]["nodes"][0]["readiness"]["credential_statuses"] == {
         account_id: {"present": True, "valid": False}}
+
+
+def test_secret_bearing_machine_conditions_are_normalized_before_storage_report_and_bundle(client, ctx):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    secret = "SECRET-MACHINE-CONDITION-TOKEN"
+    client.post("/v1/nodes/cc/heartbeat", headers=headers, json={
+        "system_conditions": [{
+            "id": "disk-space", "name": f"<img>{secret}", "result": "needs_action",
+            "detail": f"provider output: {secret}", "action": f"send token {secret}",
+            "affects_work": True, "provider_output": secret,
+        }],
+    })
+
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    disk = next(item for item in readiness["machine"] if item["id"] == "disk-space")
+    assert disk["name"] == "Free disk space"
+    assert disk["action"] == "Free at least 5 GiB on /srv/aiflow."
+    assert "machine_inputs" not in readiness
+    assert secret not in json.dumps(readiness)
+
+    stored = ctx.db.one("SELECT readiness FROM nodes WHERE name='cc'")["readiness"]
+    assert "machine_inputs" not in stored
+    assert secret not in json.dumps(stored)
+    bundle = client.get("/v1/support-bundle").json()
+    assert secret not in json.dumps(bundle)
+
+
+def test_unknown_credential_validity_blocks_work_until_confirmed(client, ctx):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    client.post("/v1/nodes/cc/heartbeat", headers=headers, json={
+        "credential_checks": {"claude-01": {"present": True, "valid": None}},
+    })
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    credential = next(item for item in readiness["projects"]["TESTWP"]
+                      if item["id"] == "credential:claude-01")
+    assert credential["result"] == "needs_action" and credential["affects_work"] is True
+
+    add_ticket(ctx.db, "TESTWP-250")
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-250", "account": "claude-01"}, headers=headers)
+    assert claim.status_code == 409
+
+
+def test_missing_readiness_snapshot_fails_closed_for_work_and_projects_explain_why(client, ctx):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    from aiflow.v4.control.db import J
+
+    ctx.db.run("UPDATE nodes SET readiness=%s, readiness_checked_at=NULL WHERE name='cc'", (J({}),))
+    add_ticket(ctx.db, "TESTWP-251")
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-251", "account": "claude-01"}, headers=headers)
+    assert claim.status_code == 409
+
+    project = next(p for p in client.get("/v1/projects").json()["projects"] if p["key"] == "TESTWP")
+    node_result = next(n for n in project["node_readiness"] if n["name"] == "cc")
+    assert node_result["blocked"]
+    assert node_result["conditions"][0]["id"] == "system-check-snapshot"
+    assert "first system readiness check" in node_result["conditions"][0]["detail"]
 
 
 def test_legacy_credential_rows_are_scrubbed_from_report_and_bundle(client, ctx):

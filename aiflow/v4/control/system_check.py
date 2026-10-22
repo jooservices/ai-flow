@@ -10,6 +10,79 @@ from .db import J
 from . import notify
 
 BLOCKING = {"needs_action", "not_possible_on_this_machine"}
+MACHINE_CONDITION_TEXT = {
+    "disk-space": ("Free disk space", {
+        "ready": ("At least 5 GiB of free disk space is available.", ""),
+        "fixed_automatically": ("The node freed disk space automatically.", ""),
+        "needs_action": ("At least 5 GiB of free disk space is required.",
+                          "Free at least 5 GiB on /srv/aiflow."),
+        "not_possible_on_this_machine": ("Disk capacity cannot be checked on this machine.",
+                                          "Upgrade the node agent so it can report disk space."),
+    }),
+    "workspace-permissions": ("Work directory permissions", {
+        "ready": ("The node can write its work and state directories.", ""),
+        "fixed_automatically": ("The node created its work directories automatically and can write its state.", ""),
+        "needs_action": ("The node cannot write its work and state directories.",
+                         "Restore write access to /srv/aiflow/work and /run/aiflow4/workers for the aiflow service account."),
+        "not_possible_on_this_machine": ("Work directory permissions cannot be checked on this machine.",
+                                          "Upgrade the node agent so it can check work directory permissions."),
+    }),
+    "control-network": ("Control API network", {
+        "ready": ("The machine reached the control API and sent this heartbeat.", ""),
+        "fixed_automatically": ("The node restored its control API connection automatically.", ""),
+        "needs_action": ("The machine cannot reach the control API.",
+                         "Restore the node's connection to the control API."),
+        "not_possible_on_this_machine": ("Control API access cannot be checked on this machine.",
+                                          "Upgrade the node agent so it can check control API access."),
+    }),
+    "repository-network": ("Repository network", {
+        "ready": ("The machine can reach GitHub over HTTPS.", ""),
+        "fixed_automatically": ("The node restored GitHub HTTPS access automatically.", ""),
+        "needs_action": ("The machine cannot reach GitHub over HTTPS.",
+                         "Allow outbound HTTPS access to github.com on port 443 from this machine."),
+        "not_possible_on_this_machine": ("Repository access cannot be checked on this machine.",
+                                          "Upgrade the node agent so it can check outbound HTTPS access to GitHub."),
+    }),
+}
+MACHINE_CONDITION_IDS = set(MACHINE_CONDITION_TEXT)
+MACHINE_CONDITION_IDS.add("node-heartbeat")
+
+
+def _machine_condition(condition_id: str, result: object, node_status: str = "") -> dict[str, object] | None:
+    """Rebuild a node condition from its allowlisted ID and result, never from node-supplied display text."""
+    if not isinstance(result, str):
+        return None
+    if condition_id == "node-heartbeat":
+        if result not in {"ready", "needs_action"}:
+            return None
+        if result == "ready":
+            return condition(condition_id, "Node heartbeat", "ready",
+                             "The node is connected to the control API.")
+        return condition(condition_id, "Node heartbeat", "needs_action",
+                         f"The node status is {node_status or 'not connected'}.",
+                         "Start the node agent and restore its control API connection on this machine.")
+    definition = MACHINE_CONDITION_TEXT.get(condition_id)
+    if not definition or result not in definition[1]:
+        return None
+    name, outcomes = definition
+    detail, action = outcomes[result]
+    return condition(condition_id, name, result, detail, action)
+
+
+def _validated_machine_results(raw: object) -> dict[str, str]:
+    """Accept only known condition IDs and result states from a node; discard every other reported field."""
+    if not isinstance(raw, list):
+        return {}
+    results: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        condition_id, result = item.get("id"), item.get("result")
+        if isinstance(condition_id, str) and isinstance(result, str) \
+                and condition_id in MACHINE_CONDITION_IDS and result in {
+                "ready", "fixed_automatically", "needs_action", "not_possible_on_this_machine"}:
+            results[condition_id] = result
+    return results
 
 
 def _credential_condition(account_id: str, status: dict[str, bool | None]) -> dict[str, object]:
@@ -24,7 +97,7 @@ def _credential_condition(account_id: str, status: dict[str, bool | None]) -> di
         return condition(f"credential:{account_id}", name, "ready", "Credential is present and valid.")
     return condition(f"credential:{account_id}", name, "needs_action",
                      "Credential status has not been confirmed.",
-                     f"Sign in to AI account {account_id} on this machine.", affects_work=False)
+                     f"Sign in to AI account {account_id} on this machine.")
 
 
 def _account_condition(row: dict | None, account_id: str) -> dict[str, object]:
@@ -41,48 +114,43 @@ def _account_condition(row: dict | None, account_id: str) -> dict[str, object]:
         return _credential_condition(account_id, {"present": True, "valid": False})
     return condition(f"credential:{account_id}", f"Credentials · {account_id}", "needs_action",
                      "Credential validity has not been confirmed.",
-                     f"Sign in to AI account {account_id} on this machine.", affects_work=False)
+                     f"Sign in to AI account {account_id} on this machine.")
 
 
 def _machine_conditions(raw: list[dict] | None, metrics: dict[str, Any],
                         auto_fixed_conditions: set[str], node_status: str) -> list[dict[str, object]]:
-    out = [dict(item) for item in raw or [] if isinstance(item, dict)]
-    known = {str(item.get("id")) for item in out}
-    if node_status == "online":
-        out.append(condition("node-heartbeat", "Node heartbeat", "ready",
-                             "The node is connected to the control API."))
-    else:
-        out.append(condition("node-heartbeat", "Node heartbeat", "needs_action",
-                             f"The node status is {node_status}.",
-                             "Start the node agent and restore its control API connection on this machine."))
+    reported = _validated_machine_results(raw)
+    out: list[dict[str, object]] = []
     free = metrics.get("disk_free")
-    if "disk-space" not in known and isinstance(free, (int, float)):
-        gib = int(free / (1024 ** 3))
-        if free >= 5 * 1024 ** 3:
-            result = "fixed_automatically" if "disk-space" in auto_fixed_conditions else "ready"
-            detail = f"The node freed space automatically; {gib} GiB is available." if result == "fixed_automatically" \
-                else f"{gib} GiB is available."
-            out.append(condition("disk-space", "Free disk space", result, detail))
-        else:
-            out.append(condition("disk-space", "Free disk space", "needs_action",
-                                 f"Only {gib} GiB is available; work needs at least 5 GiB.",
-                                 "Free at least 5 GiB on /srv/aiflow."))
-    elif "disk-space" not in known:
-        out.append(condition("disk-space", "Free disk space", "needs_action",
-                             "Disk capacity has not been reported.",
-                             "Upgrade the node agent so it can report disk space."))
+    disk_result = reported.get("disk-space")
+    if isinstance(free, (int, float)) and free < 5 * 1024 ** 3:
+        disk_result = "needs_action"
+    elif disk_result is None:
+        disk_result = ("fixed_automatically" if "disk-space" in auto_fixed_conditions else "ready") \
+            if isinstance(free, (int, float)) and free >= 5 * 1024 ** 3 else "needs_action"
+    disk_condition = _machine_condition("disk-space", disk_result)
+    if disk_condition:
+        out.append(disk_condition)
 
-    if "workspace-permissions" not in known:
-        out.append(condition("workspace-permissions", "Work directory permissions", "needs_action",
-                             "Work directory permissions have not been checked by this node agent.",
-                             "Upgrade the node agent so it can check work directory permissions."))
-    if "control-network" not in known:
-        out.append(condition("control-network", "Control API network", "ready",
-                             "The machine reached the control API and sent this heartbeat."))
-    if "repository-network" not in known:
-        out.append(condition("repository-network", "Repository network", "needs_action",
-                             "Repository network access has not been checked by this node agent.",
-                             "Upgrade the node agent so it can check outbound HTTPS access to GitHub."))
+    workspace = _machine_condition("workspace-permissions", reported.get("workspace-permissions"))
+    if workspace is None:
+        workspace = _machine_condition("workspace-permissions", "needs_action")
+    out.append(workspace)
+
+    control_result = reported.get("control-network", "ready" if node_status == "online" else "needs_action")
+    control = _machine_condition("control-network", control_result)
+    if control:
+        out.append(control)
+
+    repo_result = reported.get("repository-network", "needs_action")
+    repository = _machine_condition("repository-network", repo_result)
+    if repository:
+        out.append(repository)
+
+    if node_status == "online":
+        out.append(_machine_condition("node-heartbeat", "ready", node_status))
+    else:
+        out.append(_machine_condition("node-heartbeat", "needs_action", node_status))
     return out
 
 
@@ -125,7 +193,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
     for service in project.required_services:
         state = services.get(service) if isinstance(services, dict) else None
         if not isinstance(state, dict) or not state.get("healthy"):
-            detail = str((state or {}).get("detail") or (state or {}).get("state") or "Service has not reported healthy.")
+            detail = "The service has not reported healthy."
             out.append(condition(f"service:{service}", f"Service · {service}", "needs_action", detail,
                                  f"Start or repair the {service} service on node {node}."))
         elif state.get("state") in {"started", "recreated"}:
@@ -201,42 +269,82 @@ def _validated_credential_statuses(raw: object, account_ids: list[str]) -> dict[
 
 
 def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> dict:
-    """Remove pre-fix credential input and rebuild credential rows in stored results."""
+    """Export only known snapshot fields and normalized conditions; discard raw node inputs."""
     if not isinstance(readiness, dict):
         return {}
     has_credential_snapshot = any(key in readiness for key in
                                   ("credential_inputs", "credential_checks", "credential_statuses"))
-    safe = {key: value for key, value in readiness.items()
-            if key not in {"credential_inputs", "credential_checks"}}
-    credential_statuses = _validated_credential_statuses(safe.get("credential_statuses"), account_ids or [])
+    safe: dict[str, Any] = {}
+    checked_at = readiness.get("checked_at")
+    if isinstance(checked_at, str) and len(checked_at) <= 64:
+        safe["checked_at"] = checked_at
+    trigger = readiness.get("trigger")
+    if isinstance(trigger, str) and trigger in {
+            "machine_joined", "project_added", "upgrade", "heartbeat", "hourly", "manual", "heartbeat_lost"}:
+        safe["trigger"] = trigger
+    credential_statuses = _validated_credential_statuses(readiness.get("credential_statuses"), account_ids or [])
+
+    def clean_machine_rows(rows: object) -> list[dict[str, object]]:
+        if not isinstance(rows, list):
+            return []
+        cleaned = []
+        for item in rows:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            condition_id = item["id"]
+            if condition_id not in MACHINE_CONDITION_IDS:
+                continue
+            normalized = _machine_condition(condition_id, item.get("result"),
+                                            "online" if item.get("result") == "ready" else "offline")
+            if normalized is not None:
+                cleaned.append(normalized)
+        return cleaned
 
     def clean_rows(rows: object) -> object:
         if not isinstance(rows, list):
-            return rows
+            return []
         cleaned = []
         for item in rows:
-            if not isinstance(item, dict) or not str(item.get("id", "")).startswith("credential:"):
-                cleaned.append(item)
+            if not isinstance(item, dict):
                 continue
-            account_id = str(item["id"]).removeprefix("credential:")
-            if account_id in credential_statuses:
-                cleaned.append(_credential_condition(account_id, credential_statuses[account_id]))
-            elif item.get("result") == "ready":
-                cleaned.append(_credential_condition(account_id, {"present": True, "valid": True}))
-            else:
-                # Older snapshots did not retain normalized status. Recheck until a fresh node report arrives.
-                cleaned.append(condition(f"credential:{account_id}", f"Credentials · {account_id}", "needs_action",
-                                         "Credential status has not been confirmed.",
-                                         f"Sign in to AI account {account_id} on this machine."))
+            condition_id = item.get("id")
+            if not isinstance(condition_id, str):
+                continue
+            if condition_id.startswith("credential:"):
+                account_id = condition_id.removeprefix("credential:")
+                if account_ids is not None and account_id not in account_ids:
+                    continue
+                if account_id in credential_statuses:
+                    cleaned.append(_credential_condition(account_id, credential_statuses[account_id]))
+                elif item.get("result") == "ready":
+                    cleaned.append(_credential_condition(account_id, {"present": True, "valid": True}))
+                else:
+                    # Older snapshots did not retain normalized status. Recheck until a fresh node report arrives.
+                    cleaned.append(_credential_condition(account_id, {"present": None, "valid": None}))
+                continue
+            result = item.get("result")
+            name, detail, action = item.get("name"), item.get("detail"), item.get("action", "")
+            if (not isinstance(result, str)
+                    or result not in {"ready", "fixed_automatically", "needs_action", "not_possible_on_this_machine"}
+                    or not isinstance(name, str) or not isinstance(detail, str)
+                    or not isinstance(action, str)):
+                continue
+            # Conditions outside the node's machine report are generated by the control plane. Keep only
+            # their public display fields so legacy extension fields cannot leak through reports or bundles.
+            cleaned.append({"id": condition_id, "name": name[:160], "result": result,
+                            "detail": detail[:500], "action": action[:500],
+                            "affects_work": item.get("affects_work") is not False})
         return cleaned
 
-    if "machine" in safe:
-        safe["machine"] = clean_rows(safe.get("machine"))
-    if isinstance(safe.get("projects"), dict):
+    if "machine" in readiness:
+        safe["machine"] = clean_machine_rows(readiness.get("machine"))
+    if isinstance(readiness.get("projects"), dict):
         clean_projects = {}
-        for project, rows in safe["projects"].items():
+        for project, rows in readiness["projects"].items():
+            if not isinstance(project, str) or len(project) > 32:
+                continue
             if not isinstance(rows, list):
-                clean_projects[project] = rows
+                clean_projects[project] = []
                 continue
             if account_ids and has_credential_snapshot:
                 existing = rows[-len(account_ids):] if len(rows) >= len(account_ids) else rows
@@ -252,11 +360,17 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
                         rebuilt.append(condition(f"credential:{account_id}", f"Credentials · {account_id}",
                                                  "needs_action", "Credential status has not been confirmed.",
                                                  f"Sign in to AI account {account_id} on this machine."))
-                clean_projects[project] = base + rebuilt
+                clean_projects[project] = clean_rows(base) + rebuilt
             else:
                 clean_projects[project] = clean_rows(rows)
         safe["projects"] = clean_projects
     safe["credential_statuses"] = credential_statuses
+    for field in ("auto_fixed_tools", "auto_fixed_conditions"):
+        values = readiness.get(field)
+        if isinstance(values, list):
+            allowed = {tool for tools in STACK_TOOLS.values() for tool in tools} \
+                if field == "auto_fixed_tools" else MACHINE_CONDITION_IDS
+            safe[field] = sorted({value for value in values if isinstance(value, str) and value in allowed})
     return safe
 
 
@@ -273,13 +387,17 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     repo = ctx.repo()
     assigned_accounts = [account.id for account in repo.accounts_on(node)]
     stored = _safe_readiness(row.get("readiness") or {}, assigned_accounts)
-    raw_machine = machine_conditions if machine_conditions is not None else stored.get("machine_inputs", [])
+    raw_machine = machine_conditions if machine_conditions is not None else stored.get("machine", [])
     credential_statuses = _validated_credential_statuses(
         credential_checks if credential_checks is not None else stored.get("credential_statuses"),
         assigned_accounts)
-    auto_fixed = set(auto_fixed_tools if auto_fixed_tools is not None else stored.get("auto_fixed_tools", []))
-    auto_fixed_condition_ids = set(auto_fixed_conditions if auto_fixed_conditions is not None
-                                   else stored.get("auto_fixed_conditions", []))
+    allowed_tools = {tool for tools in STACK_TOOLS.values() for tool in tools}
+    auto_fixed = {item for item in (auto_fixed_tools if auto_fixed_tools is not None
+                                    else stored.get("auto_fixed_tools", []))
+                  if isinstance(item, str) and item in allowed_tools}
+    auto_fixed_condition_ids = {item for item in (auto_fixed_conditions if auto_fixed_conditions is not None
+                                                   else stored.get("auto_fixed_conditions", []))
+                                if isinstance(item, str) and item in MACHINE_CONDITION_IDS}
     machine = _machine_conditions(raw_machine, row.get("metrics") or {}, auto_fixed_condition_ids,
                                   str(row.get("status") or "joined"))
     account_rows = {item["id"]: item for item in ctx.db.all(
@@ -298,7 +416,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     checked_at = datetime.now(timezone.utc).isoformat()
     result = {"node": node, "machine": machine, "projects": project_results,
               "checked_at": checked_at, "trigger": trigger,
-              "machine_inputs": raw_machine, "credential_statuses": credential_statuses,
+              "credential_statuses": credential_statuses,
               "auto_fixed_tools": sorted(auto_fixed),
               "auto_fixed_conditions": sorted(auto_fixed_condition_ids)}
 
@@ -333,9 +451,17 @@ def refresh_all(ctx, trigger: str = "hourly") -> list[dict]:
 
 def blocking_reasons(readiness: dict | None, project: str, account: str = "") -> list[dict]:
     """Return work-blocking failures, restricting account conditions to the requesting worker account."""
-    if not isinstance(readiness, dict):
-        return []
-    rows = list(readiness.get("machine") or []) + list((readiness.get("projects") or {}).get(project, []) or [])
+    safe = _safe_readiness(readiness)
+    projects = safe.get("projects")
+    if not safe.get("checked_at"):
+        return [condition("system-check-snapshot", "System check", "needs_action",
+                          "This machine has not completed its first system readiness check.",
+                          "Wait for the machine's first heartbeat and system check before starting work.")]
+    if not isinstance(projects, dict) or project not in projects:
+        return [condition("project-check-snapshot", "Project system check", "needs_action",
+                          f"No readiness result is available for project {project} on this machine.",
+                          "Run the system check for this project before starting work.")]
+    rows = list(safe.get("machine") or []) + list(projects.get(project) or [])
     return [item for item in rows if isinstance(item, dict) and item.get("result") in BLOCKING
             and item.get("affects_work", True)
             and (not str(item.get("id", "")).startswith("credential:")

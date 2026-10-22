@@ -424,18 +424,20 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects']"
+    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects', '/notifications']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects"
+    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects,notifications"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
+    assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "else if (S.view === 'notifications') renderNotifications();" in page
+    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'notifications']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():

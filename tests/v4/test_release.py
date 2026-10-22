@@ -507,9 +507,10 @@ def _autodeploy(tmp_path, current, image_present=True, build_present=True):
                           f'[ "$1" = v4.1.0 ] && echo v4.1.0 > {releases}/CURRENT\nexit 0\n',
         "curl": "exit 7\n",
         "docker": f'echo "docker $* tag=${{AIFLOW4_IMAGE_TAG:-}} repo=${{AIFLOW4_IMAGE_REPOSITORY:-}}" >> {log}\n'
+                  f'[ "$1" = exec ] && [ "$4" = notify ] && {{ echo "alert $8" >> {log}; exit 0; }}\n'
                   f'[ "$1" = image ] && exit {0 if image_present else 1}\nexit 0\n',
         "systemctl": f'echo "systemctl $*" >> {log}\n',
-        "python3": f'[ "$1" = - ] && {{ cat >/dev/null; echo "alert $2" >> {log}; }}\nexit 0\n',
+        "python3": f'exec {sys.executable} "$@"\n',
     }
     env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root)}
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
@@ -554,6 +555,7 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
                           f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
                           f'echo "$1" > {releases}/CURRENT\nexit 0\n',
         "docker": f'echo "docker $*" >> {log}\n'
+                  f'[ "$1" = exec ] && [ "$4" = notify ] && {{ echo "alert $8" >> {log}; exit 0; }}\n'
                   f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
         "curl": f'case "$*" in *"/v1/state"*) cat {state} ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
                 f' *) exit 7 ;; esac\n',
@@ -715,6 +717,7 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True):
                                   f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
                                   f'echo "$2" > {releases}/CURRENT\nexit 0\n',
         "docker": f'echo "docker $*" >> {log}\n'
+                  f'[ "$1" = exec ] && [ "$4" = notify ] && {{ echo "alert $8" >> {log}; exit 0; }}\n'
                   f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
         "curl": f'case "$*" in *"/v1/state"*) cat {state} ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
                 f' *) exit 7 ;; esac\n',

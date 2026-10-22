@@ -232,7 +232,7 @@ def test_master_actions_are_fenced_audited_and_comments_use_master_note_format(c
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-210")
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args, **kwargs: sent.append(args) or ["fake"])
 
     commented = action(client, cc, master, action="jira_comment", ticket="TESTWP-210", intent="follow up",
                        headline="status update", what="A slow run was found", why="The warn clock passed",
@@ -299,7 +299,7 @@ def test_protected_master_actions_escalate_and_never_execute(client, ctx, monkey
     add_ticket(ctx.db, "TESTWP-220")
     ctx.jira.status_of["TESTWP-220"] = "Needs owner"
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args, **kwargs: sent.append(args) or ["fake"])
     response = action(client, cc, master, action=action_name, ticket="TESTWP-220", intent=intent,
                       fields={"Release status": "approved"}, headline="protected request")
 
@@ -345,7 +345,7 @@ def test_incident_for_offline_node_and_requeue_after_hard_limit_are_not_escalate
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-230", status="In Progress")
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args, **kwargs: sent.append(args) or ["fake"])
 
     opened = action(client, cc, master, action="incident_open", intent="open an incident for the offline node",
                     kind="node_down", subject="node1", severity="critical", title="node1 is offline",
@@ -427,7 +427,7 @@ def test_master_worker_forwards_category_so_protected_requests_escalate(client, 
     master = claim_master(client, cc, "claude-01").json()
     add_ticket(ctx.db, "TESTWP-240")
     sent = []
-    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args: sent.append(args) or ["fake"])
+    monkeypatch.setattr("aiflow.v4.control.api.notify.send", lambda *args, **kwargs: sent.append(args) or ["fake"])
 
     class Bridge:
         def request(self, method, path, json=None, params=None):

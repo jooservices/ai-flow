@@ -24,12 +24,14 @@ mkdir -p "$RELEASES"
 exec 8>"$RELEASES/autodeploy.lock"
 flock -n 8 || { echo "another auto-deploy pass is running"; exit 0; }
 
-alert() { python3 - "$1" "$2" <<'P' || true
-import smtplib, sys
-from email.message import EmailMessage
-m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow4.local"; m["Subject"] = sys.argv[1]; m.set_content(sys.argv[2])
-with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
-P
+alert() {
+  local severity=info
+  case "$1" in
+    '[CRITICAL]'*) severity=critical ;;
+    '[WARNING]'*) severity=warning ;;
+  esac
+  docker exec aiflow4-control-api-a aiflow4 notify --severity "$severity" --title "$1" --detail "$2" >/dev/null 2>&1 || \
+    echo "stored-channel notification could not be sent" >&2
 }
 
 control_state() { curl -fsS http://127.0.0.1/v1/state; }

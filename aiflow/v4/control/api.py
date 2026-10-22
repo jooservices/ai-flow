@@ -215,8 +215,10 @@ def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[
     email = assignee.get("email") if isinstance(assignee, dict) else ""
     title = f"{key} is ready for human review"
     detail = ticket.get("summary") or key
-    link = f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}" if ctx.settings.jira_site else ""
-    sent = notify.send("info", title, detail, link, recipient=email or "")
+    link = ctx.settings.public_url.rstrip("/") + "/review"
+    sent = notify.send("info", title, detail, link, recipient=email or "", ctx=ctx,
+                       alert_kind="review_before_merge", project=ticket.get("project", ""), ticket=key,
+                       needed="Review the ticket before merge.")
     ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
                (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
@@ -888,6 +890,56 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, None)
         return {"authenticated": True, "user": user.subject, "role": user.role,
                 "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
+
+    def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
+        return console_user(request, {"notifications.manage"}, target="notifications", action=action)
+
+    async def notification_json(request: Request) -> dict:
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "invalid notification settings") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid notification settings")
+        return payload
+
+    @app.get("/v1/notifications")
+    def notification_settings(request: Request) -> dict:
+        notification_admin(request)
+        return notify.public_settings(ctx.db)
+
+    @app.put("/v1/notifications/channels")
+    async def notification_channel_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            channel = notify.save_channel(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"channel": channel}
+
+    @app.delete("/v1/notifications/channels/{channel_id}")
+    def notification_channel_delete(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        if not notify.delete_channel(ctx.db, channel_id):
+            raise HTTPException(404, "notification channel was not found")
+        return {"deleted": True}
+
+    @app.put("/v1/notifications/preferences")
+    async def notification_preferences_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            preferences = notify.save_preferences(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"preferences": preferences}
+
+    @app.post("/v1/notifications/channels/{channel_id}/test")
+    def notification_channel_test(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            return notify.send_test(ctx, channel_id)
+        except ValueError:
+            raise HTTPException(404, "notification channel was not found") from None
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -2630,7 +2682,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                 audit("jira", "comment", ticket, body.run_id, body.fence, run["account_id"], True, comment_id,
                       {"master_action": body.action, "escalate_to_owner": decision.reason})
             sent = notify.send("warning", f"{ticket or 'AI Flow'} requires owner decision",
-                               f"{decision.reason}. {body.intent[:2500]}", link)
+                               f"{decision.reason}. {body.intent[:2500]}", link, ctx=ctx,
+                               alert_kind="ticket_needs_person", ticket=ticket,
+                               needed="Review the owner decision and choose how the ticket should proceed.")
             audit("notify", "master-escalation", ticket, body.run_id, body.fence, run["account_id"], True,
                   ",".join(sent) or "no channel configured", {"reason": decision.reason})
             master_event("escalated", decision.reason)
@@ -2703,7 +2757,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         elif body.action == "notify_owner":
             sent = notify.send(body.severity if body.severity in ("info", "warning", "critical") else "warning",
                                body.title or body.headline, body.detail or body.result,
-                               ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}" if ticket and ctx.settings.jira_site else "")
+                               ctx.settings.jira_site.rstrip("/") + f"/browse/{ticket}" if ticket and ctx.settings.jira_site else "",
+                               ctx=ctx, alert_kind="ticket_needs_person", ticket=ticket,
+                               needed=body.title or body.headline or "Review the requested owner action.")
             result = ",".join(sent) or "no channel configured"
         audit("master", body.action, ticket, body.run_id, body.fence, run["account_id"], True, str(result)[:500],
               {"intent_chars": len(body.intent), "fields": list(body.fields), "labels_added": body.add_labels,
@@ -2776,7 +2832,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         severity = "critical" if blocks else "warning"
         sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
                            ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
-                           if ctx.settings.jira_site else "")
+                           if ctx.settings.jira_site else "", ctx=ctx, alert_kind="ticket_needs_person",
+                           ticket=run["ticket_key"], needed="Review the question and provide an owner decision.")
         audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
               ",".join(sent) or "no channel configured", {"severity": severity})
         return {"ok": True, "severity": severity, "sent": sent}

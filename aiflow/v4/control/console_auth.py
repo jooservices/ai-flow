@@ -20,7 +20,8 @@ COOKIE_NAME = "aiflow4_session"
 # given access by adding its permissions here without changing endpoint code.
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "super_admin": frozenset({"*"}),
-    "owner": frozenset({"console.read", "console.write", "integrations.manage", "nodes.manage", "projects.manage"}),
+    "owner": frozenset({"console.read", "console.write", "integrations.manage", "nodes.manage", "projects.manage",
+                         "notifications.manage"}),
     "lead": frozenset({"console.read"}),
 }
 ROLE_LABELS = {"super_admin": "Super Administrator", "owner": "Owner", "lead": "Lead"}

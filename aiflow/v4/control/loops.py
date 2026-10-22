@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, memory
+from . import jira_connect, memory, notify
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -429,6 +429,8 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 last_sync = now
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
+                notify.process_retries(ctx)
+                notify.send_scheduled_summaries(ctx)
                 last_wd = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)

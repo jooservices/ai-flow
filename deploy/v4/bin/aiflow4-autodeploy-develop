@@ -28,8 +28,14 @@ m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow
 with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
-# /v1/state needs a console session when sign-in is on; the control container reads the registry directly
-control_state() { docker exec aiflow4-control-api-a aiflow4 control-state; }
+# /v1/state needs a console session when sign-in is on. These scripts sign in to the token routes of the control API
+# (/v1/deploy/*) with the owner token from the root-only secret file; it goes to curl on stdin, not on a command line.
+owner_token() {
+  [ -n "${AIFLOW4_OWNER_TOKEN:-}" ] && { printf '%s' "$AIFLOW4_OWNER_TOKEN"; return; }
+  sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' "${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets/control}/aiflow4.env" 2>/dev/null | tail -1
+}
+control_get() { printf 'Authorization: Bearer %s\n' "$(owner_token)" | curl -fsS -H @- "http://127.0.0.1$1"; }
+control_state() { control_get /v1/deploy/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
@@ -152,7 +158,9 @@ if [ "$TARGET" = "$REJECTED" ]; then
   echo "develop $TARGET already failed its canary; waiting for a newer commit"
   exit 0
 fi
-CI=$(docker exec aiflow4-control-api-a aiflow4 ci-state --repo jooservices/ai-flow --sha "$FULL" 2>/dev/null || echo error)
+CI=$(control_get "/v1/deploy/ci-state?repo=jooservices/ai-flow&sha=$FULL" 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' 2>/dev/null || echo error)
+[ -n "$CI" ] || CI=error
 AGE=$(( $(date +%s) - $(git -C "$R" log -1 --format=%ct "$FULL") ))
 case "$CI" in
   ok) ;;

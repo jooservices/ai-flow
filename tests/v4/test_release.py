@@ -1,18 +1,27 @@
 import hashlib
 import json
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import httpx
+import uvicorn
+from fastapi.testclient import TestClient
 
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.canary import (Thresholds, decide as decide_canary, is_infrastructure_failure,
                                       measure_registry, record_promotion, record_rollback,
                                       retry_pending_flow_bugs, summarize_runs)
 from aiflow.v4.core.release_notes import git_commits, render_changelog
-from conftest import join_node
+from conftest import FakeGitHub, join_node
 
 
 def _join(client, name):
@@ -365,7 +374,7 @@ INSTALLER = Path("deploy/v4/bin/aiflow4-node-install").resolve()
 AUTODEPLOY = Path("deploy/v4/bin/aiflow4-autodeploy").resolve()
 DEVELOP_AUTODEPLOY = Path("deploy/v4/bin/aiflow4-autodeploy-develop").resolve()
 _SYSTEM_TOOLS = ("bash", "cat", "awk", "sha256sum", "dirname", "grep", "uname", "rm", "mv", "ln", "mkdir", "head",
-                 "printf", "touch", "flock", "date")
+                 "printf", "touch", "flock", "date", "sed")
 
 
 def _bin(tmp_path, stubs: dict[str, str]) -> str:
@@ -543,8 +552,6 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
         decision = {"action": "promote", "reason": "minimum canary time and completed run count reached",
                     "canary": {"runs": 5, "infra_failures": 0, "failure_rate": 0.0},
                     "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
-    ci_file = tmp_path / "ci.txt"
-    ci_file.write_text("ok\n")
     decision_file = tmp_path / "decision.json"
     decision_file.write_text(json.dumps(decision))
     py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
@@ -556,13 +563,13 @@ def _canary_autodeploy(tmp_path, *, active=False, decision=None, now=None, reque
                           f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
                           f'echo "$1" > {releases}/CURRENT\nexit 0\n',
         "docker": f'echo "docker $*" >> {log}\n'
-                  f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; *control-state*) cat {state} ;; *ci-state*) cat {ci_file} ;; esac\nexit 0\n',
-        "curl": f'case "$*" in *"/v1/state"*) exit 22 ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
-                f' *) exit 7 ;; esac\n',
+                  f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
+        "curl": f'case "$*" in *"/v1/state"*) exit 22 ;; *"/v1/deploy/state"*) cat {state} ;;'
+                f' */healthz*|*/cc*) exit {0 if healthy else 7} ;; *) exit 7 ;; esac\n',
         "python3": py,
         "sleep": "exit 0\n",
     }
-    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root)}
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
     result = subprocess.run(["bash", str(AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -679,7 +686,8 @@ def test_autodeploy_promotes_stable_canary_and_records_under_observed_timeout(tm
     assert state is None
 
 
-def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok"):
+def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, ci="ok", api_port=None):
+    """api_port: forward the /v1/deploy/ requests to a control API listening there; else answer them from fixtures."""
     root = tmp_path / "srv"
     releases = root / "control" / "releases"
     releases.mkdir(parents=True)
@@ -704,10 +712,16 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
         decision = {"action": "promote", "reason": "minimum canary time and completed run count reached",
                     "canary": {"runs": 5, "infra_failures": 0, "failure_rate": 0.0},
                     "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
-    ci_file = tmp_path / "ci.txt"
-    ci_file.write_text(ci + "\n")
     decision_file = tmp_path / "develop-decision.json"
     decision_file.write_text(json.dumps(decision))
+    if api_port is None:
+        served = f'*"/v1/deploy/state"*) cat {state} ;; *"/v1/deploy/ci-state"*) echo \'{{"state":"{ci}"}}\' ;; '
+    else:  # the real curl, aimed at the test server instead of port 80
+        served = ('*"/v1/deploy/"*) args=(); for a in "$@"; do '
+                  f'args+=("${{a/\\/\\/127.0.0.1\\//\\/\\/127.0.0.1:{api_port}\\/}}"); done; '
+                  f'exec {shutil.which("curl")} "${{args[@]}}" ;; ')
+    curl_stub = (f'case "$*" in *"/v1/state"*) exit 22 ;; {served}*/healthz*|*/cc*) exit {0 if healthy else 7} ;;'
+                 f' *) exit 7 ;; esac\n')
     py = (f'if [ "$1" = - ] && [ "$#" = 3 ]; then echo "alert $2" >> {log}; cat >/dev/null; exit 0; fi\n'
           f'exec {sys.executable} "$@"\n')
     stubs = {
@@ -718,13 +732,12 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
                                   f'if [ "$1" = --stage-only ]; then exit 0; fi\n'
                                   f'echo "$2" > {releases}/CURRENT\nexit 0\n',
         "docker": f'echo "docker $*" >> {log}\n'
-                  f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; *control-state*) cat {state} ;; *ci-state*) cat {ci_file} ;; esac\nexit 0\n',
-        "curl": f'case "$*" in *"/v1/state"*) exit 22 ;; */healthz*|*/cc*) exit {0 if healthy else 7} ;;'
-                f' *) exit 7 ;; esac\n',
+                  f'case "$*" in *"canary evaluate"*) cat {decision_file} ;; esac\nexit 0\n',
+        "curl": curl_stub,
         "python3": py,
         "sleep": "exit 0\n",
     }
-    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root)}
+    env = {"PATH": _bin(tmp_path, stubs), "AIFLOW4_ROOT": str(root), "AIFLOW4_OWNER_TOKEN": "owner-secret"}
     result = subprocess.run(["bash", str(DEVELOP_AUTODEPLOY)], env=env, capture_output=True, text=True, timeout=60)
     canary_file = releases / "CANARY.json"
     current = (releases / "CURRENT").read_text().strip()
@@ -880,6 +893,92 @@ def test_autodeploy_scripts_need_no_unshipped_helper_or_open_state_read():
     for script in ("aiflow4-autodeploy", "aiflow4-autodeploy-develop"):
         text = Path("deploy/v4/bin", script).read_text()
         assert "aiflow4-gh" not in text and "127.0.0.1/v1/state" not in text
+        assert "/v1/deploy/state" in text and "Authorization: Bearer" in text
+
+
+class _CheckRunsGitHub(FakeGitHub):
+    """The GitHub App as the CI state fixture: the check runs of any commit, and the permissions asked for."""
+
+    def __init__(self, state):
+        super().__init__()
+        self.state, self.requests = state, []
+
+    def api(self, method, path, body=None, repo=None, permissions=None):
+        self.requests.append((method, path, repo, permissions))
+        runs = {"ok": [{"status": "completed", "conclusion": "success"}],
+                "pending": [{"status": "in_progress", "conclusion": None}],
+                "failed": [{"status": "completed", "conclusion": "failure"}]}[self.state]
+        return {"check_runs": runs}
+
+
+@contextmanager
+def _serve(app):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.1)
+    assert server.started
+    try:
+        yield port
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+
+def test_develop_autodeploy_runs_against_a_control_api_with_sign_in_on(ctx):
+    """AC1/AC3: the real script and the real curl talk to a running, sign-in-gated control API."""
+    ctx.settings.console_session_secret = "s" * 40
+    ctx.settings.console_login = True
+    github = ctx.github = _CheckRunsGitHub("ok")
+    app = control_api.create_app(ctx)
+    app.state.sync_accounts()
+    previous, target = "0123456789", "abcdef0123"
+    for name in ("cc", "node1"):
+        assert join_node(TestClient(app), name).status_code == 200
+
+    def registry(canary_release):
+        ctx.db.run("UPDATE nodes SET status='online', last_heartbeat=now(), release_version=%s", (previous,))
+        ctx.db.run("UPDATE nodes SET release_version=%s WHERE name='cc'", (canary_release,))
+
+    rollback = {"action": "rollback", "reason": "x", "canary": {"runs": 5, "infra_failures": 4, "failure_rate": 0.8},
+                "baseline": {"runs": 10, "infra_failures": 0, "failure_rate": 0.0}}
+    with _serve(app) as port:
+        base = f"http://127.0.0.1:{port}"
+        assert httpx.get(f"{base}/v1/state").status_code in (401, 403)  # the gate refuses the old open read
+        assert httpx.get(f"{base}/v1/deploy/state").status_code == 401
+        assert httpx.get(f"{base}/v1/deploy/state", headers={"Authorization": "Bearer wrong"}).status_code == 401
+        good = httpx.get(f"{base}/v1/deploy/state", headers={"Authorization": "Bearer owner-secret"})
+        assert good.status_code == 200 and "nodes" in good.json()
+
+        # canary request: only for green CI
+        for ci, requested in (("ok", True), ("pending", False), ("failed", False)):
+            github.state = ci
+            registry(previous)
+            result, calls, current, canary, _, _ = _develop_autodeploy(Path(tempfile.mkdtemp()), ci=ci, api_port=port)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert (canary is not None) is requested and current == previous
+            assert (canary or {}).get("node", "cc") == "cc" and ("develop-deploy --stage-only" in calls) is requested
+        method, path, repo, permissions = github.requests[0]
+        assert method == "GET" and "/repos/jooservices/ai-flow/commits/abcdef0123456789" in path
+        assert repo == "ai-flow" and set(permissions.values()) == {"read"}
+
+        # promotion of a stable canary, then rollback of a failing one
+        github.state = "ok"
+        registry(target)
+        result, calls, current, canary, _, _ = _develop_autodeploy(Path(tempfile.mkdtemp()), active=True, api_port=port)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert current == target and canary is None and f"develop-deploy  {target}" in calls
+        result, calls, current, canary, releases, _ = _develop_autodeploy(
+            Path(tempfile.mkdtemp()), active=True, decision=rollback, api_port=port)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert current == previous and canary is None and "canary record-rollback" in calls
+        assert (releases / "CANARY_REJECTED").read_text().strip() == target
 
 
 def test_ci_state_reads_check_runs_with_read_only_permissions():

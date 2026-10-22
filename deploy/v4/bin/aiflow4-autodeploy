@@ -32,8 +32,14 @@ with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
 P
 }
 
-# /v1/state needs a console session when sign-in is on; the control container reads the registry directly
-control_state() { docker exec aiflow4-control-api-a aiflow4 control-state; }
+# /v1/state needs a console session when sign-in is on. These scripts sign in to the token routes of the control API
+# (/v1/deploy/*) with the owner token from the root-only secret file; it goes to curl on stdin, not on a command line.
+owner_token() {
+  [ -n "${AIFLOW4_OWNER_TOKEN:-}" ] && { printf '%s' "$AIFLOW4_OWNER_TOKEN"; return; }
+  sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' "${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets/control}/aiflow4.env" 2>/dev/null | tail -1
+}
+control_get() { printf 'Authorization: Bearer %s\n' "$(owner_token)" | curl -fsS -H @- "http://127.0.0.1$1"; }
+control_state() { control_get /v1/deploy/state; }
 # aiflow4-deploy exits 9 when the pre-upgrade check refused TARGET; nothing changed on the control plane. Remember
 # the release so the timer does not retry it until a newer one is published.
 upgrade_blocked() {

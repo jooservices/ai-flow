@@ -50,8 +50,15 @@ commit cannot be restored through the signed node release protocol. Version-to-v
 ## Console sign-in and CI state
 
 With console sign-in on, `/v1/state` refuses a request without a session. `aiflow4-autodeploy` and
-`aiflow4-autodeploy-develop` therefore read the registry with `docker exec aiflow4-control-api-a aiflow4 control-state`
-(access to the control container on the machine is the credential; no password or token file is needed). The develop
-flow reads the CI state of a commit with `aiflow4 ci-state --repo O/R --sha S` (`pending`, `failed`, `ok` or `none`),
-shipped in the release image and using the connected GitHub App with an installation token limited to read-only
-`checks`, `statuses` and `metadata`. No `aiflow4-gh`, `aiflow4-lab-session` or `autodeploy-lab` wrapper is needed.
+`aiflow4-autodeploy-develop` therefore sign in to two token routes of the control API on `127.0.0.1` with the owner
+token (`AIFLOW4_OWNER_TOKEN`, from the environment or the root-only `aiflow4.env` secret file the install writes;
+it is sent on curl's stdin, never on a command line):
+
+- `GET /v1/deploy/state`: the registry state (the same document as `/v1/state`).
+- `GET /v1/deploy/ci-state?repo=O/R&sha=S`: `{"state": "pending|failed|ok|none"}` from the check runs of the commit,
+  read through the connected GitHub App with an installation token limited to read-only `checks`, `statuses` and
+  `metadata`.
+
+Both are served by the control image (no extra install step), refuse a missing or wrong token with 401, and pass the
+sign-in gate only because they check that bearer token. `aiflow4-deploy` and `aiflow4-deploy-develop` read no
+control state (only `/healthz`). No `aiflow4-gh`, `aiflow4-lab-session` or `autodeploy-lab` wrapper is needed.

@@ -109,7 +109,8 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     ui = "aiflow/v4/control/ui/console.html"
     api = "aiflow/v4/control/api.py"
     routes = {api: {"/v1/knowledge/{kind}", "/v1/cc"}, "aiflow/v4/control/login.py": {"/v1/auth/login"}}
-    texts = {"docs/v4/knowledge.md": "Lists items with `/v1/knowledge`.", "docs/v4/other.md": "Nothing about routes.",
+    texts = {"docs/v4/knowledge.md": "Lists items with `GET /v1/knowledge/{kind}`.",
+             "docs/v4/other.md": "Nothing about routes.",
              "docs/guide/admin/security.md": "Sign in with POST /v1/auth/login."}
 
     def gaps(*files, **kw):
@@ -119,7 +120,8 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     assert gaps(api)
     assert gaps(api, "tests/v4/test_api.py")
     assert gaps(ui, "docs/guide/screens/cc.md") == []
-    assert gaps(api, "docs/v4/knowledge.md") == []
+    # A knowledge page cannot cover a change to a different API route in the same module.
+    assert gaps(api, "docs/v4/knowledge.md")
     assert gaps("aiflow/v4/worker/dev.py") == []
     assert gaps(ui, "docs/RUNBOOK.md")  # the old flow's notes do not count
     # unrelated documentation does not satisfy a screen or API change
@@ -134,13 +136,52 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     assert gaps(login, "docs/guide/admin/security.md") == []
 
 
+def test_api_change_requires_documentation_for_the_changed_route_not_another_route():
+    api = "aiflow/v4/control/api.py"
+    routes = {api: {"/v1/knowledge/{kind}", "/v1/cc"}}
+    changed_routes = {api: {"GET /v1/cc"}}
+    texts = {
+        "docs/v4/knowledge.md": "Lists items with `GET /v1/knowledge/{kind}`.",
+        "docs/v4/cc.md": "Returns the command center snapshot with `GET /v1/cc`.",
+    }
+
+    def gaps(*files):
+        return docsite.documentation_gaps(list(files), read=lambda f: texts.get(f, ""), routes=routes,
+                                          changed_routes=changed_routes)
+
+    assert gaps(api, "docs/v4/knowledge.md")
+    assert gaps(api, "docs/v4/cc.md") == []
+
+
+def test_ci_check_maps_changed_api_lines_to_their_route_contract(monkeypatch):
+    api = "aiflow/v4/control/api.py"
+    monkeypatch.setattr(docsite, "api_route_contract_spans", lambda: {
+        api: {"GET /v1/cc": [(10, 15)], "GET /v1/knowledge/{kind}": [(20, 25)]}
+    })
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "diff":
+            return Result("@@ -12,1 +12,1 @@\n")
+        return Result("")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_api_routes("origin/develop", [api]) == {api: {"GET /v1/cc"}}
+
+
 def test_changed_master_action_route_is_named_in_documentation():
     api = "aiflow/v4/control/api.py"
     docs = "docs/v4/master.md"
     routes = docsite.api_routes_by_module()
     assert "/v1/master/actions" in routes[api]
     assert "POST /v1/master/actions" in (ROOT / docs).read_text()
-    assert docsite.documentation_gaps([api, docs], routes=routes) == []
+    assert docsite.documentation_gaps([api, docs], routes=routes,
+                                      changed_routes={api: {"POST /v1/master/actions"}}) == []
 
 
 def test_route_modules_are_derived_from_the_registered_routes():

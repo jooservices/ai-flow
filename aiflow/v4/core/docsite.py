@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ast
 import html
+import inspect
 import os
 import re
 import subprocess
@@ -335,28 +336,129 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
-def api_routes_by_module() -> dict[str, set[str]]:
-    """Repo-relative file of every module that registers control API routes -> the route paths it registers.
-    Derived from the routes of the running app, so a new route module is watched without editing this file."""
+def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
+    """Repo-relative API module -> method and route contract -> source spans of its handlers.
+    Derived from the running app, so a new route module is watched without editing this file."""
     from unittest.mock import MagicMock
 
     from ..control.api import create_app
 
-    found: dict[str, set[str]] = {}
+    found: dict[str, dict[str, list[tuple[int, int]]]] = {}
     for route in create_app(MagicMock()).routes:
-        code = getattr(getattr(route, "endpoint", None), "__code__", None)
+        endpoint = getattr(route, "endpoint", None)
+        code = getattr(endpoint, "__code__", None)
         path = getattr(route, "path", "")
         if code is None or not path.startswith("/v1/"):
             continue
         file = Path(code.co_filename).resolve()
-        if ROOT in file.parents:
-            found.setdefault(file.relative_to(ROOT).as_posix(), set()).add(path)
+        if ROOT not in file.parents:
+            continue
+        try:
+            first, source = inspect.getsourcelines(endpoint)
+            span = (first, first + len(source) - 1)
+        except (OSError, TypeError):
+            span = (code.co_firstlineno, code.co_firstlineno)
+        module = file.relative_to(ROOT).as_posix()
+        for method in sorted(getattr(route, "methods", ())):
+            if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                found.setdefault(module, {}).setdefault(f"{method} {path}", []).append(span)
     return found
 
 
-def _mentions(text: str, paths: set[str]) -> bool:
-    """True when the text names one of the route paths (cut before the first `{parameter}`)."""
-    return any(re.sub(r"/\{.*$", "", p) in text for p in paths)
+def api_routes_by_module() -> dict[str, set[str]]:
+    """Repo-relative file of every module that registers control API routes -> its route paths."""
+    return {module: {contract.split(" ", 1)[1] for contract in contracts}
+            for module, contracts in api_route_contract_spans().items()}
+
+
+def _mentions(text: str, routes: set[str]) -> bool:
+    """True when text names an exact route path, optionally with its HTTP method.
+
+    Route parameters may use different names in prose (`{key}` or `<KEY>`), but every path segment and
+    suffix must be present. A reference to `/v1/knowledge` does not name `/v1/knowledge/{kind}`.
+    """
+    for route in routes:
+        match = re.match(r"^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$", route)
+        method, path = (match.group(1), match.group(2)) if match else (None, route)
+        parts = re.split(r"(\{[^}]+\}|<[^>]+>)", path)
+        escaped = "".join(r"[^/<>]+" if re.fullmatch(r"\{[^}]+\}|<[^>]+>", part)
+                          else re.escape(part) for part in parts)
+        path_pattern = rf"(?<![\w]){escaped}(?![\w/])"
+        if method:
+            pattern = rf"\b{method}\s+`?{path_pattern}`?"
+        else:
+            pattern = path_pattern
+        if re.search(pattern, text):
+            return True
+    return False
+
+
+def _literal_route_contract_spans(source: str) -> dict[str, list[tuple[int, int]]]:
+    """Find literal FastAPI route decorators and their handler spans in source text."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    found: dict[str, list[tuple[int, int]]] = {}
+    methods = {"get": "GET", "post": "POST", "put": "PUT", "patch": "PATCH", "delete": "DELETE"}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                continue
+            path = decorator.args[0].value if decorator.args and isinstance(decorator.args[0], ast.Constant) else None
+            if not isinstance(path, str) or not path.startswith("/v1/"):
+                continue
+            method = methods.get(decorator.func.attr.lower())
+            registered = [method] if method else []
+            if decorator.func.attr.lower() == "api_route":
+                methods_arg = next((kw.value for kw in decorator.keywords if kw.arg == "methods"), None)
+                if isinstance(methods_arg, (ast.List, ast.Tuple)):
+                    registered = [m.value.upper() for m in methods_arg.elts
+                                  if isinstance(m, ast.Constant) and isinstance(m.value, str)
+                                  and m.value.upper() in methods.values()]
+            for verb in registered:
+                start = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+                found.setdefault(f"{verb} {path}", []).append((start, node.end_lineno or node.lineno))
+    return found
+
+
+def _diff_hunks(diff: str) -> list[tuple[int, int, int, int]]:
+    """Return (old start, old count, new start, new count) line ranges from a unified diff."""
+    return [(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
+            for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M)]
+
+
+def changed_api_routes(base: str, changed: list[str]) -> dict[str, set[str]]:
+    """Find the method/path contracts whose handler or registration changed between `base` and HEAD."""
+    current = api_route_contract_spans()
+    found: dict[str, set[str]] = {}
+    for module in (f for f in changed if f in current):
+        diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", module], cwd=ROOT,
+                              text=True, capture_output=True, check=True).stdout
+        hunks = _diff_hunks(diff)
+        contracts: set[str] = set()
+        # Also map removed routes and edits that delete the old handler body. Literal decorators are enough to
+        # recover their route contracts without importing or executing the base revision.
+        old_source = subprocess.run(["git", "show", f"{base}:{module}"], cwd=ROOT, text=True,
+                                    capture_output=True).stdout
+        previous = _literal_route_contract_spans(old_source)
+        for old_start, old_count, new_start, new_count in hunks:
+            current_hits = {contract for contract, spans in current[module].items()
+                            if new_count and any(start <= new_start + new_count - 1 and new_start <= end
+                                                 for start, end in spans)}
+            old_hits = {contract for contract, spans in previous.items()
+                        if old_count and any(start <= old_start + old_count - 1 and old_start <= end
+                                             for start, end in spans)}
+            contracts.update(current_hits)
+            for contract in old_hits:
+                # A live route is the contract docs should describe. For a pure route deletion, retain the old
+                # contract so the change still requires an explicit documentation update.
+                if contract in current[module] or not current_hits:
+                    contracts.add(contract)
+        found[module] = contracts
+    return found
 
 
 def _read_doc(name: str) -> str:
@@ -367,10 +469,12 @@ def _read_doc(name: str) -> str:
 
 
 def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set[str]] | None = None,
-                       views: set[str] | None = None) -> list[str]:
+                       views: set[str] | None = None,
+                       changed_routes: dict[str, set[str]] | None = None) -> list[str]:
     """Reasons a change fails the check. A changed screen needs a change to a page of `docs/guide/screens/` (the
-    page of each changed screen when `views` names them); a changed API route module needs a changed page in
-    `docs/guide/` or `docs/v4/` that names one of the routes that module registers. Unrelated edits do not count."""
+    page of each changed screen when `views` names them); a changed API route module needs changed documentation
+    that names every changed method/path contract. When route-level diff data is unavailable, every registered
+    route is required so an unrelated route cannot satisfy the check. Unrelated edits do not count."""
     files = [c.strip() for c in changed if c.strip()]
     docs = [f for f in files if f.startswith(DOC_PATHS) and f.endswith(".md")]
     gaps = []
@@ -383,11 +487,19 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
     if api_files:
         routes = api_routes_by_module() if routes is None else routes
+        changed_routes = {} if changed_routes is None else changed_routes
         texts = [read(f) for f in docs]
         for f in api_files:
-            if f in routes and not any(_mentions(t, routes[f]) for t in texts):
-                gaps.append(f"the control API changed ({f}) without a changed page in docs/guide or docs/v4 "
-                            "that names one of its routes")
+            if f not in routes:
+                continue
+            expected = changed_routes.get(f, routes[f])
+            missing = {contract for contract in expected if not any(_mentions(text, {contract}) for text in texts)}
+            if missing:
+                gaps.append(f"the control API changed ({f}) without changed documentation naming "
+                            + ", ".join(sorted(missing)))
+            elif not expected:
+                gaps.append(f"the control API changed ({f}) but its changed lines could not be matched to a "
+                            "route contract; update the documentation check's route mapping")
     return gaps
 
 
@@ -494,12 +606,14 @@ def main(argv: list[str] | None = None) -> int:
         files = changed_files(args.base)
         mapping_error = None
         views = None
+        api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
+        changed_routes = changed_api_routes(args.base, api_files) if api_files else None
         if UI.relative_to(ROOT).as_posix() in files:
             try:
                 views = changed_views(args.base)
             except ValueError as exc:
                 mapping_error = str(exc)
-        gaps = documentation_gaps(files, views=views)
+        gaps = documentation_gaps(files, views=views, changed_routes=changed_routes)
         if mapping_error:
             gaps.append(mapping_error)
     for gap in gaps:

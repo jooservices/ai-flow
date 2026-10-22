@@ -103,6 +103,28 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 .review-actions textarea{flex:1 1 320px; min-height:72px; resize:vertical; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--surface-2)}
 .review-auth{display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-weight:500}
 .review-auth input{width:min(360px,100%); min-height:38px; border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:var(--surface-2)}
+.review-filters{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.review-filters label{display:flex; align-items:center; gap:8px; font-weight:500}
+.review-filters select{min-height:36px; border:1px solid var(--line); border-radius:8px; padding:6px 10px; background:var(--surface-2)}
+.review-kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px}
+.review-kpi{border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; background:var(--surface-2)}
+.review-kpi .label{color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.04em}
+.review-kpi strong{display:block; margin-top:4px; font:700 22px var(--f-cond); font-variant-numeric:tabular-nums}
+.review-chart{display:grid; gap:6px}
+.review-chart-row{display:grid; grid-template-columns:92px minmax(0,1fr) 28px; align-items:center; gap:8px; font-size:12px}
+.review-chart-bar{height:22px; display:flex; align-items:stretch; background:var(--surface-2); border-radius:5px; overflow:hidden; min-width:0}
+.review-chart-bar span{display:flex; justify-content:center; align-items:center; min-width:0; color:#fff; font-size:11px; font-weight:600; overflow:hidden}
+.reason-question_from_ai{background:#2453D6}.reason-decision_needed{background:#7B61A8}.reason-review_before_merge{background:#0F7548}.reason-blocked{background:#B66A00}
+.review-legend{display:flex; gap:8px 16px; flex-wrap:wrap; font-size:12px; color:var(--muted)}
+.review-legend span{display:inline-flex; align-items:center; gap:6px}.review-legend i{display:inline-block; width:10px; height:10px; border-radius:2px}
+.review-breakdown{display:grid; grid-template-columns:minmax(0,1.7fr) minmax(260px,1fr); gap:16px; align-items:start}
+.review-breakdown > div{min-width:0}
+.review-suggestions table{width:100%; border-collapse:collapse; text-align:left}
+.review-suggestions th,.review-suggestions td{padding:7px 8px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+.review-thread{border-left:3px solid var(--accent); padding-left:12px; display:grid; gap:8px}
+.review-thread-line{padding:8px 10px; background:var(--surface-2); border-radius:8px; overflow-wrap:anywhere}
+.review-thread-line .muted{font-size:11px}
+@media(max-width:900px){.review-breakdown{grid-template-columns:minmax(0,1fr)}}
 .panel-h{display:flex; align-items:center; gap:10px 12px; flex-wrap:wrap}
 .panel-h h2{margin:0; font-family:var(--f-cond); font-size:17px; font-weight:600; letter-spacing:.01em; text-wrap:balance}
 .panel-h .hint{color:var(--muted); font-size:13px}
@@ -514,7 +536,8 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  consoleUser: null, nodeOperations: {}, joinCommands: {}, operationBusy: {},
+  consoleUser: null, autonomy: { data: null, error: '', busy: false, saving: false },
+  nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
@@ -526,6 +549,7 @@ var S = {
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
+  reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' },
@@ -588,6 +612,28 @@ function consoleCan(permission) {
 }
 function consoleOwner() { return consoleCan('console.manage') || consoleCan('integrations.manage'); }
 function consoleReader() { return consoleCan('console.read'); }
+function loadMasterAutonomy(force) {
+  if (!consoleReader() || S.autonomy.busy || (S.autonomy.data && !force)) return;
+  S.autonomy.busy = true;
+  fetch('/v1/master/autonomy', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { S.autonomy.data = d; S.autonomy.error = ''; })
+    .catch(function (err) { S.autonomy.error = String(err.message || err); })
+    .then(function () { S.autonomy.busy = false; if (S.view === 'cc') renderCC(); });
+}
+function saveMasterBudget() {
+  var input = $('[data-master-budget]'), value = input ? Number(input.value) : NaN;
+  if (!Number.isInteger(value) || value < 0 || value > 1440) {
+    S.autonomy.error = 'Enter a daily budget from 0 to 1,440 minutes.'; renderCC(); return;
+  }
+  S.autonomy.saving = true; S.autonomy.error = ''; renderCC();
+  fetch('/v1/master/autonomy/budget', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ daily_budget_minutes: value }) }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { if (S.autonomy.data) S.autonomy.data.budget = d.budget; })
+    .catch(function (err) { S.autonomy.error = String(err.message || err); })
+    .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
+}
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
@@ -643,6 +689,7 @@ function pollConsoleSession() {
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null;
     render();
+    if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
@@ -908,10 +955,12 @@ function pollAnalytics() {
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
 function loadReviews() {
-  fetch('/v1/reviews', { cache: 'no-store' }).then(function (r) {
+  fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
-  }).then(function (d) { S.reviews = d.tickets || []; S.reviewsError = ''; if (S.view === 'review') renderReviews(); })
+  }).then(function (d) { S.reviews = d.tickets || []; S.reviewMetrics = d.metrics || null; S.reviewProjects = d.projects || [];
+    S.reviewThreads = d.threads || [];
+    S.reviewsError = ''; if (S.view === 'review') renderReviews(); })
     .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(); });
 }
 function pollReviews() {
@@ -995,6 +1044,33 @@ function renderLive() {
 }
 
 /* ---------- Command Center ---------- */
+function masterAutonomyPanel() {
+  if (!consoleReader()) return '<section class="panel"><div class="panel-h"><h2>Master autonomy</h2></div><div class="muted">Sign in to view the autonomy report and daily budget.</div></section>';
+  if (!S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
+  var data = S.autonomy.data, budget = data && data.budget, report = data && data.report;
+  var h = '<section class="panel" id="p-master-autonomy"><div class="panel-h"><h2>Master autonomy</h2><span class="hint">Weekly report and daily model time budget</span></div>';
+  if (S.autonomy.error) h += '<div class="stakeholder-error">' + esc(S.autonomy.error) + '</div>';
+  if (!data) return h + '<div class="muted">' + (S.autonomy.busy ? 'Loading autonomy report…' : 'Autonomy report unavailable.') + '</div></section>';
+  h += '<div class="grid-2"><div class="review-fact"><div class="label">Today · UTC</div><div class="value">' + esc(budget.used_minutes) + ' / ' + esc(budget.daily_budget_minutes) + ' minutes used · ' + esc(budget.remaining_minutes) + ' remaining</div></div>';
+  h += '<div class="review-fact"><div class="label">Daily budget</div><div class="value">';
+  if (consoleCan('console.write')) h += '<label for="master-budget">Minutes <input id="master-budget" data-master-budget type="number" min="0" max="1440" step="1" value="' + esc(budget.daily_budget_minutes) + '" style="width:110px;min-height:36px;border:1px solid var(--line);border-radius:8px;padding:5px 8px;background:var(--surface-2)"></label> <button class="btn sm primary" data-act="master-budget-save"' + (S.autonomy.saving ? ' disabled' : '') + '>Save</button>';
+  else h += esc(budget.daily_budget_minutes) + ' minutes';
+  h += '</div></div></div>';
+  h += '<div class="panel-h"><h3 style="margin:4px 0">Weekly autonomy · week of ' + esc(report.week_start) + '</h3></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Finished without a person</th><th>Person needed</th><th>Repeated failures</th></tr></thead><tbody>';
+  (report.trend || []).forEach(function (row) { h += '<tr><td class="mono">' + esc(row.week_start) + '</td><td>' + esc(row.finished_without_person) + '</td><td>' + esc(row.needed_person) + '</td><td>' + esc(row.repeated_failures) + '</td></tr>'; });
+  h += '</tbody></table></div>';
+  h += '<div class="grid-2"><div><h3>Tickets finished without a person</h3>';
+  if (!(report.finished_without_person || []).length) h += '<div class="muted">No AI-finished tickets recorded this week.</div>';
+  else (report.finished_without_person || []).forEach(function (t) { h += '<div class="feed"><button class="btn sm" data-act="open-ticket" data-key="' + esc(t.key) + '">' + esc(t.key) + '</button> ' + esc(t.summary || '') + '</div>'; });
+  h += '</div><div><h3>When a person was needed</h3>';
+  if (!(report.needed_person || []).length) h += '<div class="muted">No owner decisions requested this week.</div>';
+  else (report.needed_person || []).forEach(function (item) { h += '<div class="review-fact"><div class="label">' + esc(item.ticket || item.observation_key) + ' · ' + esc(when(item.sent_at)) + '</div><div class="value">' + esc(item.reason) + '</div><div class="muted">Options: ' + esc((item.options || []).join(' · ')) + '</div></div>'; });
+  h += '</div></div><div><h3>Repeated flow failures</h3>';
+  if (!(report.repeated_failures || []).length) h += '<div class="muted">No repeated failure Bugs updated this week.</div>';
+  else (report.repeated_failures || []).forEach(function (item) { h += '<div class="review-fact"><b class="mono">' + esc(item.ticket_key) + '</b> · ' + esc(item.summary || item.signature) + ' · ' + esc(item.repeat_count) + ' additional runs</div>'; });
+  return h + '</div></section>';
+}
 function renderCC() {
   var d = D();
   var online = d.nodes.filter(function (n) { return n.status === 'online'; });
@@ -1031,6 +1107,8 @@ function renderCC() {
     });
     h += '</section>';
   }
+
+  h += masterAutonomyPanel();
 
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
@@ -1420,11 +1498,15 @@ function renderDBody() {
 /* ---------- Human review ---------- */
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
-  var rows = S.reviews || [], h = '<section class="panel"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Tickets waiting for a reviewer · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
-  h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Required for approve and rework; held only in this page until it is closed.</span>';
+  var rows = S.reviews || [], metrics = S.reviewMetrics || {}, h = '<section class="panel"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Waiting items and the reasons people are needed · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
+  h += '<div class="review-filters"><label>Project <select data-review-project aria-label="Filter human review by project"><option value="">All projects</option>';
+  (S.reviewProjects || []).forEach(function (p) { h += '<option value="' + esc(p) + '"' + (S.reviewProject === p ? ' selected' : '') + '>' + esc(p) + '</option>'; });
+  h += '</select></label><a class="btn sm" href="/v1/reviews/export.csv' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : '') + '" download>Export metrics CSV</a></div>';
+  h += reviewMetricsPanel(metrics);
+  h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Reviewer access is required for actions; the token stays in this page until it is closed.</span>';
   if (S.reviewsError) h += '<div class="empty" style="color:var(--crit)">Could not load the review queue: ' + esc(S.reviewsError) + '</div>';
   else if (S.reviews === null) h += '<div class="empty">Loading review queue…</div>';
-  else if (!rows.length) h += '<div class="empty">No tickets are waiting for human review.</div>';
+  else if (!rows.length) h += '<div class="empty">No items are waiting for a person in this project.</div>';
   h += '</section>';
   if (rows.length) {
     h += '<div class="review-list">';
@@ -1432,7 +1514,9 @@ function renderReviews() {
       var pr = t.pr || {}, ver = t.verify || {}, diff = [
         ['Files changed', pr.changed_files], ['Additions', pr.additions], ['Deletions', pr.deletions]
       ];
-      h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill('info', 'Human review', true) + '</div>';
+      var actionList = t.actions || (t.status === 'Needs owner' ? ['answer', 'ask-ai'] : ['approve', 'reject', 'rework', 'ask-ai', 'skip-gate']);
+      var labels = { question_from_ai: 'Question from AI', decision_needed: 'Decision needed', review_before_merge: 'Review before merge', blocked: 'Blocked' };
+      h += '<article class="panel review-card" data-review-card data-key="' + esc(t.key) + '"><div class="review-title"><h2><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '</h2><span class="spacer"></span>' + pill(t.status === 'Needs owner' ? 'warn' : 'info', labels[t.kind] || t.status || 'Human review', true) + '</div>';
       if (t.description) h += '<div class="review-content">' + esc(t.description) + '</div>';
       h += '<div class="review-facts"><div class="review-fact"><div class="label">Repository</div><div class="value mono">' + esc(t.repository || '—') + '</div></div><div class="review-fact"><div class="label">Pull request</div><div class="value">' + (pr.url ? '<a href="' + esc(pr.url) + '" target="_blank" rel="noopener">' + esc(pr.title || ('PR #' + pr.number)) + ' ' + ICON.ext + '</a>' : '—') + '</div></div>';
       diff.forEach(function (x) { h += '<div class="review-fact"><div class="label">' + x[0] + '</div><div class="value mono">' + (x[1] == null ? '—' : esc(x[1])) + '</div></div>'; });
@@ -1441,25 +1525,81 @@ function renderReviews() {
       if (ver.findings) h += '<div class="review-content"><strong>Findings:</strong>\n' + esc(ver.findings) + '</div>';
       h += '<div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn sm" href="' + esc(t.jira_url) + '" target="_blank" rel="noopener">Open ticket in Jira ' + ICON.ext + '</a>';
       if (t.preview_url) h += '<a class="btn sm" href="' + esc(t.preview_url) + '" target="_blank" rel="noopener">Preview environment ' + ICON.ext + '</a>';
-      h += '</div><div class="review-actions"><textarea aria-label="Reviewer comment for ' + esc(t.key) + '" placeholder="Comment required to send this ticket for rework"></textarea><button class="btn" data-act="review-approve" data-key="' + esc(t.key) + '">Approve and merge</button><button class="btn danger" data-act="review-rework" data-key="' + esc(t.key) + '">Send for rework</button></div></article>';
+      if (t.thread && t.thread.length) {
+        h += '<div class="review-thread"><strong>AI question thread</strong>';
+        t.thread.forEach(function (line) { h += '<div class="review-thread-line"><span class="muted">' + esc(line.author || line.kind) + ' · ' + esc(line.created_at || '') + '</span><div>' + esc(line.text || '') + '</div></div>'; });
+        h += '</div>';
+      }
+      if (actionList.length) {
+        h += '<div class="review-actions"><textarea data-review-note aria-label="Reviewer note for ' + esc(t.key) + '" placeholder="Required for reject, rework, answer, or an AI question"></textarea>';
+        actionList.forEach(function (action) {
+          var names = { approve: 'Approve and merge', reject: 'Reject', rework: 'Send for rework', 'ask-ai': 'Ask AI a question', answer: 'Answer', 'skip-gate': 'Skip gate and merge' };
+          h += '<button class="btn' + (action === 'reject' || action === 'rework' ? ' danger' : '') + '" data-act="review-' + esc(action) + '" data-key="' + esc(t.key) + '">' + esc(names[action] || action) + '</button>';
+        });
+        h += '</div>';
+      }
+      h += '</article>';
     });
     h += '</div>';
   }
+  h += reviewThreadsPanel(S.reviewThreads || [], rows);
   root.innerHTML = h;
+}
+function reviewThreadsPanel(threads, waiting) {
+  var waitingKeys = {}; (waiting || []).forEach(function (ticket) { waitingKeys[ticket.key] = true; });
+  var archived = (threads || []).filter(function (item) { return !waitingKeys[item.key] && item.thread && item.thread.length; });
+  if (!archived.length) return '';
+  var h = '<section class="panel"><div class="panel-h"><h2>AI question threads</h2><span class="hint">Recent questions and answers, including work no longer waiting</span></div>';
+  archived.forEach(function (item) {
+    h += '<article class="review-thread"><strong><span class="mono muted">' + esc(item.key) + '</span> ' + esc(item.summary || '') + '</strong>';
+    item.thread.forEach(function (line) { h += '<div class="review-thread-line"><span class="muted">' + esc(line.author || line.kind) + ' · ' + esc(line.created_at || '') + '</span><div>' + esc(line.text || '') + '</div></div>'; });
+    h += '</article>';
+  });
+  return h + '</section>';
+}
+function reviewMetricsPanel(metrics) {
+  var weekly = metrics.weekly || [], max = 1;
+  weekly.forEach(function (w) { max = Math.max(max, w.total || 0); });
+  function value(v, suffix) { return v == null ? '—' : String(v) + (suffix || ''); }
+  var h = '<section class="panel"><div class="panel-h"><h2>People needed</h2><span class="hint">UTC calendar weeks</span></div><div class="review-kpis">';
+  h += '<div class="review-kpi"><div class="label">This week · eight weeks ago</div><strong>' + value(metrics.people_needed_this_week, '') + ' · ' + value(metrics.people_needed_eight_weeks_ago, '') + '</strong></div>';
+  h += '<div class="review-kpi"><div class="label">Finished with no person</div><strong>' + value(metrics.finished_with_no_person_pct, '%') + '</strong></div>';
+  h += '<div class="review-kpi"><div class="label">Median person wait</div><strong>' + value(metrics.median_wait_minutes, ' min') + '</strong></div>';
+  h += '<div class="review-kpi"><div class="label">Approved first time</div><strong>' + value(metrics.approved_first_time_pct, '%') + '</strong></div>';
+  h += '<div class="review-kpi"><div class="label">Sent back or rejected</div><strong>' + value(metrics.sent_back_or_rejected_pct, '%') + '</strong></div></div>';
+  h += '<div class="review-breakdown"><div><div class="review-chart" role="img" aria-label="Weekly human need by reason">';
+  var reasons = [['question_from_ai', 'Question from AI'], ['decision_needed', 'Decision needed'], ['review_before_merge', 'Review before merge'], ['blocked', 'Blocked']];
+  weekly.forEach(function (w) {
+    h += '<div class="review-chart-row"><span class="mono">' + esc(w.week) + '</span><div class="review-chart-bar">';
+    reasons.forEach(function (r) { var count = (w.by_reason || {})[r[0]] || 0;
+      h += '<span class="reason-' + r[0] + '" title="' + esc(r[1] + ': ' + count) + '" style="width:' + (100 * count / max) + '%">' + (count ? esc(count) : '') + '</span>'; });
+    h += '</div><span class="mono">' + (w.total || 0) + '</span></div>';
+  });
+  h += '</div><div class="review-legend">';
+  reasons.forEach(function (r) { h += '<span><i class="reason-' + r[0] + '"></i>' + esc(r[1]) + '</span>'; });
+  h += '</div></div><div class="review-suggestions"><strong>Changes to reduce each reason</strong><table><thead><tr><th>Reason</th><th>Suggested change</th></tr></thead><tbody>';
+  (metrics.suggestions || []).forEach(function (s) { var match = reasons.filter(function (r) { return r[0] === s.reason; })[0];
+    h += '<tr><td>' + esc(match ? match[1] : s.reason) + '</td><td>' + esc(s.suggestion) + '</td></tr>'; });
+  h += '</tbody></table></div></div></section>';
+  return h;
 }
 function submitReview(key, action, comment) {
   var tokenField = $('[data-reviewer-token]');
   S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
   if (!S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
-  if (action === 'rework' && !String(comment || '').trim()) { toast('Comment required', 'Add a comment before sending the ticket for rework.', 'warn'); return; }
+  if (['rework', 'reject', 'ask-ai', 'answer'].indexOf(action) >= 0 && !String(comment || '').trim()) {
+    toast('A note is required', 'Enter the required reason, comment, answer, or question before taking this action.', 'warn'); return;
+  }
+  var body = action === 'rework' ? { comment: comment } : action === 'reject' ? { reason: comment } :
+    action === 'ask-ai' ? { question: comment } : action === 'answer' ? { answer: comment } : {};
   fetch('/v1/reviews/' + encodeURIComponent(key) + '/' + action, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.reviewerToken },
-    body: JSON.stringify(action === 'rework' ? { comment: comment } : {})
+    body: JSON.stringify(body)
   }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
   }).then(function (d) {
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
-    else toast(action === 'approve' ? 'Ticket approved' : 'Ticket sent for rework', key + (d.status ? ' · ' + d.status : ''), 'ok');
+    else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
     loadReviews();
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
@@ -2741,6 +2881,7 @@ document.addEventListener('click', function (e) {
       .then(function (r) { return projectResponseError(r); }).then(function () { loadNotifications(); })
       .catch(function (err) { S.notifications.error = String(err.message || err); renderNotifications(); });
   }
+  else if (act === 'master-budget-save') saveMasterBudget();
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }
@@ -2764,9 +2905,9 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-pause') setProjectPaused(el.getAttribute('data-key'), el.getAttribute('data-paused') === 'true');
   else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();
-  else if (act === 'review-approve' || act === 'review-rework') {
-    var card = el.closest('[data-review-card]'), note = card && $('textarea', card);
-    submitReview(el.getAttribute('data-key'), act === 'review-approve' ? 'approve' : 'rework', note ? note.value : '');
+  else if (act.indexOf('review-') === 0) {
+    var card = el.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
+    submitReview(el.getAttribute('data-key'), act.slice('review-'.length), note ? note.value : '');
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
@@ -2877,6 +3018,7 @@ document.addEventListener('change', function (e) {
   }
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && e.target.matches('[data-github-installation]')) S.integrations.selected = e.target.value;
+  if (e.target && e.target.matches('[data-review-project]')) { S.reviewProject = e.target.value; loadReviews(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
     S.projectAdmin.form[field] = e.target.value;

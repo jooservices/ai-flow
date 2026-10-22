@@ -118,9 +118,13 @@ def test_route_selection_for_each_alert_kind_and_quiet_hours(client, ctx, monkey
     assert response.status_code == 200
 
     for kind in notify.ALERT_KINDS:
+        assert notify.configured_channels(ctx, kind) == ["webhook"]
         notify.send("critical" if kind == "critical_incident" else "warning", f"Alert {kind}", "Please review",
                     ctx=ctx, alert_kind=kind)
     assert [item[0] for item in posted] == [f"https://notify-{i}.example.test/hook" for i in range(5)]
+    notify.send("warning", "No selected channels", "This should not send", ctx=ctx,
+                alert_kind="ticket_needs_person", channels=[])
+    assert len(posted) == 5
 
     class FixedClock(datetime):
         @classmethod

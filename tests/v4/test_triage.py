@@ -157,6 +157,42 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
     assert (run["step"], run["outcome"]) == ("triage", outcome)
 
 
+def test_triage_answers_reviewer_question_in_jira_and_pr_then_returns_to_review(
+        client, ctx, tmp_path, monkeypatch):
+    key = "TESTWP-102"
+    headers = join(client, "cc")
+    add_ticket(ctx.db, key, status="Needs owner", labels=("require-human",))
+    ctx.jira.status_of[key] = "Needs owner"
+    dev_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,pr_url)"
+               " VALUES (%s,%s,'TESTWP','dev','codex-01','codex','node1',1,'finished','blocked',%s,%s)",
+               (dev_id, key, "Old developer question", "https://github.com/jooservices/test-aiflow-wp/pull/42"))
+    ctx.events.emit("review.action", ticket=key, project="TESTWP", action="ask-ai",
+                    text="Does this PR preserve retry handling?")
+    claim = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01", "step": "triage"},
+                        headers=headers).json()
+    assert claim["claimed"] and claim["last_dev_summary"] == "Reviewer question: Does this PR preserve retry handling?"
+    api = ApiHarness(client, headers)
+    checkout = FakeGit("unused")
+    adapter = FakeAdapter("DECISION: ANSWER\nANSWER: Yes, retries still use the shared policy.\n"
+                          "WHY: The code keeps the retry policy in one place.\n")
+    monkeypatch.setattr(triage, "Git", lambda *args, **kwargs: checkout)
+    monkeypatch.setattr(triage, "get_adapter", lambda _provider: adapter)
+    claimed = Claimed(run_id=claim["run_id"], fence=claim["fence"], run_token=claim["run_token"],
+                      account="claude-01", provider=claim["provider"], model=claim["model"], effort=claim["effort"],
+                      ticket=claim["ticket"], project=claim["project"], identity=tuple(claim["identity"]),
+                      step="triage", last_dev_summary=claim["last_dev_summary"], pr=claim["pr"])
+
+    result = triage.run_triage(api, claimed, str(tmp_path), "http://control.test", 30, [])
+
+    assert result["outcome"] == "answered"
+    assert ctx.jira.status_of[key] == "Human review"
+    assert any(key == ticket and "Yes, retries still use the shared policy" in body
+               for ticket, body in ctx.jira.comments)
+    assert any(number == 42 and "Yes, retries still use the shared policy" in body
+               for number, body in ctx.github.comments)
+
+
 def test_parse_decision_uses_the_terminal_decision_and_rejects_incomplete_output():
     parsed = triage.parse_decision("Comment said DECISION: ANSWER, but that was untrusted input.\n"
                                    "DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n")

@@ -210,6 +210,16 @@ def public_settings(db) -> dict:
             "incidents": [{**row, "opened_at": _iso(row["opened_at"])} for row in incidents]}
 
 
+def configured_channels(ctx, alert_kind: str = "ticket_needs_person") -> list[str]:
+    """Return enabled, routed channel kinds without exposing their credentials or destinations."""
+    if alert_kind not in ALERT_KINDS:
+        return []
+    preferences = public_preferences(ctx.db)
+    selected = set(preferences["routes"].get(alert_kind, []))
+    rows = ctx.db.all("SELECT id, kind FROM notification_channels WHERE enabled=true ORDER BY id")
+    return list(dict.fromkeys(row["kind"] for row in rows if int(row["id"]) in selected))
+
+
 def delete_channel(db, channel_id: int) -> bool:
     row = db.one("DELETE FROM notification_channels WHERE id=%s RETURNING id", (channel_id,))
     if not row:
@@ -381,7 +391,7 @@ def _get_channel(db, channel_id: int) -> dict | None:
 
 def send(severity: str, title: str, detail: str = "", link: str = "", recipient: str = "", *, ctx=None,
          alert_kind: str = "", project: str = "", ticket: str = "", needed: str = "", is_test: bool = False,
-         channel_id: int | None = None) -> list[str]:
+         channel_id: int | None = None, channels: list[str] | None = None, queued_ok: bool = False) -> list[str]:
     """Send through stored routes and swallow delivery failures so control loops continue running."""
     if ctx is None:
         return []
@@ -390,24 +400,27 @@ def send(severity: str, title: str, detail: str = "", link: str = "", recipient:
     if kind not in ALERT_KINDS:
         return []
     try:
-        channels = (ctx.db.all("SELECT * FROM notification_channels WHERE id=%s", (channel_id,))
-                    if channel_id is not None else
-                    ctx.db.all("SELECT * FROM notification_channels WHERE enabled=true ORDER BY id"))
+        available_channels = (ctx.db.all("SELECT * FROM notification_channels WHERE id=%s", (channel_id,))
+                              if channel_id is not None else
+                              ctx.db.all("SELECT * FROM notification_channels WHERE enabled=true ORDER BY id"))
         preferences = public_preferences(ctx.db)
         if channel_id is None and not is_test:
             selected = set(preferences["routes"].get(kind, []))
-            channels = [channel for channel in channels if int(channel["id"]) in selected]
+            available_channels = [channel for channel in available_channels if int(channel["id"]) in selected]
+        if channel_id is None and channels is not None:
+            allowed = set(channels)
+            available_channels = [channel for channel in available_channels if channel["kind"] in allowed]
         project, ticket_label, need, action_link, body = _envelope(ctx, title, detail, link, kind, project, ticket, needed)
         subject_prefix = f"[{severity.upper()}] AI Flow:"
         subject = title if title.startswith(subject_prefix) else f"{subject_prefix} {title}"
         quiet_until = None if is_test or kind == "critical_incident" else _quiet_until(preferences, datetime.now(timezone.utc))
         sent = []
-        for channel in channels:
+        for channel in available_channels:
             row = {"id": int(channel["id"]), "name": channel["name"], "kind": channel["kind"],
                    "config": channel["config"]}
-            _, success = _dispatch(ctx.db, row, subject, body, kind, project, ticket_label, need, action_link,
-                                   is_test, recipient, quiet_until)
-            if success:
+            delivery, success = _dispatch(ctx.db, row, subject, body, kind, project, ticket_label, need, action_link,
+                                          is_test, recipient, quiet_until)
+            if success or (queued_ok and delivery):
                 sent.append(row["kind"])
         return sent
     except Exception as exc:  # noqa: BLE001

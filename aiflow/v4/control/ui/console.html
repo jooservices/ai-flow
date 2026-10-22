@@ -572,8 +572,8 @@ function nodeBy(n) { return D().nodes.filter(function (x) { return x.name === n;
 function accBy(id) { return D().accounts.filter(function (x) { return x.id === id; })[0]; }
 function ticketBy(k) { return D().tickets.filter(function (x) { return x.key === k; })[0]; }
 function incBy(id) { return D().incidents.concat(D().incidents_recent || []).filter(function (x) { return String(x.id) === String(id); })[0]; }
-function consoleOwner() { return S.consoleUser && S.consoleUser.role === 'owner'; }
-function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'lead'); }
+function consoleOwner() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'super_admin'); }
+function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || S.consoleUser.role === 'lead' || S.consoleUser.role === 'super_admin'); }
 
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {

@@ -47,9 +47,10 @@ downloaded or verified; `5` a health check failed (after an upgrade, the previou
 healthy); `6` the rollback is unhealthy too; `8` another install is running; `9` the pre-upgrade check blocked the
 upgrade and nothing changed.
 
-On a machine with a normal network connection, Command Center (`http://<domain>/cc`) answers within 10 minutes.
+On a machine with a normal network connection, Command Center (`https://<domain>/cc`) answers within 10 minutes.
 Most of that time goes to downloading Docker and the images. Gatus runs on port 8081 (`http://<domain>:8081/`) and
-OpenObserve on `/o2/`. Traefik serves plain HTTP on port 80. Put TLS in front of it, or terminate TLS at your proxy.
+OpenObserve on `/o2/`. Traefik serves plain HTTP on port 80; terminate TLS at the public proxy and restrict origin
+ingress to that proxy. The installer sets the public URL to HTTPS, so session cookies carry `Secure`.
 
 Data is kept in `/srv/aiflow/control/data/{postgres,redis,openobserve}`. PostgreSQL and Redis are reachable only
 on the internal `aiflow4-control` network. The control host runs no node agent (`AIFLOW4_DEPLOY_NODE_AGENT=0` in

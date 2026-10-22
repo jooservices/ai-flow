@@ -12,9 +12,10 @@ before it expires, or when Jira answers 401 (control/jira.py), under a file lock
 the same rotating refresh token. A rejected refresh marks the credential `needs_reconnect`, writes an audit row
 and opens the `jira_auth` incident; jira_sync then stops with that incident instead of failing silently.
 
-Only the owner (signed console session with role owner, or the owner bearer token) may connect, store the
-fallback token or disconnect. The OAuth `state` is single-use, kept in Redis for STATE_TTL_S and bound to the
-starting browser by a cookie; a callback with a missing or different state is refused.
+Only a session with the `integrations.manage` permission (Owner and Super Administrator by default), or the owner
+bearer token, may connect, store the fallback token or disconnect. The OAuth `state` is single-use, kept in Redis
+for STATE_TTL_S and bound to the starting browser by a cookie; a callback with a missing or different state is
+refused.
 """
 from __future__ import annotations
 
@@ -513,14 +514,14 @@ def mount(app: FastAPI, ctx) -> None:
         return a
 
     def owner(request: Request, action: str = "read") -> str:
-        """The owner bearer token or a signed console session with role owner; anyone else is refused."""
+        """The owner bearer token or a signed console session with `integrations.manage`; anyone else is refused."""
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         configured = ctx.settings.owner_token
         if scheme.lower() == "bearer" and token.strip() and configured and secrets.compare_digest(
                 token.strip().encode(), configured.encode()):
             return "owner"
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and role_satisfies(user.role, {"owner"}):
+        if user and role_satisfies(user.role, {"integrations.manage"}):
             return user.subject
         if action != "read":
             write_audit(ctx, action, user.subject if user else "", False, "owner role required")

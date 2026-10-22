@@ -211,7 +211,7 @@ def test_clean_install_runs_every_step_in_order_and_brings_the_control_plane_up(
     assert order == sorted(order)
     assert {f"aiflow4-{c}" for c in INFRA | set(ci.APP_SERVICES)} <= set(machine.containers)
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.1.0"
-    assert out[-1] == "AI Flow control plane v4.1.0 is running and healthy. Command Center: http://aiflow.example.com/cc"
+    assert out[-1] == "AI Flow control plane v4.1.0 is running and healthy. Command Center: https://aiflow.example.com/cc"
     assert any(line.startswith("health: postgres ok, redis ok, traefik ok, openobserve ok, gatus ok") for line in out)
     # the control host does not run a node agent until it is joined
     assert sec.read_env(machine.p("/etc/aiflow/control.env")) == {
@@ -236,7 +236,7 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
     for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
                 "O2_BASIC"):
         assert len(app[key]) >= 32
-    assert app["AIFLOW4_PUBLIC_URL"] == "http://aiflow.example.com"
+    assert app["AIFLOW4_PUBLIC_URL"] == "https://aiflow.example.com"
     assert app["AIFLOW4_GATUS_URL"] == "http://aiflow.example.com:8081/"
 
 
@@ -319,6 +319,7 @@ def test_install_creates_the_first_super_administrator_and_turns_console_login_o
             < index(machine, lambda a: Path(a[0]).name == "aiflow4-deploy" and a[1:] == ["v4.1.0"]))
     assert sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))["AIFLOW4_CONSOLE_LOGIN"] == "1"
     assert any("Super Administrator jooservices@gmail.com" in line and "super-admin-password" in line for line in out)
+    assert any("https://aiflow.example.com/login" in line for line in out)
 
 
 def test_rerun_remembers_the_admin_email_and_keeps_an_owner_choice_for_login(machine):
@@ -358,7 +359,7 @@ def test_rerun_with_a_new_domain_keeps_secrets_but_updates_the_urls(machine):
     before = sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))
     assert installer(machine, [], domain="cc.example.org").run() == 0
     after = sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))
-    assert after["AIFLOW4_PUBLIC_URL"] == "http://cc.example.org"
+    assert after["AIFLOW4_PUBLIC_URL"] == "https://cc.example.org"
     assert {k: v for k, v in after.items() if "URL" not in k} == {k: v for k, v in before.items() if "URL" not in k}
 
 
@@ -450,7 +451,7 @@ def test_owner_rollback_returns_to_the_previous_staged_release(machine):
     deploys = [(a, e) for a, e, _ in machine.calls[calls_before:] if Path(a[0]).name == "aiflow4-deploy"]
     assert [a[1:] for a, _ in deploys] == [["v4.1.0"]] and deploys[0][1]["AIFLOW4_SKIP_UPGRADE_CHECK"] == "1"
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.1.0"
-    assert out[-1] == "rolled back to v4.1.0; the control plane is healthy. Command Center: http://aiflow.example.com/cc"
+    assert out[-1] == "rolled back to v4.1.0; the control plane is healthy. Command Center: https://aiflow.example.com/cc"
     # and once more to the release before it
     assert installer(machine, [], version="", domain="", rollback=True).run() == 0
     assert machine.p("/srv/aiflow/control/releases/CURRENT").read_text().strip() == "v4.0.3"

@@ -2,16 +2,20 @@
 import asyncio
 import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from conftest import join_node
 from aiflow.v4 import cli
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
+from aiflow.v4.control import console_auth
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
+from aiflow.v4.core.settings import Settings
 
 SECRET = "s" * 40
 EMAIL = "admin@example.test"
@@ -23,7 +27,7 @@ def make_client(ctx, gate=False):
     ctx.settings.console_login = gate
     app = create_app(ctx)
     app.state.sync_accounts()
-    return TestClient(app, follow_redirects=False)
+    return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
 
 
 @pytest.fixture
@@ -134,6 +138,7 @@ def test_an_expired_lock_resets_failed_attempts(ctx, seeded):
 
 # --- AC3: rate limits and bounded audit ------------------------------------------------------------------------------
 def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, monkeypatch):
+    ctx.settings.trusted_proxies = ["127.0.0.1/32"]
     monkeypatch.setattr(login, "RATE_PER_IP_EMAIL", 3)
     client = make_client(ctx)
     for _ in range(3):
@@ -149,6 +154,7 @@ def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, mo
 
 
 def test_ip_rate_limit_covers_every_email(ctx, monkeypatch):
+    ctx.settings.trusted_proxies = ["127.0.0.1/32"]
     monkeypatch.setattr(login, "RATE_PER_IP", 4)
     client = make_client(ctx)
     codes = [sign_in(client, "x", f"u{i}@example.test", ip="203.0.113.8").status_code for i in range(6)]
@@ -197,11 +203,31 @@ def test_scrypt_runs_off_the_event_loop_for_known_and_unknown_emails(ctx, seeded
 
 # --- AC5: roles --------------------------------------------------------------------------------------------------------
 def test_super_administrator_passes_every_role_check_and_lead_does_not():
-    assert role_satisfies("super_admin", {"owner"}) and role_satisfies("super_admin", {"lead"})
-    assert role_satisfies("owner", {"owner", "lead"})
-    assert not role_satisfies("lead", {"owner"}) and not role_satisfies("unknown", {"owner"})
+    assert role_satisfies("super_admin", {"integrations.manage"}) and role_satisfies("super_admin", {"console.read"})
+    assert role_satisfies("owner", {"integrations.manage", "console.read"})
+    assert not role_satisfies("lead", {"integrations.manage"})
+    assert not role_satisfies("unknown", {"integrations.manage"})
     assert has_permission("super_admin", "anything.at.all") and has_permission("owner", "nodes.manage")
     assert not has_permission("lead", "nodes.manage")
+
+
+def test_non_owner_role_gets_endpoint_access_from_its_mapped_permissions(ctx, monkeypatch):
+    monkeypatch.setitem(console_auth.ROLE_PERMISSIONS, "integration_admin", frozenset({"integrations.manage"}))
+    monkeypatch.setattr(console_auth, "ALLOWED_ROLES", console_auth.ALLOWED_ROLES | {"integration_admin"})
+    client = make_client(ctx)
+    client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "integration_admin", EXP, SECRET))
+    assert client.get("/v1/integrations/github").status_code == 200
+    assert client.get("/v1/projects/catalog").status_code == 403
+
+
+def test_super_administrator_sees_owner_and_reader_controls_in_console_ui():
+    html = (Path(login.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
+    owner_check = ("function consoleOwner() { return S.consoleUser && (S.consoleUser.role === 'owner' || "
+                   "S.consoleUser.role === 'super_admin'); }")
+    reader_check = ("function consoleReader() { return S.consoleUser && (S.consoleUser.role === 'owner' || "
+                    "S.consoleUser.role === 'lead' || S.consoleUser.role === 'super_admin'); }")
+    assert owner_check in html
+    assert reader_check in html
 
 
 def test_owner_only_endpoints_accept_super_admin(ctx):
@@ -278,6 +304,35 @@ def test_next_is_only_a_path_on_this_site():
     assert login.safe_next("/delivery?x=1") == "/delivery?x=1"
     for bad in ("https://evil.example", "//evil.example", "/\\evil", "javascript:alert(1)", ""):
         assert login.safe_next(bad) == "/cc"
+
+
+def test_forwarded_client_ip_headers_are_ignored_unless_the_peer_is_a_trusted_proxy():
+    def request(peer, headers):
+        return Request({"type": "http", "method": "POST", "path": "/v1/auth/login", "headers": headers,
+                        "client": (peer, 1234), "server": ("origin", 80), "scheme": "http"})
+
+    direct = request("198.51.100.20", [(b"cf-connecting-ip", b"203.0.113.9"),
+                                       (b"x-forwarded-for", b"192.0.2.6")])
+    assert login.client_ip(direct, ["10.0.0.0/8"]) == "198.51.100.20"
+
+    proxied = request("10.0.0.5", [(b"cf-connecting-ip", b"203.0.113.9")])
+    assert login.client_ip(proxied, ["10.0.0.0/8"]) == "203.0.113.9"
+
+    fallback = request("10.0.0.5", [(b"cf-connecting-ip", b"not-an-ip"),
+                                    (b"x-forwarded-for", b"192.0.2.6, 10.0.0.4")])
+    assert login.client_ip(fallback, ["10.0.0.0/8"]) == "192.0.2.6"
+
+
+def test_trusted_proxy_cidrs_load_from_settings(monkeypatch):
+    monkeypatch.setenv("AIFLOW4_TRUSTED_PROXIES", "10.12.0.0/16, 2001:db8::5/128")
+    assert Settings.from_env().trusted_proxies == ["10.12.0.0/16", "2001:db8::5/128"]
+
+
+def test_untrusted_forwarding_headers_cannot_rotate_the_ip_rate_limit(ctx, monkeypatch):
+    monkeypatch.setattr(login, "RATE_PER_IP", 2)
+    client = make_client(ctx)
+    codes = [sign_in(client, "x", f"u{i}@example.test", ip=f"203.0.113.{i}").status_code for i in range(4)]
+    assert codes == [401, 401, 429, 429]
 
 
 # --- AC7: the seed command ---------------------------------------------------------------------------------------------

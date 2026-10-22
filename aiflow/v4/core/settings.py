@@ -62,6 +62,7 @@ class Settings:
     join_token: str = ""
     console_session_secret: str = ""
     console_login: bool = False  # AIFLOW4_CONSOLE_LOGIN=1: the console pages and read APIs need a signed-in user
+    trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
     reviewer_token: str = ""
     owner_token: str = ""
     o2_url: str = ""
@@ -106,6 +107,7 @@ class Settings:
         s.control_repo = _env("CONTROL_REPO", s.control_repo)
         s.console_session_secret = _env("CONSOLE_SESSION_SECRET", s.console_session_secret)
         s.console_login = _env("CONSOLE_LOGIN", "0").strip().lower() in ("1", "true", "yes", "on")
+        s.trusted_proxies = [value.strip() for value in _env("TRUSTED_PROXIES", "").split(",") if value.strip()]
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)
         s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)

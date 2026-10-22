@@ -231,7 +231,7 @@ class ControlInstaller:
             raise InstallError(f"health check failed: {describe(failures)}", EXIT_UNHEALTHY, "health")
         self.step("cli")
         self.refresh_cli(v)
-        self.out(f"AI Flow control plane {v} is running and healthy. Command Center: http://{self.opt.domain}/cc")
+        self.out(f"AI Flow control plane {v} is running and healthy. Command Center: https://{self.opt.domain}/cc")
         return 0
 
     def roll_back_on_request(self) -> int:
@@ -247,7 +247,7 @@ class ControlInstaller:
         failures = self.health(prev) if rc == 0 else [("deploy", f"aiflow4-deploy {prev} exited {rc}")]
         if failures:
             raise InstallError(f"rollback to {prev} is unhealthy: {describe(failures)}", EXIT_ROLLBACK_FAILED, "health")
-        self.out(f"rolled back to {prev}; the control plane is healthy. Command Center: http://{self.domain()}/cc")
+        self.out(f"rolled back to {prev}; the control plane is healthy. Command Center: https://{self.domain()}/cc")
         return 0
 
     def roll_back_after_failure(self, prev: str, failed: str, failures: list[tuple[str, str]]) -> int:
@@ -421,7 +421,7 @@ class ControlInstaller:
                        force={"AIFLOW4_DOMAIN": d, "AIFLOW4_JOIN_CONTROL_URL": f"http://{d}",
                               "AIFLOW4_CONSOLE_ADMIN_EMAIL": self.admin_email()},
                        keep={"AIFLOW4_DEPLOY_NODE_AGENT": "0"})
-        changed = sec.ensure_internal(lay.secrets, f"http://{d}", f"http://{d}:8081/")
+        changed = sec.ensure_internal(lay.secrets, f"https://{d}", f"http://{d}:8081/")
         for path, mode in ((lay.p("/etc/aiflow/secrets"), 0o700), (lay.p("/etc/aiflow/secrets/github"), 0o700),
                            (lay.p("/etc/aiflow/secrets/jira"), 0o700), (lay.console_secrets, 0o700)):
             sec.ensure_dir(path, mode)
@@ -494,7 +494,7 @@ class ControlInstaller:
         if r.returncode:
             raise InstallError(f"could not create the first Super Administrator {email} (exit {r.returncode})",
                                EXIT_UNHEALTHY)
-        self.out(f"Super Administrator {email}: sign in at http://{self.opt.domain}/login; the first password is in "
+        self.out(f"Super Administrator {email}: sign in at https://{self.opt.domain}/login; the first password is in "
                  f"{lay.console_secrets / ADMIN_PASSWORD_FILE} (0600, written once)")
 
     def deploy(self, v: str, cur: str, skip_check: bool) -> int:

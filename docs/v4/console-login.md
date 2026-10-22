@@ -2,16 +2,18 @@
 
 People sign in to Command Center with an email and a password. The first role is **Super Administrator**
 (`super_admin`, every permission). Roles live in one mapping, `ROLE_PERMISSIONS` in `control/console_auth.py`; a
-new role is added there without touching call sites, which ask `role_satisfies(user.role, {"owner"})` or
-`has_permission(role, "nodes.manage")`. A Super Administrator passes every owner-only and role-aware check.
+new role is added there without touching call sites, which ask for permission identifiers such as
+`integrations.manage`, `projects.manage` or `nodes.manage`. A Super Administrator passes every owner-only and
+role-aware check.
 
 ## Installation turns it on
 
 `aiflow4 install control --version vX.Y.Z --domain D --admin-email you@example.com` (see
 [control-install.md](control-install.md)):
 
-- sets `AIFLOW4_CONSOLE_LOGIN=1` in `/etc/aiflow/secrets/control/aiflow4.env` (an owner's explicit `0` is kept);
-  the signing key `AIFLOW4_CONSOLE_SESSION_SECRET` is generated there too;
+- sets `AIFLOW4_CONSOLE_LOGIN=1` and the external `https://<domain>` `AIFLOW4_PUBLIC_URL` in
+  `/etc/aiflow/secrets/control/aiflow4.env` (an owner's explicit login setting `0` is kept); the signing key
+  `AIFLOW4_CONSOLE_SESSION_SECRET` is generated there too;
 - in its `admin` step runs `aiflow4 console-user seed --role super_admin` from the release image, after the
   migrations and before the deploy. The generated password is written once to
   `/etc/aiflow/secrets/console/super-admin-password` (0600) and is never printed;
@@ -19,8 +21,8 @@ new role is added there without touching call sites, which ask `role_satisfies(u
   no `--admin-email` and change nothing for an existing user.
 
 After the install the owner opens `https://<domain>/login` and only uses the UI. The lab's Super Administrator is
-`jooservices@gmail.com`. The environment variable and the CLI below remain installer and developer tools.
-Set `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cookie is marked `Secure`. Without
+`jooservices@gmail.com`. The environment variable and the CLI below remain installer and developer tools. The
+installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cookie is marked `Secure`. Without
 `AIFLOW4_CONSOLE_LOGIN=1` the console is open as before.
 
 ## What the gate does
@@ -50,8 +52,11 @@ asks `/v1/auth/me` (a same-site request that carries the cookie) and continues t
 ## Sign-in protection
 
 - **Rate limits first.** Before any database lookup Redis counts attempts per client IP (30) and per IP+email (10)
-  in a 15-minute window; above that the answer is 429 with `Retry-After`. The client IP is Cloudflare's
-  `CF-Connecting-IP`, else the first `X-Forwarded-For` hop, else the peer; the gatekeeper in front must set these.
+  in a 15-minute window; above that the answer is 429 with `Retry-After`. Forwarding headers are used only when the
+  socket peer matches a CIDR in `AIFLOW4_TRUSTED_PROXIES`; otherwise the socket peer address is used, even if a
+  direct-origin caller supplies `CF-Connecting-IP` or `X-Forwarded-For`. Configure only the proxy CIDRs that
+  sanitize these headers, and restrict origin ingress at the host/network firewall so only those proxies can reach
+  the published HTTP port.
 - **Same answer.** Unknown email, wrong password, locked account and disabled account all answer
   `401 {"detail": "invalid email or password"}` after the same scrypt work (a dummy hash for unknown, locked and
   disabled users).

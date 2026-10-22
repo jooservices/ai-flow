@@ -16,8 +16,8 @@ from dataclasses import dataclass
 
 
 COOKIE_NAME = "aiflow4_session"
-# Role -> permissions. "*" is every permission. A Super Administrator passes any role check; more roles are added
-# here without touching the call sites, which ask `role_satisfies(user.role, {"owner"})`.
+# Role -> permissions. "*" is every permission. Call sites ask for permission identifiers, so a new role can be
+# given access by adding its permissions here without changing endpoint code.
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "super_admin": frozenset({"*"}),
     "owner": frozenset({"console.read", "console.write", "integrations.manage", "nodes.manage", "projects.manage"}),
@@ -28,8 +28,9 @@ ALLOWED_ROLES = set(ROLE_PERMISSIONS)
 
 
 def role_satisfies(role: str, required: set[str] | frozenset[str]) -> bool:
-    """True when `role` is one of the required roles or holds every permission (Super Administrator)."""
-    return role in required or "*" in ROLE_PERMISSIONS.get(role, frozenset())
+    """True when the role has at least one required permission identifier."""
+    granted = ROLE_PERMISSIONS.get(role, frozenset())
+    return "*" in granted or bool(granted.intersection(required))
 
 
 def has_permission(role: str, permission: str) -> bool:

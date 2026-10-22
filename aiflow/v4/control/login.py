@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -182,13 +183,37 @@ def safe_next(value: str) -> str:
     return "/cc"
 
 
-def client_ip(request: Request) -> str:
-    """The visitor's address: Cloudflare's CF-Connecting-IP, else the first X-Forwarded-For hop, else the peer."""
+def client_ip(request: Request, trusted_proxies: list[str] | tuple[str, ...] = ()) -> str:
+    """Use forwarding headers only when the socket peer belongs to a configured proxy CIDR.
+
+    Direct-origin callers are keyed by their actual peer address, even if they send forged Cloudflare or
+    X-Forwarded-For headers. Proxies must sanitize the forwarded values they provide.
+    """
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer[:64]
+
+    trusted = False
+    for value in trusted_proxies:
+        try:
+            if peer_address in ipaddress.ip_network(value, strict=False):
+                trusted = True
+                break
+        except ValueError:
+            # A malformed proxy entry cannot expand the trust boundary.
+            continue
+    if not trusted:
+        return str(peer_address)
+
     for value in (request.headers.get("cf-connecting-ip", ""),
                   request.headers.get("x-forwarded-for", "").split(",", 1)[0]):
-        if value.strip():
-            return value.strip()[:64]
-    return request.client.host if request.client else "unknown"
+        try:
+            return str(ipaddress.ip_address(value.strip()))
+        except ValueError:
+            continue
+    return str(peer_address)
 
 
 LOGIN_PAGE = """<!doctype html>
@@ -339,7 +364,8 @@ def install_login(app: FastAPI, ctx) -> None:
         except ValueError:
             email = ""
         try:
-            status, body, headers = await run_in_threadpool(attempt, client_ip(request), email, data["password"][:1024])
+            status, body, headers = await run_in_threadpool(
+                attempt, client_ip(request, settings.trusted_proxies), email, data["password"][:1024])
         except redis.RedisError:
             log.exception("console sign-in: Redis is unavailable")
             return JSONResponse({"detail": "sign-in is unavailable; try again shortly"}, status_code=503)

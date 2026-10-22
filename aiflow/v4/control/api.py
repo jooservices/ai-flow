@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from pydantic import BaseModel, Field
 
 from .. import VERSION
-from ..core.controlrepo import ControlRepo
+from ..core.controlrepo import ControlRepo, epic_for_ticket
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
@@ -263,6 +263,7 @@ class ClaimBody(BaseModel):
 class VersionReleaseClaimBody(BaseModel):
     project: str
     version_id: str
+    repository: str = ""
     account: str
 
 
@@ -288,6 +289,18 @@ class ProjectCreateBody(ProjectPreflightBody):
     priority: int = Field(default=5, ge=0, le=100)
     parallel_limit: int = Field(default=2, ge=1, le=100)
     merge_method: Literal["merge", "squash", "rebase"] = "squash"
+
+
+class ProjectRepositoryConfigBody(BaseModel):
+    repo: str = Field(min_length=3, max_length=200)
+    base: str = Field(default="", max_length=120)
+    checks: list[str] = Field(default_factory=list, max_length=50)
+    stack: str = Field(default="", max_length=80)
+
+
+class ProjectRepositoriesBody(BaseModel):
+    repositories: list[ProjectRepositoryConfigBody] = Field(default_factory=list, max_length=100)
+    epic_repositories: dict[str, str] = Field(default_factory=dict, max_length=500)
 
 
 class GitHubInstallationBody(BaseModel):
@@ -646,7 +659,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "ticket is no longer in Human review")
         if not ctx.jira or not github_gateway(ctx):
             raise HTTPException(503, "Jira or GitHub is unavailable")
-        pr_run = ctx.db.one("SELECT pr_url FROM runs WHERE ticket_key=%s AND pr_url<>''"
+        pr_run = ctx.db.one("SELECT pr_url,details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                             " ORDER BY started_at DESC LIMIT 1", (key,))
         match = re.search(r"/pull/(\d+)(?:/|$)", (pr_run or {}).get("pr_url", ""))
         if not match:
@@ -656,9 +669,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not claim.ok:
             raise HTTPException(409, "ticket is already being changed")
         try:
-            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash)"
-                        " VALUES (%s,%s,%s,'qa','reviewer-console','human','control',%s,'')",
-                        (run_id, key, ticket["project"], claim.fence))
+            run_details = {"repository": str(((pr_run or {}).get("details") or {}).get("repository") or "")}
+            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash,details)"
+                        " VALUES (%s,%s,%s,'qa','reviewer-console','human','control',%s,'',%s)",
+                        (run_id, key, ticket["project"], claim.fence, J(run_details)))
         except Exception:
             ctx.leases.release(key, run_id, claim.fence)
             raise
@@ -672,6 +686,28 @@ def create_app(ctx: Ctx) -> FastAPI:
                         fence=fence, account="reviewer-console", provider="human", node="control", outcome=outcome,
                         reason=summary[:200])
 
+    def repository_for_run(run: dict[str, Any], project=None) -> str:
+        """Use the repository captured when the run was claimed, with a legacy settings fallback."""
+        saved = str(((run.get("details") or {}).get("repository") or ""))
+        if saved:
+            return saved
+        project = project or ctx.repo().projects.get(run.get("project"))
+        if not project:
+            return ""
+        ticket = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (run.get("ticket_key"),)) or {}
+        ticket["epic"] = ticket_epic(ticket)
+        return project.repo_for(ticket)
+
+    def settings_for_run(run: dict[str, Any], project) -> dict[str, Any]:
+        settings = (run.get("details") or {}).get("repository_settings")
+        if isinstance(settings, dict) and settings.get("repo"):
+            return settings
+        return project.settings_for_repo(repository_for_run(run, project))
+
+    def matches_run_repository(repository: str, requested: str) -> bool:
+        requested = requested.strip().lower()
+        return requested in {repository.lower(), repository.split("/", 1)[-1].lower()}
+
     def merge_command(run: dict, number: int, title: str = "", method: str = "squash", node: str = "") -> dict:
         project = ctx.repo().projects.get(run["project"])
         if not project:
@@ -679,10 +715,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         github = github_gateway(ctx)
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
-        res = github.merge_pr(project.repo_name, number, title, method)
+        repository = repository_for_run(run, project)
+        repo_name = repository.split("/", 1)[-1]
+        res = github.merge_pr(repo_name, number, title, method)
         ok = bool(res.get("merged"))
         audit("github", "merge", run["ticket_key"], str(run["id"]), run["fence"], run["account_id"], ok,
-              res.get("sha") or res.get("message", ""), {"number": number, "method": method})
+              res.get("sha") or res.get("message", ""), {"number": number, "method": method,
+                                                             "repo": repository})
         ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=str(run["id"]), fence=run["fence"],
                         account=run["account_id"], node=node or run["node"],
                         outcome="merged" if ok else "refused", reason=res.get("message", "")[:200])
@@ -1297,12 +1336,30 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("aiflow-control", action, key, "", None, actor, accepted, result,
               payload or {"project": key})
 
+    def ticket_epic(ticket: dict[str, Any]) -> str:
+        """Resolve a ticket's parent chain to its Jira epic key."""
+        if ticket.get("type") == "Epic":
+            return str(ticket.get("key") or "")
+        parent = str(ticket.get("parent_key") or "")
+        seen: set[str] = set()
+        while parent and parent not in seen:
+            seen.add(parent)
+            ancestor = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+            if not ancestor:
+                return parent
+            if ancestor["type"] == "Epic":
+                return parent
+            parent = str(ancestor.get("parent_key") or "")
+        return ""
+
     @app.get("/v1/projects")
     def managed_projects() -> dict:
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
-        return {"projects": [{"key": project.key, "repo": project.repo, "status": "paused" if project.paused else "active",
+        return {"projects": [{"key": project.key, "repo": project.repo,
+                              "repositories": project.configured_repositories,
+                              "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack}
                              for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
@@ -1325,6 +1382,152 @@ def create_app(ctx: Ctx) -> FastAPI:
                                  if str(item.get("full_name", "")).split("/", 1)[0].lower()
                                  == str(getattr(github, "org", "") or ctx.settings.github_org).lower()],
                 "stacks": sorted(STACK_TOOLS), "required_statuses": required_project_statuses}
+
+    def jira_project_epics(key: str) -> list[dict[str, str]]:
+        """Read the current Jira epics for the project instead of relying on the periodic ticket mirror."""
+        issues = ctx.jira.search(f'project = "{key}" AND issuetype = Epic ORDER BY key')
+        out = []
+        for issue in issues:
+            fields = issue.get("fields") or {}
+            issue_type = (fields.get("issuetype") or {}).get("name") or ""
+            if issue_type and issue_type.lower() != "epic":
+                continue
+            issue_key = str(issue.get("key") or "")
+            if issue_key:
+                out.append({"key": issue_key, "summary": str(fields.get("summary") or issue_key),
+                            "status": str((fields.get("status") or {}).get("name") or "")})
+        return sorted(out, key=lambda item: (int(re.search(r"(\d+)$", item["key"]).group(1))
+                                             if re.search(r"(\d+)$", item["key"]) else 0, item["key"]))
+
+    def repository_settings_payload(project) -> list[dict[str, Any]]:
+        configured = {str(item.get("repo") or "").lower(): item for item in project.repositories
+                      if isinstance(item, dict) and item.get("repo")}
+        names = project.configured_repositories
+        return [{"repo": name, "base": str(configured.get(name.lower(), {}).get("base") or ""),
+                 "checks": list(configured.get(name.lower(), {}).get("checks") or []),
+                 "stack": str(configured.get(name.lower(), {}).get("stack") or ""),
+                 "effective": project.settings_for_repo(name)} for name in names]
+
+    @app.get("/v1/projects/{key}/repositories")
+    def project_repositories(key: str, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="aiflow-control", action="project_repositories", node=key)
+        project = ctx.repo().projects.get(key)
+        if not project:
+            raise HTTPException(404, "project is not configured")
+        github = github_gateway(ctx)
+        if not ctx.jira or not github:
+            raise HTTPException(503, "Jira and GitHub App must be connected to configure repositories")
+        try:
+            epics = jira_project_epics(key)
+            available = github.installation_repositories()
+            audit_github_repository_changes(github, available, user.subject, "project_repositories")
+        except Exception as exc:
+            log.warning("project repositories could not be loaded (%s)", type(exc).__name__)
+            raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
+        owner = str(getattr(github, "org", "") or ctx.settings.github_org).lower()
+        available = [item for item in available
+                     if str(item.get("full_name", "")).split("/", 1)[0].lower() == owner]
+        return {"project": key, "default_repo": project.repo,
+                "project_defaults": {"base": project.base, "checks": project.checks, "stack": project.stack},
+                "repositories": repository_settings_payload(project),
+                "epic_repositories": project.epic_repositories or {},
+                "epics": epics, "github_repos": available, "stacks": sorted(STACK_TOOLS)}
+
+    @app.put("/v1/projects/{key}/repositories")
+    def save_project_repositories(key: str, body: ProjectRepositoriesBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="aiflow-control", action="save_project_repositories", node=key)
+        project = ctx.repo().projects.get(key)
+        if not project:
+            project_audit("save_project_repositories", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        github = github_gateway(ctx)
+        if not ctx.jira or not github:
+            project_audit("save_project_repositories", key, user.subject, False,
+                          "Jira and GitHub App must be connected")
+            raise HTTPException(503, "Jira and GitHub App must be connected")
+        try:
+            epics = jira_project_epics(key)
+            available_repositories = github.installation_repositories()
+        except Exception as exc:
+            project_audit("save_project_repositories", key, user.subject, False, "could not load providers")
+            log.warning("project repository save preflight failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
+        audit_github_repository_changes(github, available_repositories, user.subject, "project_repository_save")
+        owner = str(getattr(github, "org", "") or ctx.settings.github_org).lower()
+        available = {str(item.get("full_name") or "").lower() for item in available_repositories
+                     if str(item.get("full_name", "")).split("/", 1)[0].lower() == owner}
+        epic_keys = {item["key"] for item in epics}
+        repos: dict[str, dict[str, Any]] = {}
+        error = ""
+        for item in body.repositories:
+            name = item.repo.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) or name.lower() not in available:
+                error = f"repository {name} is not visible to the connected GitHub App"
+                break
+            if name.lower() in repos:
+                error = f"repository {name} is listed more than once"
+                break
+            base = item.base.strip()
+            effective_base = base or project.base
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", effective_base) or ".." in effective_base:
+                error = f"invalid base branch for {name}"
+                break
+            if item.stack and item.stack not in STACK_TOOLS:
+                error = f"unsupported stack for {name}"
+                break
+            repos[name.lower()] = {"repo": name, "base": base,
+                                   "checks": [check.strip() for check in item.checks if check.strip()],
+                                   "stack": item.stack.strip()}
+        mappings = {str(epic).strip(): str(name).strip() for epic, name in body.epic_repositories.items()
+                    if str(name).strip()}
+        if not error:
+            for epic, name in mappings.items():
+                if epic not in epic_keys:
+                    error = f"{epic} is not an epic in Jira project {key}"
+                    break
+                if name.lower() not in available:
+                    error = f"repository {name} is not visible to the connected GitHub App"
+                    break
+                if name.lower() not in repos:
+                    repos[name.lower()] = {"repo": name, "base": "", "checks": [], "stack": ""}
+        if not error and project.repo.lower() not in repos:
+            repos[project.repo.lower()] = {"repo": project.repo, "base": "", "checks": [], "stack": ""}
+        if not error:
+            for item in repos.values():
+                branch = item["base"] or project.base
+                if not github.branch_exists(item["repo"].split("/", 1)[-1], branch):
+                    error = f"base branch {branch} is missing from {item['repo']}"
+                    break
+        if error:
+            project_audit("save_project_repositories", key, user.subject, False, error,
+                          {"epic_repositories": mappings, "repositories": list(repos.values())})
+            raise HTTPException(422, error)
+
+        config_path = ctx.repo().root / "projects" / f"{key}.yaml"
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            normalized = sorted(repos.values(), key=lambda item: item["repo"].lower())
+            config["repositories"] = normalized
+            config["epic_repositories"] = mappings
+            content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+            control_name = Path(ctx.settings.control_repo).name
+            branch = github.default_branch(control_name)
+            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                       f"projects: update repositories for {key} via AI Flow console")
+        except Exception as exc:
+            log.warning("project repository update failed (%s)", type(exc).__name__)
+            project_audit("save_project_repositories", key, user.subject, False, "control repo commit failed",
+                          {"epic_repositories": mappings, "repositories": list(repos.values())})
+            raise HTTPException(502, "could not save repository settings to aiflow-control") from exc
+        refresh_projects()
+        project_audit("save_project_repositories", key, user.subject, True,
+                      commit or "bot commit created", {"epic_repositories": mappings,
+                                                       "repositories": normalized})
+        ctx.events.emit("project.repositories_changed", project=key, account=user.subject, outcome="saved",
+                        reason=f"control repo commit {commit or 'created'}",
+                        data={"epic_count": len(mappings), "repository_count": len(normalized)})
+        return {"saved": True, "project": key, "commit": commit,
+                "epic_repositories": mappings, "repositories": normalized}
 
     @app.post("/v1/projects/preflight")
     def project_preflight_endpoint(body: ProjectPreflightBody, request: Request) -> dict:
@@ -1582,7 +1785,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         release = fleet_release(node, body.release_version) if body.release_protocol >= 1 else ""
         joined_node = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
         node_projects = repo.projects_for_node(node, joined_node.get("projects") or [], joined_node.get("dynamic", False))
-        project_stacks = {key: repo.projects[key].stack for key in node_projects if key in repo.projects}
+        project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
+                                else repo.projects[key].stack)
+                          for key in node_projects if key in repo.projects}
         return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
                             "release": release,
                             "projects": node_projects,
@@ -2072,16 +2277,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
         model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
         run_token = secrets.token_urlsafe(32)
+        p = repo.projects.get(t["project"])
+        epic = ticket_epic(t)
+        ticket_data = {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
+                       "parent_key": t.get("parent_key"), "epic": epic}
+        prior_dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
+        selected_repo = p.settings_for_ticket(ticket_data) if p else {}
+        # Once development starts, verify and rework keep the repository that produced the PR even if
+        # the owner changes the epic mapping while that work waits for review.
+        prior_repository = str(((prior_dev or {}).get("details") or {}).get("repository") or "")
+        if p and prior_repository and body.step in {"dev", "verify", "qa"}:
+            prior_settings = ((prior_dev or {}).get("details") or {}).get("repository_settings")
+            selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
+        run_details = ({"repository": selected_repo.get("repo", ""),
+                        "repository_settings": selected_repo} if selected_repo else {})
         ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence, token_hash)"
                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                    (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
+        if run_details:
+            ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         ctx.db.run("UPDATE accounts SET status='working', updated_at=now(), idle_since=NULL, cooldown_since=NULL WHERE id=%s",
                    (acc.id,))
         ctx.events.emit("run.claimed", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
                         fence=c.fence, account=acc.id, provider=acc.provider, model=model, node=node)
-        p = repo.projects.get(t["project"])
         extra: dict[str, Any] = {}
-        dev = None if body.step == "master" else (last_dev(t["key"], done=True) or last_dev(t["key"]))
+        dev = prior_dev
         if body.step == "verify" and dev:
             extra["pr"] = {"url": dev["pr_url"], "number": int(dev["pr_url"].rstrip("/").split("/")[-1]),
                            "branch": dev["branch"], "head_sha": dev["head_sha"], "dev_account": dev["account_id"],
@@ -2125,8 +2345,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                          "work_minutes": {"target": 30, "warn": 45, "hard": 60},
                          "merge": {"method": "squash", "auto": False, "require_human": True}}
                         if body.step == "master" else
-                        {"key": p.key, "repo": p.repo, "base": p.base, "hotfix_base": p.hotfix_base,
-                         "checks": p.checks, "stack": p.stack, "work_minutes": p.work_minutes(),
+                        {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
+                         "work_minutes": p.work_minutes(),
                          "merge": {"method": (p.merge or {}).get("method", "squash"),
                                    "auto": bool((p.merge or {}).get("auto", True)),
                                    "require_human": bool((p.merge or {}).get("require_human", False))}}
@@ -2134,8 +2354,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {**extra, "claimed": True, "step": body.step, "run_id": run_id, "fence": c.fence, "run_token": run_token,
                 "lease_ms": ctx.settings.lease_ms, "model": model, "effort": effort, "provider": acc.provider,
                 "account": acc.id, "identity": bot_identity(),
-                "ticket": {**{k: t[k] for k in ("key", "project", "summary", "description", "labels", "priority", "type")},
-                           "parent_key": t.get("parent_key")},
+                "ticket": ticket_data,
                 "project": project_data}
 
     # --- configured Jira version releases ------------------------------------------------------------------
@@ -2165,8 +2384,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
         if not version:
             raise HTTPException(404, "configured unreleased Jira version not found")
-        state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s",
-                           (project.key, version["id"]))
+        requested_repository = body.repository or version.get("repository") or project.repo
+        if requested_repository not in (version.get("repositories") or [project.repo]):
+            raise HTTPException(422, "repository is not represented in this Jira version")
+        version = {**version, "repository": requested_repository}
+        project = version_release.project_for_version(ctx, project, version)
+        if not version_release.enabled(project) or project.repo.lower().rstrip("/") == "jooservices/ai-flow":
+            raise HTTPException(403, "version release is not enabled for the selected repository")
+        state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
+                           (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):
             raise HTTPException(409, "version already has an active or completed release run")
         snapshot = version_release.post_merge_resume(ctx, project, version)
@@ -2200,14 +2426,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if branch_created:
                     github.create_branch(project.repo_name, release_branch, source_branch)
             tracker = version_release.tracker_for(ctx, project, version["id"], version["name"])
-            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash)"
-                       " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'')",
-                       (run_id, key, project.key, acc.id, acc.provider, node, lease.fence))
-            ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot)"
-                       " VALUES (%s,%s,%s,%s,'checking','',%s) ON CONFLICT (project,version_id) DO UPDATE SET"
+            selected_settings = {"repo": project.repo, "base": project.base,
+                                 "checks": version_release.check_commands(project), "stack": project.stack}
+            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash,details)"
+                       " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'',%s)",
+                       (run_id, key, project.key, acc.id, acc.provider, node, lease.fence,
+                        J({"repository": project.repo, "repository_settings": selected_settings})))
+            ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
+                       " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
+                       " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
                        " version_name=EXCLUDED.version_name,tracker_key=EXCLUDED.tracker_key,status='checking',"
                        " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
-                       (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"])) )
+                       (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"]), project.repo))
             version_release._audit(ctx, project, tracker,
                                    {"id": run_id, "fence": lease.fence, "account_id": acc.id},
                                    "github-release-branch", "created" if branch_created else "existing",
@@ -2247,11 +2477,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(run["project"])
         if not project or not version_release.enabled(project):
             raise HTTPException(403, "project is not enabled for version releases")
-        if project.repo.lower().rstrip("/") == "jooservices/ai-flow":
-            raise HTTPException(403, "AI Flow itself is never released by project version releases")
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == version_id), None)
         if not version:
             raise HTTPException(409, "Jira version is no longer configured and unreleased")
+        saved_repository = str(((run.get("details") or {}).get("repository") or ""))
+        if saved_repository:
+            version = {**version, "repository": saved_repository}
+        project = version_release.project_for_version(ctx, project, version)
+        if project.repo.lower().rstrip("/") == "jooservices/ai-flow":
+            raise HTTPException(403, "AI Flow itself is never released by project version releases")
         commands = version_release.check_commands(project)
         reported = [str(item.get("command") or "") for item in body.checks]
         if not commands or any(command not in reported for command in commands):
@@ -2574,16 +2808,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
         project = ctx.repo().projects.get(run["project"])
-        if not project or project.repo.split("/")[-1] != body.repo.split("/")[-1]:
+        repository = repository_for_run(run, project)
+        if not project or not matches_run_repository(repository, body.repo):
             raise HTTPException(403, "repository does not belong to the run's project")
         permissions = ({"contents": "read", "metadata": "read"}
                        if run["step"] in ("triage", "version_release") else
                        {"contents": "write", "metadata": "read", "workflows": "write"})
         if run["step"] == "version_release" and not version_release.enabled(project):
             raise HTTPException(403, "project is not enabled for version releases")
-        token, expires = github.token(project.repo_name, permissions)
+        token, expires = github.token(repository.split("/", 1)[-1], permissions)
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
-              {"repo": project.repo, "expires": expires.isoformat()})
+              {"repo": repository, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
 
     @app.post("/v1/github/pr")
@@ -2593,12 +2828,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
         project = ctx.repo().projects.get(run["project"])
-        if not project or project.repo_name != body.repo.split("/")[-1]:
+        repository = repository_for_run(run, project)
+        if not project or not matches_run_repository(repository, body.repo):
             raise HTTPException(403, "repository does not belong to the run's project")
-        pr = github.create_pr(project.repo_name, body.head, body.base, body.title, body.body, body.draft)
+        settings = settings_for_run(run, project)
+        if body.base != settings["base"]:
+            raise HTTPException(403, "pull request base does not match the repository settings")
+        pr = github.create_pr(repository.split("/", 1)[-1], body.head, body.base, body.title, body.body, body.draft)
         ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s WHERE id=%s", (pr["html_url"], body.head, body.run_id))
         audit("github", "pr", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, pr["html_url"],
-              {"number": pr.get("number"), "draft": body.draft})
+              {"number": pr.get("number"), "draft": body.draft, "repo": repository})
         ctx.events.emit("github.pr", ticket=run["ticket_key"], run_id=body.run_id, fence=body.fence,
                         account=run["account_id"], node=node, outcome="opened", pr_url=pr["html_url"])
         return {"url": pr["html_url"], "number": pr.get("number")}
@@ -2620,16 +2859,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
         out = []
         for ticket in tickets:
-            dev = ctx.db.one("SELECT pr_url, summary FROM runs WHERE ticket_key=%s AND pr_url<>''"
+            dev = ctx.db.one("SELECT pr_url, summary, details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                              " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
             pr_url = (dev or {}).get("pr_url", "")
             match = re.search(r"/pull/(\d+)(?:/|$)", pr_url)
             project = repo.projects.get(ticket["project"])
+            repository = repository_for_run(dev or {}, project) if project else ""
             pr_detail: dict[str, Any] = {}
             github = github_gateway(ctx)
             if project and match and github:
                 try:
-                    pr_detail = github.pr(project.repo_name, int(match.group(1))) or {}
+                    pr_detail = github.pr(repository.split("/", 1)[-1], int(match.group(1))) or {}
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not load PR details for %s: %s", ticket["key"], e)
             verify = ctx.db.one("SELECT outcome, summary, details, started_at FROM runs"
@@ -2646,6 +2886,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 preview_url = ""
             out.append({
                 **ticket,
+                "repository": repository,
                 "jira_url": f"{ctx.settings.jira_site.rstrip('/')}/browse/{ticket['key']}",
                 "pr": {"url": pr_url, "number": int(match.group(1)) if match else None,
                        "title": pr_detail.get("title", ""),
@@ -2736,9 +2977,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         github = github_gateway(ctx)
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
-        res = github.update_branch(project.repo_name, body.number)
+        repository = repository_for_run(run, project)
+        res = github.update_branch(repository.split("/", 1)[-1], body.number)
         audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], res["ok"],
-              res["message"][:200], {"number": body.number})
+              res["message"][:200], {"number": body.number, "repo": repository})
         return res
 
     @app.get("/v1/github/checks")
@@ -2750,7 +2992,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         github = github_gateway(ctx)
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
-        return {"checks": github.checks(project.repo_name, sha)}
+        repository = repository_for_run(run, project)
+        return {"checks": github.checks(repository.split("/", 1)[-1], sha)}
 
     @app.post("/v1/github/comment")
     def github_comment(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
@@ -2759,9 +3002,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         github = github_gateway(ctx)
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
-        github.comment(project.repo_name, body.number, body.body)
+        repository = repository_for_run(run, project)
+        github.comment(repository.split("/", 1)[-1], body.number, body.body)
         audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
-              {"number": body.number})
+              {"number": body.number, "repo": repository})
         return {"ok": True}
 
     # --- policy hook ------------------------------------------------------------------------------------------

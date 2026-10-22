@@ -7,7 +7,7 @@ import yaml
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control.console_auth import issue_session
-from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core.controlrepo import ControlRepo, Project, epic_for_ticket
 
 
 SESSION_SECRET = "projects-console-session-secret-with-32-bytes"
@@ -238,7 +238,6 @@ def test_project_writes_require_owner_session_and_reject_without_changes(client,
     assert ctx.github.commits == [] and not (control_repo / "projects/NEWAPP.yaml").exists()
     assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE target='aiflow-control'"
                       " AND action='add_project' AND ticket='NEWAPP' AND accepted=false")["n"] == 1
-
     owner_sign_in(client, ctx, role="lead")
     response = client.post("/v1/projects", json=project_body())
     assert response.status_code == 403
@@ -254,6 +253,98 @@ def test_super_admin_can_resume_and_pause_a_project(client, ctx, control_repo):
     resumed = client.post("/v1/projects/NEWAPP/pause", json={"paused": False})
     assert paused.status_code == 200 and paused.json()["status"] == "paused"
     assert resumed.status_code == 200 and resumed.json()["status"] == "active"
+
+
+def test_project_epic_repository_lookup_inherits_project_defaults_and_all_repo_stacks():
+    project = Project(key="MULTI", repo="jooservices/default", base="develop", stack="php-8.3",
+                      checks=["composer install"], repositories=[
+                          {"repo": "jooservices/core", "base": "main", "stack": "python-3.12",
+                           "checks": ["pytest"]}],
+                      epic_repositories={"MULTI-2": "jooservices/core"})
+    assert project.repo_for({"key": "MULTI-3", "epic": "MULTI-2"}) == "jooservices/core"
+    assert project.settings_for_ticket({"epic": "MULTI-2"}) == {
+        "repo": "jooservices/core", "base": "main", "checks": ["pytest"], "stack": "python-3.12"}
+    assert project.settings_for_ticket({"key": "MULTI-4"}) == {
+        "repo": "jooservices/default", "base": "develop", "checks": ["composer install"], "stack": "php-8.3"}
+    assert set(project.stacks) == {"php-8.3", "python-3.12"}
+    assert {"php", "composer", "wp", "python3"}.issubset(project.tools)
+    assert epic_for_ticket({"key": "MULTI-4", "type": "Sub-task", "parent_key": "MULTI-3"}, {
+        "MULTI-3": {"key": "MULTI-3", "type": "Story", "parent_key": "MULTI-2"},
+        "MULTI-2": {"key": "MULTI-2", "type": "Epic", "parent_key": None},
+    }) == "MULTI-2"
+
+
+def test_projects_screen_loads_jira_epics_and_saves_audited_repository_mapping(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    ctx.github.repositories.append({"full_name": "jooservices/core-repo", "name": "core-repo",
+                                   "default_branch": "develop"})
+    ctx.jira.search_data = [{"key": "TESTWP-12", "fields": {
+        "summary": "Core", "issuetype": {"name": "Epic"}, "status": {"name": "In Progress"}}}]
+
+    loaded = client.get("/v1/projects/TESTWP/repositories")
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["epics"] == [{"key": "TESTWP-12", "summary": "Core", "status": "In Progress"}]
+    assert "jooservices/core-repo" in {r["full_name"] for r in loaded.json()["github_repos"]}
+    assert 'issuetype = Epic' in ctx.jira.search_queries[-1]
+
+    saved = client.put("/v1/projects/TESTWP/repositories", json={
+        "repositories": [
+            {"repo": "jooservices/test-aiflow-wp", "base": "", "checks": [], "stack": ""},
+            {"repo": "jooservices/core-repo", "base": "", "checks": [], "stack": ""},
+        ],
+        "epic_repositories": {"TESTWP-12": "jooservices/core-repo"},
+    })
+    assert saved.status_code == 200, saved.text
+    config = yaml.safe_load((control_repo / "projects/TESTWP.yaml").read_text(encoding="utf-8"))
+    assert config["epic_repositories"] == {"TESTWP-12": "jooservices/core-repo"}
+    assert {item["repo"] for item in config["repositories"]} == {
+        "jooservices/test-aiflow-wp", "jooservices/core-repo"}
+    audit_row = ctx.db.one("SELECT actor,action,accepted,result,payload FROM write_audit"
+                           " WHERE target='aiflow-control' AND ticket='TESTWP'"
+                           " AND action='save_project_repositories' ORDER BY id DESC LIMIT 1")
+    assert audit_row["actor"] == "owner@example.test" and audit_row["accepted"] is True
+    assert audit_row["payload"]["epic_repositories"] == {"TESTWP-12": "jooservices/core-repo"}
+    assert ctx.github.commits[-1]["path"] == "projects/TESTWP.yaml"
+
+
+def test_dev_claim_uses_parent_epics_repository_and_fenced_github_writes(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    config_path = control_repo / "projects/TESTWP.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["repositories"] = [{"repo": "jooservices/core-repo", "base": "main", "checks": ["pytest"],
+                                "stack": "python-3.12"}]
+    config["epic_repositories"] = {"TESTWP-50": "jooservices/core-repo"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    ctx.repo = lambda: ControlRepo.load(control_repo)
+    ctx.github.repositories.append({"full_name": "jooservices/core-repo", "name": "core-repo",
+                                   "default_branch": "develop"})
+    ctx.github.available_branches[("core-repo", "main")] = True
+    headers = worker_headers(client)
+    ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,parent_key)"
+               " VALUES ('TESTWP-50','TESTWP','In Progress','Epic',%s,'Core','',NULL)", ([],))
+    add_ticket(ctx.db, "TESTWP-51")
+    ctx.db.run("UPDATE tickets SET type='Story',parent_key='TESTWP-50' WHERE key='TESTWP-51'")
+    add_ticket(ctx.db, "TESTWP-52")
+    ctx.db.run("UPDATE tickets SET type='Sub-task',parent_key='TESTWP-51' WHERE key='TESTWP-52'")
+
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-52", "account": "codex-01", "step": "dev"},
+                         headers=headers)
+    assert claimed.status_code == 200, claimed.text
+    data = claimed.json()
+    assert data["ticket"]["epic"] == "TESTWP-50"
+    assert data["project"]["repo"] == "jooservices/core-repo"
+    assert data["project"]["base"] == "main" and data["project"]["checks"] == ["pytest"]
+    token = client.post("/v1/github/token", json={"run_id": data["run_id"], "fence": data["fence"],
+                                                    "repo": "jooservices/core-repo"}, headers=headers)
+    assert token.status_code == 200, token.text
+    pr = client.post("/v1/github/pr", json={"run_id": data["run_id"], "fence": data["fence"],
+                                              "repo": "jooservices/core-repo", "head": "TESTWP-52-work",
+                                              "base": "main", "title": "test", "body": "", "draft": True},
+                     headers=headers)
+    assert pr.status_code == 200, pr.text
+    assert ctx.github.token_requests[-1][0] == "core-repo"
+    assert ctx.github.prs[-1]["repo"] == "core-repo" and ctx.github.prs[-1]["base"] == "main"
 
 
 def test_pause_and_remove_write_audits_have_owner_action_project_and_result(client, ctx, control_repo):

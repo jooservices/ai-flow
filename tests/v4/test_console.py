@@ -112,7 +112,7 @@ console.log(knowledgeView.innerHTML);
 
 
 def render_projects(projects: list[dict], catalog: dict, preflight: dict | None = None,
-                    user: dict | None = None) -> str:
+                    user: dict | None = None, repository_editor: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
@@ -125,6 +125,7 @@ S.projectAdmin.projects = {json.dumps(projects)};
 S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
+S.projectAdmin.repositoryEditor = {json.dumps(repository_editor)};
 S.consoleUser = {json.dumps(user or console_session_user())};
 renderProjects();
 console.log(projectsView.innerHTML);
@@ -411,6 +412,7 @@ console.log(JSON.stringify({
 def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
     ticket = {
         "key": "TESTFLOW-28", "summary": "Reviewer queue", "description": "Ticket details",
+        "repository": "jooservices/testflow",
         "jira_url": "https://jira.test/browse/TESTFLOW-28",
         "pr": {"url": "https://github.com/jooservices/testflow/pull/28", "number": 28,
                "title": "Reviewer queue", "additions": 8, "deletions": 2, "changed_files": 3},
@@ -427,7 +429,8 @@ console.log(root.innerHTML);
 """
     out = run_script(driver)
     for text in ("Human review queue", "TESTFLOW-28", "Ticket details", "pull/28", "Files changed",
-                 "Additions", "Deletions", "pytest passed", "Preview environment", "Approve and merge", "Send for rework"):
+                 "Repository", "jooservices/testflow", "Additions", "Deletions", "pytest passed",
+                 "Preview environment", "Approve and merge", "Send for rework"):
         assert text in out
     assert 'data-view="review"' in html() and 'id="view-review"' in html()
 
@@ -801,6 +804,53 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
                  "Needs owner", "node1: missing python3", "Run preflight", "Save project"):
         assert text in rendered
     assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
+
+
+def test_projects_editor_renders_live_epics_and_repository_specific_settings():
+    editor = {"key": "JOOWP", "busy": False, "saving": False, "error": "", "data": {
+        "default_repo": "jooservices/wordpress-core",
+        "project_defaults": {"base": "develop", "checks": ["composer install"], "stack": "php-8.3"},
+        "repositories": [
+            {"repo": "jooservices/wordpress-core", "base": "main", "checks": ["vendor/bin/phpunit"],
+             "stack": "php-8.3"},
+            {"repo": "jooservices/wordpress-mcp", "base": "", "checks": [], "stack": ""},
+        ],
+        "epic_repositories": {"JOOWP-306": "jooservices/wordpress-mcp"},
+        "epics": [{"key": "JOOWP-306", "summary": "MCP", "status": "To Do"}],
+        "github_repos": [{"full_name": "jooservices/wordpress-core"},
+                         {"full_name": "jooservices/wordpress-mcp"}],
+        "stacks": ["node-24", "php-8.3"],
+    }}
+    rendered = render_projects([{"key": "JOOWP", "repo": "jooservices/wordpress-core",
+                                 "repositories": ["jooservices/wordpress-core", "jooservices/wordpress-mcp"],
+                                 "status": "active", "priority": 5, "ticket_count": 2}], {},
+                              repository_editor=editor)
+    assert "JOOWP-306" in rendered and "MCP" in rendered
+    assert "jooservices/wordpress-mcp" in rendered and "Inherit develop" in rendered
+    assert "Save repository settings" in rendered and "data-epic-repository" in rendered
+
+
+def test_ticket_cards_business_change_requests_and_drawer_show_selected_repository():
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the console")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = r"""
+var ticket = {key: 'JOOWP-4', project: 'JOOWP', summary: 'MCP change', status: 'To Do', type: 'Story',
+  priority: 'Medium', labels: [], blocked_by: [], repository: 'jooservices/wordpress-mcp', parent_key: 'JOOWP-306'};
+S.data = {tickets: [ticket], projects: [], nodes: [], accounts: [], active_runs: [], recent_runs: [],
+  incidents: [], events: [], totals: {}, versions: {}};
+S.ticket[ticket.key] = {ticket: ticket, runs: [], events: [], writes: [], timeline: null, jira_url: ''};
+console.log(card(ticket, {work_minutes: {hard: 60}}));
+console.log(crCard({key: ticket.key, summary: ticket.summary, epic: ticket.parent_key, status: ticket.status}));
+console.log(drawerTicket(ticket.key));
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("jooservices/wordpress-mcp") >= 3
+    assert "Repository" in result.stdout
 
 
 def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints():

@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Master monitoring](../../docs/v4/master.md): fenced Claude/Codex cycles monitor incidents, follow up, and escalate protected work
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
@@ -21,7 +22,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Worktree cleanup](../../docs/v4/worktree-cleanup.md): nodes delete the worktrees of Done tickets and spent per-run checkouts
 - [Develop channel](../../docs/v4/develop-channel.md): lab hosts opt in to unsigned builds of `develop` while there is no release
 - [Business view](../../docs/v4/business.md): `/business` shows epic progress, tickets waiting on the owner and change requests with their AI impact assessment
-- [Command Center node operations](../../docs/v4/node-operations.md): owner-only install, desired-state repair, one-time join commands and audited operation logs
+- [Command Center node operations](../../docs/v4/node-operations.md): `nodes.manage` install, desired-state repair and one-time join actions for `owner` and `super_admin`, with audited operation logs
 - [Project close reports and study cases](../../docs/v4/project-study-cases.md): close projects, email versioned reports, and find saved reports in memory
 - [Human review queue](../../docs/v4/reviewer-queue.md): `/review` shows PR and verify details, with token-authorized fenced approve and rework actions
 - [Stakeholder review](../../docs/v4/stakeholder.md): `/stakeholder` opens configured environment links and records acceptance or UAT feedback in Jira
@@ -41,13 +42,14 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Memory and RAG](../../docs/v4/memory-rag.md): locally embedded multilingual memory combines pgvector similarity with full-text search
 - [OpenObserve event delivery](../../docs/v4/openobserve-delivery.md): lab memtable sizing, bounded event retries and sustained rejection incidents
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
-- [Connect Jira from the UI](../../docs/v4/jira-connect.md): owner-only OAuth 2.0 (3LO) or API-token connection on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
+- [Connect Jira from the UI](../../docs/v4/jira-connect.md): `integrations.manage` OAuth 2.0 (3LO) or API-token connection for `owner` and `super_admin` on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
+- [Console roles and permissions](../../docs/v4/console-roles.md): UI controls and protected API actions follow the shared role permission map
 - [No CLI for end users](../../docs/v4/no-cli.md): inventory of owner and user operations that still need commands, their replacement tickets, and proposed backlog gaps
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
+- [Command Center V2](../../docs/v4/command-center-v2.md): implementation guide and design prototype for the warm theme, combined Dashboard, role views, Work board picker and Ctrl K search
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
-- [Command Center V2](../../docs/v4/command-center-v2.md): warm graphite console, role-aware navigation, combined Dashboard, searchable Work board project picker, and Ctrl K quick search
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 
 ## Tools on a node

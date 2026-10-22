@@ -464,6 +464,9 @@ def test_only_the_owner_may_connect_store_tokens_or_disconnect(web, jira_env, at
     assert jira_env.jira_auth.store.app()["client_id"] == CLIENT_ID
     refused = [r for r in audit_rows(jira_env) if not r["accepted"]]
     assert len(refused) == 9 and {r["actor"] for r in refused} == {"", "lead@example.test"}
+    admin = TestClient(web.app, base_url="https://control.example.test")
+    sign_in(admin, role="super_admin", subject="admin@example.test")
+    assert admin.get("/v1/integrations/jira").status_code == 200
     # the owner bearer token is accepted as well (same token as the other owner actions)
     owner = TestClient(web.app, base_url="https://control.example.test")
     assert owner.get("/v1/integrations/jira", headers={"Authorization": "Bearer owner-secret"}).status_code == 200

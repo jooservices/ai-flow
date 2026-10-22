@@ -170,11 +170,24 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})["token"]
         mirror = git.mirror(repo, token)
         wt = Path(srv_root) / "work" / project["key"] / branch
+        moved = git.foreign_worktree(mirror, wt, branch)
+        if moved:  # the ticket's repository changed since the worktree was made: never reuse it
+            log.warning("%s: repository changed from %s to %s; replacing worktree %s", key, moved["old_repo"], repo, wt)
+            work = (f"{len(moved['commits'])} committed change(s) on branch {branch} in {moved['old_repo']}"
+                    + (" (the branch is also pushed there):\n" if moved["pushed"] else " (not pushed anywhere):\n")
+                    + "\n".join(f"- {x}" for x in moved["commits"][:20])) if moved["commits"] else "no committed work on the old branch"
+            jira("comment", body=note(c, "repository changed", what=f"The ticket's repository changed from {moved['old_repo']} to {repo}",
+                                      why="The old worktree belongs to the old repository, so the AI could not find the code in it",
+                                      result=f"Old worktree and branch {branch} removed; {work}",
+                                      next_=f"A new worktree is created from {repo} {project['base']}", node=api_node(api)))
+            git.drop_foreign_worktree(wt, branch, Path(moved["old_mirror"]))
         start = git.worktree(mirror, wt, branch, project["base"])
         conflicts: list[str] = []
         if start != f"origin/{project['base']}":  # continuing the branch: bring in the latest base first
             conflicts = git.merge_base_in(wt, project["base"], c.identity)
         hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
+        if moved:
+            hb.progress["repo_change"] = f"{moved['old_repo']} -> {repo}"
         jira("transition", to="In Progress")
         jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})

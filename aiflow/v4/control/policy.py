@@ -82,8 +82,7 @@ class Decision:
                                        "permissionDecisionReason": self.reason}}
 
 
-MASTER_ACTIONS = {"jira_comment", "jira_update", "dev_reply", "requeue", "incident_open", "incident_close",
-                  "notify_owner", "escalate_to_owner"}
+MASTER_ACTIONS = {"retry", "move_to_todo", "pause_account", "restart_run", "open_bug", "escalate_to_owner"}
 # Matched only against what the master requests (the action name, its intent and an explicit category), never
 # against observations such as "node1 is offline" or "the run passed the hard limit, restart it": monitoring
 # talks about nodes, servers and restarts all the time, and those follow-ups are allowed master work.

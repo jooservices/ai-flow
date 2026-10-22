@@ -171,6 +171,10 @@ class GitHubApp:
         """Reopen the existing release PR after a prior merge attempt was blocked by repository policy."""
         return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{number}", {"state": "open"}, repo=repo)
 
+    def close_pr(self, repo: str, number: int) -> dict:
+        """Close a pull request rejected in human review without merging it."""
+        return self.api("PATCH", f"/repos/{self.org}/{repo}/pulls/{number}", {"state": "closed"}, repo=repo)
+
     def comment(self, repo: str, number: int, body: str) -> None:
         self.api("POST", f"/repos/{self.org}/{repo}/issues/{number}/comments", {"body": body[:60000]}, repo=repo)
 

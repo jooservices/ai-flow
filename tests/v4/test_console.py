@@ -459,14 +459,23 @@ def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
     driver = f"""
 var root = {{innerHTML: ''}};
 document.querySelector = function (s) {{ return s === '#view-review' ? root : null; }};
-S.reviews = [{json.dumps(ticket)}];
+    S.reviews = [{json.dumps(ticket)}, {{key: 'TESTFLOW-29', summary: 'AI question', status: 'Needs owner',
+      kind: 'question_from_ai', actions: ['answer', 'ask-ai'], jira_url: 'https://jira.test/browse/TESTFLOW-29',
+      pr: {{}}, verify: {{}}, thread: [{{kind: 'question', author: 'Reviewer', text: 'Can retries be preserved?'}}]}}];
+S.reviewMetrics = {{people_needed_this_week: 2, people_needed_eight_weeks_ago: 1, finished_with_no_person_pct: 50,
+  median_wait_minutes: 10, approved_first_time_pct: 75, sent_back_or_rejected_pct: 25,
+  weekly: [{{week: '2026-10-19', total: 2, by_reason: {{question_from_ai: 1, decision_needed: 1,
+    review_before_merge: 0, blocked: 0}}}}], suggestions: [{{reason: 'question_from_ai', suggestion: 'Clarify repeated questions.'}}]}};
+S.reviewProjects = ['TESTFLOW', 'TESTWP'];
 renderReviews();
 console.log(root.innerHTML);
 """
     out = run_script(driver)
     for text in ("Human review queue", "TESTFLOW-28", "Ticket details", "pull/28", "Files changed",
                  "Repository", "jooservices/testflow", "Additions", "Deletions", "pytest passed",
-                 "Preview environment", "Approve and merge", "Send for rework"):
+                 "Preview environment", "Approve and merge", "Reject", "Send for rework", "Skip gate and merge",
+                 "Answer", "Ask AI a question", "Can retries be preserved?", "Changes to reduce each reason",
+                 "Approved first time", "Export metrics CSV", "Project"):
         assert text in out
     assert 'data-view="review"' in html() and 'id="view-review"' in html()
 
@@ -1141,6 +1150,7 @@ def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal()
     assert ".tabs{max-width:100%;width:100%}" in style
     for old_blue in ("#2453D6", "#88AAFF", "#0A0F1E", "#111933", "#7b6cff"):
         assert old_blue.lower() not in style.lower()
+    assert ".reason-question_from_ai{background:var(--provider-claude)}" in style
     assert 'data-view="cc">Command Center</button>' not in page
 
 

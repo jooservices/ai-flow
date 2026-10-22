@@ -52,7 +52,9 @@ After checks pass, the control plane creates a dated `CHANGELOG.md` section from
 grouped as Added, Changed and Fixed. It updates a managed Current release block in the README with the version
 and included tickets. It discovers existing `package.json`, `composer.json`, `package-lock.json`, `pyproject.toml`,
 `Cargo.toml`, `setup.cfg`, `Chart.yaml` and `.csproj` manifests, and updates only those that already contain a
-version field. A project may provide an explicit `manifest_files` list. The control plane commits changed files
+version field. Only the project's own version is changed: `[project]`/`[tool.poetry]` in `pyproject.toml`,
+`[package]`/`[workspace.package]` in `Cargo.toml`, top-level `version`/`appVersion` in `Chart.yaml` (never
+`dependencies[].version`), `[metadata]` in `setup.cfg`. A project may provide an explicit `manifest_files` list. The control plane commits changed files
 on the release branch before it opens a non-draft PR from that branch to `master`.
 
 Release PRs use GitHub's **merge commit** method. Squash is never used, so the commits from `develop` remain in

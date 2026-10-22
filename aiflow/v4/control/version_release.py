@@ -150,10 +150,11 @@ def _update_manifest(path: str, content: str, version_name: str) -> str:
                 section = match.group(1).strip().lower()
             should_update = (basename == "pyproject.toml" and section in {"project", "tool.poetry"}
                              and re.match(r"\s*version\s*=", line)
-                             or basename == "cargo.toml" and not section and re.match(r"\s*version\s*=", line)
+                             or basename == "cargo.toml" and section in {"package", "workspace.package"}
+                             and re.match(r"\s*version\s*=", line)
                              or basename == "setup.cfg" and section == "metadata"
                              and re.match(r"\s*version\s*=", line)
-                             or basename == "chart.yaml" and re.match(r"\s*(version|appVersion)\s*:", line))
+                             or basename == "chart.yaml" and re.match(r"(version|appVersion)\s*:", line))
             if should_update:
                 key = "version|appVersion" if basename == "chart.yaml" else "version"
                 quoted = re.sub(r"(?m)^(\s*(?:" + key + r")\s*(?:=|:)\s*)([^\s#]+)(.*)$",
@@ -165,7 +166,7 @@ def _update_manifest(path: str, content: str, version_name: str) -> str:
                         break
         return "".join(lines) if changed else content
 
-    if basename.endswith(".xml"):
+    if basename.endswith((".csproj", ".xml")):
         return re.sub(r"(?is)(<Version>)[^<]+(</Version>)",
                       lambda match: f"{match.group(1)}{number}{match.group(2)}", content, count=1)
     return content

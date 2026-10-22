@@ -682,3 +682,45 @@ def test_testwp_default_release_scope_names_both_trial_versions(ctx):
     assert [item["name"] for item in eligible] == [CORE, THEME]
     assert version_release.release_tag(project, CORE) == "testwp-wordpress-core-0.5.0-beta"
 
+
+def test_manifest_update_pyproject_bumps_project_version_only():
+    content = ('[build-system]\nrequires = ["hatchling"]\n\n[project]\nname = "demo"\nversion = "0.4.0"\n'
+               'dependencies = ["requests>=2"]\n\n[tool.other]\nversion = "9.9.9"\n')
+    updated = version_release._update_manifest("pyproject.toml", content, CORE)
+    assert '[project]\nname = "demo"\nversion = "0.5.0-beta"\n' in updated
+    assert '[tool.other]\nversion = "9.9.9"' in updated
+    assert updated.count("0.5.0-beta") == 1
+
+
+def test_manifest_update_cargo_bumps_package_version_not_dependencies():
+    content = ('[package]\nname = "demo"\nversion = "0.4.0"\nedition = "2021"\n\n'
+               '[dependencies]\nserde = { version = "1.0" }\n\n[dependencies.tokio]\nversion = "1.38"\n')
+    updated = version_release._update_manifest("crates/demo/Cargo.toml", content, CORE)
+    assert '[package]\nname = "demo"\nversion = "0.5.0-beta"\n' in updated
+    assert 'serde = { version = "1.0" }' in updated
+    assert '[dependencies.tokio]\nversion = "1.38"' in updated
+
+
+def test_manifest_update_cargo_workspace_package():
+    content = '[workspace]\nmembers = ["a"]\n\n[workspace.package]\nversion = "0.4.0"\n'
+    updated = version_release._update_manifest("Cargo.toml", content, CORE)
+    assert '[workspace.package]\nversion = "0.5.0-beta"\n' in updated
+
+
+def test_manifest_update_chart_keeps_dependency_versions():
+    content = ('apiVersion: v2\nname: demo\nversion: 0.4.0\nappVersion: "0.4.0"\n'
+               'dependencies:\n  - name: redis\n    version: 17.3.0\n    repository: https://charts.example\n'
+               '  - name: postgresql\n    version: "12.1.0"\n')
+    updated = version_release._update_manifest("deploy/chart/Chart.yaml", content, CORE)
+    assert 'version: "0.5.0-beta"\nappVersion: "0.5.0-beta"\n' in updated
+    assert "    version: 17.3.0\n" in updated
+    assert '    version: "12.1.0"\n' in updated
+    assert updated.count("0.5.0-beta") == 2
+
+
+def test_manifest_update_setup_cfg_and_csproj():
+    cfg = "[metadata]\nname = demo\nversion = 0.4.0\n\n[options]\ninstall_requires =\n    x\n"
+    assert 'version = "0.5.0-beta"' in version_release._update_manifest("setup.cfg", cfg, CORE)
+    csproj = "<Project><PropertyGroup><Version>0.4.0</Version></PropertyGroup></Project>\n"
+    assert "<Version>0.5.0-beta</Version>" in version_release._update_manifest("src/App.csproj", csproj, CORE)
+

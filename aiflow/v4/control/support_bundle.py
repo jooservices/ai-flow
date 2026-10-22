@@ -26,10 +26,11 @@ MAX_LOG_BYTES = 5 * 1024 * 1024
 RETENTION = timedelta(hours=24)
 MAX_INCIDENTS = 100
 
-_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization)[A-Za-z0-9_-]*)"
+_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*)"
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?P<prefix>\b{_SECRET_NAME}\b\s*\\?[\"']?\s*[:=]\s*)"
-    r"(?P<value>\\?\"(?:\\.|[^\"\\])*?\\?\"|\\?'(?:\\.|[^'\\])*?\\?'|[^\s,;}]+)"
+    r"(?P<value>\[REDACTED\]|\\?\"(?:\\.|[^\"\\])*?\\?\"|\\?'(?:\\.|[^'\\])*?\\?'|[^\r\n]*?)"
+    r"(?P<suffix>(?:\\?[\"'{}\[\],]\s*)*)$"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _KNOWN_TOKEN = re.compile(
@@ -41,6 +42,11 @@ _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _PHONE = re.compile(r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(\d{2,4}\)|\d{2,4})[ .-]\d{3,4}[ .-]\d{4}(?!\w)")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b", re.I)
+_PERSON_FIELD = re.compile(
+    r"(?i)(?P<prefix>\b(?:owner|assignee|reporter|contact|person|(?:first|last|full)[ _-]?name|user(?:[ _-]?name)?)"
+    r"\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)"
+    r"(?P<value>[A-Z][A-Za-z'-]{1,30})\b(?P<suffix>\\?[\"']?)"
+)
 _COMMON_LOWER_NAME_WORDS = frozenset({
     "account", "accounts", "active", "api", "available", "background", "bundle", "cache", "captured",
     "closed", "control", "current", "data", "default", "detail", "enabled", "entry", "error", "event",
@@ -80,7 +86,8 @@ def sanitize_text(text: str) -> str:
     text = _ADDRESS.sub("[REDACTED_ADDRESS]", text)
     text = _IP.sub(_redact_ip, text)
     text = _HOME_PATH.sub(r"\1[REDACTED_USER]", text)
-    return _NAME.sub(_redact_name, text)
+    text = _NAME.sub(_redact_name, text)
+    return _PERSON_FIELD.sub(_redact_person_field, text)
 
 
 def _redact_name(match: re.Match[str]) -> str:
@@ -89,6 +96,10 @@ def _redact_name(match: re.Match[str]) -> str:
     if value.islower() and all(word in _COMMON_LOWER_NAME_WORDS for word in words):
         return value
     return "[REDACTED_NAME]"
+
+
+def _redact_person_field(match: re.Match[str]) -> str:
+    return match.group("prefix") + "[REDACTED_NAME]" + match.group("suffix")
 
 
 def _redact_secret_assignment(match: re.Match[str]) -> str:
@@ -104,7 +115,7 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
         redacted = "'[REDACTED]'"
     else:
         redacted = "[REDACTED]"
-    return match.group("prefix") + redacted
+    return match.group("prefix") + redacted + match.group("suffix")
 
 
 def sensitive_findings(text: str) -> list[str]:
@@ -116,7 +127,8 @@ def sensitive_findings(text: str) -> list[str]:
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    has_name = any(_redact_name(match) != match.group(0) for match in _NAME.finditer(text))
+    has_name = (any(_redact_name(match) != match.group(0) for match in _NAME.finditer(text))
+                or bool(_PERSON_FIELD.search(text)))
     if _EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _ADDRESS.search(text) or has_ip or has_name:
         findings.append("personal_data")
     return findings

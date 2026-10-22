@@ -90,13 +90,14 @@ def test_bundle_scrubs_personal_data_and_credentials_before_archive_is_built(ctx
     email = "private.person@example.test"
     ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
                " VALUES ('test','TESTWP-1','warning','Private incident',%s)",
-               (f"token={token}; contact {email}; phone +1 (415) 555-0134; Jane Doe",))
+               (f"owner=Alice; token={token}; contact {email}; phone +1 (415) 555-0134; Jane Doe",))
 
     archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         contents = {name: bundle.read(name).decode("utf-8") for name in bundle.namelist()}
     joined = "\n".join(contents.values())
-    assert token not in joined and email not in joined and "415) 555-0134" not in joined and "Jane Doe" not in joined
+    assert token not in joined and email not in joined and "415) 555-0134" not in joined
+    assert "Jane Doe" not in joined and "Alice" not in joined
     assert all(not support_bundle.sensitive_findings(content) for content in contents.values())
 
 
@@ -131,12 +132,41 @@ def test_secret_scanner_redacts_and_rejects_the_full_quoted_value():
     assert "credential" in support_bundle.sensitive_findings('password: "[REDACTED] secret phrase"')
 
 
+def test_secret_scanner_redacts_session_and_cookie_credentials():
+    for raw in ("session=abc123def456", "cookie=auth-cookie-value", "set-cookie: session=abc123"):
+        clean = support_bundle.sanitize_text(raw)
+
+        assert "credential" in support_bundle.sensitive_findings(raw)
+        assert raw.split("=", 1)[-1].split(":", 1)[-1].strip() not in clean
+        assert not support_bundle.sensitive_findings(clean)
+
+
+def test_secret_scanner_redacts_full_unquoted_multiword_value():
+    raw = "password=two words"
+    clean = support_bundle.sanitize_text(raw)
+
+    assert "credential" in support_bundle.sensitive_findings(raw)
+    assert clean == "password=[REDACTED]"
+    assert "two words" not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+
 def test_personal_data_scan_redacts_lowercase_names():
     raw = "alice johnson"
     clean = support_bundle.sanitize_text(raw)
 
     assert "personal_data" in support_bundle.sensitive_findings(raw)
     assert "alice johnson" not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+
+def test_personal_data_scan_redacts_single_name_in_person_field():
+    raw = "owner=Alice"
+    clean = support_bundle.sanitize_text(raw)
+
+    assert "personal_data" in support_bundle.sensitive_findings(raw)
+    assert clean == "owner=[REDACTED_NAME]"
+    assert "Alice" not in clean
     assert not support_bundle.sensitive_findings(clean)
 
 

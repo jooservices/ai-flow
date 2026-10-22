@@ -10,10 +10,14 @@ from __future__ import annotations
 import hashlib
 import re
 import string
+import time
 import uuid
 from typing import Any
 
 from .db import J
+
+FAILURE_ACTIONS = ("jira-release-check-failed", "jira-release-publish-failed")
+JIRA_RETRY_S = 3600  # a publish error whose Jira follow-up could not be created waits this long before a retry
 
 TESTWP_DEFAULT = {
     "enabled": True,
@@ -150,8 +154,49 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
         reasons = [f"{t['key']}: missing {', '.join(t['missing'])}" for t in tickets if t["missing"]]
     if not check_commands(project):
         reasons.append("no full project check commands are configured")
+    reasons.extend(_failure_reasons(ctx, project, version, tickets))
     return {"project": project.key, "version_id": str(version["id"]), "version": version["name"],
             "tickets": tickets, "ready": bool(tickets) and not reasons, "reasons": reasons}
+
+
+def _last_failure(ctx, tracker: str) -> dict | None:
+    return ctx.db.one("SELECT action, payload FROM write_audit WHERE ticket=%s AND action IN (%s, %s)"
+                      " ORDER BY id DESC LIMIT 1", (tracker, *FAILURE_ACTIONS))
+
+
+def _failure_reasons(ctx, project: Any, version: dict[str, Any], tickets: list[dict[str, Any]]) -> list[str]:
+    """Keep a `failed` version out of release until the blockers recorded by its last failure are resolved.
+
+    The live Jira search can lag behind issue creation, so a release-check Bug must appear in the version's
+    member list (where the member gate requires it Done with evidence) before the version is ready again. A
+    publication follow-up Task stays outside the version and only has to reach Done.
+    """
+    row = _tracker_row(ctx, project.key, version["id"])
+    if not row or row["status"] != "failed" or not row["tracker_key"]:
+        return []
+    last = _last_failure(ctx, row["tracker_key"])
+    if not last:
+        return []
+    payload = last["payload"] or {}
+    members = {t["key"]: t["status"] for t in tickets}
+    reasons = []
+    for bug in payload.get("bugs") or []:
+        key = str(bug.get("key") or "")
+        if key and key not in members:
+            reasons.append(f"{key}: release-check Bug is not yet listed in Jira version {version['name']}")
+    for blocker in payload.get("blockers") or []:
+        key = str(blocker.get("key") or "")
+        try:
+            status = ctx.jira.status(key)
+        except Exception:  # noqa: BLE001 - an unreadable blocker keeps the version waiting
+            status = "unknown"
+        if status != "Done":
+            reasons.append(f"{key}: release follow-up is {status}, not Done")
+    retry_after = float(payload.get("retry_after") or 0)
+    if retry_after > time.time():
+        reasons.append("publication failed and its Jira follow-up could not be created; retrying after "
+                       + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(retry_after)))
+    return reasons
 
 
 def _snapshot_text(snapshot: dict[str, Any]) -> str:
@@ -167,7 +212,7 @@ def record_gate(ctx, project: Any, version: dict[str, Any], snapshot: dict[str, 
     detail = _snapshot_text(snapshot)
     prior_detail = row["gate_detail"] if row else ""
     prior_status = row["status"] if row else "pending"
-    status = prior_status if prior_status in ("checking", "released") else ("pending" if snapshot["ready"] else "blocked")
+    status = prior_status if prior_status in ("checking", "released", "failed") else ("pending" if snapshot["ready"] else "blocked")
     ctx.db.run("UPDATE version_releases SET version_name=%s, status=%s, gate_detail=%s, ticket_snapshot=%s,"
                " updated_at=now() WHERE project=%s AND version_id=%s",
                (version["name"], status, detail, J(snapshot["tickets"]), project.key, version["id"]))
@@ -303,6 +348,57 @@ def _failed_checks(ctx, project: Any, version: dict[str, Any], tracker: str, run
                     run_id=str(run["id"]), fence=run["fence"], account=run["account_id"], node=run["node"],
                     outcome="failed", reason=text, data={"version_id": version["id"], "bugs": bugs})
     return {"released": False, "status": "failed", "bugs": bugs}
+
+
+def publish_failed(ctx, project: Any, version: dict[str, Any], run: dict, exc: Exception) -> dict[str, Any]:
+    """Park a version after a GitHub/Jira publication error behind one blocking follow-up Task.
+
+    The version stays `failed` (never `pending`), so workers do not reclaim it and rerun the full checks on
+    every poll; it becomes a candidate again once the Task is Done. The same error with its Task still open
+    reuses that Task and posts no new comment.
+    """
+    tracker = tracker_for(ctx, project, version["id"], version["name"])
+    error = str(exc)[:1000]
+    message = f"Automatic publication stopped at an integration error: {error}"
+    row = _tracker_row(ctx, project.key, version["id"])
+    if row and row["status"] == "released":
+        return {"released": True, "status": "released", "reason": message}
+    _set_state(ctx, project.key, version["id"], status="failed", gate_detail=message)
+    last = _last_failure(ctx, tracker)
+    prior = (last["payload"] or {}) if last and last["action"] == "jira-release-publish-failed" else {}
+    same_error = prior.get("error") == error
+    task = ""
+    if same_error:
+        for blocker in prior.get("blockers") or []:
+            try:
+                if ctx.jira.status(blocker["key"]) != "Done":
+                    task = str(blocker["key"])
+            except Exception:  # noqa: BLE001 - unknown status: create a fresh follow-up below
+                pass
+    payload: dict[str, Any] = {"error": error, "version_id": version["id"]}
+    try:
+        created = not task
+        if created:
+            task = ctx.jira.create_issue(
+                project.key, f"Release publication failed: {version['name']}"[:250],
+                f"The full checks for Jira version {version['name']} passed, but publication stopped:\n\n{error}\n\n"
+                f"Fix the cause (for example a merge conflict between {source_branch(project)} and "
+                f"{target_branch(project)}, branch protection, or GitHub access) and move this Task to Done. "
+                f"AI Flow then checks and releases the version again.",
+                issuetype="Task", labels=["aiflow-version-release", "release-publish"])
+            ctx.jira.link_issues(task, tracker, "Blocks")
+        payload["blockers"] = [{"key": task}]
+        if created or not same_error:
+            ctx.jira.comment(tracker, f"{message}\nRelease is blocked by {task} until it is Done.")
+    except Exception as jira_exc:  # noqa: BLE001 - without a Jira blocker, fall back to a timed retry
+        payload["jira_error"] = str(jira_exc)[:500]
+        payload["retry_after"] = time.time() + JIRA_RETRY_S
+    _audit(ctx, project, tracker, run, "jira-release-publish-failed", message, payload)
+    ctx.events.emit("version_release.error", ticket=tracker, project=project.key, step="version_release",
+                    run_id=str(run["id"]), fence=run["fence"], outcome="failed", reason=message,
+                    data={"version_id": version["id"], "blockers": payload.get("blockers", []),
+                          "retry_after": payload.get("retry_after")})
+    return {"released": False, "status": "failed", "reason": message, "blockers": payload.get("blockers", [])}
 
 
 def complete(ctx, project: Any, version: dict[str, Any], run: dict, report: dict[str, Any]) -> dict[str, Any]:

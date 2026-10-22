@@ -36,8 +36,18 @@ required. The control plane verifies the source branch still points to the teste
 
 If a check fails, AI Flow creates one `Bug` for each failing command, assigns the Jira version, adds
 `aiflow-ready` and `release-check` labels, moves each Bug to `To Do`, and links each Bug as blocking the Release
-tracker. The version is checked again by the normal loop after the Bugs have reached `Done` and satisfy the full
-readiness gate.
+tracker. The version stays `failed` and is checked again by the normal loop after the Bugs have reached `Done`
+and satisfy the full readiness gate. Because the Jira search can lag behind issue creation, every Bug key
+recorded in the `jira-release-check-failed` audit must also appear in the live member list before a `failed`
+version can be claimed again; a version whose Bugs are not indexed yet is blocked, not re-checked.
+
+If publication stops at an integration error (merge conflict, protected destination branch, a failing GitHub or
+Jira API, a tag that points elsewhere), the version also stays `failed` instead of returning to `pending`, so
+workers do not reclaim it and rerun the full checks on every poll. AI Flow creates one Jira `Task` labelled
+`release-publish`, links it as blocking the Release tracker, comments the error once, and records the Task in a
+`jira-release-publish-failed` audit. The version waits until that Task is `Done`. A repeat of the same error
+while the Task is open reuses it and posts no new comment. If Jira itself cannot take the follow-up Task, the
+audit records a retry time one hour ahead and the version waits until then.
 
 After all commands pass, AI Flow merges the configured source branch into the destination, creates a unique tag,
 publishes a GitHub Release with notes listing the current version tickets and check results, and marks the Jira

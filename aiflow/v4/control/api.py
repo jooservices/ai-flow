@@ -2227,18 +2227,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         github_gateway(ctx)
         try:
             result = version_release.complete(ctx, project, version, run, report)
-        except Exception as exc:  # noqa: BLE001 - preserve a Jira audit entry and let the idempotent run retry
+        except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
-            tracker = version_release.tracker_for(ctx, project, version_id, version["name"])
-            message = f"Automatic publication stopped at an integration error: {str(exc)[:1000]}"
-            ctx.db.run("UPDATE version_releases SET status=CASE WHEN status='released' THEN status ELSE 'pending' END,"
-                       " gate_detail=%s,updated_at=now() WHERE project=%s AND version_id=%s",
-                       (message, project.key, version_id))
-            ctx.jira.comment(tracker, message)
-            ctx.events.emit("version_release.error", ticket=tracker, project=project.key, step="version_release",
-                            run_id=body.run_id, fence=body.fence, outcome="failed", reason=message,
-                            data={"version_id": version_id})
-            return {"released": False, "status": "failed", "reason": message}
+            return version_release.publish_failed(ctx, project, version, run, exc)
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
                                                                               "checks": body.checks}), body.run_id))

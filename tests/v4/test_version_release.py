@@ -252,7 +252,90 @@ def test_failed_bugs_enter_the_live_gate_and_are_rechecked_only_after_done(ctx):
     assert f"{bug['key']}: missing reviewer PASS, QA merge, QC checks" in still_blocked["reasons"]
     assert version_release.scan(ctx) == 1
     state = ctx.db.one("SELECT status,gate_detail FROM version_releases WHERE project='TESTWP' AND version_id='101'")
-    assert state["status"] == "blocked" and bug["key"] in state["gate_detail"]
+    assert state["status"] == "failed" and bug["key"] in state["gate_detail"]
+
+
+def test_failed_version_waits_until_jira_search_lists_its_new_bugs(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-45")
+    project = ctx.repo().projects["TESTWP"]
+    version = ctx.jira.version_data["TESTWP"][0]
+    version_release.record_gate(ctx, project, version, version_release.evaluate(ctx, project, version))
+    version_release.complete(ctx, project, version,
+                             {"id": "run-lag", "fence": 1, "account_id": "claude-01", "node": "cc"},
+                             {"head_sha": "a" * 40, "checks": [{"command": "composer test", "passed": False,
+                                                                "exit_code": 1, "output": "failed"}]})
+    bug = next(row for row in ctx.jira.created if row["issuetype"] == "Bug")
+    headers = node_headers(client)
+
+    # Jira search has not indexed the new Bug yet: the member list still shows only the Done ticket
+    lagging = version_release.evaluate(ctx, project, version)
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert not lagging["ready"]
+    assert f"{bug['key']}: release-check Bug is not yet listed in Jira version {CORE}" in lagging["reasons"]
+    assert candidates["versions"] == [] and claim.status_code == 409
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release'")["n"] == 0
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Bug"]) == 1
+
+    ctx.jira.version_issue_data[("TESTWP", "101")].append(issue(bug["key"], "To Do"))
+    assert client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()["versions"] == []
+    ctx.jira.version_issue_data[("TESTWP", "101")].pop()
+    evidence(ctx, bug["key"])
+    ready = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    assert [item["version_id"] for item in ready["versions"]] == ["101"]
+
+
+def test_publish_error_parks_version_behind_one_follow_up_instead_of_reclaiming(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-46")
+    ctx.github.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    headers = node_headers(client)
+    merge_branch = ctx.github.merge_branch
+
+    def protected(repo, base, head, message):
+        raise RuntimeError("409 merge conflict: master is protected")
+
+    ctx.github.merge_branch = protected
+
+    def worker_iteration(expected: str = "failed") -> int:
+        claims = 0
+        for release in client.get("/v1/version-releases/candidates?account=claude-01",
+                                  headers=headers).json()["versions"]:
+            claim = claim_release(client, headers, release["version_id"])
+            if claim.status_code != 200:
+                continue
+            claims += 1
+            run = claim.json()
+            result = client.post("/v1/version-releases/101/complete",
+                                 json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                                       "checks": [{"command": "composer install", "passed": True},
+                                                  {"command": "vendor/bin/phpunit", "passed": True}]},
+                                 headers=headers)
+            assert result.status_code == 200 and result.json()["status"] == expected, result.text
+            client.post(f"/v1/runs/{run['run_id']}/release", json={"fence": run["fence"]}, headers=headers)
+        return claims
+
+    claims = worker_iteration() + worker_iteration()
+
+    tracker = ctx.db.one("SELECT tracker_key FROM version_releases")["tracker_key"]
+    tasks = [row for row in ctx.jira.created if row["issuetype"] == "Task"]
+    error_comments = [body for key, body in ctx.jira.comments if key == tracker and "integration error" in body]
+    state = ctx.db.one("SELECT status,gate_detail FROM version_releases WHERE project='TESTWP' AND version_id='101'")
+    assert claims == 1
+    assert len(tasks) == 1 and "release-publish" in tasks[0]["labels"]
+    assert ctx.jira.issue_links == [(tasks[0]["key"], tracker, "Blocks")]
+    assert len(error_comments) == 1 and tasks[0]["key"] in error_comments[0]
+    assert state["status"] == "failed" and "master is protected" in state["gate_detail"]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='jira-release-publish-failed'")["n"] == 1
+    assert ctx.github.tags == {} and ctx.jira.released_versions == []
+
+    ctx.jira.status_of[tasks[0]["key"]] = "Done"
+    ctx.github.merge_branch = merge_branch
+    assert worker_iteration("released") == 1
+    assert ctx.jira.released_versions == ["101"] and len(ctx.github.tags) == 1
+    assert len([row for row in ctx.jira.created if row["issuetype"] == "Task"]) == 1
 
 
 def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_back(client, ctx):

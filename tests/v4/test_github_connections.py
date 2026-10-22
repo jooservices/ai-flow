@@ -1,6 +1,7 @@
 """Several GitHub connections held by Command Center, chosen per repository (JAIF-220)."""
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -30,6 +31,10 @@ class PersonalGitHub(FakeGitHub):
         self.repositories = [{"full_name": "person/tool", "name": "tool", "default_branch": "develop"},
                              {"full_name": "someone-else/skipped", "name": "skipped", "default_branch": "main"}]
 
+    def token(self, repo=None, permissions=None):
+        from datetime import datetime, timedelta, timezone
+        return self._token_value, datetime.now(timezone.utc) + timedelta(hours=1)
+
 
 @pytest.fixture
 def secrets_dir(ctx, tmp_path, monkeypatch):
@@ -54,6 +59,17 @@ def test_single_app_installation_is_the_first_connection(client, ctx, secrets_di
     assert first["kind"] == "app" and first["account"] == "jooservices" and first["status"] == "connected"
     assert "jooservices/new-app" in first["repositories"]
     assert github_gateway(ctx, "jooservices/new-app") is ctx.github  # nothing else configured: unchanged path
+    with pytest.raises(HTTPException) as refused:
+        github_gateway(ctx, "jooservices/not-reachable")
+    assert refused.value.status_code == 409
+
+
+def test_short_invalid_token_is_never_echoed_by_validation_response(client, ctx, secrets_dir):
+    owner_sign_in(client, ctx)
+    secret = "short-credential-sentinel"
+    response = add_token(client, token=secret[:8])
+    assert response.status_code == 422
+    assert secret[:8] not in response.text
 
 
 def test_token_is_verified_stored_in_secret_store_and_never_shown_again(client, ctx, secrets_dir, caplog):
@@ -159,8 +175,8 @@ def test_projects_screen_shows_and_changes_the_connection_of_each_repository(cli
     assert client.delete(f"/v1/integrations/github/connections/{conn}").status_code == 409  # still assigned
 
 
-def test_commands_use_the_assigned_connection_nodes_get_no_token_for_access_tokens_and_audit_names_it(
-        client, ctx, control_repo, secrets_dir):
+def test_commands_use_assigned_token_connection_through_repository_transfer_relay_and_audit_writes(
+        client, ctx, control_repo, secrets_dir, monkeypatch):
     prepare_project_control(ctx, control_repo)
     owner_sign_in(client, ctx)
     conn = add_token(client).json()["id"]
@@ -180,7 +196,54 @@ def test_commands_use_the_assigned_connection_nodes_get_no_token_for_access_toke
     run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
 
     token = client.post("/v1/github/token", json={**run, "repo": "person/tool"}, headers=headers)
-    assert token.status_code == 409 and TOKEN not in token.text and "token" not in token.json().get("token", "")
+    assert token.status_code == 200, token.text
+    credential = token.json()
+    assert credential["token"] != TOKEN and credential["transport_url"].endswith("/v1/github/git/person/tool.git")
+    assert TOKEN not in token.text
+    assert (secrets_dir / "worker-git-proxy.key").stat().st_mode & 0o777 == 0o600
+
+    upstream_calls = []
+
+    def relay(repository, suffix, method, params, proxy_headers, content, stored_token):
+        upstream_calls.append((repository, suffix, method, params, proxy_headers, content, stored_token))
+        import httpx
+        return httpx.Response(200, headers={"Content-Type": "application/x-git-upload-pack-result"}, content=b"pack")
+
+    monkeypatch.setattr(api, "_github_git_upstream", relay)
+    basic = lambda value: {"Authorization": "Basic " + base64.b64encode(
+        f"x-access-token:{value}".encode()).decode()}
+    clone = client.get("/v1/github/git/person/tool.git/info/refs", params={"service": "git-upload-pack"},
+                       headers=basic(credential["token"]))
+    assert clone.status_code == 200 and clone.content == b"pack"
+    assert upstream_calls[-1][0:3] == ("person/tool", ".git/info/refs", "GET")
+    assert upstream_calls[-1][-1] == TOKEN  # raw access token is used only by the control plane relay
+
+    branch = "TESTWP-51-work"
+    push_token = client.post("/v1/github/token", json={**run, "repo": "person/tool", "branch": branch},
+                             headers=headers).json()
+    denied_service = client.get("/v1/github/git/person/tool.git/info/refs",
+                                params={"service": "git-receive-pack"}, headers=basic(credential["token"]))
+    assert denied_service.status_code == 403
+    command = f"{'0' * 40} {'1' * 40} refs/heads/{branch}\0report-status\n".encode()
+    pack_request = f"{len(command) + 4:04x}".encode() + command + b"0000"
+    wrong_branch_command = f"{'0' * 40} {'1' * 40} refs/heads/TESTWP-52-wrong\0report-status\n".encode()
+    denied_push = client.post("/v1/github/git/person/tool.git/git-receive-pack",
+                              content=f"{len(wrong_branch_command) + 4:04x}".encode()
+                              + wrong_branch_command + b"0000",
+                              headers={**basic(push_token["token"]),
+                                       "Content-Type": "application/x-git-receive-pack-request"})
+    assert denied_push.status_code == 403
+    pushed = client.post("/v1/github/git/person/tool.git/git-receive-pack", content=pack_request,
+                         headers={**basic(push_token["token"]),
+                                  "Content-Type": "application/x-git-receive-pack-request"})
+    assert pushed.status_code == 200
+    assert upstream_calls[-1][1:3] == (".git/git-receive-pack", "POST")
+    assert ctx.db.one("SELECT payload FROM write_audit WHERE action='git-push' ORDER BY id DESC LIMIT 1")[
+        "payload"]["connection"] == conn
+
+    out_of_scope = client.get("/v1/github/git/person/not-the-repo.git/info/refs",
+                              params={"service": "git-upload-pack"}, headers=basic(credential["token"]))
+    assert out_of_scope.status_code == 403
 
     pr = client.post("/v1/github/pr", json={**run, "repo": "person/tool", "head": "TESTWP-51-work",
                                             "base": "develop", "title": "t", "body": "", "draft": True},

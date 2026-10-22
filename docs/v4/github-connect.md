@@ -1,8 +1,8 @@
 # Connect GitHub from the console
 
-Owners connect GitHub from **Integrations** in the v4 console. The GitHub App is the control plane's only GitHub
-credential: workers still ask the control API for a short lived installation token scoped to their project repo,
-and the control API continues to fence and audit GitHub writes.
+Owners manage GitHub connections from **Integrations** in the v4 console. App keys and access tokens stay in the
+control plane; workers receive a short lived repository credential or use the control plane Git relay, and the
+control API continues to fence and audit GitHub writes.
 
 ## Before connecting
 
@@ -102,14 +102,17 @@ connection that cannot reach it, is refused (HTTP 409 on the run, 422 when savin
 another account. A connection assigned to repositories cannot be removed until they are reassigned.
 
 Command Center performs pull request, comment, merge, branch, release and checks operations with the
-connection assigned to the repository. For a GitHub App connection a node still receives only the short lived
-installation token limited to that repository (`POST /v1/github/token`). An access token cannot be narrowed or
-shortened, so it is never handed to a node: that endpoint answers 409 for a repository on a token connection, and
-workers cannot clone or push it. Assign such a repository a GitHub App connection for worker use; token
-connections serve Command Center operations and repository listing.
+connection assigned to the repository. For a GitHub App connection a node receives only the short lived
+installation token limited to that repository (`POST /v1/github/token`). For an access-token connection, the same
+endpoint returns a one-hour relay capability scoped to that repository, run, node and fencing lease. Git clone
+and fetch traffic goes through Command Center, which uses the stored access token upstream. A second capability
+can push only the run's branch; Command Center refuses other repositories, stale runs and other branches. The
+stored access token is never sent to a node. Workers keep the relay capability in the Git process environment and
+do not write it into the remote URL or Git configuration.
 
 ### Audit
 
 Every GitHub write in `write_audit` (target `github`, and `aiflow-control` for control repository commits)
-carries `connection` in its payload: `default` or the connection id. Token and key values never appear in the
-UI, logs, Jira, events or audit rows.
+carries `connection` in its payload: `default` or the connection id. This includes worker branch pushes through
+the relay and version release publication. Token and key values never appear in the UI, logs, Jira, events or
+audit rows.

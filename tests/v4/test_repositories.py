@@ -185,7 +185,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def mirror(self, repo, token):
+        def mirror(self, repo, token, _transport_url=""):
             calls["mirrors"].append((repo, token))
             return "mirror"
 
@@ -225,7 +225,7 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def mirror(self, repo, token):
+        def mirror(self, repo, token, _transport_url=""):
             calls["mirrors"].append((repo, token))
             return "mirror"
 

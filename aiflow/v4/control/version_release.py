@@ -291,6 +291,15 @@ def post_merge_resume(ctx, project: Any, version: dict[str, Any]) -> dict[str, A
     return result
 
 
+def _github_context_for_repository(ctx, project: Any):
+    """Use the repository's selected connection for release reads and retry writes when the API supplies it."""
+    resolve = getattr(ctx, "github_connection_for_repository", None)
+    if not callable(resolve):
+        return ctx, ""
+    gateway, connection = resolve(project.repo)
+    return replace(ctx, github=gateway), str(connection or "")
+
+
 def _tracker_row(ctx, project: Any, version_id: str) -> dict | None:
     project_key = project.key if hasattr(project, "key") else str(project)
     repository = str(getattr(project, "repo", "") or "")
@@ -632,7 +641,8 @@ def reconcile_merge_backs(ctx, project: Any) -> int:
     The Jira version is already Released, so it no longer appears in `project_versions`; this durable path reads
     released rows from the registry and runs the same idempotent `merge_back` under the version lease.
     """
-    if ctx.github is None:
+    resolve = getattr(ctx, "github_connection_for_repository", None)
+    if ctx.github is None and not callable(resolve):
         return 0
     done = 0
     rows = ctx.db.all("SELECT * FROM version_releases WHERE project=%s AND status='released'", (project.key,))
@@ -647,8 +657,10 @@ def reconcile_merge_backs(ctx, project: Any) -> int:
         try:
             if ctx.leases.valid(lock_key, run_id, claim.fence):
                 target_project = project_for_version(ctx, project, {"repository": row.get("repository") or project.repo})
-                merge_back(ctx, target_project, row["tracker_key"], row["version_name"], row["tag"],
-                           {"id": run_id, "fence": claim.fence, "account_id": "control", "node": ""})
+                release_ctx, connection = _github_context_for_repository(ctx, target_project)
+                run = {"id": run_id, "fence": claim.fence, "account_id": "control", "node": "",
+                       "github_connection": connection}
+                merge_back(release_ctx, target_project, row["tracker_key"], row["version_name"], row["tag"], run)
                 done += 1
         except Exception:  # noqa: BLE001 - nothing was recorded, so the next scan retries
             log.exception("merge-back retry failed for %s %s", project.key, row["version_name"])
@@ -683,12 +695,13 @@ def candidates(ctx, account: str, node: str) -> list[dict[str, Any]]:
                     if running:
                         continue
                     _set_state(ctx, target_project, version["id"], status="pending")
-                resumed = post_merge_resume(ctx, target_project, version)
+                release_ctx, _connection = _github_context_for_repository(ctx, target_project)
+                resumed = post_merge_resume(release_ctx, target_project, version)
                 if resumed:
                     if resumed["ready"]:
                         out.append({**resumed, "repository": repository})
                     continue
-                snapshot = evaluate(ctx, target_project, version)
+                snapshot = evaluate(release_ctx, target_project, version)
                 if snapshot["ready"]:
                     out.append({**snapshot, "tracker_key": state["tracker_key"] if state else ""})
     return out
@@ -724,6 +737,11 @@ def _markdown_text(value: str) -> str:
 
 
 def _audit(ctx, project: Any, tracker: str, run: dict, action: str, result: str, payload: dict) -> None:
+    payload = dict(payload)
+    details = run.get("details") or {}
+    connection = run.get("github_connection") or details.get("github_connection")
+    if action.startswith("github-") and connection:
+        payload["connection"] = connection
     ctx.db.run("INSERT INTO write_audit (target,action,ticket,run_id,fence,actor,accepted,result,payload)"
                " VALUES (%s,%s,%s,%s,%s,%s,true,%s,%s)",
                ("github" if action.startswith("github-") else "jira", action, tracker, str(run["id"]),

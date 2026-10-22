@@ -782,7 +782,7 @@ function connectImportedGitHubApp() {
 }
 function renderGitHubIntegrations() {
   var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
-  h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
+  h += '<span class="hint">Manage GitHub connections used by workers and project setup.</span><span class="spacer"></span>';
   if (consoleCan('integrations.manage')) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
   h += '</div>';
   if (!consoleCan('integrations.manage')) h += '<div class="muted">Only an authenticated user with integration management permission can manage integrations.</div>';
@@ -2519,9 +2519,10 @@ function renderProjects() {
       h += '<button class="btn" data-act="project-add-cancel">Cancel</button></div>';
     }
     h += '</section>';
+  }
   var editor = state.repositoryEditor;
   if (editor) {
-    h += '<section class="panel"><div class="panel-h"><h2>Repositories · ' + esc(editor.key) + '</h2><span class="hint">Map Jira epics to repositories visible to the connected GitHub App.</span><span class="spacer"></span><button class="btn sm" data-act="project-repositories-close">Close</button></div>';
+    h += '<section class="panel"><div class="panel-h"><h2>Repositories · ' + esc(editor.key) + '</h2><span class="hint">Map Jira epics to repositories reachable through GitHub connections.</span><span class="spacer"></span><button class="btn sm" data-act="project-repositories-close">Close</button></div>';
     if (editor.error) h += '<div class="stakeholder-error">' + esc(editor.error) + '</div>';
     if (editor.busy || !editor.data) h += '<div class="muted">Loading Jira epics and GitHub repositories…</div>';
     else {
@@ -2553,7 +2554,6 @@ function renderProjects() {
       h += '<div class="project-actions"><select data-repository-add><option value="">Add a repository…</option>' + options.filter(function (r) { return !configured.some(function (c) { return c.repo === r.full_name; }); }).map(function (r) { return '<option value="' + esc(r.full_name) + '">' + esc(r.full_name) + '</option>'; }).join('') + '</select><button class="btn sm" data-act="project-repository-add">Add repository</button><span class="spacer"></span><button class="btn primary" data-act="project-repositories-save"' + (editor.saving ? ' disabled' : '') + '>Save repository settings</button></div>';
     }
     h += '</section>';
-  }
   }
   root.innerHTML = h;
 }

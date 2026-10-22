@@ -8,9 +8,11 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import hmac
 import ipaddress
 import re
 import logging
+import os
 import secrets
 import shlex
 import socket
@@ -19,7 +21,7 @@ import html
 import json
 import httpx
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
@@ -27,7 +29,8 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .. import VERSION
@@ -233,14 +236,12 @@ def github_route(ctx: Ctx, repo: str) -> Connection:
 def github_gateway(ctx: Ctx, repo: str | None = None) -> GitHubApp | None:
     """Load the shared secret-store configuration lazily and refresh it across API replicas.
 
-    With a repository, return the connection assigned to it; an installation with one connection and no
-    assignments keeps the original behavior. The connection used is remembered for the audit log."""
+    With a repository, always check that the selected connection can reach it, including a single legacy App.
+    The connection used is remembered for the audit log."""
     if repo is not None:
-        registry = github_connections(ctx)
-        if registry.has_extras() or registry.assignments():
-            conn = github_route(ctx, repo)
-            github_connection_used.set(conn.id)
-            return conn.gateway
+        conn = github_route(ctx, repo)
+        github_connection_used.set(conn.id)
+        return conn.gateway
     gateway = ctx.github
     if gateway is None:
         store = GitHubSecretStore(ctx.settings.github_app_dir)
@@ -253,6 +254,125 @@ def github_gateway(ctx: Ctx, repo: str | None = None) -> GitHubApp | None:
         ctx.settings.github_org = str(gateway.org)
     github_connection_used.set(DEFAULT_ID if gateway is not None else "")
     return gateway
+
+
+def github_gateway_for_connection(ctx: Ctx, connection_id: str, repo: str) -> GitHubApp:
+    """Resolve the connection captured by a run and confirm it still reaches the repository."""
+    registry = github_connections(ctx)
+    connection = next((item for item in github_connection_list(ctx) if item.id == connection_id), None)
+    if connection is None or not registry.reaches(connection.id, connection.gateway, repo):
+        raise HTTPException(409, f"the GitHub connection assigned to {repo} cannot reach it")
+    github_connection_used.set(connection.id)
+    return connection.gateway
+
+
+def github_context_for_repository(ctx: Ctx, repo: str) -> tuple[GitHubApp, str]:
+    gateway = github_gateway(ctx, repo)
+    if gateway is None:
+        raise HTTPException(503, "GitHub is not connected")
+    return gateway, github_connection_used.get()
+
+
+def _git_proxy_key(ctx: Ctx) -> bytes:
+    """Load or create the shared signing key for short-lived worker Git relay capabilities."""
+    path = Path(ctx.settings.github_app_dir) / "worker-git-proxy.key"
+    try:
+        value = path.read_bytes()
+    except FileNotFoundError:
+        value = b""
+    if value and len(value) < 32:
+        raise RuntimeError("Git transfer signing key is invalid")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    if not value:
+        value = secrets.token_bytes(32)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)  # atomic create: a second API replica reads a complete key
+            except FileExistsError:
+                value = path.read_bytes()
+        finally:
+            temporary.unlink(missing_ok=True)
+    if len(value) < 32:
+        raise RuntimeError("Git transfer signing key is invalid")
+    os.chmod(path, 0o600)
+    return value
+
+
+def _issue_git_proxy_token(ctx: Ctx, claims: dict[str, Any]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=")
+    signature = hmac.new(_git_proxy_key(ctx), payload, hashlib.sha256).digest()
+    return payload.decode() + "." + base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+
+
+def _verify_git_proxy_token(ctx: Ctx, token: str) -> dict[str, Any] | None:
+    try:
+        encoded, encoded_signature = token.split(".", 1)
+        payload = encoded.encode()
+        signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+        expected = hmac.new(_git_proxy_key(ctx), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        if not isinstance(claims, dict) or int(claims.get("expires", 0)) < int(utcnow().timestamp()):
+            return None
+        return claims
+    except (ValueError, TypeError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _git_proxy_credential(request: Request) -> str:
+    scheme, _, value = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "basic":
+        return ""
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        _, separator, token = decoded.partition(":")
+        return token if separator else ""
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _receive_pack_target(body: bytes) -> set[str] | None:
+    """Read Git receive-pack command pkt-lines; malformed or empty requests are refused."""
+    targets: set[str] = set()
+    offset = 0
+    while offset < len(body):
+        header = body[offset:offset + 4]
+        if len(header) != 4:
+            return None
+        try:
+            length = int(header, 16)
+        except ValueError:
+            return None
+        offset += 4
+        if length == 0:
+            break
+        if length < 4 or offset + length - 4 > len(body):
+            return None
+        packet = body[offset:offset + length - 4]
+        offset += length - 4
+        fields = packet.split(b"\0", 1)[0].strip().split()
+        if len(fields) >= 3 and re.fullmatch(rb"[0-9a-fA-F]{40,64}", fields[0]) and re.fullmatch(
+                rb"[0-9a-fA-F]{40,64}", fields[1]):
+            if set(fields[1]) == {ord("0")}:
+                return None
+            targets.add(fields[2].decode("ascii", errors="ignore"))
+    return targets or None
+
+
+def _github_git_upstream(repository: str, suffix: str, method: str, params: list[tuple[str, str]],
+                         headers: dict[str, str], body: bytes, token: str) -> httpx.Response:
+    """Relay one Git smart HTTP request using a Command Center held access token."""
+    with httpx.Client(timeout=180, follow_redirects=False) as client:
+        return client.request(method, f"https://github.com/{repository}{suffix}", params=params,
+                              headers=headers, content=body, auth=("x-access-token", token))
 
 
 def validate_github_app_permissions(details: dict[str, Any]) -> None:
@@ -391,7 +511,7 @@ class ResultBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
-    branch: str = ""
+    branch: str = Field(default="", max_length=240)
     pr_url: str = ""
     head_sha: str = ""
     summary: str = ""
@@ -413,6 +533,7 @@ class GitHubTokenBody(BaseModel):
     run_id: str
     fence: int
     repo: str
+    branch: str = ""
 
 
 class PRBody(BaseModel):
@@ -579,6 +700,17 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+    # Release reconciliation loops receive the same per-repository routing as API handlers.
+    ctx.github_connection_for_repository = lambda repository: github_context_for_repository(ctx, repository)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Never echo a submitted credential from Pydantic's `input` field in a 422 response."""
+        errors = []
+        for error in exc.errors():
+            errors.append({"loc": list(error.get("loc") or ()), "msg": error.get("msg", "Invalid value"),
+                           "type": error.get("type", "value_error")})
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     def sync_accounts() -> None:
         repo = ctx.repo()
@@ -2643,9 +2775,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                            (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):
             raise HTTPException(409, "version already has an active or completed release run")
-        snapshot = version_release.post_merge_resume(ctx, project, version)
+        claim_github = github_gateway(ctx, project.repo)
+        if claim_github is None:
+            raise HTTPException(503, "GitHub is not connected")
+        release_ctx = replace(ctx, github=claim_github)
+        snapshot = version_release.post_merge_resume(release_ctx, project, version)
         if snapshot is None:
-            snapshot = version_release.evaluate(ctx, project, version)
+            snapshot = version_release.evaluate(release_ctx, project, version)
         if not snapshot["ready"]:
             if not snapshot.get("resume_after_merge"):
                 version_release.record_gate(ctx, project, version, snapshot)
@@ -2660,6 +2796,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             github = github_gateway(ctx, project.repo)
             if github is None:
                 raise HTTPException(503, "GitHub App is not connected")
+            connection_id = github_connection_used.get() or DEFAULT_ID
             source_branch = version_release.source_branch(project)
             if snapshot.get("resume_after_merge"):
                 source_sha = snapshot["source_sha"]
@@ -2679,7 +2816,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash,details)"
                        " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'',%s)",
                        (run_id, key, project.key, acc.id, acc.provider, node, lease.fence,
-                        J({"repository": project.repo, "repository_settings": selected_settings})))
+                        J({"repository": project.repo, "repository_settings": selected_settings,
+                           "github_connection": connection_id})))
             ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
                        " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
                        " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
@@ -2687,7 +2825,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
                        (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"]), project.repo))
             version_release._audit(ctx, project, tracker,
-                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id},
+                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id,
+                                    "github_connection": connection_id},
                                    "github-release-branch", "created" if branch_created else "existing",
                                    {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
         except Exception:
@@ -2740,12 +2879,26 @@ def create_app(ctx: Ctx) -> FastAPI:
             body.error = body.error or "Worker did not report every configured full project check."
         report = {"head_sha": body.head_sha, "source_sha": body.source_sha or body.head_sha,
                   "checks": body.checks, "error": body.error}
-        github_gateway(ctx)
+        connection_id = str(((run.get("details") or {}).get("github_connection") or ""))
         try:
-            result = version_release.complete(ctx, project, version, run, report)
+            if connection_id:
+                selected_github = github_gateway_for_connection(ctx, connection_id, project.repo)
+            else:
+                selected_github = github_gateway(ctx, project.repo)
+                connection_id = github_connection_used.get()
+        except HTTPException:
+            raise
+        if selected_github is None:
+            raise HTTPException(503, "GitHub is not connected")
+        run = dict(run)
+        if connection_id:
+            run["github_connection"] = connection_id
+        release_ctx = replace(ctx, github=selected_github)
+        try:
+            result = version_release.complete(release_ctx, project, version, run, report)
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
-            return version_release.publish_failed(ctx, project, version, run, exc)
+            return version_release.publish_failed(release_ctx, project, version, run, exc)
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
                                                                               "checks": body.checks}), body.run_id))
@@ -3066,15 +3219,91 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "project is not enabled for version releases")
         github = github_gateway(ctx, repository)
         if getattr(github, "kind", "app") == "token":
-            # An access token cannot be narrowed or shortened, so it stays in Command Center.
-            audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], False,
-                  "refused: repository uses an access token connection", {"repo": repository})
-            raise HTTPException(409, "this repository uses a personal access token connection, which is never "
-                                     "handed to a node; assign it a GitHub App connection")
+            branch = body.branch.strip()
+            if branch and (run["step"] != "dev" or not branch.startswith(f"{run['ticket_key']}-")
+                           or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", branch)
+                           or branch.startswith("/") or branch.endswith("/") or ".." in branch
+                           or "@{" in branch):
+                raise HTTPException(422, "the Git transfer branch is invalid for this run")
+            expires = utcnow() + timedelta(hours=1)
+            connection_id = github_connection_used.get()
+            capability = _issue_git_proxy_token(ctx, {
+                "connection": connection_id, "repo": repository.lower(), "run_id": body.run_id,
+                "fence": body.fence, "node": node, "branch": branch,
+                "expires": int(expires.timestamp()),
+            })
+            audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+                  "repository Git relay capability issued",
+                  {"repo": repository, "branch": branch, "expires": expires.isoformat(), "transport": "control"})
+            return {"token": capability, "expires_at": expires.isoformat(),
+                    "transport_url": f"{ctx.settings.control_url.rstrip('/')}/v1/github/git/{repository}.git"}
         token, expires = github.token(repository.split("/", 1)[-1], permissions)
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
               {"repo": repository, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
+
+    @app.api_route("/v1/github/git/{git_path:path}", methods=["GET", "POST"])
+    async def github_git_proxy(git_path: str, request: Request) -> Response:
+        """Broker token-backed Git smart HTTP without exposing the stored access token to a worker."""
+        capability = _verify_git_proxy_token(ctx, _git_proxy_credential(request))
+        if not capability:
+            raise HTTPException(401, "Git repository transfer credential is invalid or expired",
+                                headers={"WWW-Authenticate": 'Basic realm="AI Flow Git transfer"'})
+        repository, separator, suffix = git_path.partition(".git")
+        if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                or repository.lower() != str(capability.get("repo", ""))):
+            raise HTTPException(403, "Git repository transfer is outside this credential's scope")
+        suffix = ".git" + suffix
+        if request.method == "GET" and suffix == ".git/info/refs":
+            service = request.query_params.get("service", "")
+            if service not in ("git-upload-pack", "git-receive-pack"):
+                raise HTTPException(400, "unsupported Git service")
+            operation = service
+        elif request.method == "POST" and suffix in (".git/git-upload-pack", ".git/git-receive-pack"):
+            operation = suffix.rsplit("/", 1)[-1]
+        else:
+            raise HTTPException(404, "unsupported Git repository transfer operation")
+
+        run_id = str(capability.get("run_id") or "")
+        run = run_row(run_id)
+        fence = int(capability.get("fence", -1))
+        if (run["node"] != capability.get("node") or int(run["fence"]) != fence
+                or not ctx.leases.valid(run["ticket_key"], run_id, fence)
+                or not matches_run_repository(repository_for_run(run, ctx.repo().projects.get(run["project"])),
+                                              repository)):
+            raise HTTPException(409, "Git repository transfer run is no longer active")
+        if operation == "git-receive-pack" and not capability.get("branch"):
+            raise HTTPException(403, "Git push is not allowed by this read-only credential")
+        body_bytes = await request.body() if request.method == "POST" else b""
+        branch = str(capability.get("branch") or "")
+        if request.method == "POST" and operation == "git-receive-pack":
+            targets = _receive_pack_target(body_bytes)
+            if targets != {f"refs/heads/{branch}"}:
+                raise HTTPException(403, "Git push is limited to the branch assigned to this run")
+
+        connection_id = str(capability.get("connection") or "")
+        gateway = github_gateway_for_connection(ctx, connection_id, repository)
+        if getattr(gateway, "kind", "app") != "token":
+            raise HTTPException(403, "Git relay credentials are only valid for access-token connections")
+        upstream_token, _ = gateway.token(repository.split("/", 1)[-1])
+        forwarded_headers = {key: value for key, value in request.headers.items()
+                             if key.lower() in {"accept", "content-type", "git-protocol"}}
+        try:
+            import anyio
+            upstream = await anyio.to_thread.run_sync(
+                _github_git_upstream, repository, suffix, request.method,
+                list(request.query_params.multi_items()), forwarded_headers, body_bytes, upstream_token)
+        except httpx.HTTPError as exc:
+            log.warning("GitHub repository transfer failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "GitHub repository transfer failed") from exc
+        if request.method == "POST" and operation == "git-receive-pack":
+            accepted = 200 <= upstream.status_code < 300
+            audit("github", "git-push", run["ticket_key"], run_id, fence, run["account_id"], accepted,
+                  "pushed" if accepted else f"GitHub returned {upstream.status_code}",
+                  {"repo": repository, "branch": branch})
+        response_headers = {key: value for key, value in upstream.headers.items()
+                            if key.lower() in {"content-type", "cache-control", "expires", "pragma"}}
+        return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
 
     @app.post("/v1/github/pr")
     def github_pr(body: PRBody, node: str = Depends(node_auth)) -> dict:

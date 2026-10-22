@@ -49,6 +49,21 @@ def test_merge_base_reports_conflicts_and_detached_verify(tmp_path):
     assert g.merge_base_in(vt, "develop", ID, commit=False) == ["a.txt"]
 
 
+def test_mirror_uses_command_center_transport_url_without_putting_token_in_remote(tmp_path):
+    g = Git(str(tmp_path / "srv"))
+    mirror = tmp_path / "srv" / "mirrors" / "person__tool.git"
+    mirror.mkdir(parents=True)
+    (mirror / "HEAD").write_text("ref: refs/heads/develop\n")
+    calls = []
+    g.run = lambda *args, **kwargs: calls.append((args, kwargs)) or ""
+    transport = "http://control.example.test/v1/github/git/person/tool.git"
+    g.mirror("person/tool", "opaque-capability", transport)
+    assert calls[0][0] == ("remote", "set-url", "origin", transport)
+    assert calls[0][1]["cwd"] == mirror
+    assert calls[1][0] == ("fetch", "--prune", "--quiet", "origin")
+    assert calls[1][1]["token"] == "opaque-capability"
+
+
 def test_triage_checkout_is_detached_from_base_and_read_only(tmp_path):
     o = make_origin(tmp_path)
     g = Git(str(tmp_path / "srv"))

@@ -8,10 +8,11 @@ import pytest
 
 from aiflow.v4.control import version_release
 from aiflow.v4.control.db import J
+from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import Project
 from aiflow.v4.worker import version_release as release_worker
 from aiflow.v4.worker.dev import Claimed
-from conftest import add_ticket, join_node
+from conftest import FakeGitHub, add_ticket, join_node
 
 
 CORE = "WordPress Core 0.5.0-beta"
@@ -173,7 +174,7 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
         def __init__(self, _root, run_as=None):
             self.refs = git_refs
 
-        def mirror(self, _repo, _token):
+        def mirror(self, _repo, _token, _transport_url=""):
             return tmp_path
 
         def remote_branch_exists(self, _mirror, branch):
@@ -541,6 +542,43 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert replay["released"] is True
     assert len(ctx.github.prs) == 1 and len(ctx.github.tags) == len(ctx.github.releases) == 1
     assert len(ctx.github.commits) == before_commits and ctx.jira.released_versions == ["101"]
+
+
+def test_release_completion_keeps_the_non_default_connection_selected_at_claim(client, ctx, tmp_path):
+    configure(ctx)
+    evidence(ctx, "TESTWP-52")
+    repo = "jooservices/test-aiflow-wp"
+    ctx.settings.github_app_dir = str(tmp_path / "github-secrets")
+    selected = FakeGitHub()
+    selected.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    registry = GitHubConnections(ctx.settings.github_app_dir, lambda _directory, _account: FakeGitHub(),
+                                 lambda _token, _account, _kind: selected)
+    connection = registry.add_token("Release access token", "stored-token", "jooservices", "Organization")
+    registry.assign(repo, connection)
+    ctx.github_registry = registry
+
+    headers = node_headers(client)
+    claim = claim_release(client, headers)
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    assert run["project"]["source_sha"] == "a" * 40
+    assert ctx.db.one("SELECT details FROM runs WHERE id=%s", (run["run_id"],))["details"][
+        "github_connection"] == connection
+
+    result = client.post("/v1/version-releases/101/complete",
+                         json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                               "source_sha": run["project"]["source_sha"],
+                               "checks": [{"command": "composer install", "passed": True},
+                                          {"command": "vendor/bin/phpunit", "passed": True}]},
+                         headers=headers)
+    assert result.status_code == 200 and result.json()["released"] is True, result.text
+    assert ("test-aiflow-wp", "testwp-core-v0.5.0-beta") in selected.tags
+    assert not ctx.github.tags
+    github_writes = ctx.db.all("SELECT action,payload FROM write_audit WHERE target='github' AND run_id=%s",
+                               (run["run_id"],))
+    assert {row["action"] for row in github_writes} >= {"github-release-branch", "github-release-files",
+                                                         "github-merge", "github-tag", "github-release"}
+    assert all(row["payload"]["connection"] == connection for row in github_writes)
 
 
 def test_scan_repairs_jira_released_version_after_registry_write_failure(client, ctx, monkeypatch):

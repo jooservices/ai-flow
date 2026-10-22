@@ -1,0 +1,264 @@
+"""Licence activation, resource limits, usage reports and grace/read-only behavior."""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+import jwt
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from aiflow.v4.control import licensing, login
+from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import mount_ui
+from conftest import add_ticket, join_node
+
+PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
+COMPOSE = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
+SESSION_SECRET = "licensing-console-session-secret-has-32-bytes"
+
+
+def sign_in(client, ctx, role="owner"):
+    licensing.initialize(ctx.db)
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(licensing.PLAN_DEFAULTS),))
+    ctx.settings.console_session_secret = SESSION_SECRET
+    client.cookies.set("aiflow4_session", issue_session("owner@example.test", role, 2_000_000_000,
+                                                         SESSION_SECRET))
+
+
+def issuer_key():
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(serialization.Encoding.PEM,
+                                                serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    return private, public
+
+
+def token(private, installation_id, *, plan="team", expiry=None):
+    claims = {"plan": plan, "exp": int((expiry or datetime.now(timezone.utc) + timedelta(days=90)).timestamp()),
+              "installation_id": installation_id}
+    return jwt.encode(claims, private, algorithm="EdDSA")
+
+
+def signed_in_license(client, ctx, private, public, *, plan="team", expiry=None):
+    sign_in(client, ctx)
+    ctx.settings.license_public_key = public
+    installation_id = client.get("/v1/licensing").json()["installation_id"]
+    license_token = token(private, installation_id, plan=plan, expiry=expiry)
+    return installation_id, license_token
+
+
+class FakeResponse:
+    def __init__(self, body=None, error=None):
+        self.body, self.error = body or {}, error
+
+    def raise_for_status(self):
+        if self.error:
+            raise self.error
+
+    def json(self):
+        return self.body
+
+
+def test_plan_defaults_and_console_licence_usage_export_path(client, ctx):
+    sign_in(client, ctx)
+    response = client.get("/v1/licensing")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "active" and data["plan"] == "free"
+    assert data["plans"] == {
+        "free": {"machines": 1, "ai_accounts": 2, "projects": 3, "users": 3},
+        "team": {"machines": 5, "ai_accounts": 12, "projects": 25, "users": 25},
+        "business": {"machines": 50, "ai_accounts": 100, "projects": 250, "users": 250},
+    }
+    page = PAGE.read_text()
+    assert 'data-view="licensing">Licence</button>' in page
+    assert 'id="license-warning"' in page and "14-day grace period" in page
+    for path in ("/v1/licensing/status", "/v1/licensing/activate", "/v1/licensing/offline", "/v1/licensing/limits",
+                 "/v1/licensing/usage.csv", "Export spreadsheet"):
+        assert path in page
+    app = FastAPI()
+    mount_ui(app, ctx)
+    assert TestClient(app).get("/licensing").status_code == 200
+    assert "PathPrefix(`/licensing`)" in COMPOSE.read_text()
+
+
+def test_database_migration_starts_with_the_published_plan_defaults(db):
+    licensing.initialize(db)
+    row = db.one("SELECT plan_limits FROM licensing_state WHERE id=1")
+    assert row["plan_limits"] == licensing.PLAN_DEFAULTS
+
+
+def test_console_readers_get_the_installation_warning_status_without_licence_management(client, ctx):
+    sign_in(client, ctx, role="lead")
+    response = client.get("/v1/licensing/status")
+    assert response.status_code == 200
+    assert response.json() == {"status": "active", "reason": "", "plan": "free", "expires_at": None,
+                               "grace_until": None, "read_only": False}
+    assert client.get("/v1/licensing").status_code == 403
+
+
+def test_online_activation_sends_only_key_and_installation_identifier(client, ctx, monkeypatch):
+    private, public = issuer_key()
+    sign_in(client, ctx)
+    ctx.settings.license_public_key = public
+    ctx.settings.license_service_url = "https://licenses.example.test/activate"
+    installation_id = client.get("/v1/licensing").json()["installation_id"]
+    signed = token(private, installation_id, plan="team")
+    requests = []
+
+    def post(url, **kwargs):
+        requests.append((url, kwargs))
+        return FakeResponse({"license_token": signed})
+
+    monkeypatch.setattr(licensing.httpx, "post", post)
+    response = client.post("/v1/licensing/activate", json={"key": "secret-customer-key"})
+    assert response.status_code == 200, response.text
+    assert response.json()["plan"] == "team" and response.json()["status"] == "active"
+    assert len(requests) == 1
+    url, request = requests[0]
+    assert url == ctx.settings.license_service_url and request["follow_redirects"] is False
+    assert request["json"] == {"key": "secret-customer-key", "installation_id": installation_id}
+    assert set(request["json"]) == {"key", "installation_id"}
+    assert not any(word in str(request["json"]).lower() for word in ("ticket", "code", "credential", "password"))
+    stored = ctx.db.one("SELECT license_token,license_source FROM licensing_state WHERE id=1")
+    assert stored == {"license_token": signed, "license_source": "online"}
+
+
+def test_invalid_online_key_and_bad_offline_signature_leave_current_license_unchanged(client, ctx, monkeypatch):
+    private, public = issuer_key()
+    other_private, _ = issuer_key()
+    installation_id, current = signed_in_license(client, ctx, private, public)
+    valid = client.post("/v1/licensing/offline", json={"license_file": current})
+    assert valid.status_code == 200
+    before = ctx.db.one("SELECT plan,expires_at,license_token,license_source,invalid_since,plan_limits"
+                        " FROM licensing_state WHERE id=1")
+
+    ctx.settings.license_service_url = "https://licenses.example.test/activate"
+    monkeypatch.setattr(licensing.httpx, "post", lambda *a, **k: FakeResponse(error=httpx.HTTPError("rejected")))
+    rejected = client.post("/v1/licensing/activate", json={"key": "never-echo-this-key"})
+    assert rejected.status_code == 422 and "licence service" in rejected.json()["detail"].lower()
+    bad_file = token(other_private, installation_id, plan="business")
+    bad = client.post("/v1/licensing/offline", json={"license_file": bad_file})
+    assert bad.status_code == 422 and "signature" in bad.json()["detail"].lower()
+    after = ctx.db.one("SELECT plan,expires_at,license_token,license_source,invalid_since,plan_limits"
+                       " FROM licensing_state WHERE id=1")
+    assert after == before
+    assert "never-echo-this-key" not in rejected.text and "never-echo-this-key" not in bad.text
+
+
+def test_limits_are_editable_and_project_machine_account_and_user_caps_are_enforced(client, ctx):
+    sign_in(client, ctx)
+    updated = client.put("/v1/licensing/limits", json={
+        "plan": "free", "limits": {"machines": 1, "ai_accounts": 2, "projects": 1, "users": 1},
+    })
+    assert updated.status_code == 200 and updated.json()["limits"]["projects"] == 1
+
+    project = client.post("/v1/projects", json={
+        "site": "https://jooservices.atlassian.net", "project": "NEWAPP", "repo": "jooservices/new-app",
+        "base": "develop", "stack": "", "checks": [], "priority": 5, "parallel_limit": 1,
+        "merge_method": "squash",
+    })
+    assert project.status_code == 409 and "Projects limit of 1" in project.json()["detail"]
+
+    ctx.settings.join_token = "join-secret"
+    machine = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-new",
+                                                         "role": "worker", "project": "TESTWP"})
+    assert machine.status_code == 409 and "Machines limit of 1" in machine.json()["detail"]
+
+    join = join_node(client, "cc")
+    assert join.status_code == 200
+    account = client.get("/v1/work/candidates", params={"account": "opencode-01"},
+                         headers={"Authorization": f"Bearer {join.json()['node_token']}"})
+    assert account.status_code == 200 and "AI accounts limit of 2" in account.json()["reason"]
+
+    first = login.seed_user(ctx.db, "first@example.test", "lead")
+    assert first
+    with pytest.raises(ValueError, match="Users limit of 1"):
+        login.seed_user(ctx.db, "second@example.test", "lead")
+
+
+def test_running_work_survives_account_limit_refusal(client, ctx):
+    sign_in(client, ctx)
+    joined = join_node(client, "cc")
+    assert joined.status_code == 200
+    run_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'TESTWP-90','TESTWP','dev','opencode-01','opencode','cc',1,'running','')", (run_id,))
+    response = client.get("/v1/work/candidates", params={"account": "opencode-01"},
+                          headers={"Authorization": f"Bearer {joined.json()['node_token']}"})
+    assert "AI accounts limit" in response.json()["reason"]
+    assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "running"
+
+
+def test_expired_and_first_detected_invalid_licences_use_their_correct_grace_clock_and_read_only_preserves_data(
+        client, ctx):
+    private, public = issuer_key()
+    installation_id, _ = signed_in_license(client, ctx, private, public)
+    expiry = datetime.fromtimestamp(int((datetime.now(timezone.utc) - timedelta(days=1)).timestamp()), timezone.utc)
+    expired_token = token(private, installation_id, plan="team", expiry=expiry)
+    ctx.db.run("UPDATE licensing_state SET plan='team',expires_at=%s,license_token=%s,license_source='offline' WHERE id=1",
+               (expiry, expired_token))
+    state = licensing.snapshot(ctx.db, public, expiry + timedelta(days=13, hours=23))
+    assert state["status"] == "grace" and state["reason"] == "expired"
+    state = licensing.snapshot(ctx.db, public, expiry + timedelta(days=14))
+    assert state["status"] == "read_only" and state["read_only"] is True
+
+    # A licence that becomes unverifiable starts its clock on first detection, not at its old expiry.
+    bad_token = token(Ed25519PrivateKey.generate(), installation_id, plan="team", expiry=expiry)
+    ctx.db.run("UPDATE licensing_state SET license_token=%s,invalid_since=NULL WHERE id=1", (bad_token,))
+    detected = datetime.now(timezone.utc)
+    assert licensing.snapshot(ctx.db, public, detected)["status"] == "grace"
+    assert licensing.snapshot(ctx.db, public, detected + timedelta(days=13))["status"] == "grace"
+    assert licensing.snapshot(ctx.db, public, detected + timedelta(days=14))["status"] == "read_only"
+
+    # The actual API refuses new changes after the real grace deadline, leaves data intact, and still accepts renewal.
+    expired_at = datetime.fromtimestamp(int((datetime.now(timezone.utc) - timedelta(days=15)).timestamp()), timezone.utc)
+    renewal = token(private, installation_id, plan="business", expiry=datetime.now(timezone.utc) + timedelta(days=90))
+    ctx.db.run("UPDATE licensing_state SET plan='team',expires_at=%s,license_token=%s,invalid_since=NULL WHERE id=1",
+               (expired_at, token(private, installation_id, plan="team", expiry=expired_at)))
+    add_ticket(ctx.db, "TESTWP-91")
+    before_tickets = ctx.db.one("SELECT count(*) AS count FROM tickets")["count"]
+    readonly = client.post("/v1/projects", json={
+        "site": "https://jooservices.atlassian.net", "project": "NEWAPP", "repo": "jooservices/new-app",
+        "base": "develop", "stack": "", "checks": [], "priority": 5, "parallel_limit": 1,
+        "merge_method": "squash",
+    })
+    assert readonly.status_code == 423 and "read-only" in readonly.json()["detail"]
+    assert ctx.db.one("SELECT count(*) AS count FROM tickets")["count"] == before_tickets
+    restored = client.post("/v1/licensing/offline", json={"license_file": renewal})
+    assert restored.status_code == 200 and restored.json()["status"] == "active"
+    assert ctx.db.one("SELECT count(*) AS count FROM tickets")["count"] == before_tickets
+
+
+def test_usage_totals_per_project_month_and_csv_export(client, ctx):
+    sign_in(client, ctx)
+    jan = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    feb = datetime(2026, 2, 10, tzinfo=timezone.utc)
+    values = [
+        ("TESTWP-1", "TESTWP", "done", jan, 100, 20, 0.50),
+        ("TESTWP-1", "TESTWP", "done", jan + timedelta(hours=1), 200, 30, 0.25),
+        ("TESTWP-2", "TESTWP", "failed", jan, 300, 40, 0.10),
+        ("OTHER-1", "OTHER", "done", feb, 400, 50, 0.75),
+    ]
+    for ticket, project, outcome, started, tokens_in, tokens_out, cost in values:
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                   "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+                   " VALUES (%s,%s,%s,'dev','claude-01','claude','cc',1,'finished',%s,%s,%s,%s,%s,%s)",
+                   (str(uuid.uuid4()), ticket, project, outcome, started, started + timedelta(minutes=5),
+                    tokens_in, tokens_out, cost))
+    report = client.get("/v1/licensing/usage")
+    assert report.status_code == 200
+    rows = {(row["project"], row["month"]): row for row in report.json()["rows"]}
+    assert rows[("TESTWP", "2026-01")] == {"project": "TESTWP", "month": "2026-01", "tickets_finished": 1,
+                                              "tokens_in": 600, "tokens_out": 90, "cost_usd": 0.85}
+    assert rows[("OTHER", "2026-02")]["tickets_finished"] == 1
+    exported = client.get("/v1/licensing/usage.csv")
+    assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
+    assert "attachment; filename=ai-flow-usage.csv" in exported.headers["content-disposition"]
+    assert "TESTWP,2026-01,1,600,90,0.850000" in exported.text

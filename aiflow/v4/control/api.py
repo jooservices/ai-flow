@@ -35,7 +35,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, rollout, version_release
+from . import business, jira_connect, knowledge, licensing, memory, rollout, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -500,12 +500,32 @@ class JoinCommandBody(BaseModel):
     project: str = Field(default="", max_length=32)
 
 
+class LicenseKeyBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    key: str = Field(min_length=1, max_length=2000)
+
+
+class OfflineLicenseBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    license_file: str = Field(min_length=1, max_length=50000)
+
+
+class PlanLimitsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    plan: str
+    limits: dict[str, int]
+
+
 # --- app --------------------------------------------------------------------------------------------------
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
     async def lifespan(_app):
+        try:
+            licensing.initialize(ctx.db)
+        except Exception as e:  # noqa: BLE001
+            log.warning("licence state initialization failed (%s)", type(e).__name__)
         try:
             _app.state.sync_accounts()
         except Exception as e:  # noqa: BLE001
@@ -573,13 +593,21 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "reviewer"
 
     def owner_auth(request: Request, authorization: str = Header(default="")) -> str:
+        def writable() -> None:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
+
         configured = ctx.settings.owner_token
         scheme, separator, token = authorization.partition(" ")
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            writable()
             return ""
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         if user and has_permission(user.role, "knowledge.approve"):
+            writable()
             return user.subject
         if not configured and not ctx.settings.console_session_secret:
             raise HTTPException(503, "owner actions are not configured")
@@ -617,7 +645,20 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
+        read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
+                        "list_import_installations", "open_installation_settings"}
+        if action not in read_actions | {"license_activate", "license_limits"}:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
         return user
+
+    def require_capacity(resource: str, count: int | None = None) -> dict:
+        try:
+            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     def run_row(run_id: str) -> dict:
         try:
@@ -655,6 +696,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         return run
 
     def reviewer_run(key: str) -> tuple[dict, str, int, int]:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         ticket = ctx.db.one("SELECT key, project, status, labels, summary FROM tickets WHERE key=%s", (key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
@@ -901,6 +946,57 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.one("SELECT 1 AS ok")
         ctx.leases.r.ping()
         return {"ok": True, "version": VERSION}
+
+    # --- licence and metered usage ---------------------------------------------------------------------------
+    @app.get("/v1/licensing")
+    def licensing_state(request: Request) -> dict:
+        console_user(request, "licensing.manage")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        state["usage"] = licensing.resource_counts(ctx)
+        return state
+
+    @app.get("/v1/licensing/status")
+    def licensing_status(request: Request) -> dict:
+        console_user(request, "console.read")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only")}
+
+    @app.post("/v1/licensing/activate")
+    def activate_license(body: LicenseKeyBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                             ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/v1/licensing/offline")
+    def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.put("/v1/licensing/limits")
+    def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        try:
+            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/v1/licensing/usage")
+    def licensing_usage(request: Request) -> dict:
+        console_user(request, "console.read")
+        return {"rows": licensing.usage_report(ctx.db)}
+
+    @app.get("/v1/licensing/usage.csv")
+    def licensing_usage_csv(request: Request) -> PlainTextResponse:
+        console_user(request, "console.read")
+        content = licensing.usage_csv(licensing.usage_report(ctx.db))
+        return PlainTextResponse(content, media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=ai-flow-usage.csv"})
 
     # --- Owner-managed GitHub App connection ----------------------------------------------------------------
     def github_secret_store() -> GitHubSecretStore:
@@ -1543,6 +1639,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
+        require_capacity("projects", len(ctx.repo().projects))
         try:
             result = project_preflight(body, user.subject)
         except HTTPException as exc:
@@ -1659,6 +1756,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def create_join_grant(name: str, role: str, project: str) -> tuple[str, datetime]:
         """Create the shared five-minute grant used by both Command Center entry points."""
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             raise HTTPException(422, "invalid node name")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", role):
@@ -1672,6 +1773,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         existing = ctx.db.one("SELECT name,status FROM nodes WHERE name=%s", (name,))
         if existing and dynamic and existing["status"] == "online":
             raise HTTPException(409, "an online node already uses this name")
+        if not existing:
+            require_capacity("machines", int(ctx.db.one("SELECT count(*) AS count FROM nodes")["count"]))
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
@@ -1712,6 +1815,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             row = conn.execute(
@@ -2244,6 +2351,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_account_entitlement(ctx, account, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
@@ -2264,6 +2375,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            licensing.enforce_account_entitlement(ctx, body.account, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
@@ -2372,6 +2487,10 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_account_entitlement(ctx, account, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"versions": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
@@ -2379,6 +2498,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            licensing.enforce_account_entitlement(ctx, body.account, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             raise HTTPException(409, f"node version skew: {policy['reason']}")

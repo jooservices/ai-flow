@@ -121,8 +121,10 @@ def _console_user(a, s) -> int:
             login.write_password_file(a.password_file, password)
 
         try:
-            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver) if a.action == "seed"
-                        else login.reset_password(db, a.email, deliver=deliver))
+            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver,
+                                        public_key=getattr(s, "license_public_key", "")) if a.action == "seed"
+                        else login.reset_password(db, a.email, deliver=deliver,
+                                                  public_key=getattr(s, "license_public_key", "")))
         except (ValueError, OSError) as exc:
             print(f"{exc}; nothing changed", file=sys.stderr)
             return 2

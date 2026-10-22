@@ -60,7 +60,7 @@ EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
 PAGES = {"/", "/cc", "/delivery", "/sa", "/lead", "/business", "/review", "/stakeholder", "/knowledge",
-         "/integrations", "/projects"}
+         "/integrations", "/projects", "/licensing"}
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -139,7 +139,7 @@ def write_password_file(path: str, password: str) -> None:
 
 
 def seed_user(db, email: str, role: str, display_name: str = "",
-              deliver: Callable[[str], None] | None = None) -> str | None:
+              deliver: Callable[[str], None] | None = None, public_key: str = "") -> str | None:
     """Create the user with a generated password and return it; return None when the user already exists.
 
     `deliver(password)` runs inside the transaction, before the commit: when it fails the user is rolled back, so a
@@ -149,6 +149,12 @@ def seed_user(db, email: str, role: str, display_name: str = "",
         raise ValueError(f"unknown role {role}; choose one of {', '.join(sorted(ROLE_PERMISSIONS))}")
     if db.one("SELECT 1 AS x FROM console_users WHERE email=%s", (email,)):
         return None
+    from . import licensing
+    try:
+        count = int(db.one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"])
+        licensing.require_count_capacity(db, "users", count, public_key=public_key)
+    except licensing.LicenseError as exc:
+        raise ValueError(str(exc)) from None
     password = generate_password()
     with db.pool.connection() as c:
         created = c.execute("INSERT INTO console_users (email, display_name, role, password_hash) VALUES (%s,%s,%s,%s)"
@@ -161,8 +167,13 @@ def seed_user(db, email: str, role: str, display_name: str = "",
     return password
 
 
-def reset_password(db, email: str, deliver: Callable[[str], None] | None = None) -> str:
+def reset_password(db, email: str, deliver: Callable[[str], None] | None = None, public_key: str = "") -> str:
     """Give an existing user a new generated password and clear any lock; `deliver` runs before the commit."""
+    from . import licensing
+    try:
+        licensing.require_writable(db, public_key)
+    except licensing.LicenseError as exc:
+        raise ValueError(str(exc)) from None
     email = normalize_email(email)
     password = generate_password()
     with db.pool.connection() as c:

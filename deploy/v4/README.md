@@ -52,6 +52,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Command Center V2 design](../../docs/v4/command-center-v2.md): interactive prototype of the new console: dark theme, one Dashboard, Work board with a project picker, role views, machines and AI, users and roles, human review metrics
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
+- [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
 
 ## Tools on a node
 

@@ -33,6 +33,7 @@ from .. import VERSION
 from ..core.controlrepo import ControlRepo, epic_for_ticket
 from ..core.fencing import Leases
 from ..core.settings import Settings
+from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, rollout, version_release
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, role_satisfies, verify_session
@@ -249,6 +250,7 @@ class HeartbeatBody(BaseModel):
     release_version: str = ""
     release_protocol: int = 0
     tools: dict[str, Any] = Field(default_factory=dict)
+    services: dict[str, Any] = Field(default_factory=dict)  # test services: state per name (docs/v4/test-services.md)
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
@@ -1739,7 +1741,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
-                   (body.slots_total, body.slots_used, body.release_version, J(body.tools), J(body.metrics),
+                   (body.slots_total, body.slots_used, body.release_version, J(body.tools),
+                    J({**body.metrics, "services": body.services}),
                     body.release_protocol, body.slots_used, node))
         for account_id, expires_at in body.credential_expiries.items():
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
@@ -1790,6 +1793,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "release": release,
                             "projects": node_projects,
                             "project_stacks": project_stacks,
+                            "project_services": {key: repo.projects[key].required_services for key in node_projects
+                                                 if key in repo.projects and repo.projects[key].required_services},
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
@@ -2088,7 +2093,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if ctx.leases.cooling(account_id):
             return []
-        node_row = ctx.db.one("SELECT projects,dynamic,tools FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
         running_by_project = {row["project"]: int(row["count"]) for row in
@@ -2101,6 +2106,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects if not repo.projects[p].stacks or not toolchain_gaps(
             node_row.get("tools") or {}, repo.projects[p].tools, repo.versions, repo.projects[p].stacks,
             require_pins=True)]
+        # Declared test services (PostgreSQL, Redis) must be reported healthy too; other projects stay available.
+        reported_services = (node_row.get("metrics") or {}).get("services")
+        projects = [p for p in projects
+                    if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
         held = set(ctx.leases.held_keys())
         out: list[dict] = []

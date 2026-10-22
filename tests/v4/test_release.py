@@ -803,3 +803,46 @@ def test_develop_channel_scripts_refuse_hosts_that_did_not_opt_in(tmp_path):
         assert done.returncode == 3 and "not on the develop channel" in done.stderr
     autodeploy = Path("deploy/v4/bin/aiflow4-autodeploy").read_text()
     assert 'AIFLOW4_CHANNEL:-release}" = develop ] && exec /usr/local/sbin/aiflow4-autodeploy-develop' in autodeploy
+
+
+def _run_develop_node_agent_step(tmp_path, flag, unit_present):
+    """Run the node-agent step of aiflow4-deploy-develop with stubbed systemctl and installer."""
+    tmp_path.mkdir()
+    script = Path("deploy/v4/bin/aiflow4-deploy-develop").read_text()
+    step = script.split("# node-agent-step", 1)[1].split("# end node-agent-step", 1)[0]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    unit = "aiflow4-node-agent.service enabled" if unit_present else ""
+    (bin_dir / "systemctl").write_text(
+        f'#!/bin/bash\necho "systemctl $*" >> {log}\n[ "$1" = list-unit-files ] && echo "{unit}"\nexit 0\n')
+    (bin_dir / "aiflow4-develop-install").write_text(f'#!/bin/bash\necho "install $*" >> {log}\n')
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "TAR": "x.tar.gz", "SHA": "0123456789"}
+    if flag is not None:
+        env["AIFLOW4_DEPLOY_NODE_AGENT"] = flag
+    done = subprocess.run(["bash", "-c", step], capture_output=True, text=True, env=env)
+    assert done.returncode == 0, done.stderr
+    return done.stdout, log.read_text() if log.exists() else ""
+
+
+def test_develop_deploy_installs_the_node_agent_when_switched_on(tmp_path):
+    _, calls = _run_develop_node_agent_step(tmp_path / "on", "1", False)
+    assert calls.strip() == "install x.tar.gz 0123456789"
+    _, calls = _run_develop_node_agent_step(tmp_path / "default", None, False)
+    assert calls.strip() == "install x.tar.gz 0123456789"
+
+
+def test_develop_deploy_with_node_agent_off_installs_nothing(tmp_path):
+    out, calls = _run_develop_node_agent_step(tmp_path / "a", "0", False)
+    assert "install " not in calls and "enable" not in calls and "restart" not in calls
+    assert "not installed" in out
+
+
+def test_develop_deploy_with_node_agent_off_disables_an_earlier_agent(tmp_path):
+    out, calls = _run_develop_node_agent_step(tmp_path / "a", "0", True)
+    assert "systemctl disable -q --now aiflow4-node-agent" in calls
+    assert "systemctl reset-failed aiflow4-node-agent" in calls
+    assert "install " not in calls
+    assert "node agent disabled and stopped" in out

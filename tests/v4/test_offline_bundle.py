@@ -494,7 +494,8 @@ def test_offline_install_uses_bundle_and_checks_healthy_node_and_worker_without_
     installed = subprocess.run([str(launcher), "version"], check=True, capture_output=True, text=True,
                                 env={**offline.os.environ, "UV_OFFLINE": "1"})
     assert installed.stdout.strip() == str(release.resolve())
-    assert (release / ".venv/lib/python3.12/site-packages/aiflow4-release.pth").is_file()
+    # The fixture runs the test interpreter, which need not be 3.12 on CI runners.
+    assert len(list((release / ".venv/lib").glob("python3.*/site-packages/aiflow4-release.pth"))) == 1
     version_call = next(i for i, (args, _) in enumerate(calls)
                         if args[0].endswith("/current/.venv/bin/aiflow4") and args[1:] == ["version"])
     assert (root / "srv/aiflow/accounts/codex-01").is_dir()
@@ -539,6 +540,7 @@ def test_offline_install_default_runner_accepts_text_and_finishes(tmp_path, monk
             launcher.parent.mkdir(parents=True)
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o755)
+            (Path(args[-1]) / "lib/python3.12/site-packages").mkdir(parents=True)
         elif args[0] == "curl":
             Path(args[args.index("--output") + 1]).write_text(json.dumps(state))
         elif args[0] == "systemctl" and "list-units" in args:
@@ -576,6 +578,7 @@ def test_offline_install_default_runner_wraps_command_failures(tmp_path, monkeyp
             launcher.parent.mkdir(parents=True)
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o755)
+            (Path(args[-1]) / "lib/python3.12/site-packages").mkdir(parents=True)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(offline.subprocess, "run", run)

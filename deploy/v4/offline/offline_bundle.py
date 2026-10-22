@@ -637,8 +637,12 @@ def install_bundle(bundle: Path, *, root: Path = Path("/"), runner: Callable = _
         if old_prefix in contents:
             launcher.write_bytes(contents.replace(old_prefix, new_prefix))
 
-    site_packages = release_root / ".venv/lib/python3.12/site-packages"
-    site_packages.mkdir(parents=True, exist_ok=True)
+    # The bundle ships Python 3.12, but locate site-packages from the venv itself rather than
+    # assuming the directory name, so a mismatched interpreter cannot leave the .pth unread.
+    site_dirs = sorted((release_root / ".venv/lib").glob("python3.*/site-packages"))
+    if len(site_dirs) != 1:
+        raise BundleError("offline AI Flow virtualenv has no single site-packages directory")
+    site_packages = site_dirs[0]
     release_path = str(release_root.resolve())
     (site_packages / "aiflow4-release.pth").write_text(
         f"import sys; sys.path.insert(0, {release_path!r})\n", encoding="utf-8")

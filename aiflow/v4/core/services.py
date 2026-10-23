@@ -30,6 +30,10 @@ SERVICES: dict[str, dict[str, Any]] = {
 }
 ALIASES = {"postgresql": "postgres", "pg": "postgres", "pgvector": "postgres"}
 
+# These environments occur in escalation text, but nodes have no probes for them yet. They are deliberately not
+# accepted as parked requirements until the heartbeat can report their availability.
+EXTERNAL_REQUIREMENTS = ("dev-vm", "sonarqube", "devices")
+
 
 def normalize_services(value: Any) -> list[str]:
     """Canonical names of the declared services (a string or a list), without duplicates or unknown names."""

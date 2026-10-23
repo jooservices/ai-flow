@@ -4016,10 +4016,16 @@ function projectChecksCell(c) {
 function toolWaitsPanel(d) {
   var waits = d.tool_waits || [];
   if (!waits.length) return '';
-  var h = '<section class="panel" data-block="tool-waits" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Tickets waiting for a tool</h2><span class="hint">Parked for a machine that has the tool; the owner is not asked</span></div>';
-  h += '<table><thead><tr><th>Tool</th><th>Waiting tickets</th><th>Projects</th><th>Missing on</th><th>Maintenance ticket</th></tr></thead><tbody>';
+  var h = '<section class="panel" data-block="tool-waits" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Parked tickets</h2><span class="hint">Requirement, time parked, and automatic next action</span></div>';
+  h += '<table><thead><tr><th>Requirement</th><th>Ticket</th><th>Parked since</th><th>Missing on</th><th>System action</th><th>Maintenance ticket</th></tr></thead><tbody>';
   waits.forEach(function (w) {
-    h += '<tr><td class="mono">' + esc(w.requirement) + '</td><td class="mono" title="' + esc(w.tickets.map(function (t) { return t.key; }).join(', ')) + '">' + esc(w.count) + '</td><td>' + esc((w.projects || []).join(', ')) + '</td><td>' + esc((w.machines || []).join(', ')) + '</td><td class="mono">' + (w.maintenance_ticket ? esc(w.maintenance_ticket) : '<span class="muted">after 24 h without a capable machine</span>') + '</td></tr>';
+    (w.tickets || []).forEach(function (t) {
+      h += '<tr><td class="mono">' + esc(t.requirement || w.requirement) + '</td>';
+      h += '<td class="mono" title="' + esc(t.summary || t.detail || '') + '">' + esc(t.key) + '</td>';
+      h += '<td title="' + esc(t.since || w.since) + '">' + esc(when(t.since || w.since)) + '</td>';
+      h += '<td>' + esc(t.machine || 'unknown') + '</td><td>' + esc(t.action || w.action || 'Waiting for a capable machine') + '</td>';
+      h += '<td class="mono">' + (w.maintenance_ticket ? esc(w.maintenance_ticket) : '<span class="muted">after 24 h without a capable machine</span>') + '</td></tr>';
+    });
   });
   return h + '</tbody></table></section>';
 }

@@ -5160,7 +5160,9 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/state", responses={200: {"description": "Command Center, Delivery, and SA snapshot",
                                             "content": {"application/json": {"schema": STATE_RESPONSE_SCHEMA}}}})
-    def state(request: Request) -> dict:
+    def state(request: Request, authorization: str = Header(default="")) -> dict:
+        if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
+            owner_auth(request, authorization)
         from .state import snapshot
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         include_signin = bool(user and has_permission(user.role, "nodes.manage"))

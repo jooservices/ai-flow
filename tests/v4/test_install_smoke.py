@@ -11,16 +11,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_publication_waits_for_systemd_install_smoke():
+def test_release_publication_waits_for_documented_install_and_fleet_smokes():
     workflow = yaml.load((ROOT / ".github/workflows/release-v4.yml").read_text(), Loader=yaml.BaseLoader)
     release = workflow["jobs"]["release"]
-    assert release["needs"] == "v4-tests"
+    assert release["needs"] == ["v4-tests", "acceptance"]
     names = [step.get("name", "") for step in release["steps"]]
-    smoke = names.index("Install release on Ubuntu systemd control and two nodes")
+    clean_install = names.index("Clean-install signed candidate on Ubuntu control and two nodes")
+    rollout_smoke = names.index("Fleet rollout and rollback smoke using signed candidate artifacts")
     image = names.index("Build and push control-api image to GHCR")
     publish = names.index("Create GitHub Release and upload assets")
-    assert smoke < image < publish
-    assert "install-smoke.sh" in release["steps"][smoke]["run"]
+    assert clean_install < rollout_smoke < image < publish
+    assert "clean-install-containers.sh" in release["steps"][clean_install]["run"]
+    assert "install-smoke.sh" in release["steps"][rollout_smoke]["run"]
     validate = next(step for step in release["steps"] if step.get("name") == "Validate tag and master ancestry")
     assert "gh release list" in validate["run"]
     assert "git merge-base --is-ancestor" in validate["run"]

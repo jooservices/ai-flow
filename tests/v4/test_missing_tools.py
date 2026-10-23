@@ -54,6 +54,10 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
         {"command": "echo 'bash: php: command not found'", "output": "bash: php: command not found", "exit_code": 1},
         {"command": "php -v", "output": "bash: php: command not found", "exit_code": 0},
     ]) == []
+    assert parse_command_not_found_requirements([
+        {"command": "echo 'bash: php: command not found'; php --bad 2>/dev/null",
+         "output": "bash: php: command not found", "exit_code": 1},
+    ]) == []
     assert parse_missing_requirements("MISSING-TOOL: phpunit - not a catalogue tool") == []
     assert parse_missing_requirements("The summary mentions docker, php, and a missing test fixture") == []
     assert parse_missing_requirements("AC2 contradicts AC4; which one wins?") == []
@@ -156,6 +160,16 @@ def test_quoted_command_error_in_blocked_explanation_is_not_execution_evidence(m
     assert result["outcome"] == "blocked"
     assert result["details"].get("missing_tools", []) == []
     assert result["details"]["verdict_reason"] == reason
+
+
+def test_compound_command_error_text_is_not_attributed_to_a_missing_tool(monkeypatch, tmp_path):
+    result, _ = _run_dev(
+        monkeypatch, tmp_path, "BLOCKED", "the command failed",
+        command_results=[{"command": "echo 'bash: php: command not found'; php --bad 2>/dev/null",
+                          "output": "bash: php: command not found", "exit_code": 1}],
+    )
+    assert result["outcome"] == "blocked"
+    assert result["details"].get("missing_tools", []) == []
 
 
 def test_unknown_missing_marker_fails_normally_and_keeps_the_ai_reason(monkeypatch, tmp_path):

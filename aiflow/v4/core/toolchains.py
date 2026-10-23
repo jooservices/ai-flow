@@ -236,40 +236,42 @@ def parse_missing_requirements(text: str) -> list[str]:
     return []
 
 
-def _executed_programs(command: str) -> set[str]:
-    """Executable names in shell command segments, excluding words printed as arguments (for example by echo)."""
+def _single_executed_program(command: str) -> str | None:
+    """Return the executable only when a command record attributes one simple invocation.
+
+    Adapter command events can contain an entire shell script. In that case output may come from a different
+    command in the script (including an ``echo``), so a diagnostic cannot be attributed to any executable safely.
+    Transparent ``sh -c`` wrappers are accepted only when their payload also contains one simple invocation.
+    """
+    if "\n" in command or "\r" in command:
+        return None
     try:
         tokens = list(shlex.shlex(command, posix=True, punctuation_chars=";&|"))
     except ValueError:
-        return set()
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token and all(char in ";&|" for char in token):
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    found: set[str] = set()
-    for segment in segments:
-        if not segment:
-            continue
-        executable = segment[0]
-        if executable == "env":
+        return None
+    # Any shell control operator means this event does not identify which command produced its output.
+    if any(token and all(char in ";&|" for char in token) for token in tokens):
+        return None
+    if any("$(" in token or "`" in token for token in tokens):
+        return None
+    if not tokens:
+        return None
+    segment = tokens
+    executable = segment[0]
+    if executable == "env":
+        segment = segment[1:]
+        while segment and (segment[0].startswith("-") or "=" in segment[0]):
             segment = segment[1:]
-            while segment and (segment[0].startswith("-") or "=" in segment[0]):
-                segment = segment[1:]
-            if not segment:
-                continue
-            executable = segment[0]
-        base = executable.rsplit("/", 1)[-1].casefold()
-        if base in {"bash", "sh", "dash", "zsh"}:
-            for index, token in enumerate(segment[1:], start=1):
-                if token == "-c" or (token.startswith("-") and "c" in token[1:]):
-                    if index + 1 < len(segment):
-                        found.update(_executed_programs(segment[index + 1]))
-                    break
-            continue
-        found.add(base)
-    return found
+        if not segment:
+            return None
+        executable = segment[0]
+    base = executable.rsplit("/", 1)[-1].casefold()
+    if base in {"bash", "sh", "dash", "zsh"}:
+        for index, token in enumerate(segment[1:], start=1):
+            if token == "-c" or (token.startswith("-") and "c" in token[1:]):
+                return _single_executed_program(segment[index + 1]) if index + 1 < len(segment) else None
+        return None
+    return base
 
 
 def parse_command_not_found_requirements(command_results: Iterable[dict]) -> list[str]:
@@ -298,12 +300,14 @@ def parse_command_not_found_requirements(command_results: Iterable[dict]) -> lis
             command = " ".join(str(part) for part in command)
         if not isinstance(command, str):
             continue
-        programs = _executed_programs(command)
+        program = _single_executed_program(command)
+        if not program:
+            continue
         output = str(result.get("output") or "")
         for pattern in patterns:
             for match in re.finditer(pattern, output, re.I):
                 name = match.group(1).casefold()
-                if name in command_tools and name in programs:
+                if name in command_tools and name == program:
                     found.append(command_tools[name])
     return list(dict.fromkeys(found))
 

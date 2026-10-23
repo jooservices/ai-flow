@@ -6,22 +6,15 @@ trail from the console. Details never contain secrets: they name what changed, n
 """
 from __future__ import annotations
 
-import logging
-
 from .db import J
-
-log = logging.getLogger(__name__)
 
 CATEGORIES = ("auth", "people", "roles", "credentials", "settings", "security")
 
 
 def record(db, actor: str, category: str, action: str, target: str = "", detail: dict | None = None, ip: str = "") -> None:
-    """Append one entry. A failure to write is logged loudly but never hides the change that was made."""
-    try:
-        db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) VALUES (%s,%s,%s,%s,%s,%s)",
-               (actor[:200], category, action[:200], target[:300], ip[:64], J(detail or {})))
-    except Exception:  # noqa: BLE001
-        log.exception("audit log: could not record %s %s by %s", category, action, actor)
+    """Append one entry; callers include it in the same transaction as the change."""
+    db.run("INSERT INTO audit_log (actor, category, action, target, ip, detail) VALUES (%s,%s,%s,%s,%s,%s)",
+           (actor[:200], category, action[:200], target[:300], ip[:64], J(detail or {})))
 
 
 def category_for(method: str, path: str) -> str:

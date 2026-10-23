@@ -30,16 +30,20 @@ def console_csrf_header(request, monkeypatch):
     """A console session cookie needs the session's X-CSRF-Token on every state-changing request (AC4 of JAIF-231).
     Tests of other features sign in with a forged cookie, so this adds the matching token for them. Tests of the
     protection itself opt out with `@pytest.mark.raw_csrf` and send exactly what they mean to."""
-    if request.node.get_closest_marker("raw_csrf"):
-        return
+    raw_csrf = request.node.get_closest_marker("raw_csrf") is not None
     from starlette.testclient import TestClient
     from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token
     original = TestClient.request
 
     def request_with_token(self, method, url, **kwargs):
-        cookie = self.cookies.get(COOKIE_NAME)
         headers = kwargs.get("headers") or {}
-        if cookie and method.upper() not in ("GET", "HEAD", "OPTIONS") and not any(k.lower() == "x-csrf-token" for k in headers):
+        if (method.upper() == "POST" and str(url).split("?", 1)[0].endswith("/v1/auth/login")
+                and not any(k.lower() in {"origin", "referer"} for k in headers)):
+            headers = {**headers, "Origin": str(self.base_url).rstrip("/")}
+            kwargs["headers"] = headers
+        cookie = self.cookies.get(COOKIE_NAME)
+        if (not raw_csrf and cookie and method.upper() not in ("GET", "HEAD", "OPTIONS")
+                and not any(k.lower() == "x-csrf-token" for k in headers)):
             ctx = getattr(self.app, "state", None) and getattr(self.app.state, "ctx", None)
             if ctx is not None:
                 kwargs["headers"] = {**headers, "X-CSRF-Token": csrf_token(cookie, ctx.settings.console_session_secret)}

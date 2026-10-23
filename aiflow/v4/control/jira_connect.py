@@ -103,7 +103,10 @@ class SecretStore:
 
     def _read(self, name: str) -> dict | None:
         try:
-            data = json.loads(secretbox.decrypt((self.dir / name).read_text(encoding="utf-8"), context=name))
+            raw = (self.dir / name).read_text(encoding="utf-8")
+            data = json.loads(secretbox.decrypt(raw, context=name))
+            if not secretbox.is_encrypted(raw):
+                self._write(name, data)  # upgrade old plaintext files on first access
         except (OSError, ValueError):  # SecretBoxError is a ValueError: an unreadable secret reads as not connected
             return None
         return data if isinstance(data, dict) else None
@@ -116,7 +119,7 @@ class SecretStore:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(secretbox.seal(json.dumps(data), name))  # AES-GCM when a key is configured
+                f.write(secretbox.seal(json.dumps(data), name))  # fails closed if the external key is missing
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.dir / name)

@@ -648,7 +648,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
@@ -2132,7 +2132,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise
         operation_id = str(uuid.uuid4())
         components = [str(t["name"]) for t in payload["tools"]]
-        with ctx.db.pool.connection() as connection:
+        with ctx.db.transaction() as connection:
             connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
                                (operation_id, name, body.action, user.subject, J(payload)))
             audit_in(connection, "node", body.action, name, operation_id, None, user.subject, True, "queued",

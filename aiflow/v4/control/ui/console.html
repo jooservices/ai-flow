@@ -2017,16 +2017,16 @@ function renderLearningKnowledge(k, canManage) {
     var statusTone = item.status === 'active' ? 'ok' : (item.status === 'stale' ? 'warn' : 'muted');
     h += '<article class="knowledge-item"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>' + esc(item.title) + '</h3>' +
       '<span class="pill" data-tone="' + statusTone + '">' + esc(item.status) + '</span><span class="pill">' + esc(KNOWLEDGE_TYPES[item.kind] || item.kind) + ' · ' + esc(scope) + '</span></div>' +
-      '<div class="small">' + esc(item.content) + '</div><div class="small">Source: ' + source + (item.source_url ? ' · <a href="' + esc(item.source_url) + '" target="_blank" rel="noopener">ticket</a>' : '') +
+      '<div class="small">' + esc(item.content) + '</div><div class="small">Source: ' + source + (item.source_url ? ' · <a href="' + esc(safeHref(item.source_url)) + '" target="_blank" rel="noopener">ticket</a>' : '') +
       (item.run_id ? ' · <a href="/v1/tickets/' + encodeURIComponent(item.ticket_key) + '/timeline" target="_blank" rel="noopener">run ' + esc(item.run_id) + '</a>' : '') +
-      (item.pr_url ? ' · <a href="' + esc(item.pr_url) + '" target="_blank" rel="noopener">pull request</a>' : '') + '</div>' +
+      (item.pr_url ? ' · <a href="' + esc(safeHref(item.pr_url)) + '" target="_blank" rel="noopener">pull request</a>' : '') + '</div>' +
       '<div class="small">Created by ' + esc(item.created_by || 'unknown') + ' · approved by ' + esc(item.approved_by || 'pending') + ' · handed to ' + Number(item.handed_count || 0) + ' runs</div>';
     if (canManage) h += '<div class="knowledge-actions">' +
-      '<button class="btn sm" data-act="knowledge-item-edit" data-id="' + item.id + '">Correct</button>' +
-      ((!item.approved || item.status === 'stale') ? '<button class="btn sm" data-act="knowledge-item-approve" data-id="' + item.id + '">Approve / review</button>' : '') +
-      (item.status === 'active' ? '<button class="btn sm" data-act="knowledge-item-stale" data-id="' + item.id + '">Flag for review</button>' : '') +
-      (item.status !== 'retired' ? '<button class="btn sm" data-act="knowledge-item-retire" data-id="' + item.id + '">Retire</button>' : '') +
-      '<button class="btn sm" data-act="knowledge-item-merge" data-id="' + item.id + '">Merge duplicate…</button></div>';
+      '<button class="btn sm" data-act="knowledge-item-edit" data-id="' + esc(item.id) + '">Correct</button>' +
+      ((!item.approved || item.status === 'stale') ? '<button class="btn sm" data-act="knowledge-item-approve" data-id="' + esc(item.id) + '">Approve / review</button>' : '') +
+      (item.status === 'active' ? '<button class="btn sm" data-act="knowledge-item-stale" data-id="' + esc(item.id) + '">Flag for review</button>' : '') +
+      (item.status !== 'retired' ? '<button class="btn sm" data-act="knowledge-item-retire" data-id="' + esc(item.id) + '">Retire</button>' : '') +
+      '<button class="btn sm" data-act="knowledge-item-merge" data-id="' + esc(item.id) + '">Merge duplicate…</button></div>';
     h += '</article>';
   });
   h += '</div>';

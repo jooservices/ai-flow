@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from aiflow.v4.control import audit, login, mfa
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.console_auth import COOKIE_NAME, csrf_token, issue_session
+from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.github_connect import GitHubSecretStore
 from aiflow.v4.control.jira_connect import SecretStore
 from aiflow.v4.core import secretbox
@@ -18,9 +19,10 @@ ADMIN = "admin@example.test"
 OTHER = "lead@example.test"
 
 
-def make_client(ctx, gate=False, ip="127.0.0.1"):
+def make_client(ctx, gate=False, ip="127.0.0.1", require_mfa=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
+    ctx.settings.console_require_mfa = require_mfa  # tests opt out except when checking the secure default
     app = create_app(ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=(ip, 50000))
@@ -80,6 +82,16 @@ def test_two_factor_setup_enable_and_sign_in_needs_the_code(ctx, key, admin):
     other = make_client(ctx)
     refused = sign_in(other, "wrong", code=mfa.totp_code(secret, time.time() + 30))
     assert refused.status_code == 401 and refused.json() == {"detail": login.REFUSED}
+
+
+def test_administrator_mfa_is_required_by_default(ctx, admin):
+    assert ctx.settings.console_require_mfa is True
+    assert login.require_mfa(ctx) is True
+    client = make_client(ctx, require_mfa=True)
+    started = sign_in(client, admin)
+    assert started.status_code == 200 and started.json()["mfa_setup_required"] is True
+    assert client.get("/v1/console/session").status_code == 401
+    assert client.post("/v1/security/mfa/setup").status_code == 200
 
 
 def test_recovery_codes_sign_in_once_and_can_be_reissued(ctx, key, admin):
@@ -167,11 +179,15 @@ def test_logout_and_password_reset_end_the_session(ctx, admin):
     a = make_client(ctx)
     assert sign_in(a, admin).status_code == 200
     stolen = a.cookies.get(COOKIE_NAME)
-    assert a.post("/v1/auth/logout").status_code == 200
+    assert a.get("/logout").status_code == 405
+    assert a.get("/v1/auth/me").status_code == 200  # a safe request cannot end the session
+    assert a.post("/logout").status_code == 303
     thief = make_client(ctx)
     thief.cookies.set(COOKIE_NAME, stolen)
     assert thief.get("/v1/console/session").status_code == 401  # a copied cookie dies with the logout
     b = make_client(ctx)
+    assert sign_in(b, admin).status_code == 200
+    assert b.post("/v1/auth/logout").status_code == 200
     assert sign_in(b, admin).status_code == 200
     login.reset_password(ctx.db, ADMIN)
     assert b.get("/v1/console/session").status_code == 401
@@ -207,7 +223,10 @@ def test_secretbox_round_trip_wrong_key_and_legacy_plaintext(key):
 
 def test_key_can_come_from_a_file_and_is_never_taken_from_the_database(tmp_path, monkeypatch):
     monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)
-    assert secretbox.load_key() is None and secretbox.seal("x") == "x"
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+    assert secretbox.load_key() is None
+    with pytest.raises(secretbox.SecretBoxError, match="no secret encryption key"):
+        secretbox.seal("x")
     keyfile = tmp_path / "secret.key"
     keyfile.write_text(secretbox.generate_key() + "\n")
     monkeypatch.setenv("AIFLOW4_SECRET_KEY_FILE", str(keyfile))
@@ -215,6 +234,17 @@ def test_key_can_come_from_a_file_and_is_never_taken_from_the_database(tmp_path,
     monkeypatch.setenv("AIFLOW4_SECRET_KEY_FILE", str(tmp_path / "missing"))
     with pytest.raises(secretbox.SecretBoxError):
         secretbox.load_key()
+
+
+def test_connector_secret_writes_require_a_configured_external_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+    with pytest.raises(secretbox.SecretBoxError, match="no secret encryption key"):
+        SecretStore(tmp_path / "jira").save_credential({"access_token": "secret"})
+    with pytest.raises(secretbox.SecretBoxError, match="no secret encryption key"):
+        GitHubSecretStore(tmp_path / "github").save_active({"id": 1}, "private key")
+    assert not (tmp_path / "jira" / "credential.json").exists()
+    assert not (tmp_path / "github" / "app.pem").exists()
 
 
 def test_jira_credentials_are_stored_encrypted(tmp_path, key, monkeypatch):
@@ -229,6 +259,16 @@ def test_jira_credentials_are_stored_encrypted(tmp_path, key, monkeypatch):
     assert store.credential() is None
 
 
+def test_existing_jira_plaintext_is_migrated_when_read(tmp_path, key):
+    store = SecretStore(tmp_path / "jira")
+    store.dir.mkdir()
+    legacy = json.dumps({"access_token": "legacy-SECRET", "refresh_token": "legacy-REFRESH"})
+    (store.dir / store.CREDENTIAL).write_text(legacy, encoding="utf-8")
+    assert store.credential() == {"access_token": "legacy-SECRET", "refresh_token": "legacy-REFRESH"}
+    raw = (store.dir / store.CREDENTIAL).read_text(encoding="utf-8")
+    assert secretbox.is_encrypted(raw) and "legacy-SECRET" not in raw
+
+
 def test_github_app_key_is_stored_encrypted(tmp_path, key):
     store = GitHubSecretStore(tmp_path / "gh")
     pem = "-----BEGIN PRIVATE KEY-----\nPEM-SECRET\n-----END PRIVATE KEY-----\n"
@@ -236,6 +276,17 @@ def test_github_app_key_is_stored_encrypted(tmp_path, key):
     assert "PEM-SECRET" not in (tmp_path / "gh" / "app.pem").read_text()
     store.create_pending("a" * 64, {"app": {"id": 1}}, pem)
     assert store.read_pending("a" * 64)[2] == pem
+
+
+def test_existing_github_private_key_is_migrated_when_loaded(tmp_path, key):
+    root = tmp_path / "gh"
+    root.mkdir()
+    pem = "-----BEGIN PRIVATE KEY-----\nLEGACY-PEM-SECRET\n-----END PRIVATE KEY-----\n"
+    (root / "app.json").write_text(json.dumps({"id": "1", "installation_id": 2}), encoding="utf-8")
+    (root / "app.pem").write_text(pem, encoding="utf-8")
+    app = GitHubApp(str(root), "aiflow")
+    raw = (root / "app.pem").read_text(encoding="utf-8")
+    assert app.key == pem and secretbox.is_encrypted(raw) and "LEGACY-PEM-SECRET" not in raw
 
 
 def test_two_factor_secrets_and_recovery_codes_are_not_readable_in_the_database(ctx, key, admin):
@@ -247,6 +298,15 @@ def test_two_factor_secrets_and_recovery_codes_are_not_readable_in_the_database(
     # without the environment key the value cannot be read, even by the application
     row = ctx.db.one("SELECT * FROM console_users")
     assert mfa.read_secret(row, ADMIN, SECRET) == secret
+
+
+def test_existing_plaintext_totp_secret_is_migrated_at_control_startup(ctx, key, admin):
+    legacy = mfa.new_secret()
+    ctx.db.run("UPDATE console_users SET totp_secret=%s, totp_enabled=true WHERE email=%s", (legacy, ADMIN))
+    make_client(ctx, require_mfa=True)
+    row = ctx.db.one("SELECT email, totp_secret FROM console_users WHERE email=%s", (ADMIN,))
+    assert secretbox.is_encrypted(row["totp_secret"])
+    assert mfa.read_secret(row, ADMIN, SECRET) == legacy
 
 
 # --- AC3: rate limits and sign-in guessing protection ----------------------------------------------------------------
@@ -280,6 +340,25 @@ def test_sign_in_attempts_per_address_and_email_are_capped(ctx, admin):
     statuses = [sign_in(client, "wrong").status_code for _ in range(login.RATE_PER_IP_EMAIL + 1)]
     assert statuses[-1] == 429
     assert "retry-after" in sign_in(client, admin).headers
+
+
+def test_valid_second_factor_can_sign_in_after_sign_in_budgets_are_exhausted(ctx, key, admin, monkeypatch):
+    monkeypatch.setattr(login, "RATE_PER_IP", 2)
+    monkeypatch.setattr(login, "RATE_PER_IP_EMAIL", 2)
+    secret, codes = enrol(make_client(ctx, ip="127.0.0.9"), admin)
+    client = make_client(ctx, ip="127.0.0.10")
+    assert sign_in(client, "wrong").status_code == 401
+    assert sign_in(client, "wrong").status_code == 401
+    limited = sign_in(client, "wrong")
+    assert limited.status_code == 429 and int(limited.headers["retry-after"]) > 0
+    valid_totp = sign_in(client, admin, code=mfa.totp_code(secret))
+    assert valid_totp.status_code == 200
+
+    recovery_client = make_client(ctx, ip="127.0.0.11")
+    for _ in range(3):
+        assert sign_in(recovery_client, "wrong").status_code in (401, 429)
+    valid_recovery = sign_in(recovery_client, admin, code=codes[0])
+    assert valid_recovery.status_code == 200
 
 
 def test_guessing_locks_password_only_sign_in_but_never_the_real_owner(ctx, key, admin):
@@ -344,6 +423,16 @@ def test_state_changing_requests_with_a_session_need_the_csrf_token(ctx, admin):
     assert ctx.db.one("SELECT value FROM security_settings WHERE key='session_ttl_s'")["value"] == "7200"
 
 
+def test_login_rejects_cross_site_pre_authentication_posts(ctx, admin):
+    client = make_client(ctx)
+    rejected = client.post("/v1/auth/login", json={"email": ADMIN, "password": admin},
+                           headers={"Origin": "https://attacker.example", "Sec-Fetch-Site": "cross-site"})
+    assert rejected.status_code == 403 and "cross-site" in rejected.json()["detail"]
+    same_site = client.post("/v1/auth/login", json={"email": ADMIN, "password": admin},
+                            headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"})
+    assert same_site.status_code == 200
+
+
 @pytest.mark.raw_csrf
 def test_requests_without_a_session_cookie_or_with_a_bearer_token_are_not_blocked_by_csrf(ctx):
     client = make_client(ctx)
@@ -388,11 +477,31 @@ def test_people_roles_and_credentials_changes_are_recorded(ctx):
     changed = ctx.db.all("SELECT action, actor, detail FROM audit_log WHERE category='settings'")
     assert {c["action"] for c in changed} == {"security_setting_session_ttl_s", "security_setting_require_mfa"}
     assert all(c["actor"] == ADMIN for c in changed)
-    # credentials: a console change on the integrations routes is recorded with its route, never its body
+    # Other console mutations are recorded before dispatch, in the same database transaction as the change.
     client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
     entry = ctx.db.one("SELECT actor, category, action, detail FROM audit_log WHERE action LIKE 'PUT %budget'")
-    assert entry and entry["actor"] == ADMIN and entry["category"] == "settings" and entry["detail"] == {"status": 200}
+    assert entry and entry["actor"] == ADMIN and entry["category"] == "settings" and entry["detail"] == {}
     assert audit.category_for("POST", "/v1/integrations/jira/api-token") == "credentials"
+
+
+def test_audit_append_failure_rolls_back_the_associated_setting_change(ctx, admin, monkeypatch):
+    signed_in = make_client(ctx)
+    assert sign_in(signed_in, admin).status_code == 200
+    client = TestClient(signed_in.app, follow_redirects=False, raise_server_exceptions=False)
+    client.cookies.update(signed_in.cookies)
+
+    def fail_append(*_args, **_kwargs):
+        raise RuntimeError("audit database unavailable")
+
+    monkeypatch.setattr(audit, "record", fail_append)
+    response = client.put("/v1/security/settings", json={"session_ttl_s": 7200})
+    assert response.status_code == 500
+    assert ctx.db.one("SELECT value FROM security_settings WHERE key='session_ttl_s'") is None
+    # A generic mutation is not dispatched when its pre-mutation audit append fails.
+    response = client.put("/v1/master/autonomy/budget", json={"daily_budget_minutes": 12})
+    assert response.status_code == 500
+    assert ctx.db.one("SELECT daily_budget_minutes FROM master_settings WHERE singleton=true")[
+        "daily_budget_minutes"] == 60
 
 
 def test_secrets_never_reach_the_audit_log(ctx, key, admin):

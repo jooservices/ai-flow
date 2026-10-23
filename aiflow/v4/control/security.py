@@ -8,7 +8,8 @@ Installed once by `create_app` after the console login (login.py), it adds:
   `X-CSRF-Token` of that session (the console script copies it from the `aiflow4_csrf` cookie). Machine callers that
   send an `Authorization` header are not affected: a browser cannot add that header to a cross-site request;
 - security headers, including a content security policy that blocks scripts from other origins;
-- the audit trail (AC7): every successful state-changing request of a signed-in person is recorded;
+- the audit trail (AC7): state-changing console requests are recorded in the transaction; credential OAuth callbacks
+  and owner-token Jira changes are recorded too;
 - the security screen's API under `/v1/security/*`: two-factor setup and recovery codes, session length, forced
   sign-out, people and the read-only audit log (`GET /v1/security/audit`; there is no route that writes to it).
 """
@@ -37,7 +38,7 @@ log = logging.getLogger(__name__)
 
 CSRF_HEADER = "x-csrf-token"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-CSRF_EXEMPT = {"/v1/auth/login"}  # no session yet; the password (and second factor) is the credential
+CSRF_EXEMPT = {"/v1/auth/login"}  # checked against Origin/Referer in login.py before credentials are read
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
@@ -54,6 +55,7 @@ class CodeBody(BaseModel):
 
 def install_security(app: FastAPI, ctx) -> None:
     settings = ctx.settings
+    mfa.migrate_plaintext_secrets(ctx.db, settings.console_session_secret)
     secret = lambda: settings.console_session_secret  # noqa: E731 - read late: tests and the CLI set it after startup
 
     def session(request: Request, allow_pending: bool = False) -> ConsoleUser | None:
@@ -75,16 +77,39 @@ def install_security(app: FastAPI, ctx) -> None:
     # --- middleware (the last one registered is the outermost) --------------------------------------------------------
     @app.middleware("http")
     async def audit_changes(request: Request, call_next):
-        response = await call_next(request)
-        if request.method in SAFE_METHODS or response.status_code >= 400 or request.url.path.startswith("/v1/security"):
-            return response
+        callback_actors = {
+            "/v1/integrations/jira/oauth/callback": "jira-oauth",
+            "/v1/integrations/github/manifest/callback": "github-oauth",
+            "/v1/integrations/github/setup": "github-oauth",
+        }
+        if request.method in SAFE_METHODS and request.url.path not in callback_actors:
+            return await call_next(request)
         user = await run_in_threadpool(session, request, True)
-        if user:
-            route = request.scope.get("route")
-            template = getattr(route, "path", request.url.path)
-            await run_in_threadpool(audit_log.record, ctx.db, user.subject, audit_log.category_for(request.method, template),
-                                    f"{request.method} {template}", "", {"status": response.status_code}, ip_of(request))
-        return response
+        actor = user.subject if user else ""
+        if not actor and request.url.path.startswith("/v1/integrations/jira/"):
+            scheme, separator, token = request.headers.get("authorization", "").partition(" ")
+            if (separator and scheme.lower() == "bearer" and token.strip() and settings.owner_token
+                    and hmac.compare_digest(token.strip().encode(), settings.owner_token.encode())):
+                actor = "owner-token"
+        actor = actor or callback_actors.get(request.url.path, "")
+        if not actor:
+            return await call_next(request)
+        with ctx.db.transaction():
+            explicit_audit = (request.url.path.startswith("/v1/security/")
+                              or request.url.path.startswith("/v1/auth/") or request.url.path == "/logout")
+            if not explicit_audit:
+                template = request.url.path
+                for route in app.routes:
+                    match, _ = route.matches(request.scope)
+                    if match.name == "FULL":
+                        template = getattr(route, "path", template)
+                        break
+                # Insert before invoking code that may change a database row or a secret file. If the append fails,
+                # the handler never runs.
+                await run_in_threadpool(
+                    audit_log.record, ctx.db, actor, audit_log.category_for(request.method, template),
+                    f"{request.method} {template}", "", {}, ip_of(request))
+            return await call_next(request)
 
     @app.middleware("http")
     async def csrf(request: Request, call_next):
@@ -109,6 +134,10 @@ def install_security(app: FastAPI, ctx) -> None:
 
     def over_budget(request: Request) -> int:
         path, ip = request.url.path, ip_of(request)
+        # Login has a credential-aware limiter: the owner can prove identity with a valid second factor even when
+        # the guessing budgets are spent. A generic 429 here would bypass that exception.
+        if path == "/v1/auth/login":
+            return 0
         budgets = []
         if settings.rate_limit_per_min:
             budgets.append(("all", settings.rate_limit_per_min))

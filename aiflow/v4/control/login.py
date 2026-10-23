@@ -5,7 +5,8 @@ password hashing (scrypt from the standard library, salted, no new dependency), 
 and the gate. The gate only works with `AIFLOW4_CONSOLE_LOGIN=1`; without it nothing changes.
 
 Sign-in, in order:
-1. Redis rate limits per client IP and per IP+email, before any database lookup (429 with Retry-After).
+1. Redis rate limits per client IP and per IP+email; when those budgets are spent, only a valid password plus a
+   one-time second factor can still sign in (429 with Retry-After for other attempts).
 2. The user row; an account whose lock has expired gets `failed_attempts` reset first.
 3. scrypt verification in a worker thread, never on the event loop. Unknown emails and locked accounts are checked
    against a dummy hash, so every refusal costs the same and returns the same 401 answer.
@@ -40,7 +41,7 @@ import secrets
 import stat
 import time
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import redis
 from fastapi import FastAPI, Request
@@ -158,20 +159,18 @@ def seed_user(db, email: str, role: str, display_name: str = "",
     email = normalize_email(email)
     if role not in ROLE_PERMISSIONS:
         raise ValueError(f"unknown role {role}; choose one of {', '.join(sorted(ROLE_PERMISSIONS))}")
-    if db.one("SELECT 1 AS x FROM console_users WHERE email=%s", (email,)):
-        return None
     password = generate_password()
-    with db.pool.connection() as c:
+    with db.transaction() as c:
         created = c.execute("INSERT INTO console_users (email, display_name, role, password_hash) VALUES (%s,%s,%s,%s)"
                             " ON CONFLICT (email) DO NOTHING RETURNING email",
                             (email, display_name.strip(), role, hash_password(password))).fetchone()
         if not created:
             return None
+        audit_log.record(db, "cli", "people", "user_created", email, {"role": role})
+        if role != "lead":
+            audit_log.record(db, "cli", "roles", "role_granted", email, {"role": role})
         if deliver:
             deliver(password)
-    audit_log.record(db, "cli", "people", "user_created", email, {"role": role})
-    if role != "lead":
-        audit_log.record(db, "cli", "roles", "role_granted", email, {"role": role})
     return password
 
 
@@ -179,16 +178,16 @@ def reset_password(db, email: str, deliver: Callable[[str], None] | None = None)
     """Give an existing user a new generated password and clear any lock; `deliver` runs before the commit."""
     email = normalize_email(email)
     password = generate_password()
-    with db.pool.connection() as c:
+    with db.transaction() as c:
         updated = c.execute("UPDATE console_users SET password_hash=%s, failed_attempts=0, locked_until=NULL,"
                             " updated_at=now() WHERE email=%s RETURNING email", (hash_password(password), email)).fetchone()
         if not updated:
             raise ValueError("no such console user")
         c.execute("UPDATE console_sessions SET revoked_at=now(), revoked_by='password reset'"
                   " WHERE email=%s AND revoked_at IS NULL", (email,))  # a new password ends every open session
+        audit_log.record(db, "cli", "people", "password_reset", email)
         if deliver:
             deliver(password)
-    audit_log.record(db, "cli", "people", "password_reset", email)
     return password
 
 
@@ -254,6 +253,37 @@ def client_ip(request: Request, trusted_proxies: list[str] | tuple[str, ...] = (
         except ValueError:
             continue
     return str(peer_address)
+
+
+def _origin_tuple(value: str, *, referrer: bool = False) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        scheme, host = parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip(".")
+        if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return None
+        if not referrer and (parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            return None
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return scheme, host, port
+    except ValueError:
+        return None
+
+
+def preauth_origin_allowed(request: Request, public_url: str) -> bool:
+    """Require a same-origin marker on the pre-authentication login request."""
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return False
+    origin = request.headers.get("origin", "")
+    referrer = request.headers.get("referer", "")
+    supplied = origin or referrer
+    if not supplied:
+        return False
+    source = _origin_tuple(supplied, referrer=not bool(origin))
+    if source is None:
+        return False
+    expected = {_origin_tuple(str(request.base_url)), _origin_tuple(public_url)}
+    expected.discard(None)
+    return source in expected
 
 
 LOGIN_PAGE = """<!doctype html>
@@ -383,8 +413,11 @@ def install_login(app: FastAPI, ctx) -> None:
         presents a valid authenticator code or an unused recovery code (a second factor a guesser does not have) is
         still checked and signed in, and success clears the lock."""
         wait = over_limit(ip, email)
-        if wait:
-            return 429, {"detail": "too many sign-in attempts; try again later"}, {"Retry-After": str(wait)}
+        limited = bool(wait)
+        with ctx.db.transaction():
+            return check_attempt(ip, email, password, code, wait, limited)
+
+    def check_attempt(ip: str, email: str, password: str, code: str, wait: int, limited: bool):
         row = None
         if email:
             ctx.db.run("UPDATE console_users SET failed_attempts=0, locked_until=NULL, updated_at=now()"
@@ -396,14 +429,16 @@ def install_login(app: FastAPI, ctx) -> None:
         second_factor = bool(code.strip()) and enrolled
         usable = bool(row and not row["disabled"] and (not locked or second_factor))
         good = verify_password(password, row["password_hash"] if usable else _dummy_hash())
+        factor = ""
+        if usable and good and enrolled and code.strip():
+            factor = mfa.check_second_factor(ctx.db, row, email, code, settings.console_session_secret)
+            good = bool(factor)
+        if limited and not (usable and good and enrolled and factor):
+            return 429, {"detail": "too many sign-in attempts; try again later"}, {"Retry-After": str(wait)}
         if usable and good and enrolled and not code.strip():
             # right password, second factor still to come; not a failure and nothing is revealed to a wrong password
             return 401, {"detail": "enter the code from your authenticator app or a recovery code",
                          "mfa_required": True}, {}
-        factor = ""
-        if usable and good and enrolled:
-            factor = mfa.check_second_factor(ctx.db, row, email, code, settings.console_session_secret)
-            good = bool(factor)
         if not (usable and good):
             if usable and not locked:
                 ctx.db.run("UPDATE console_users SET failed_attempts=failed_attempts+1,"
@@ -437,6 +472,8 @@ def install_login(app: FastAPI, ctx) -> None:
         secret = settings.console_session_secret
         if len(secret.encode()) < 32:
             return JSONResponse({"detail": "console sign-in is not configured"}, status_code=503)
+        if not preauth_origin_allowed(request, settings.public_url):
+            return JSONResponse({"detail": "cross-site sign-in request refused"}, status_code=403)
         try:
             data = await request.json()
         except ValueError:
@@ -488,7 +525,7 @@ def install_login(app: FastAPI, ctx) -> None:
         clear_cookies(response)
         return response
 
-    @app.get("/logout", include_in_schema=False)
+    @app.post("/logout", include_in_schema=False)
     def logout_page(request: Request) -> RedirectResponse:
         end_session(request)
         response = RedirectResponse("/login", status_code=303)

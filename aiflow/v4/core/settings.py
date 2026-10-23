@@ -64,7 +64,7 @@ class Settings:
     console_session_secret: str = ""
     console_login: bool = False  # AIFLOW4_CONSOLE_LOGIN=1: the console pages and read APIs need a signed-in user
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
-    console_require_mfa: bool = False  # AIFLOW4_CONSOLE_REQUIRE_MFA=1: default of the "require two-factor" security setting
+    console_require_mfa: bool = True  # AIFLOW4_CONSOLE_REQUIRE_MFA=0 explicitly disables the default requirement
     rate_limit_per_min: int = 600  # requests per client IP per minute on every endpoint (0 turns limits off)
     rate_limit_public_per_min: int = 60  # requests per client IP per minute on each public (no sign-in) endpoint
     reviewer_token: str = ""
@@ -113,7 +113,7 @@ class Settings:
         s.console_session_secret = _env("CONSOLE_SESSION_SECRET", s.console_session_secret)
         s.console_login = _env("CONSOLE_LOGIN", "0").strip().lower() in ("1", "true", "yes", "on")
         s.trusted_proxies = [value.strip() for value in _env("TRUSTED_PROXIES", "").split(",") if value.strip()]
-        s.console_require_mfa = _env("CONSOLE_REQUIRE_MFA", "0").strip().lower() in ("1", "true", "yes", "on")
+        s.console_require_mfa = _env("CONSOLE_REQUIRE_MFA", "1").strip().lower() in ("1", "true", "yes", "on")
         s.rate_limit_per_min = max(0, int(_env("RATE_LIMIT_PER_MIN", str(s.rate_limit_per_min))))
         s.rate_limit_public_per_min = max(0, int(_env("RATE_LIMIT_PUBLIC_PER_MIN", str(s.rate_limit_public_per_min))))
         s.o2_url = _env("O2_URL", s.o2_url)

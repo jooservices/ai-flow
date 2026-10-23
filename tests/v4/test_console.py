@@ -615,6 +615,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
 
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_require_mfa = False  # this browser test covers the rest of the console login flow
         ctx.repo().projects["TESTWP"].paused = True
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password

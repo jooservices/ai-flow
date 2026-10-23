@@ -19,7 +19,7 @@ needs `security.audit` (also Super Administrator). All of it is also available a
 - **Lost both?** A Super Administrator uses *Reset two-factor* on the people table; the person is signed out and sets it up
   again.
 - **Require for administrators.** The setting *Require two-factor sign-in for administrators* (roles `super_admin` and
-  `owner`; default from `AIFLOW4_CONSOLE_REQUIRE_MFA`, off) makes a sign-in without two-factor a limited session that can
+  `owner`; on by default) makes a sign-in without two-factor a limited session that can
   only open the Security screen to set it up. Administrators then cannot turn it off.
 - **Session length.** Setting *Session length* (5 minutes to 30 days, default 12 hours) applies to the next sign-in.
 - **Forced sign-out.** *Sign out* on a session, or *Sign out everywhere* for a person, ends the session in the database.
@@ -28,15 +28,17 @@ needs `security.audit` (also Super Administrator). All of it is also available a
 
 ## AC2 Secrets encrypted at rest
 
-Secrets are encrypted with AES-256-GCM (`aiflow/v4/core/secretbox.py`). The key is **not** in the database:
+Secrets are encrypted with AES-256-GCM (`aiflow/v4/core/secretbox.py`). Secret writes fail until an external encryption
+key is configured. The key is **not** in the database:
 
 - `AIFLOW4_SECRET_KEY` (urlsafe base64 of 32 random bytes) or `AIFLOW4_SECRET_KEY_FILE` (a file, mode 0600, same format).
   Generate with `python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`.
-- Encrypted when a key is set: the Jira credential and OAuth app secret files, the GitHub App private key, and the
+- The Jira credential and OAuth app secret files, the GitHub App private key, and the
   authenticator secrets in `console_users`. Recovery codes are keyed hashes. Console passwords were already salted scrypt
-  hashes. Without a key, files stay as before and authenticator secrets use a key derived from the console session secret
-  (also outside the database). Plaintext written before a key was set is still read and is encrypted the next time it is
-  saved. Keep the key with the other secrets and back it up separately: without it encrypted secrets cannot be read.
+  hashes. If `AIFLOW4_SECRET_KEY` is absent, authenticator secrets use a key derived from the console session secret (also
+  outside the database). On first access with a key configured, existing plaintext Jira and GitHub secret files are
+  upgraded in place; legacy plaintext authenticator secrets are migrated when the control API starts. Keep the key with
+  the other secrets and back it up separately: without it encrypted secrets cannot be read.
 
 ## AC3 Rate limits and sign-in guessing protection
 
@@ -45,7 +47,9 @@ Secrets are encrypted with AES-256-GCM (`aiflow/v4/core/secretbox.py`). The key 
   (`AIFLOW4_RATE_LIMIT_PUBLIC_PER_MIN`, default 60). Over the budget the answer is `429` with `Retry-After`. `0` turns a
   budget off. Behind a proxy set `AIFLOW4_TRUSTED_PROXIES` so the real client address is used.
 - Sign-in: budgets per address and per address+email (429), and 5 wrong passwords lock the account against
-  **password-only** attempts for 15 minutes. The lock never shuts the real owner out: someone who also gives a valid
+  **password-only** attempts for 15 minutes. After a sign-in budget is spent, the service still checks the credentials;
+  only a valid password plus fresh authenticator or recovery code is allowed through. The lock never shuts the real owner
+  out: someone who also gives a valid
   authenticator code or an unused recovery code is still checked and signed in, which clears the lock. A guesser does not
   have the second factor. An account without two-factor stays locked until the lock ends, or a Super Administrator uses
   *Unlock* on the Security screen. All refusals look the same.
@@ -55,7 +59,9 @@ Secrets are encrypted with AES-256-GCM (`aiflow/v4/core/secretbox.py`). The key 
 - A state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) that uses the console session cookie must send the header
   `X-CSRF-Token`, an HMAC of that session; the console copies it from the `aiflow4_csrf` cookie. Without it, or with another
   session's token, the answer is `403`. Requests with an `Authorization` header (nodes, workers, owner token) are not
-  browser-driven and are exempt; so is the sign-in request itself. The cookie is also `SameSite=Strict`.
+  browser-driven and are exempt. The pre-authentication sign-in request checks `Origin` or `Referer` against the service
+  origin (and rejects `Sec-Fetch-Site: cross-site`). Logout uses `POST` and requires the CSRF token. The cookie is also
+  `SameSite=Strict`.
 - Console text from tickets, projects, nodes and integrations goes through `esc()` before it is put in a page; links are
   limited to `http(s)` and same-site paths. Pages carry a Content-Security-Policy (no foreign scripts, no framing).
 
@@ -76,8 +82,10 @@ working days, fixes in 30 or 90 days by severity.
 
 ## AC7 Audit log
 
-Every change to settings, people, roles and credentials is appended to `audit_log` with who, when, area, what and from
+Every change to settings, people, roles and credentials is appended to `audit_log` in the same database transaction as
+the associated change, so an append failure rolls the change back. Entries include who, when, area, what and from
 which address (never a secret value): security settings, people and role creation, password resets, two-factor changes,
-forced sign-outs, sign-in and sign-out, and every successful state-changing console request (by its route, for example
-Jira and GitHub credential changes under `credentials`). The Security screen shows it read-only with an area filter. There
+forced sign-outs, sign-in and sign-out, owner-token Jira writes, OAuth callbacks, and signed-in state-changing requests
+(by route, for example Jira and GitHub credential changes under `credentials`). The Security screen shows it read-only
+with an area filter. There
 is no route that writes, edits or deletes it, and database triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the table.

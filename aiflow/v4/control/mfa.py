@@ -3,7 +3,8 @@
 The authenticator secret is stored encrypted (core/secretbox.py) with a key that is not in the database; recovery codes
 are stored as keyed hashes, so a database dump reveals neither. The key is `AIFLOW4_SECRET_KEY` (or its file); when none
 is configured the encryption key is derived from the console session secret, which also lives outside the database.
-A code is accepted once (the last used time step is kept), and a recovery code is consumed by using it.
+Legacy plaintext authenticator secrets are upgraded to ciphertext at control startup. A code is accepted once (the last
+used time step is kept), and a recovery code is consumed by using it.
 """
 from __future__ import annotations
 
@@ -90,10 +91,26 @@ def read_secret(row: dict, email: str, session_secret: str) -> str:
     return secretbox.decrypt(row["totp_secret"], key_for(session_secret), "totp:" + email) if row["totp_secret"] else ""
 
 
+def migrate_plaintext_secrets(db, session_secret: str) -> int:
+    """Upgrade legacy plaintext TOTP values before they can be used by a running control API."""
+    configured_key = secretbox.load_key()
+    if configured_key is None and len(session_secret.encode()) < 32:
+        return 0
+    key = configured_key or key_for(session_secret)
+    with db.transaction() as c:
+        rows = c.execute("SELECT email, totp_secret FROM console_users WHERE totp_secret<>''"
+                          " AND totp_secret NOT LIKE %s", (secretbox.PREFIX + "%",)).fetchall()
+        for row in rows:
+            sealed = secretbox.encrypt(row["totp_secret"], key, "totp:" + row["email"])
+            c.execute("UPDATE console_users SET totp_secret=%s WHERE email=%s AND totp_secret=%s",
+                      (sealed, row["email"], row["totp_secret"]))
+    return len(rows)
+
+
 def replace_recovery_codes(db, email: str, session_secret: str) -> list[str]:
     codes = new_recovery_codes()
     key = key_for(session_secret)
-    with db.pool.connection() as c:
+    with db.transaction() as c:
         c.execute("DELETE FROM console_recovery_codes WHERE email=%s", (email,))
         for code in codes:
             c.execute("INSERT INTO console_recovery_codes (email, code_hash) VALUES (%s,%s)", (email, recovery_hash(code, key)))
@@ -105,7 +122,7 @@ def recovery_codes_left(db, email: str) -> int:
 
 
 def clear(db, email: str) -> None:
-    with db.pool.connection() as c:
+    with db.transaction() as c:
         c.execute("UPDATE console_users SET totp_secret='', totp_enabled=false, totp_last_step=0, updated_at=now()"
                   " WHERE email=%s", (email,))
         c.execute("DELETE FROM console_recovery_codes WHERE email=%s", (email,))

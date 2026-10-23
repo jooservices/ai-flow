@@ -25,6 +25,7 @@ EXP = 4_102_444_800
 def make_client(ctx, gate=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
+    ctx.settings.console_require_mfa = False  # these login behavior tests opt out explicitly
     app = create_app(ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
@@ -137,7 +138,7 @@ def test_an_expired_lock_resets_failed_attempts(ctx, seeded):
 
 
 # --- AC3: rate limits and bounded audit ------------------------------------------------------------------------------
-def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, monkeypatch):
+def test_ip_and_email_rate_limit_still_checks_credentials_without_counting_another_failure(ctx, seeded, monkeypatch):
     ctx.settings.trusted_proxies = ["127.0.0.1/32"]
     monkeypatch.setattr(login, "RATE_PER_IP_EMAIL", 3)
     client = make_client(ctx)
@@ -148,7 +149,7 @@ def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, mo
     monkeypatch.setattr(ctx.db, "one", lambda sql, *a: lookups.append(sql) or real_one(sql, *a))
     limited = sign_in(client, seeded, ip="203.0.113.7")
     assert limited.status_code == 429 and int(limited.headers["retry-after"]) > 0
-    assert not [s for s in lookups if "console_users" in s]  # refused before any lookup
+    assert len([s for s in lookups if "console_users" in s]) == 1  # checked, but no 2FA means no exception
     assert user_row(ctx)["failed_attempts"] == 3
     assert sign_in(client, seeded, ip="198.51.100.9").status_code == 200  # another address is not affected
 

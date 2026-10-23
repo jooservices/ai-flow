@@ -3,8 +3,9 @@
 AES-256-GCM (the `cryptography` package that pyjwt[crypto] already brings). The key never lives in the database:
 it comes from `AIFLOW4_SECRET_KEY` (urlsafe base64 of 32 bytes) or from the file named by `AIFLOW4_SECRET_KEY_FILE`
 (mode 0600, same format), so a database dump or a copy of the secret files alone reveals nothing. Ciphertext is
-text, `aiflow-enc:v1:<base64 nonce+ciphertext>`; a value without that prefix is legacy plaintext and is still readable,
-so turning encryption on never breaks an installation (the next write encrypts it).
+text, `aiflow-enc:v1:<base64 nonce+ciphertext>`. A value without that prefix is legacy plaintext; connector files are
+upgraded on first access and legacy TOTP values are upgraded at control startup. New writes fail until an external key
+is configured.
 """
 from __future__ import annotations
 
@@ -83,6 +84,5 @@ def decrypt(value: str, key: bytes | None = None, context: str = "") -> str:
 
 
 def seal(plaintext: str, context: str = "") -> str:
-    """Encrypt when a key is configured, else keep plaintext (installations without a key keep working)."""
-    key = load_key()
-    return encrypt(plaintext, key, context) if key else plaintext
+    """Encrypt a value for storage; refuse the write when no external key is configured."""
+    return encrypt(plaintext, load_key(), context)

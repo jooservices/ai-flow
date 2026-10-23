@@ -83,8 +83,8 @@ key is configured. The key is **not** in the database:
   This escaping and link check was applied to the existing screens as well, and every browser request that changes
   something now carries the CSRF header.
 
-**Console screens:** `cc`, `work`, `delivery`, `sa`, `lead`, `business`, `review`, `stakeholder`, `machines`, `users`,
-`knowledge`, `backup`, `integrations`, `projects`, `licensing`, `notifications`, `support`, `security`.
+**Console screens:** `cc`, `work`, `delivery`, `sa`, `lead`, `business`, `review`, `stakeholder`, `machines`, `users`, `knowledge`, `backup`, `integrations`, `projects`, `licensing`, `notifications`, `support`, `security`.
+
 Their text and links are escaped as described above; their behaviour is otherwise unchanged.
 
 ## AC5 Scans on every pull request
@@ -94,7 +94,11 @@ the repository (secrets, misconfiguration) and the control-api container image. 
 fails the job and blocks the merge when the check is required. The level is the repository variable
 `SECURITY_SEVERITY_THRESHOLD` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `HIGH`), not a constant in the code.
 
-There is no blanket suppression: findings without a fix still block (no `--ignore-unfixed`), and the production
+There is no blanket suppression. The one exception is the container image scan, which uses `--ignore-unfixed`:
+operating-system findings for which the Debian base has no fixed package cannot be acted on, and the image upgrades its
+packages on every build. Dependency and repository findings, and every image finding that has a fix, still block.
+`pyproject.toml` overrides fastembed's `pillow<13` cap so that pillow 13 (which fixes HIGH findings) is locked; fastembed
+uses pillow only for image embeddings, which AI Flow does not use. The production
 control image runs as the non-root user `aiflow` (`USER` in `deploy/v4/control/Dockerfile`, `user:` in the compose file).
 Two narrow, reviewed exceptions exist: `deploy/v4/ci/trivy-secret.yaml` allows fake keys only in the named test fixture
 files (any other file under `tests/` is scanned), and the repository scan skips `deploy/v4/ci/systemd.Dockerfile` and
@@ -107,6 +111,19 @@ level, each check with counts per severity and PASS or FAIL, the test and instal
 (`aiflow/v4/core/security_report.py`). A failing scan stops the release before it is published. The coordinated disclosure
 policy is [`.github/SECURITY.md`](https://github.com/jooservices/ai-flow/blob/master/.github/SECURITY.md): report privately through GitHub, acknowledgement in 3
 working days, fixes in 30 or 90 days by severity.
+
+## Routes that now write atomically with the audit log
+
+These routes keep their request and response shapes. Their shared database helpers now run inside one transaction, so a
+change and its audit entry are written together or not at all, and they carry the cross-site request token like every
+other state-changing route:
+
+- `POST /v1/decisions`, `POST /v1/decisions/{decision_id}/answer`, `POST /v1/decisions/{decision_id}/retire`
+- `POST /v1/escalations/raise`, `POST /v1/escalations/triage`
+- `GET /v1/github/ci-log`, `POST /v1/github/delete-branch`
+- `POST /v1/integrations/github/connections/token`, `PUT /v1/integrations/github/connections/{connection_id}/token`,
+  `POST /v1/integrations/github/connections/{connection_id}/test`, `DELETE /v1/integrations/github/connections/{connection_id}`
+- `PUT /v1/projects/{key}/repositories`
 
 ## AC7 Audit log
 

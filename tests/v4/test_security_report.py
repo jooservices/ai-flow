@@ -57,6 +57,9 @@ def test_pull_request_ci_scans_with_a_configurable_threshold():
     script = (ROOT / "deploy/v4/ci/security-scan.sh").read_text()
     assert "--exit-code 1" in script and "SECURITY_SEVERITY_THRESHOLD" in script
     assert all(scan in script for scan in ("uv.lock", "secret,misconfig", "image"))
+    # only the image scan ignores findings that have no fix; the dependency scan does not
+    assert script.count("--ignore-unfixed --exit-code") == 1
+    assert script.index("--ignore-unfixed --exit-code") > script.index("container image $IMAGE")
 
 
 def test_release_workflow_generates_and_uploads_the_security_report():

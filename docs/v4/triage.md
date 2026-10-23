@@ -27,6 +27,12 @@ branch and removes the checkout afterwards. The AI must end with one of:
 
 Anything else (no decision, an empty answer or reason) is recorded as `failed` and changes nothing in Jira.
 
+Since JAIF-255 the decision goes through the owner decision register and the escalation classes
+([escalations](escalations.md)): `DECISION: ESCALATE` needs a class (a new business decision or an irreversible or
+production action), at least two options and a recommended default; a decision the owner already made is applied and
+cited instead; a new kind of decision is asked once; `DECISION: AMEND` narrows an acceptance criterion that cannot be
+met here.
+
 ## Operators
 
 Triage runs are recorded in the `runs` table with step `triage` and appear in the console's Runs table. To resume

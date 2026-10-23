@@ -174,7 +174,8 @@ class Worker:
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
                         related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
                         context_pack=r.get("context_pack") or {},
-                        machine_tools=r.get("machine_tools") or {})
+                        machine_tools=r.get("machine_tools") or {}, owner_register=r.get("owner_register") or [],
+                        escalation_class=r.get("escalation_class") or "")
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":

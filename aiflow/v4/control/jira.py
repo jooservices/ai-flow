@@ -205,9 +205,19 @@ class Jira:
         """Return the newest Jira comments in a compact, prompt-safe form."""
         data = self.call("GET", f"/rest/api/3/issue/{key}/comment?orderBy=-created&maxResults={limit}")
         return [{"author": (c.get("author") or {}).get("displayName", "unknown"),
+                 "account_id": (c.get("author") or {}).get("accountId", ""),
                  "created": c.get("created", ""),
                  "body": adf_to_text(c.get("body"))[:2000]}
                 for c in data.get("comments", [])[:limit]]
+
+    def current_account_id(self) -> str:
+        """Return the stable Jira identity of the account connected by the owner.
+
+        Ticket comments are eligible to answer owner-only questions only when their accountId matches this
+        authenticated Jira identity; display names and email addresses are not authorization identifiers.
+        """
+        profile = self.call("GET", "/rest/api/3/myself")
+        return str((profile or {}).get("accountId") or "")
 
     # --- writes ---------------------------------------------------------------------------------------------
     def create_issue(self, project: str, summary: str, description: str, issuetype: str = "Story",

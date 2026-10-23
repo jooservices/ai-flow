@@ -39,23 +39,18 @@ _KNOWN_TOKEN = re.compile(
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-_PHONE = re.compile(r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(\d{2,4}\)|\d{2,4})[ .-]\d{3,4}[ .-]\d{4}(?!\w)")
-_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b", re.I)
+_URL_CREDENTIALS = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_PHONE = re.compile(
+    r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\d{10}|\(\d{2,4}\)[ .-]?\d{3,4}[ .-]?\d{4}|"
+    r"\d{3}[ .-]\d{3}[ .-]\d{4}|\d{2,4}[ .-]\d{3,4}[ .-]\d{4})(?!\w)"
+)
+_SSN = re.compile(r"(?<!\d)\d{3}(?:[- ]?\d{2})(?:[- ]?\d{4})(?!\d)")
+_NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b")
 _PERSON_FIELD = re.compile(
     r"(?i)(?P<prefix>\b(?:owner|assignee|reporter|contact|person|(?:first|last|full)[ _-]?name|user(?:[ _-]?name)?)"
     r"\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)"
-    r"(?P<value>[A-Z][A-Za-z'-]{1,30})\b(?P<suffix>\\?[\"']?)"
+    r"(?P<value>[A-Za-z][A-Za-z'-]{0,30}(?:[._][A-Za-z][A-Za-z'-]{0,30})*)\b(?P<suffix>\\?[\"']?)"
 )
-_COMMON_LOWER_NAME_WORDS = frozenset({
-    "account", "accounts", "active", "api", "available", "background", "bundle", "cache", "captured",
-    "closed", "control", "current", "data", "default", "detail", "enabled", "entry", "error", "event",
-    "failed", "file", "flow", "found", "general", "health", "incident", "info", "issue", "key", "last",
-    "latest", "level", "log", "logs", "machine", "memory", "message", "no", "node", "not", "offline",
-    "online", "open", "owner", "private", "process", "project", "recent", "report", "retry", "run",
-    "service", "settings", "state", "status", "support", "system", "test", "ticket", "token", "updated",
-    "version", "worker",
-})
 _ADDRESS = re.compile(r"(?i)\b\d{1,6}\s+(?:[A-Z0-9.'-]+\s+){1,5}(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd|court|ct|way)\b")
 _HOME_PATH = re.compile(r"(?i)(/(?:home|users)/)[^/\s]+")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
@@ -80,6 +75,7 @@ def sanitize_text(text: str) -> str:
     text = _BEARER.sub("Bearer [REDACTED]", text)
     text = _KNOWN_TOKEN.sub("[REDACTED_TOKEN]", text)
     text = _JWT.sub("[REDACTED_TOKEN]", text)
+    text = _URL_CREDENTIALS.sub("://[REDACTED]@", text)
     text = _EMAIL.sub("[REDACTED_EMAIL]", text)
     text = _PHONE.sub("[REDACTED_PHONE]", text)
     text = _SSN.sub("[REDACTED_ID]", text)
@@ -91,10 +87,6 @@ def sanitize_text(text: str) -> str:
 
 
 def _redact_name(match: re.Match[str]) -> str:
-    value = match.group(0)
-    words = value.casefold().split()
-    if value.islower() and all(word in _COMMON_LOWER_NAME_WORDS for word in words):
-        return value
     return "[REDACTED_NAME]"
 
 
@@ -121,7 +113,7 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
 def sensitive_findings(text: str) -> list[str]:
     """Return names of sensitive-data classes still present after sanitization."""
     findings = []
-    if (_PRIVATE_KEY.search(text) or _BEARER.search(text)
+    if (_PRIVATE_KEY.search(text) or _BEARER.search(text) or _URL_CREDENTIALS.search(text)
             or any(not _redacted_secret_value(match.group("value")) for match in _SECRET_ASSIGNMENT.finditer(text))):
         findings.append("credential")
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):

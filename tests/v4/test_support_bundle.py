@@ -151,13 +151,13 @@ def test_secret_scanner_redacts_full_unquoted_multiword_value():
     assert not support_bundle.sensitive_findings(clean)
 
 
-def test_personal_data_scan_redacts_lowercase_names():
-    raw = "alice johnson"
-    clean = support_bundle.sanitize_text(raw)
+def test_personal_data_scan_redacts_dotted_and_underscored_person_field_names():
+    for raw in ("owner=jane.doe", "reporter=jane_doe"):
+        clean = support_bundle.sanitize_text(raw)
 
-    assert "personal_data" in support_bundle.sensitive_findings(raw)
-    assert "alice johnson" not in clean
-    assert not support_bundle.sensitive_findings(clean)
+        assert "personal_data" in support_bundle.sensitive_findings(raw)
+        assert "jane" not in clean and "doe" not in clean
+        assert not support_bundle.sensitive_findings(clean)
 
 
 def test_personal_data_scan_redacts_single_name_in_person_field():
@@ -168,6 +168,35 @@ def test_personal_data_scan_redacts_single_name_in_person_field():
     assert clean == "owner=[REDACTED_NAME]"
     assert "Alice" not in clean
     assert not support_bundle.sensitive_findings(clean)
+
+
+def test_support_sanitizer_redacts_url_and_dsn_userinfo_credentials():
+    cases = (
+        ("postgresql://bundle_user:db-secret@db.internal/aiflow", "bundle_user", "db-secret"),
+        ("https://api_user:api-secret@example.internal/status", "api_user", "api-secret"),
+    )
+    for raw, username, password in cases:
+        clean = support_bundle.sanitize_text(raw)
+
+        assert "credential" in support_bundle.sensitive_findings(raw)
+        assert username not in clean and password not in clean
+        assert not support_bundle.sensitive_findings(clean)
+
+
+def test_support_sanitizer_redacts_unseparated_phone_and_spaced_ssn():
+    for raw in ("phone=4155550134", "ssn=123 45 6789"):
+        clean = support_bundle.sanitize_text(raw)
+
+        assert "personal_data" in support_bundle.sensitive_findings(raw)
+        assert raw.split("=", 1)[1] not in clean
+        assert not support_bundle.sensitive_findings(clean)
+
+
+def test_support_sanitizer_keeps_ordinary_log_text():
+    raw = "2026-10-22 12:04:05 INFO aiflow4.control.api bundle build completed without errors"
+
+    assert support_bundle.sanitize_text(raw) == raw
+    assert not support_bundle.sensitive_findings(raw)
 
 
 def test_standard_deployment_routes_support_screen_to_control_api():

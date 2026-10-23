@@ -117,6 +117,8 @@ AMBIGUITY_RE = re.compile(
 REPOSITORY_FACT_RE = re.compile(
     r"\b(?:which|what)\s+(?:http\s+)?(?:request\s+)?method\b.{0,120}"
     r"(?:/\w[\w./{}:-]*|\b(?:endpoint|route|url)\b)|"
+    r"\bwhat\s+does\b.{0,120}(?:`?/\w[\w./{}:-]*`?|\b(?:endpoint|route|handler|function)\b)"
+    r".{0,80}\b(?:return|respond|produce|do)\b|"
     r"\b(?:which|what)\s+(?:status code|response|parameter|header)\b.{0,100}"
     r"\b(?:endpoint|route|api|function|handler)\b|"
     r"\bwhat\s+(?:value|setting)\b.{0,80}\b(?:existing|current|configured)\b.{0,80}\b(?:use|set|configured)\b",
@@ -247,6 +249,13 @@ def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str],
             # workers. Generated topics and keyword patterns can change between triage runs.
             connection.execute("SELECT pg_advisory_xact_lock(255, 255)")
             locked_db = _ConnectionQueries(connection)
+            decided_question = (locked_db.one(
+                "SELECT * FROM owner_decisions WHERE kind='decision' AND status='decided' "
+                "AND question_key=%s AND (project='' OR project=%s) ORDER BY id LIMIT 1",
+                (question_key, project)) if question_key else None)
+            if decided_question:
+                return {"action": "applied", "decision": decided_question,
+                        "citation": cite(locked_db, decided_question)}
             decided = match_decision(locked_db, full, project)
             if decided:
                 return {"action": "applied", "decision": decided, "citation": cite(locked_db, decided)}

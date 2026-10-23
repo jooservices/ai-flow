@@ -69,9 +69,12 @@ def test_each_of_the_seven_classes_is_covered_by_the_recorded_escalations():
     assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES)
 
 
-def test_repository_answerable_http_method_question_does_not_reach_a_person(ctx):
+@pytest.mark.parametrize("question", [
+    "Which HTTP method does `/v1/foo` use?",
+    "What does `/v1/work/claim` return?",
+])
+def test_repository_answerable_route_question_does_not_reach_a_person(ctx, question):
     put_ticket(ctx, "TESTWP-401", "Acceptance criteria:\n- AC1: document the existing route")
-    question = "Which HTTP method does `/v1/foo` use?"
     raised = esc.dev_question(ctx, run_of("TESTWP-401"), question)
     assert raised["class"] == esc.AMBIGUITY and not raised["resolved"]
     answered = esc.triage_decision(ctx, run_of("TESTWP-401"), {
@@ -170,6 +173,24 @@ def test_register_entry_is_applied_cited_and_counted(ctx):
         assert result["citation"].startswith(f'Owner decision D{docker["id"]} "No Docker for AI runs"')
         assert "No." in result["answer"]
     assert ctx.db.one("SELECT cited_count FROM owner_decisions WHERE id=%s", (docker["id"],))["cited_count"] == 3
+
+
+def test_exact_question_is_deduplicated_after_owner_answer_even_when_keywords_change(ctx):
+    question = "Should customer exports default to CSV or JSON?"
+    first = esc.ask(ctx, "TESTWP-410", "TESTWP", question, "Choose the export default.",
+                    ["CSV", "JSON"], "JSON", "Export format", ["orchid", "bicycle"])
+    assert first["action"] == "asked"
+    answered = esc.answer_decision(ctx, first["decision"]["id"], "CSV", "Owner chose CSV", "owner")
+    assert answered["decision"].startswith("CSV")
+
+    repeated = esc.ask(ctx, "TESTWP-411", "TESTWP", question, "Choose the export default.",
+                       ["JSON", "XML"], "JSON", "Billing default", ["quartz", "lighthouse"])
+    assert repeated["action"] == "applied"
+    assert repeated["decision"]["id"] == first["decision"]["id"]
+    assert repeated["decision"]["decision"] == answered["decision"]
+    assert repeated["citation"].startswith(f'Owner decision D{first["decision"]["id"]}')
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE question_key=%s",
+                      (esc.normalize_question(question),))["n"] == 1
 
 
 @pytest.mark.parametrize("topic", ["no-release-or-tag-without-owner", "company-name-jooservices", "plans-and-limits",

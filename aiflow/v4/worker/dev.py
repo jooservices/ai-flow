@@ -296,6 +296,20 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             # still carries all missing requirements so the normal tool-wait path is preserved.
             raised = api.call("POST", "/v1/escalations/raise", {
                 "run_id": c.run_id, "fence": c.fence, "question": res.verdict_reason})
+            if raised.get("resolved") and raised.get("outcome") == "auto_answered":
+                result["outcome"] = "auto_answered"
+                result["details"]["escalation_class"] = raised.get("class", "")
+                result["details"]["missing_tools"] = []
+                cited = f" {raised['citation']}." if raised.get("citation") else ""
+                jira("comment", body=note(c, "question answered without the owner",
+                                          what=f"The developer AI stopped with a question: {res.verdict_reason[:400]}",
+                                          why=f"Classified as: {raised.get('label', 'Resolved automatically')} "
+                                              f"({raised.get('reason', 'the register answered this')}).{cited}",
+                                          result=raised.get("answer", ""),
+                                          next_="Back to To Do; the next run gets this answer in its prompt",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
             result["details"]["escalation_class"] = raised.get("class", "")

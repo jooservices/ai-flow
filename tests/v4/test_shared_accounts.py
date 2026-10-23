@@ -277,17 +277,80 @@ def test_removing_the_last_machine_with_confirmation_removes_the_account(client,
 
 def test_account_from_the_control_repo_can_be_shared_with_another_machine(client, ctx):
     sign_in(client, ctx)
-    join(client, "cc")
+    cc = join(client, "cc")
     node1 = join(client, "node1")
     shared = client.post("/v1/shared-accounts/claude-01/machines", json={"node": "node1"})
     assert shared.status_code == 201
     assert shared.json()["session_limit"] == 1  # keeps its previous capacity until the owner changes it
     assert [m["node"] for m in shared.json()["machines"]] == ["cc", "node1"]
+    assert all(m["removable"] for m in shared.json()["machines"])
     assert client.put("/v1/shared-accounts/claude-01/session-limit", json={"session_limit": 3}).json()["session_limit"] == 3
-    # the repo-defined machine cannot be removed here
-    assert client.delete("/v1/shared-accounts/claude-01/machines/cc").status_code == 409
-    assert client.delete("/v1/shared-accounts/claude-01/machines/node1").status_code == 200
-    assert [m["node"] for m in client.get("/v1/shared-accounts").json()["accounts"][0]["machines"]] == ["cc"]
+    beat(client, "cc", cc)
+    beat(client, "node1", node1)
+    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    add_ticket(ctx.db, "TESTWP-1")
+
+    # Removing the accounts.yaml primary detaches just that assignment; the other machine can still take work.
+    removed = client.delete("/v1/shared-accounts/claude-01/machines/cc")
+    assert removed.status_code == 200 and removed.json()["machines"] == ["node1"]
+    account = ctx.repo().account("claude-01")
+    assert account and account.runs_on("node1") and not account.runs_on("cc")
+    assert candidates(client, node1, "claude-01") == ["TESTWP-1"]
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=node1)
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).status_code == 403
+
+    # Removing the remaining configured assignment from all machines still asks for confirmation.
+    asked = client.delete("/v1/shared-accounts/claude-01")
+    assert asked.status_code == 409 and asked.json()["detail"]["error"] == "confirmation_required"
+    all_removed = client.delete("/v1/shared-accounts/claude-01", params={"confirm": "true"})
+    assert all_removed.status_code == 200 and all_removed.json()["source_retained"] is True
+    assert ctx.repo().account("claude-01").machines == []
+
+
+def test_free_machine_capacity_moves_shared_work_and_weighted_share(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    # cc has one worker slot, while node1 has two. After cc uses its slot, only node1 can take more work.
+    ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='cc'")
+    ctx.db.run("UPDATE nodes SET slots_total=2 WHERE name='node1'")
+    assert claim(client, cc, "TESTWP-1").json()["claimed"]
+    assert candidates(client, cc) == []
+    assert claim(client, cc, "TESTWP-2").status_code == 409
+    assert candidates(client, node1) == ["TESTWP-2", "TESTWP-3"]
+    assert claim(client, node1, "TESTWP-2").json()["claimed"]
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
+
+
+def test_machine_capacity_is_rechecked_atomically_during_claims(client, ctx):
+    from aiflow.v4.control import shared_accounts
+
+    cc, node1 = two_machines(client, ctx, limit=2)
+    assert client.post("/v1/shared-accounts", json={"id": "shared-02", "provider": "claude",
+                                                     "session_limit": 2}).status_code == 201
+    for name in ("cc", "node1"):
+        assert client.post("/v1/shared-accounts/shared-02/machines", json={"node": name}).status_code == 201
+    for name, headers in (("cc", cc), ("node1", node1)):
+        assert client.post("/v1/accounts/shared-02/probe", json={"ok": True}, headers=headers).status_code == 200
+        beat(client, name, headers)
+    ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='cc'")
+    ctx.db.run("UPDATE nodes SET slots_total=0 WHERE name='node1'")
+    barrier = Barrier(3)
+
+    def claim_on_cc(account_id, index):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        acc = ctx.repo().account(account_id)
+        return shared_accounts.claim_run(ctx.db, acc, (run_id, f"TESTWP-{index}", "TESTWP", "dev", account_id,
+                                                       "claude", "", "cc", index, "x"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on_cc, account_id, i)
+                   for account_id, i in (("shared-01", 21), ("shared-02", 22))]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+    assert sorted(results) == [False, True]
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE node='cc'"
+                      " AND status='running'")["n"] == 1
 
 
 def test_account_management_needs_an_owner_session(client, ctx):

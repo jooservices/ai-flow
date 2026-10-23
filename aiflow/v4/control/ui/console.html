@@ -3377,13 +3377,15 @@ function renderMachines() {
     h += '<div class="machine-accounts">';
     pendingAccounts.forEach(function (a) {
       var signIn = state.signIns[a.id];
+      var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
       if (consoleCan('nodes.manage') && (!signIn || (state.signInRefreshAt[a.id] && Date.now() - state.signInRefreshAt[a.id] >= 2000))) loadAccountSignIn(a.id);
       h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill('warn', 'Sign-in pending') +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + '</span><span class="spacer"></span>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">Start sign-in again</button>';
       var signInReady = signIn && signIn.status === 'completed' && (a.status === 'idle' || a.status === 'working');
       if (consoleCan('nodes.manage')) h += '<button class="btn sm primary" data-act="account-signin-complete" data-id="' + esc(a.id) + '"' + (signInReady ? '' : ' disabled') + '>Finish sign-in</button>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
+      else if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div>';
       if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
       else if (signIn && signIn.status === 'failed') h += '<div class="small">' + esc(signIn.error || 'Provider sign-in failed.') + ' · Start sign-in again to retry.</div>';
@@ -3398,13 +3400,15 @@ function renderMachines() {
     if (!accounts.length && !pendingAccounts.length) h += '<div class="machine-empty">No AI accounts on this machine.</div>';
     accounts.forEach(function (a) {
       var windows = (a.quota || {}).windows || {}, quota = a.quota_used == null ? '—' : pctText(a.quota_used * 100);
+      var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
       h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
         ' · ' + esc((a.jobs || []).join(', ') || 'no jobs') + '</span><span class="spacer"></span>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
+      else if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Quota used <strong>' + quota + '</strong></span><span>Limit resets <strong>' + esc(a.quota_resets_at ? when(typeof a.quota_resets_at === 'number' ? new Date(a.quota_resets_at * 1000).toISOString() : a.quota_resets_at) : '—') + '</strong></span>';
       h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>' + quotaAwareness(a);
       if (state.accountEditor === a.id) {

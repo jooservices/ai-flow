@@ -2,13 +2,14 @@
 
 Design (docs/v4/shared-accounts.md):
 - Accounts come from aiflow-control (`accounts.yaml`, one primary machine) or are created in Command Center
-  (`shared_accounts`). `account_machines` lists the extra machines an account is enabled on. `overlay` merges both
-  into the `ControlRepo` every caller already uses, so `repo.account(id).machines` is the one answer.
+  (`shared_accounts`). `account_machines` lists machines enabled in Command Center, and
+  `account_machine_exclusions` records a machine detached from a control-repo account. `overlay` merges these into
+  the `ControlRepo` every caller already uses, so `repo.account(id).machines` is the one answer.
 - The account has ONE total session limit (`Account.sessions`). Running sessions, quota and cooldown are counted per
-  account id across machines. `claim_run` checks the total and per-machine share under a per-account advisory lock,
-  so simultaneous workers cannot exceed the limit or take another online machine's share.
-- Work is spread: a machine takes at most its fair share (limit / online machines) while other machines are online;
-  when one goes offline the share of the others grows and its work moves.
+  account id across machines. `claim_run` checks the total, per-machine share and free worker slots under account and
+  machine advisory locks, so simultaneous workers cannot exceed the limit or take another machine's capacity.
+- Work is spread across online machines in proportion to their free worker slots, capped by each machine's free
+  capacity; when a machine goes offline or runs out of capacity the others can take its share.
 - Credentials stay on the machines that signed in. Control stores only the sign-in prompt a machine reports (a
   provider link and a short-lived device code) and whether the machine signed in.
 """
@@ -40,21 +41,29 @@ def overlay(repo: ControlRepo, db) -> ControlRepo:
         machines: dict[str, list[str]] = {}
         for m in db.all("SELECT account_id, node FROM account_machines ORDER BY enabled_at, node"):
             machines.setdefault(m["account_id"], []).append(m["node"])
+        exclusions: dict[str, set[str]] = {}
+        for row in db.all("SELECT account_id,node FROM account_machine_exclusions"):
+            exclusions.setdefault(row["account_id"], set()).add(row["node"])
     except Exception:  # noqa: BLE001 - before the migration ran, the control repo alone is the truth
         return repo
-    if not rows and not machines:
+    if not rows and not machines and not exclusions:
         return repo
     accounts: list[Account] = []
     for a in repo.accounts:
         row = rows.get(a.id)
-        accounts.append(replace(a, session_limit=int(row["session_limit"]) if row else a.session_limit,
-                                extra_machines=list(a.extra_machines) + machines.get(a.id, [])))
+        detached = exclusions.get(a.id, set())
+        accounts.append(replace(a, node="" if a.node in detached else a.node,
+                                session_limit=int(row["session_limit"]) if row else a.session_limit,
+                                extra_machines=[n for n in list(a.extra_machines) + machines.get(a.id, [])
+                                                if n not in detached]))
     known = {a.id for a in repo.accounts}
     for row in rows.values():
         if row["managed"] and row["id"] not in known:
             accounts.append(Account(id=row["id"], provider=row["provider"], node="", tier=row["tier"],
                                     roles=list(row["roles"] or []), explicit_only=row["explicit_only"],
-                                    session_limit=int(row["session_limit"]), extra_machines=machines.get(row["id"], [])))
+                                    session_limit=int(row["session_limit"]),
+                                    extra_machines=[n for n in machines.get(row["id"], [])
+                                                    if n not in exclusions.get(row["id"], set())]))
     return replace(repo, accounts=accounts)
 
 
@@ -75,53 +84,121 @@ def running_by_node(db, account_id: str) -> dict[str, int]:
 
 
 def available_machines(db, acc: Account, node: str) -> list[str]:
-    """Machines of the account that can take work now: signed in and online (the asking machine always counts)."""
+    """Machines of the account that are signed in, online, and have a free worker slot."""
+    if not acc.runs_on(node):
+        return []
     pending = pending_nodes(db, acc.id)
-    online = online_nodes(db) | {node}
-    return [n for n in acc.machines if n not in pending and n in online]
+    candidates = [n for n in acc.machines if n not in pending]
+    capacities = machine_capacities(db, candidates, acc.id)
+    return [n for n in candidates if capacities.get(n, {}).get("free", 0) > 0]
+
+
+def _all(queryable, sql: str, params: tuple) -> list[dict]:
+    """Read through DB's convenience method or the active transaction connection."""
+    if hasattr(queryable, "all"):
+        return queryable.all(sql, params)
+    return list(queryable.execute(sql, params).fetchall())
+
+
+def machine_capacities(queryable, machines: list[str] | set[str], account_id: str) -> dict[str, dict[str, int]]:
+    """Free worker slots and the account's capacity on each currently online machine."""
+    names = sorted(set(machines))
+    if not names:
+        return {}
+    rows = _all(
+        queryable,
+        "SELECT n.name,n.slots_total,count(r.id) FILTER (WHERE r.status='running') AS active_runs,"
+        " count(r.id) FILTER (WHERE r.status='running' AND r.account_id<>%s) AS other_runs"
+        " FROM nodes n LEFT JOIN runs r ON r.node=n.name"
+        " WHERE n.name=ANY(%s) AND n.removed_at IS NULL AND n.status='online' AND n.last_heartbeat IS NOT NULL"
+        " AND n.last_heartbeat > now() - make_interval(secs => %s) GROUP BY n.name,n.slots_total",
+        (account_id, names, NODE_ONLINE_S))
+    out = {}
+    for row in rows:
+        slots = max(0, int(row["slots_total"] or 0))
+        active = int(row["active_runs"] or 0)
+        other = int(row["other_runs"] or 0)
+        out[row["name"]] = {"free": max(0, slots - active), "account": max(0, slots - other)}
+    return out
 
 
 def may_take(db, acc: Account, node: str) -> tuple[bool, str]:
-    """Whether `node` may start another session of the account: the total limit and this machine's fair share."""
-    if node in pending_nodes(db, acc.id):
+    """Whether `node` has free worker capacity and may start its capacity-weighted account share."""
+    pending = pending_nodes(db, acc.id)
+    if node in pending:
         return False, "this machine has not signed in to the account yet"
+    if not acc.runs_on(node):
+        return False, "this account is not enabled on this machine"
+    capacities = {}
+    if acc.session_limit:
+        candidates = [n for n in acc.machines if n not in pending]
+        capacities = machine_capacities(db, candidates, acc.id)
+        if capacities.get(node, {}).get("free", 0) <= 0:
+            return False, "this machine has no free worker slots; its capacity is full"
     running = running_by_node(db, acc.id)
     if acc.session_limit and sum(running.values()) >= acc.sessions:
         return False, f"account is at its limit of {acc.sessions} concurrent sessions"
-    machines = available_machines(db, acc, node)
-    if acc.session_limit and len(machines) > 1 and running.get(node, 0) >= math.ceil(acc.sessions / len(machines)):
-        return False, "other machines of the account have free capacity"
+    if acc.session_limit:
+        eligible_capacities = [c["account"] for c in capacities.values() if c["free"] > 0]
+        capacity_total = sum(eligible_capacities)
+        share_capacity = capacities[node]["account"]
+        share = min(share_capacity, math.ceil(acc.sessions * share_capacity / capacity_total))
+        if running.get(node, 0) >= share:
+            return False, "other machines of the account have free capacity"
     return True, ""
 
 
 def claim_run(db, acc: Account, values: tuple) -> bool:
-    """Atomically enforce the account total and machine fair share before inserting a running session."""
+    """Atomically enforce account and machine capacity limits before inserting a running session."""
     node = str(values[7])
     if not acc.runs_on(node):
         return False
     with db.pool.connection() as conn:
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+            machines = sorted(set(acc.machines))
+            # All claims take machine locks in the same order. Shared claims also use the locked counts to enforce
+            # their capacity-weighted share, including work claimed concurrently by a different account.
+            for machine in machines:
+                conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                             (f"aiflow4-machine-sessions:{machine}",))
             # the limit is read under the lock, so a concurrent change is never missed
             stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
             if stored:
                 acc = replace(acc, session_limit=int(stored["session_limit"]))
+            machine_account = conn.execute("SELECT node,removed_at FROM managed_ai_accounts WHERE id=%s",
+                                            (acc.id,)).fetchone()
+            if machine_account:
+                assigned = machine_account["removed_at"] is None and machine_account["node"] == node
+            else:
+                configured_assignment = node == acc.node and not conn.execute(
+                    "SELECT 1 FROM account_machine_exclusions WHERE account_id=%s AND node=%s",
+                    (acc.id, node)).fetchone()
+                enabled_assignment = conn.execute(
+                    "SELECT 1 FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node)).fetchone()
+                assigned = bool(configured_assignment or enabled_assignment)
+            if not assigned:
+                return False
+            pending = {row["node"] for row in conn.execute(
+                "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
+            if node in pending:
+                return False
+            counts = {row["node"]: int(row["n"]) for row in conn.execute(
+                "SELECT node,count(*) AS n FROM runs WHERE account_id=%s AND status='running' GROUP BY node",
+                (acc.id,))}
             if acc.session_limit:
-                pending = {row["node"] for row in conn.execute(
-                    "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
-                if node in pending:
+                capacities = machine_capacities(conn, [m for m in machines if m not in pending], acc.id)
+                if capacities.get(node, {}).get("free", 0) <= 0:
                     return False
-                counts = {row["node"]: int(row["n"]) for row in conn.execute(
-                    "SELECT node,count(*) AS n FROM runs WHERE account_id=%s AND status='running' GROUP BY node",
-                    (acc.id,))}
                 if sum(counts.values()) >= acc.sessions:
                     return False
-                online = {row["name"] for row in conn.execute(
-                    "SELECT name FROM nodes WHERE removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
-                    " AND last_heartbeat > now() - make_interval(secs => %s)", (NODE_ONLINE_S,))}
-                available = [machine for machine in acc.machines
-                             if machine not in pending and (machine == node or machine in online)]
-                if len(available) > 1 and counts.get(node, 0) >= math.ceil(acc.sessions / len(available)):
+                eligible_capacities = [c["account"] for c in capacities.values() if c["free"] > 0]
+                capacity_total = sum(eligible_capacities)
+                if capacity_total <= 0:
+                    return False
+                share_capacity = capacities[node]["account"]
+                share = min(share_capacity, math.ceil(acc.sessions * share_capacity / capacity_total))
+                if counts.get(node, 0) >= share:
                     return False
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
                          " token_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
@@ -151,6 +228,8 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
         return []
     rows = {r["node"]: r for r in db.all("SELECT * FROM account_machines WHERE account_id=%s", (acc.id,))}
     running = running_by_node(db, acc.id)
+    machine_managed = bool(db.one("SELECT 1 AS x FROM managed_ai_accounts WHERE id=%s AND removed_at IS NULL",
+                                  (acc.id,)))
     recent = {r["node"]: int(r["n"]) for r in db.all(
         "SELECT node, count(*) AS n FROM runs WHERE account_id=%s AND started_at > now() - interval '24 hours'"
         " GROUP BY node", (acc.id,))}
@@ -165,7 +244,8 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
             prompt = {"link": row["signin_link"], "code": row["signin_code"],
                       "expires_at": row["signin_expires_at"].isoformat()}
         out.append({"node": n, "node_status": node_status.get(n, "offline"), "signed_in": not pending,
-                    "removable": bool(row) and n != acc.node, "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
+                    "removable": not machine_managed and (n == acc.node or bool(row)),
+                    "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
                     "state": ((row or {}).get("worker_state") or {}).get("state", ""), "signin": prompt,
                     "credential_expires_at": (row["credential_expires_at"].isoformat()
                                               if row and row["credential_expires_at"] else None)})
@@ -279,8 +359,13 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         ctx.db.run("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit, managed,"
                    " created_by) VALUES (%s,%s,%s,%s,%s,%s,false,%s) ON CONFLICT (id) DO NOTHING",
                    (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, acc.sessions, user.subject))
-        ctx.db.run("INSERT INTO account_machines (account_id, node, enabled_by) VALUES (%s,%s,%s)",
-                   (acc.id, body.node, user.subject))
+        with ctx.db.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+                conn.execute("DELETE FROM account_machine_exclusions WHERE account_id=%s AND node=%s",
+                             (acc.id, body.node))
+                conn.execute("INSERT INTO account_machines (account_id, node, enabled_by) VALUES (%s,%s,%s)",
+                             (acc.id, body.node, user.subject))
         sync()
         audit("account", "enable_machine", acc.id, "", None, user.subject, True, body.node)
         ctx.events.emit("account.machine_enabled", account=acc.id, node=body.node, outcome="pending")
@@ -292,15 +377,14 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         acc = account_or_404(account_id)
         if not acc.runs_on(node):
             raise HTTPException(404, f"{acc.id} is not enabled on {node}")
-        if node == acc.node or not ctx.db.one("SELECT 1 AS x FROM account_machines WHERE account_id=%s AND node=%s",
-                                              (acc.id, node)):
-            raise HTTPException(409, f"{acc.id} is assigned to {node} in aiflow-control/accounts.yaml")
+        if ctx.db.one("SELECT 1 AS x FROM managed_ai_accounts WHERE id=%s AND removed_at IS NULL", (acc.id,)):
+            raise HTTPException(409, f"{acc.id} is managed from the machine account screen")
         last = len(acc.machines) == 1
         if last and not confirm:
             raise HTTPException(409, {"error": "confirmation_required",
                                       "message": f"{node} is the last machine of {acc.id}; removing it removes the "
                                                  "account from every machine. Confirm to continue."})
-        ctx.db.run("DELETE FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node))
+        detach_machine(acc, node, user.subject)
         removed_account = False
         if last:
             removed_account = delete_account(acc)
@@ -310,12 +394,23 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         return {"account": acc.id, "node": node, "account_removed": removed_account,
                 "machines": [] if removed_account else [n for n in acc.machines if n != node]}
 
+    def detach_machine(acc: Account, node: str, actor: str) -> None:
+        """Remove one assignment and persist the opt-out for a configured primary machine."""
+        with ctx.db.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+                conn.execute("DELETE FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node))
+                conn.execute("INSERT INTO account_machine_exclusions (account_id,node,detached_by) VALUES (%s,%s,%s)"
+                             " ON CONFLICT (account_id,node) DO UPDATE SET detached_by=EXCLUDED.detached_by,"
+                             " detached_at=now()", (acc.id, node, actor))
+
     def delete_account(acc: Account) -> bool:
         row = ctx.db.one("SELECT managed FROM shared_accounts WHERE id=%s", (acc.id,))
         if not row or not row["managed"]:
             return False
         ctx.db.run("DELETE FROM shared_accounts WHERE id=%s", (acc.id,))
         ctx.db.run("DELETE FROM account_machines WHERE account_id=%s", (acc.id,))
+        ctx.db.run("DELETE FROM account_machine_exclusions WHERE account_id=%s", (acc.id,))
         ctx.db.run("DELETE FROM accounts WHERE id=%s", (acc.id,))
         return True
 
@@ -323,17 +418,24 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
     def remove_account(account_id: str, request: Request, confirm: bool = False) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="remove", node=account_id)
         acc = account_or_404(account_id)
+        if ctx.db.one("SELECT 1 AS x FROM managed_ai_accounts WHERE id=%s AND removed_at IS NULL", (acc.id,)):
+            raise HTTPException(409, f"{acc.id} is managed from the machine account screen")
         row = ctx.db.one("SELECT managed FROM shared_accounts WHERE id=%s", (acc.id,))
-        if not row or not row["managed"]:
-            raise HTTPException(409, f"{acc.id} is defined in aiflow-control/accounts.yaml")
         if not confirm:
             raise HTTPException(409, {"error": "confirmation_required",
                                       "message": f"Removing {acc.id} removes it from all {len(acc.machines)} "
                                                  "machines. Confirm to continue."})
-        delete_account(acc)
-        audit("account", "remove", acc.id, "", None, user.subject, True, "removed from all machines")
+        if row and row["managed"]:
+            delete_account(acc)
+            retained = False
+        else:
+            for node in acc.machines:
+                detach_machine(acc, node, user.subject)
+            retained = True
+        audit("account", "remove", acc.id, "", None, user.subject, True, "removed from all machines",
+              {"source_retained": retained})
         ctx.events.emit("account.removed", account=acc.id, outcome="removed")
-        return {"account": acc.id, "removed": True, "machines": list(acc.machines)}
+        return {"account": acc.id, "removed": True, "source_retained": retained, "machines": list(acc.machines)}
 
     @app.post("/v1/accounts/{account_id}/signin-prompt")
     def signin_prompt(account_id: str, body: SigninPromptBody, node: str = Depends(node_auth)) -> dict:

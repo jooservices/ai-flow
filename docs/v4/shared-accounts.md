@@ -16,7 +16,9 @@ its sessions and quota once, across all of them, and never runs more sessions th
    the same way; their first machine stays defined in the repo and keeps its previous capacity as the limit until you
    change it.
 5. **Remove** takes the account off one machine only; other machines keep using it. Removing the last machine, or
-   **Remove from all machines**, asks for an on-screen confirmation and deletes the account.
+   **Remove from all machines**, asks for an on-screen confirmation. For an account defined in
+   `aiflow-control/accounts.yaml`, this detaches its machine assignments while leaving the source definition in the
+   repo so it can be enabled again later.
 
 The account list shows the account once (quota, status, prediction, `used/total sessions`). The account panel shows a
 breakdown per machine below: online or offline, sessions now, sessions in the last 24 hours, sign-in state.
@@ -24,11 +26,12 @@ breakdown per machine below: online or offline, sessions now, sessions in the la
 ## How the limit and the spread work
 
 - Sessions are the running runs of the account id, whichever machine runs them. Every claim, including a version
-  release, inserts the run under a per-account database lock and checks both the total limit and the machine's fair
-  share, so concurrent workers cannot take another online machine's capacity (`409`, ticket lease released).
-- A machine takes at most its fair share, `ceil(limit / machines online and signed in)`, while another such machine
-  is online. A machine that is offline (no heartbeat for 75 s) drops out, so the others' share grows and the work
-  moves to them. The limit still holds.
+  release, checks the account total, machine share and free worker slots while holding account and machine database
+  locks. Concurrent workers cannot exceed the account limit or overfill a machine (`409`, ticket lease released).
+- Each online, signed-in machine's share is weighted by its worker capacity remaining after other accounts' active
+  runs: `ceil(limit × machine capacity / total eligible capacity)`, capped by that machine's capacity. A machine with
+  no free worker slot cannot claim work. Offline machines (no heartbeat for 75 s) and machines at capacity stop
+  holding up work; the other machines can take the remaining sessions.
 - Every machine can run as many worker instances as the limit (`desired.workers`), so any machine can carry the whole
   account when the others are away. The worker checks the local credentials; only a passing check makes that machine
   eligible to claim work.
@@ -56,4 +59,5 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `DELETE /v1/shared-accounts/{id}?confirm=true` | remove from all machines |
 | `POST /v1/accounts/{id}/signin-prompt` | node reports link and code (node token) |
 
-Changes need the `nodes.manage` permission (owner, super administrator). The migration is `011_shared_accounts.sql`.
+Changes need the `nodes.manage` permission (owner, super administrator). The shared account tables are created by
+`011_shared_accounts.sql`; `015_shared_account_machine_detach.sql` records detached control-repo assignments.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
 from collections.abc import Iterable
 
 # Tools every node reports, whatever its projects use (reporting only; requirements are below).
@@ -258,8 +259,10 @@ def _single_executed_program(command: str) -> str | None:
         return None
     segment = tokens
     executable = segment[0]
-    if executable == "env":
+    if executable.rsplit("/", 1)[-1].casefold() == "env":
         segment = segment[1:]
+        if any(token.startswith("PATH=") for token in segment):
+            return None
         while segment and (segment[0].startswith("-") or "=" in segment[0]):
             segment = segment[1:]
         if not segment:
@@ -271,17 +274,36 @@ def _single_executed_program(command: str) -> str | None:
             if token == "-c" or (token.startswith("-") and "c" in token[1:]):
                 return _single_executed_program(segment[index + 1]) if index + 1 < len(segment) else None
         return None
+    # A catalogue executable is resolved through PATH. Paths such as ./php may name unrelated project files and
+    # cannot be checked against the adapter's command-search environment.
+    if "/" in executable or "\\" in executable:
+        return None
     return base
+
+
+def command_executable_found_on_path(command: str, path: str | None) -> bool | None:
+    """Whether a simple catalogue executable resolves in the PATH given to the adapter's AI process.
+
+    ``None`` means the command is not a simple catalogue invocation, so its launch cannot be verified this way.
+    Adapters attach this evidence to completed command events; the worker only accepts a not-found diagnostic when
+    the command returned 127 and this check confirms that the shell's requested executable was unresolved.
+    """
+    if path is None:
+        return None
+    program = _single_executed_program(command)
+    if not program or program not in {name.casefold() for name in NODE_TOOLS + CATALOG_TOOLS}:
+        return None
+    return shutil.which(program, path=path) is not None
 
 
 def parse_command_not_found_requirements(command_results: Iterable[dict]) -> list[str]:
     """Return catalogue tools whose *executed command result* failed with a shell not-found error.
 
-    The normalized records are produced by adapters from completed command-execution events. We also check that the
-    adapter recorded the shell's command-not-found exit status (127), that the failed command actually invoked the
-    missing executable, and that the output contains the matching diagnostic. A generic nonzero status is not enough:
-    an installed program may print the same words itself. Quoted or illustrative output from `echo`/`printf` also
-    cannot masquerade as a missing tool.
+    The normalized records are produced by adapters from completed command-execution events. We check that the
+    command returned the shell's command-not-found status (127), the adapter confirmed the executable did not
+    resolve on the PATH given to the AI process, the failed command actually invoked that executable, and the output
+    contains the matching diagnostic. A program that is installed and prints the same words itself cannot pass the
+    adapter's PATH check. Quoted or illustrative output from `echo`/`printf` also cannot masquerade as a missing tool.
     """
     command_tools = {name.casefold(): name for name in NODE_TOOLS + CATALOG_TOOLS}
     command_tools.update({tool.casefold(): tool for stack_tools in STACK_TOOLS.values() for tool in stack_tools})
@@ -298,6 +320,8 @@ def parse_command_not_found_requirements(command_results: Iterable[dict]) -> lis
         # Adapter events expose 127 when the shell cannot launch its requested executable. Other failures may be
         # produced by a program that is installed and must not become tool_missing based on its output text.
         if exit_code != 127:
+            continue
+        if result.get("executable_found_on_path") is not False:
             continue
         command = result.get("command")
         if isinstance(command, (list, tuple)):

@@ -25,9 +25,8 @@ class OpenCodeAdapter(Adapter):
             exit_code = state.get("exit")
             if tool in {"bash", "shell"} and isinstance(command, str) and (
                     status == "error" or (exit_code is not None and exit_code != 0)):
-                res.command_results.append({"command": command,
-                                            "output": state.get("output") or part.get("output") or "",
-                                            "exit_code": exit_code if exit_code is not None else 1})
+                self.record_command_result(res, command, state.get("output") or part.get("output") or "",
+                                           exit_code if exit_code is not None else 1)
         elif t == "text" and part.get("text"):
             res.final_text = part["text"]
         elif t == "error":

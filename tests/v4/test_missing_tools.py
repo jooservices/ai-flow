@@ -47,9 +47,14 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
     assert parse_missing_requirements("bash: php: command not found") == []
     assert parse_missing_requirements("bash: line 1: docker: command not found") == []
     assert parse_command_not_found_requirements([
-        {"command": "php -v", "output": "bash: php: command not found", "exit_code": 127},
-        {"command": "bash -lc 'docker version'", "output": "bash: line 1: docker: command not found", "exit_code": 127},
+        {"command": "php -v", "output": "bash: php: command not found", "exit_code": 127,
+         "executable_found_on_path": False},
+        {"command": "bash -lc 'docker version'", "output": "bash: line 1: docker: command not found", "exit_code": 127,
+         "executable_found_on_path": False},
     ]) == ["php", "docker"]
+    assert parse_command_not_found_requirements([
+        {"command": "php -v", "output": "bash: php: command not found", "exit_code": 127},
+    ]) == []  # An exit status and text without adapter PATH evidence are insufficient.
     assert parse_command_not_found_requirements([
         {"command": "echo 'bash: php: command not found'", "output": "bash: php: command not found", "exit_code": 1},
         {"command": "php -v", "output": "bash: php: command not found", "exit_code": 0},
@@ -151,18 +156,19 @@ def test_summary_naming_docker_or_php_and_missing_is_not_a_missing_tool(monkeypa
 def test_command_not_found_for_executed_catalogue_command_is_a_missing_tool(monkeypatch, tmp_path):
     result, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "the check could not run",
                          command_results=[{"command": "php -v", "output": "bash: line 1: php: command not found",
-                                           "exit_code": 127}])
+                                           "exit_code": 127, "executable_found_on_path": False}])
     assert result["outcome"] == "tool_missing"
     assert result["details"]["missing_tools"] == ["php"]
     assert result["details"]["tool_missing_evidence"] == "command_not_found"
     assert result["details"]["command_not_found_tools"] == ["php"]
 
 
-def test_single_php_command_printing_command_not_found_and_exiting_nonzero_is_not_a_missing_tool(monkeypatch, tmp_path):
+def test_single_php_command_printing_command_not_found_and_exiting_127_is_not_a_missing_tool(monkeypatch, tmp_path):
     result, _ = _run_dev(
         monkeypatch, tmp_path, "BLOCKED", "the command failed",
-        command_results=[{"command": """php -r 'echo "bash: php: command not found"; exit(1);'""",
-                          "output": "bash: php: command not found", "exit_code": 1}],
+        command_results=[{"command": """php -r 'echo "php: command not found"; exit(127);'""",
+                          "output": "php: command not found", "exit_code": 127,
+                          "executable_found_on_path": True}],
     )
     assert result["outcome"] == "blocked"
     assert result["details"].get("missing_tools", []) == []

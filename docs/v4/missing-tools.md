@@ -16,10 +16,11 @@ RESULT: BLOCKED: MISSING-TOOL: php, composer - phpunit cannot run
 ```
 
 The worker accepts either the explicit `MISSING-TOOL(S)` or `MISSING-SERVICE(S)` marker above, or adapter evidence from
-an actually executed command: the adapter must report shell exit code 127, the command must be one simple invocation
-of the same catalogue executable named by the shell's `command not found` diagnostic, and the command must have
-failed. Plain phrases in a blocked explanation, summary, or ordinary program output are not sufficient (for example,
-"composer is not installed" or output printed by an installed `php` command). Such a verified run ends with outcome
+an actually executed command: the command must return shell exit code 127, the adapter must confirm the executable
+does not resolve on the PATH given to the AI process, and the command must be one simple invocation of the same
+catalogue executable named by the shell's `command not found` diagnostic. Exit code and output text alone are not
+enough: an installed `php` command can print the same diagnostic and exit 127. Plain phrases in a blocked explanation
+or summary are not sufficient either (for example, "composer is not installed"). Such a verified run ends with outcome
 `tool_missing`, the ticket goes back to To Do with a comment (no question to the owner), and the control plane stores
 one open row per ticket and requirement in `tool_waits` (requirement, machine, project, run). A genuine requirement
 conflict still goes to Needs owner.

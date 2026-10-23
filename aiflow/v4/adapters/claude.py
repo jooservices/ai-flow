@@ -19,6 +19,7 @@ class ClaudeAdapter(Adapter):
     provider = "claude"
 
     def __init__(self) -> None:
+        super().__init__()
         self._bash_tool_uses: dict[str, str] = {}
 
     def settings_path(self, spec: RunSpec) -> Path:
@@ -85,8 +86,10 @@ class ClaudeAdapter(Adapter):
                 # classifier requires exit 127; an is_error flag alone also covers ordinary program failures.
                 exit_code = block.get("exit_code")
                 if exit_code is not None:
-                    result["exit_code"] = exit_code
-                res.command_results.append(result)
+                    self.record_command_result(res, command, str(content), exit_code, failed=True)
+                    # Keep the normalized provider result's existing failed field for downstream diagnostics.
+                else:
+                    res.command_results.append(result)
         elif t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
             windows = info.get("unifiedWindows") or {}

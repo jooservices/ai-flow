@@ -90,6 +90,26 @@ def test_codex_records_failed_command_execution_output():
     assert result.command_results == [{"command": "php -v", "output": "bash: php: command not found", "exit_code": 127}]
 
 
+def test_codex_command_event_records_whether_catalogue_executable_resolves_on_ai_path(monkeypatch):
+    from aiflow.v4.core import toolchains
+
+    monkeypatch.setattr(toolchains.shutil, "which",
+                        lambda name, path=None: "/usr/bin/php" if name == "php" and path == "/has-php" else None)
+    missing, installed = CodexAdapter(), CodexAdapter()
+    missing._command_path = "/no-php"
+    installed._command_path = "/has-php"
+    event = {"type": "item.completed", "item": {
+        "type": "command_execution", "command": "php -v", "aggregated_output": "bash: php: command not found",
+        "exit_code": 127}}
+    missing_result, installed_result = RunResult(), RunResult()
+
+    missing.parse_event(event, missing_result)
+    installed.parse_event(event, installed_result)
+
+    assert missing_result.command_results[0]["executable_found_on_path"] is False
+    assert installed_result.command_results[0]["executable_found_on_path"] is True
+
+
 def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():
     codex = RunResult()
     CodexAdapter().parse_event({"type": "token_count", "info": {"rate_limits": {

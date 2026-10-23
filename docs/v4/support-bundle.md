@@ -26,6 +26,10 @@ Control API and loop processes write rotated logs to `/srv/aiflow/control/logs` 
 Only entries with timestamps in the preceding 24 hours are included. Other deployments retain a bounded in-memory
 log ring for the running API process. Each included log file is capped at 5 MiB.
 
+Node release strings are included only when they match the v4 release format; other values appear as `unknown`.
+Heartbeat tool reports are reduced to a version parsed from a recognized CLI version line, or the fixed status
+`missing`, `timeout` or `broken`. Unknown tool names are omitted and unrecognized values are redacted.
+
 To create a ticket bundle, select a ticket before building. It adds the ticket's key, project, status and type (the summary is free text and is replaced with a redaction marker)
 and any run logs
 from the preceding 24 hours. Workers attach the newest 5 MiB of a run log to that run's result, so the control plane

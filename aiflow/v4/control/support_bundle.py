@@ -21,11 +21,38 @@ from pathlib import Path
 from typing import Any
 
 from .. import VERSION
+from ..core.toolchains import STACK_TOOLS, tools_for_stacks
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
 RETENTION = timedelta(hours=24)
 MAX_INCIDENTS = 100
 RUN_LOG_TTL_S = int(RETENTION.total_seconds()) + 3600
+_RELEASE_VERSION = re.compile(
+    r"v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:(?:a|b|rc)\d+)?\Z"
+)
+_TOOL_VERSION = re.compile(
+    r"(?P<version>v?(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){1,3})(?=$|[.\-+~\s(,])"
+)
+_TOOL_VERSION_PREFIXES = {
+    "claude": ("Claude Code ",),
+    "codex": ("codex-cli ", "Codex CLI "),
+    "codex-code-mode-host": ("codex-code-mode-host ",),
+    "grok": ("grok ",),
+    "opencode": ("opencode ",),
+    "docker": ("Docker version ",),
+    "git": ("git version ",),
+    "node": ("node ",),
+    "uv": ("uv ",),
+    "gh": ("gh version ",),
+    "php": ("PHP ",),
+    "composer": ("Composer version ",),
+    "wp": ("WP-CLI ",),
+    "python3": ("Python ",),
+    "playwright": ("Version ", "Playwright "),
+    "playwright-browser": ("Playwright Chromium ",),
+}
+_REDACTED = "[REDACTED]"
+_REPORTED_TOOLS = frozenset(tools_for_stacks(STACK_TOOLS))
 
 _log = logging.getLogger("aiflow4.support_bundle")
 
@@ -419,6 +446,46 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _safe_release_version(value: Any) -> str:
+    """Keep only the v4 release syntax used by the node agent and package version."""
+    if isinstance(value, str) and _RELEASE_VERSION.fullmatch(value):
+        return value
+    return "unknown"
+
+
+def _safe_tool_version(name: str, value: Any) -> str:
+    """Reduce a heartbeat tool report to a recognized version or a fixed status marker.
+
+    Heartbeat values are supplied by node agents and can contain arbitrary text. Export only version-shaped
+    values, extracting them from the known CLI output prefixes; never include extra output or error details.
+    """
+    if not isinstance(value, str):
+        return _REDACTED
+    value = value.strip()
+    if value in {"missing", "timeout"}:
+        return value
+    if value.lower().startswith("broken:"):
+        return "broken"
+    match = _TOOL_VERSION.match(value)
+    if match:
+        return match.group("version")
+    # Prefix parsing accepts CLI build metadata only after a recognized label and a valid version token.
+    for prefix in _TOOL_VERSION_PREFIXES.get(name, ()):
+        if value.startswith(prefix):
+            match = _TOOL_VERSION.match(value[len(prefix):])
+            if match:
+                return match.group("version")
+    return _REDACTED
+
+
+def _safe_heartbeat_tools(value: Any) -> dict[str, str]:
+    """Retain only recognized tool keys and their validated, reduced heartbeat values."""
+    if not isinstance(value, dict):
+        return {}
+    return {name: _safe_tool_version(name, raw)
+            for name, raw in sorted(value.items()) if isinstance(name, str) and name in _REPORTED_TOOLS}
+
+
 _LOG_PREFIX = re.compile(
     r"^(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
     r"(?:\s+(?P<level>DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL))?"
@@ -484,7 +551,7 @@ def _safe_json(value: Any, file_name: str | None = None) -> str:
 def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
     repo = ctx.repo()
     now = datetime.now(timezone.utc)
-    version = str(ctx.settings.control_version or VERSION)
+    version = _safe_release_version(ctx.settings.control_version or VERSION)
     nodes = ctx.db.all("SELECT name,role,status,slots_total,slots_used,release_version,last_heartbeat,tools"
                        " FROM nodes ORDER BY name")
     machines = []
@@ -492,9 +559,9 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         heartbeat = row["last_heartbeat"]
         machines.append({"name": row["name"], "role": row["role"], "status": row["status"],
                          "slots_total": row["slots_total"], "slots_used": row["slots_used"],
-                         "release": row["release_version"] or "unknown",
+                         "release": _safe_release_version(row["release_version"]),
                          "heartbeat_age_seconds": int((now - heartbeat).total_seconds()) if heartbeat else None,
-                         "tools": row["tools"] or {}})
+                         "tools": _safe_heartbeat_tools(row["tools"])})
     accounts = ctx.db.all("SELECT id,provider,node,tier,roles,status,updated_at FROM accounts ORDER BY id")
     account_states = [{"id": row["id"], "provider": row["provider"], "node": row["node"],
                        "tier": row["tier"], "roles": row["roles"], "status": row["status"],
@@ -512,7 +579,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
     files: dict[str, bytes] = {
         "versions.json": _safe_json({"aiflow": version, "python": platform.python_version(),
                                       "platform": platform.system().lower(),
-                                      "nodes": [{"name": row["name"], "release": row["release_version"] or "unknown"}
+                                      "nodes": [{"name": row["name"], "release": _safe_release_version(row["release_version"])}
                                                 for row in nodes]}, "versions.json").encode("utf-8"),
         "settings.json": _safe_json({"environment": ctx.settings.env, "console_login_enabled": bool(ctx.settings.console_login),
                                       "control_version": version, "projects": sorted(repo.projects),

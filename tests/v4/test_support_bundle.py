@@ -74,6 +74,29 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
                if item["name"].startswith("logs/"))
 
 
+def test_bundle_validates_heartbeat_tool_values_and_node_release_versions(ctx):
+    ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version,tools)"
+               " VALUES ('node1','worker','online',2,1,'jane doe',%s)",
+               (J({"git": "git version 2.43.0", "python3": "Python 3.12.4", "uv": "jane doe",
+                   "docker": "Docker version 28.0.0-jane-doe",
+                   "jane doe": "1.2.3"}),))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        versions = json.loads(bundle.read("versions.json"))
+        machine = json.loads(bundle.read("machine-state.json"))[0]
+        all_files = {name: bundle.read(name).decode("utf-8") for name in bundle.namelist()}
+
+    assert inventory["scan"] == "passed"
+    assert all(not support_bundle.file_findings(name, text) for name, text in all_files.items())
+    assert "jane doe" not in "\n".join(all_files.values())
+    assert "jane-doe" not in "\n".join(all_files.values())
+    assert versions["nodes"][0]["release"] == "unknown"
+    assert machine["release"] == "unknown"
+    assert machine["tools"] == {"docker": "28.0.0", "git": "2.43.0", "python3": "3.12.4",
+                                 "uv": "[REDACTED]"}
+
+
 def test_bundle_omits_untrusted_logger_name_from_timestamped_log(ctx):
     logs = support_bundle.SupportLogBuffer()
     logs.emit(logging.LogRecord("jane.doe", logging.INFO, __file__, 1, "hello", (), None))
@@ -409,7 +432,7 @@ def test_standard_deployment_routes_support_screen_to_control_api():
     rule = next(line for line in compose.read_text(encoding="utf-8").splitlines()
                 if "traefik.http.routers.api.rule:" in line)
 
-    assert "PathPrefix(`/support`)" in rule
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in rule
 
 
 def test_owner_reviews_inventory_before_download_and_lead_cannot_build(client, ctx):

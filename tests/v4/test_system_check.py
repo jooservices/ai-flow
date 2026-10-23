@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+import os
+import pwd
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from aiflow.v4.control import loops, system_check
+from aiflow.v4.control import api, loops, system_check
 from aiflow.v4.control import notify
 from aiflow.v4.core.system_check import condition
 from aiflow.v4.node import agent
@@ -22,10 +28,49 @@ def _direct_join(client, name="cc"):
     return {"Authorization": f"Bearer {joined.json()['node_token']}"}
 
 
+def _wait_for_join_readiness(ctx, node="cc"):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,))
+        readiness = (row or {}).get("readiness") or {}
+        if readiness.get("trigger") == "machine_joined":
+            return readiness
+        time.sleep(0.01)
+    pytest.fail(f"machine-join system check did not finish for {node}")
+
+
+def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, monkeypatch):
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+
+    def slow_provider(*_args, **_kwargs):
+        provider_started.set()
+        provider_release.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(system_check, "_github_project_conditions", slow_provider)
+    grant = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "cc",
+                                                        "role": "worker", "project": "TESTWP"})
+    assert grant.status_code == 200
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client.post, "/v1/nodes/join", json={"join_token": grant.json()["token"]})
+        try:
+            provider_started_in_time = provider_started.wait(timeout=2)
+            response_sent_while_probe_waited = future.done()
+        finally:
+            provider_release.set()
+        joined = future.result(timeout=3)
+
+    assert provider_started_in_time
+    assert response_sent_while_probe_waited
+    assert joined.status_code == 200
+    assert joined.json()["node_token"]
+
+
 def test_machine_join_project_add_upgrade_and_hourly_are_check_triggers(client, ctx, control_repo, monkeypatch):
     headers = _direct_join(client)
-    row = ctx.db.one("SELECT readiness FROM nodes WHERE name='cc'")
-    assert row["readiness"]["trigger"] == "machine_joined"
+    assert _wait_for_join_readiness(ctx)["trigger"] == "machine_joined"
 
     joined = join_node(client, "cc").json()
     headers = {"Authorization": f"Bearer {joined['node_token']}"}
@@ -211,7 +256,8 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
         "jira-credentials"}
 
 
-def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx):
+def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx, monkeypatch):
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
@@ -231,7 +277,8 @@ def test_jira_browse_access_without_issue_write_permissions_needs_action(client,
     assert joined["node"] == "cc"
 
 
-def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx):
+def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx, monkeypatch):
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
@@ -252,7 +299,9 @@ def test_jira_edit_and_transition_without_comment_permission_needs_action(client
     ("CREATE_ISSUES", "Create Issues"),
     ("LINK_ISSUES", "Link Issues"),
 ])
-def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, missing_permission, label):
+def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, missing_permission, label,
+                                                               monkeypatch):
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
@@ -343,6 +392,8 @@ def test_system_check_screen_and_clean_install_acceptance_include_results():
 
 
 def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, tmp_path):
+    worker = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: worker)
     monkeypatch.setattr(agent, "_github_network_available", lambda: True)
     monkeypatch.setattr(agent, "_worker_can_access_directory", lambda _path, _uid: True)
     machine = agent._system_machine_conditions({"disk_free": 20 * 1024 ** 3}, work_path=tmp_path / "work",
@@ -351,7 +402,6 @@ def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, t
                                                    "repository-network"}
     assert next(item for item in machine if item["id"] == "workspace-permissions")["result"] == \
         "fixed_automatically"
-    import pwd
     worker_uid = pwd.getpwnam("aiflow-worker").pw_uid
     assert (tmp_path / "work").stat().st_uid == worker_uid
     assert (tmp_path / "state").stat().st_uid == worker_uid
@@ -373,12 +423,14 @@ def test_primary_credential_probe_is_not_overwritten_by_an_extra_session():
     assert agent._credential_conditions([extra]) == {"codex-01": {"present": True, "valid": None}}
 
 
-def test_workspace_permission_check_reports_a_directory_the_worker_cannot_write(tmp_path):
+def test_workspace_permission_check_reports_a_directory_the_worker_cannot_write(tmp_path, monkeypatch):
     work, state = tmp_path / "locked-work", tmp_path / "state"
     work.mkdir()
     state.mkdir()
     work.chmod(0o555)
-    import pwd
+    worker = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: worker)
+    monkeypatch.setattr(agent, "_worker_can_access_directory", lambda _path, _uid: False)
     assert not agent._worker_can_access_directory(work, pwd.getpwnam("aiflow-worker").pw_uid)
 
     machine = agent._system_machine_conditions({}, work_path=work, state_path=state)

@@ -16,6 +16,7 @@ import logging
 import secrets
 import shlex
 import socket
+import threading
 import uuid
 import html
 import json
@@ -56,6 +57,21 @@ from .report import ReportNotFound, build_report, render_csv, render_html, rende
 from . import notify
 
 log = logging.getLogger("aiflow4.api")
+
+
+def _refresh_join_readiness(ctx, node: str) -> None:
+    """Run provider-backed readiness probes away from the one-use node join request."""
+    try:
+        system_check.refresh_node(ctx, node, "machine_joined")
+    except Exception as exc:  # noqa: BLE001 - a readiness outage must not affect a completed join
+        log.warning("machine-join system check failed for node %s (%s)", node, type(exc).__name__)
+
+
+def _schedule_join_readiness(ctx, node: str) -> None:
+    threading.Thread(target=_refresh_join_readiness, args=(ctx, node),
+                     name=f"aiflow4-join-readiness-{node}", daemon=True).start()
+
+
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
@@ -2573,7 +2589,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "invalid, expired, or used join token")
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
         repo = ctx.repo()
-        system_check.refresh_node(ctx, row["name"], "machine_joined")
+        _schedule_join_readiness(ctx, row["name"])
         project = repo.projects[row["projects"][0]]
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
                 "stack": project.stack, "release": current_release(), "node_token": token,

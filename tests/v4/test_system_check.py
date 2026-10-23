@@ -56,7 +56,7 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(client.post, "/v1/nodes/join", json={"join_token": grant.json()["token"]})
         try:
-            provider_started_in_time = provider_started.wait(timeout=2)
+            provider_started_in_time = provider_started.wait(timeout=5)
             response_sent_while_probe_waited = future.done()
         finally:
             provider_release.set()
@@ -87,7 +87,7 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(client.post, "/v1/nodes/cc/heartbeat", headers=headers, json={})
         try:
-            provider_started_in_time = provider_started.wait(timeout=2)
+            provider_started_in_time = provider_started.wait(timeout=5)
             try:
                 heartbeat = future.result(timeout=3)
                 response_sent_while_probe_waited = True

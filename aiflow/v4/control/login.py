@@ -47,6 +47,7 @@ from .console_auth import (COOKIE_NAME, PAGE_VIEWS, ROLE_LABELS, ROLE_PERMISSION
                            issue_session, landing_page, normalize_roles, permissions_for_view, resolve_session_user,
                            verify_session)
 from .db import J
+from .ui import CONSOLE_PAGE_PATHS
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = set(PAGE_VIEWS)
+PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS)
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -552,7 +553,7 @@ def install_login(app: FastAPI, ctx) -> None:
         if user is None and bearer_route:
             return await call_next(request)
         if user is None:
-            if path in PAGES:
+            if path in PAGES or path.startswith("/help/"):
                 target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
                 return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=302)
             if request.cookies.get(COOKIE_NAME):
@@ -585,7 +586,7 @@ def install_login(app: FastAPI, ctx) -> None:
         if bearer_route and request.cookies.get(COOKIE_NAME) and user:
             # A signed-in person cannot use a separate bearer header to skip the role menu.
             return await call_next(request)
-        if path in PAGES:
+        if path in PAGES or path.startswith("/help/"):
             target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
             # Retain the current page for an already authenticated browser; sign-in itself lands by role priority.
             request.state.console_user = user

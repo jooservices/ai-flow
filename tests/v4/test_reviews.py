@@ -64,7 +64,7 @@ def test_review_page_is_routed_by_traefik():
     from pathlib import Path
 
     compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
-    assert "PathPrefix(`/review`)" in compose.read_text()
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in compose.read_text()
 
 
 def test_reviewer_token_is_loaded_from_control_environment(monkeypatch):

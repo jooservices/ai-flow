@@ -350,8 +350,7 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
 def test_traefik_routes_console_help_and_backups_to_control_api():
     compose = (ROOT / "deploy/v4/control/compose.yaml").read_text()
     api_rule = next(line for line in compose.splitlines() if "traefik.http.routers.api.rule:" in line)
-    assert "PathPrefix(`/help`)" in api_rule
-    assert "PathPrefix(`/backup`)" in api_rule
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in api_rule
 
 
 def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsys):

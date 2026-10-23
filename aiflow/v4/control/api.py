@@ -518,6 +518,9 @@ def github_gateway(ctx: Ctx, repo: str | None = None) -> GitHubApp | None:
             ctx.github = gateway
     elif hasattr(gateway, "_refresh_config"):
         gateway._refresh_config()
+        if not getattr(gateway, "configured", True):
+            ctx.github = None
+            gateway = None
     if gateway is not None and getattr(gateway, "org", ""):
         ctx.settings.github_org = str(gateway.org)
     github_connection_used.set(DEFAULT_ID if gateway is not None else "")
@@ -4840,7 +4843,6 @@ def create_app(ctx: Ctx) -> FastAPI:
               {"repo": repository, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
 
-    @app.api_route("/v1/github/git/{git_path:path}", methods=["GET", "POST"])
     async def github_git_proxy(git_path: str, request: Request) -> Response:
         """Broker token-backed Git smart HTTP without exposing the stored access token to a worker."""
         capability = _verify_git_proxy_token(ctx, _git_proxy_credential(request))
@@ -4919,6 +4921,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         response_headers = {key: value for key, value in upstream.headers.items()
                             if key.lower() in {"content-type", "cache-control", "expires", "pragma"}}
         return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
+
+    @app.get("/v1/github/git/{git_path:path}", operation_id="githubGitProxyGet")
+    async def github_git_proxy_get(git_path: str, request: Request) -> Response:
+        return await github_git_proxy(git_path, request)
+
+    @app.post("/v1/github/git/{git_path:path}", operation_id="githubGitProxyPost")
+    async def github_git_proxy_post(git_path: str, request: Request) -> Response:
+        return await github_git_proxy(git_path, request)
 
     @app.post("/v1/github/pr")
     def github_pr(body: PRBody, node: str = Depends(node_auth)) -> dict:

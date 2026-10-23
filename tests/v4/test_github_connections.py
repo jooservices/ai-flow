@@ -14,6 +14,7 @@ from test_projects import owner_sign_in, prepare_project_control, worker_headers
 from test_reviews import add_review_run
 import aiflow.v4.control.api as api
 from aiflow.v4.control.api import github_gateway
+from aiflow.v4.control.github import GitHubApp, GitHubError
 from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.node import probes
@@ -65,6 +66,45 @@ def test_single_app_installation_is_the_first_connection(client, ctx, secrets_di
     with pytest.raises(HTTPException) as refused:
         github_gateway(ctx, "jooservices/not-reachable")
     assert refused.value.status_code == 409
+
+
+def test_cached_default_app_is_revoked_after_another_replica_removes_its_files(ctx, secrets_dir):
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    (secrets_dir / "app.json").write_text(json.dumps({"id": "901", "account_login": "jooservices",
+                                                        "installation_id": 7}))
+    (secrets_dir / "app.pem").write_text("-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----")
+    replica_gateway = GitHubApp(str(secrets_dir), "jooservices")
+    replica_gateway._cache["person/tool|[]"] = ("cached-installation-token", 9_999_999_999)
+    ctx.github = replica_gateway
+
+    assert github_gateway(ctx) is replica_gateway
+    (secrets_dir / "app.json").unlink()
+    (secrets_dir / "app.pem").unlink()
+
+    assert github_gateway(ctx) is None
+    assert ctx.github is None
+    assert not replica_gateway.configured
+    assert replica_gateway.key == "" and replica_gateway.meta == {}
+    assert replica_gateway._inst is None and replica_gateway._cache == {}
+
+
+def test_delete_branch_treats_only_not_found_as_already_gone():
+    gateway = object.__new__(GitHubApp)
+    gateway.org = "person"
+
+    def missing_reference(*args, **kwargs):
+        raise GitHubError("DELETE /refs/heads/TESTWP-1-work -> 404: {\"message\":\"Not Found\"}",
+                          status_code=404, response_body='{"message":"Not Found"}')
+
+    gateway.api = missing_reference
+    assert gateway.delete_branch("tool", "TESTWP-1-work") is False
+
+    def rejected_delete(*args, **kwargs):
+        raise GitHubError("DELETE /refs/heads/TESTWP-1-work -> 422: validation failed", status_code=422)
+
+    gateway.api = rejected_delete
+    with pytest.raises(GitHubError):
+        gateway.delete_branch("tool", "TESTWP-1-work")
 
 
 def test_short_invalid_token_is_never_echoed_by_validation_response(client, ctx, secrets_dir):
@@ -503,3 +543,21 @@ def test_remote_branch_cleanup_uses_assigned_connection_and_audits_it(client, ct
     assert getattr(ctx.github, "deleted_branches", []) == []  # the organization App was not used
     row = ctx.db.one("SELECT payload FROM write_audit WHERE action='delete-branch' ORDER BY id DESC")
     assert row["payload"]["connection"] == conn and row["payload"]["repo"] == "person/tool"
+
+    def rejected_delete(repo, branch):
+        raise GitHubError("DELETE /refs/heads/TESTWP-51-invalid -> 422: validation failed", status_code=422)
+
+    personal.delete_branch = rejected_delete
+    rejected = client.post("/v1/github/delete-branch", json={**run, "branch": "TESTWP-51-invalid"},
+                           headers=headers)
+    assert rejected.status_code == 502
+    failure_audit = ctx.db.one("SELECT accepted, payload FROM write_audit WHERE action='delete-branch'"
+                               " ORDER BY id DESC LIMIT 1")
+    assert failure_audit["accepted"] is False
+    assert failure_audit["payload"]["connection"] == conn
+
+
+def test_github_git_relay_get_and_post_have_distinct_openapi_operation_ids(client):
+    operations = client.app.openapi()["paths"]["/v1/github/git/{git_path}"]
+    assert operations["get"]["operationId"] == "githubGitProxyGet"
+    assert operations["post"]["operationId"] == "githubGitProxyPost"

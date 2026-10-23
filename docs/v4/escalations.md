@@ -1,5 +1,7 @@
 # Only real business decisions reach a person
 
+**Console screens:** Command Center (`cc`) and Machines and AI (`machines`).
+
 A person is needed only for **new business decisions** and **irreversible or production actions**. Everything else a
 ticket might stop on is classified when it is raised and resolved by AI Flow itself. This builds on
 [Needs owner triage](triage.md), the [master](master.md), the policy hook and the knowledge register.
@@ -106,3 +108,13 @@ conversion into an entry, amendment, refusals, the CI log, the weekly numbers, a
 2026-10-22 and 23 recorded in `tests/v4/fixtures/escalations-2026-10-22-23.json` (JAIF-130, JAIF-220, JAIF-222,
 JOOWP-301/303/304/308/312 and the rest of the same families): each is classified and none of the five other classes
 reaches a person.
+
+## Control API paths
+
+The developer worker records a stop with `POST /v1/escalations/raise`; the master applies its answer with
+`POST /v1/escalations/triage`. `POST /v1/work/claim` passes the decision register and any saved answer into a run.
+The policy hook responds through `POST /v1/policy/decide`. Command Center reads the register and weekly metrics from
+`GET /v1/escalations`, records decisions with `POST /v1/decisions`, answers with
+`POST /v1/decisions/{decision_id}/answer`, and retires entries with
+`POST /v1/decisions/{decision_id}/retire`. Escalation totals are also included in `GET /v1/master/report`; the
+master snapshot is available through `GET /v1/master/autonomy`.

@@ -27,6 +27,9 @@ AIFLOW4_PUBLIC_URL=https://control.example.com
 5. Select the account or organization and the repositories the App can access. GitHub returns to AI Flow after
    installation.
 
+The manifest flow starts with `GET /v1/integrations/github/manifest/start` and saves an imported App through
+`POST /v1/integrations/github/imports` when an owner chooses **Use an existing GitHub App**.
+
 The manifest requests repository contents write, pull requests write, workflow write, Actions read, checks read,
 statuses read, metadata read and administration write permissions. Actions read lets a developer run read the log
 of a failing GitHub Actions job for its recorded pull request. Administration write lets a release run turn on merge commits

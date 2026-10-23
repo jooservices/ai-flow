@@ -18,5 +18,9 @@ COPY aiflow aiflow
 COPY prompts prompts
 COPY deploy/v4/bin/aiflow4-bootstrap /app/deploy/v4/bin/aiflow4-bootstrap
 RUN uv sync --frozen --no-dev
-ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 AIFLOW4_VERSION=$AIFLOW4_VERSION
+ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 AIFLOW4_VERSION=$AIFLOW4_VERSION HOME=/home/aiflow
+# Not root: the code is read-only for the runtime user. The compose file can run it as another uid when the host
+# directories it mounts belong to someone else (AIFLOW4_CONTAINER_UID / AIFLOW4_CONTAINER_GID).
+RUN groupadd --gid 10001 aiflow && useradd --uid 10001 --gid aiflow --create-home --shell /usr/sbin/nologin aiflow
+USER aiflow
 ENTRYPOINT ["aiflow4"]

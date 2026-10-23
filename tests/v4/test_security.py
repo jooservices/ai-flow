@@ -338,6 +338,53 @@ def test_existing_plaintext_totp_secret_is_migrated_at_control_startup(ctx, key,
     assert mfa.read_secret(row, ADMIN, SECRET) == legacy
 
 
+def test_notification_credentials_are_encrypted_and_legacy_ones_are_migrated(ctx, key, admin):
+    from aiflow.v4.control import notify
+    from aiflow.v4.control.db import J
+    ctx.db.run("INSERT INTO notification_channels (name, kind, config) VALUES ('Mail','email',%s),('Hook','webhook',%s)",
+               (J({"host": "smtp.example.test", "port": 587, "username": "u", "password": "legacy-MAIL-pass",
+                   "from": "a@example.test", "to": "b@example.test", "tls_mode": "starttls"}),
+                J({"url": "https://hooks.example.test/legacy-HOOK-url", "auth_token": "legacy-HOOK-token"})))
+    make_client(ctx)  # control startup upgrades what older releases stored as plain text
+    dump = json.dumps([r["config"] for r in ctx.db.all("SELECT config FROM notification_channels")])
+    assert "legacy-MAIL-pass" not in dump and "legacy-HOOK" not in dump and dump.count(secretbox.PREFIX) == 3
+    hook = ctx.db.one("SELECT kind, config FROM notification_channels WHERE kind='webhook'")
+    assert notify._reveal_config("webhook", hook["config"])["auth_token"] == "legacy-HOOK-token"
+    assert notify.migrate_plaintext_credentials(ctx.db) == 0  # idempotent
+    saved = notify.save_channel(ctx.db, {"kind": "telegram", "name": "T", "config": {"bot_token": "123:new-BOT", "chat_id": "9"}})
+    assert saved["secrets"] == {"has_bot_token": True}
+    assert "new-BOT" not in json.dumps(ctx.db.one("SELECT config FROM notification_channels WHERE kind='telegram'")["config"])
+
+
+def test_notification_credentials_are_not_written_without_an_external_key(ctx, monkeypatch):
+    from aiflow.v4.control import notify
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+    with pytest.raises(secretbox.SecretBoxError):
+        notify.save_channel(ctx.db, {"kind": "slack", "name": "S", "config": {"webhook_url": "https://hooks.example.test/x"}})
+    assert ctx.db.one("SELECT count(*) AS n FROM notification_channels")["n"] == 0
+
+
+def test_a_cookie_from_before_the_hardening_is_rejected(ctx, admin):
+    import base64
+    import hashlib
+    import hmac
+
+    def b64(data):
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    # the exact shape older releases issued: no version, no sid, no second-factor state
+    head = b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    body = b64(json.dumps({"sub": ADMIN, "role": "super_admin", "exp": int(time.time()) + 3600}, separators=(",", ":")).encode())
+    legacy = f"{head}.{body}.{b64(hmac.new(SECRET.encode(), f'{head}.{body}'.encode(), hashlib.sha256).digest())}"
+    for gate in (False, True):
+        client = make_client(ctx, gate=gate)
+        client.cookies.set(COOKIE_NAME, legacy)
+        assert client.get("/v1/console/session").status_code == 401
+        assert client.get("/v1/security/sessions").status_code == 401
+    assert client.get("/v1/state").status_code == 401
+
+
 # --- AC3: rate limits and sign-in guessing protection ----------------------------------------------------------------
 def test_public_endpoints_are_rate_limited(ctx):
     ctx.settings.rate_limit_public_per_min = 3

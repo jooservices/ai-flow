@@ -29,7 +29,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..core import secretbox
 from . import audit as audit_log
-from . import mfa
+from . import mfa, notify
 from .console_auth import COOKIE_NAME, ConsoleUser, csrf_token, has_permission, issue_session, verify_session
 from .login import (CSRF_COOKIE, MFA_ROLES, OPEN_PATHS, OPEN_PREFIXES, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S, client_ip,
                     get_setting, require_mfa, session_ttl_s, set_setting)
@@ -56,6 +56,10 @@ class CodeBody(BaseModel):
 def install_security(app: FastAPI, ctx) -> None:
     settings = ctx.settings
     mfa.migrate_plaintext_secrets(ctx.db, settings.console_session_secret)
+    try:
+        notify.migrate_plaintext_credentials(ctx.db)
+    except secretbox.SecretBoxError:
+        log.exception("notification credentials could not be encrypted at startup")
     secret = lambda: settings.console_session_secret  # noqa: E731 - read late: tests and the CLI set it after startup
 
     def session(request: Request, allow_pending: bool = False) -> ConsoleUser | None:

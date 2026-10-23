@@ -25,6 +25,8 @@ needs `security.audit` (also Super Administrator). All of it is also available a
 - **Forced sign-out.** *Sign out* on a session, or *Sign out everywhere* for a person, ends the session in the database.
   Every route that reads the session cookie checks it, so the next request on that session is refused (401). Logout,
   and a password reset, end sessions the same way.
+- **Upgrade.** Cookies issued before this release carry no session id or version, so they bypass neither two-factor
+  nor forced sign-out: they are refused and every person signs in once more.
 
 ## AC2 Secrets encrypted at rest
 
@@ -37,7 +39,8 @@ key is configured. The key is **not** in the database:
   authenticator secrets in `console_users`. Recovery codes are keyed hashes. Console passwords were already salted scrypt
   hashes. If `AIFLOW4_SECRET_KEY` is absent, authenticator secrets use a key derived from the console session secret (also
   outside the database). On first access with a key configured, existing plaintext Jira and GitHub secret files are
-  upgraded in place; legacy plaintext authenticator secrets are migrated when the control API starts. Keep the key with
+  upgraded in place; legacy plaintext authenticator secrets and notification channel credentials (email password, bot
+  token, webhook URLs and tokens in `notification_channels.config`) are migrated when the control API starts. Keep the key with
   the other secrets and back it up separately: without it encrypted secrets cannot be read.
 
 ## AC3 Rate limits and sign-in guessing protection
@@ -72,9 +75,11 @@ the repository (secrets, misconfiguration) and the control-api container image. 
 fails the job and blocks the merge when the check is required. The level is the repository variable
 `SECURITY_SEVERITY_THRESHOLD` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `HIGH`), not a constant in the code.
 
-Reviewed exceptions live next to the script: `deploy/v4/ci/trivy-ignore.yaml` (root user in the two Dockerfiles, with the
-reason) and `deploy/v4/ci/trivy-secret.yaml` (fake keys in `tests/` are not secrets). The image scan ignores findings
-that have no fix yet (`--ignore-unfixed`), so the job fails only on what can be fixed.
+There is no blanket suppression: findings without a fix still block (no `--ignore-unfixed`), and the production
+control image runs as the non-root user `aiflow` (`USER` in `deploy/v4/control/Dockerfile`, `user:` in the compose file).
+Two narrow, reviewed exceptions exist: `deploy/v4/ci/trivy-secret.yaml` allows fake keys only in the named test fixture
+files (any other file under `tests/` is scanned), and the repository scan skips `deploy/v4/ci/systemd.Dockerfile`, a
+throw-away CI test machine that needs PID 1 as root and is never deployed.
 
 ## AC6 Release security report and disclosure policy
 

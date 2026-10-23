@@ -32,12 +32,12 @@ trivy -w /src "$TRIVY_IMAGE" fs --scanners vuln --severity "$SEVERITIES" --exit-
 echo "== repository (secrets and misconfiguration) =="
 trivy -w /src "$TRIVY_IMAGE" fs --scanners secret,misconfig --severity "$SEVERITIES" --exit-code 1 \
   --skip-dirs .venv --skip-dirs .git --secret-config deploy/v4/ci/trivy-secret.yaml \
-  --ignorefile deploy/v4/ci/trivy-ignore.yaml --format json --output /out/repository.json . || status=1
+  --skip-files deploy/v4/ci/systemd.Dockerfile --format json --output /out/repository.json . || status=1
 
 if [ -n "$IMAGE" ]; then
   echo "== container image $IMAGE =="
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$OUT:/out" -v "$CACHE:/root/.cache/trivy" \
-    "$TRIVY_IMAGE" image --scanners vuln --ignore-unfixed --severity "$SEVERITIES" --exit-code 1 \
+    "$TRIVY_IMAGE" image --scanners vuln --severity "$SEVERITIES" --exit-code 1 \
     --format json --output /out/image.json "$IMAGE" || status=1
 fi
 

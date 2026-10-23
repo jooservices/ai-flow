@@ -5,6 +5,7 @@ name: aiflow4-app
 x-app: &app
   image: ${AIFLOW4_IMAGE_REPOSITORY:-aiflow4/control}:${AIFLOW4_IMAGE_TAG:-latest}
   restart: unless-stopped
+  user: "${AIFLOW4_CONTAINER_UID:-10001}:${AIFLOW4_CONTAINER_GID:-10001}"  # not root; must own the mounted directories
   env_file: [/etc/aiflow/secrets/control/aiflow4.env]
   environment: &app-environment
     AIFLOW4_ENV: lab
@@ -45,7 +46,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: aiflow4-edge
-      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || PathPrefix(`/business`) || PathPrefix(`/review`) || PathPrefix(`/stakeholder`) || PathPrefix(`/integrations`) || PathPrefix(`/projects`) || PathPrefix(`/machines`) || PathPrefix(`/backup`) || PathPrefix(`/notifications`) || Path(`/`) || Path(`/healthz`) || PathPrefix(`/login`) || PathPrefix(`/logout`)"
+      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || PathPrefix(`/business`) || PathPrefix(`/review`) || PathPrefix(`/stakeholder`) || PathPrefix(`/integrations`) || PathPrefix(`/licensing`) || PathPrefix(`/projects`) || PathPrefix(`/machines`) || PathPrefix(`/users`) || PathPrefix(`/backup`) || PathPrefix(`/notifications`) || Path(`/`) || Path(`/healthz`) || PathPrefix(`/login`) || PathPrefix(`/logout`)"
       traefik.http.routers.api.entrypoints: web
       traefik.http.services.api.loadbalancer.server.port: "8080"
       traefik.http.services.api.loadbalancer.healthcheck.path: /healthz

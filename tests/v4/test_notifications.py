@@ -5,14 +5,24 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
+import pytest
 
 from aiflow.v4.control import notify
+from aiflow.v4.core import secretbox
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.ui import mount_ui
 from tests.v4.conftest import add_ticket
 
 
 SECRET = "notifications-test-session-secret-32-bytes"
+
+
+@pytest.fixture(autouse=True)
+def secret_key(monkeypatch):
+    """Channel credentials are encrypted at rest; the key comes from outside the database."""
+    key = secretbox.generate_key()
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", key)
+    return key
 
 
 def sign_in(client, ctx, role="owner"):

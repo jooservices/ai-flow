@@ -23,8 +23,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "super_admin": frozenset({"*"}),
     "owner": frozenset({
         "console.read", "console.write", "console.manage", "integrations.manage", "nodes.manage", "projects.manage",
-        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve", "backup.read", "backup.manage",
-        "notifications.manage",
+        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve", "licensing.manage",
+        "users.manage", "backup.read", "backup.manage", "notifications.manage",
     }),
     "lead": frozenset({"console.read", "node.operations.read", "knowledge.read"}),
 }
@@ -70,6 +70,10 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+# Cookies issued before sessions were tracked (JAIF-231) carry no version; they are refused so every administrator
+# signs in again through the two-factor flow, and each later cookie can be ended by a forced sign-out.
+SESSION_VERSION = 2
+
 # signing secret -> callable(sid) that is True when that session was ended (forced sign-out) or is unknown.
 # login.install_login registers it; verify_session asks it for every token that names a session, so every
 # route that reads the cookie, not only the login gate, refuses an ended session.
@@ -86,7 +90,7 @@ def issue_session(subject: str, role: str, expires_at: int, secret: str, sid: st
     if not subject.strip() or role not in ALLOWED_ROLES or len(secret.encode()) < 32:
         raise ValueError("invalid console session claims or signing secret")
     header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    claims: dict = {"sub": subject.strip(), "role": role, "exp": int(expires_at)}
+    claims: dict = {"sub": subject.strip(), "role": role, "exp": int(expires_at), "v": SESSION_VERSION}
     if sid:
         claims["sid"] = sid
     if mfa_pending:
@@ -120,6 +124,8 @@ def verify_session(token: str, secret: str, now: int | None = None, allow_pendin
         if not isinstance(subject, str) or not subject.strip() or role not in ALLOWED_ROLES:
             return None
         if not isinstance(expires_at, int) or expires_at <= (int(time.time()) if now is None else now):
+            return None
+        if claims.get("v") != SESSION_VERSION:  # a cookie from before the hardening: no two-factor, no forced sign-out
             return None
         sid = claims.get("sid", "")
         if not isinstance(sid, str):

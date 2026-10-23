@@ -179,6 +179,8 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 .alert{display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:10px 14px; animation:slideIn .45s ease both}
 .alert .a-title{font-weight:600}
 .alert .a-detail{color:var(--muted); font-size:13px}
+.license-warning{margin:14px 0;padding:12px 16px;border:1px solid var(--warn);border-radius:10px;background:var(--surface);color:var(--fg);font-weight:600}
+.license-warning[data-tone="crit"]{border-color:var(--crit)}
 @keyframes slideIn{from{opacity:0; transform:translateY(-6px)}to{opacity:1; transform:none}}
 
 /* nodes */
@@ -499,6 +501,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
       <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>
+      <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
     </div>
     <div class="spacer"></div>
@@ -511,6 +514,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   </div>
 </header>
 <main class="wrap">
+  <div class="license-warning" id="license-warning" role="status" hidden></div>
   <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"></section>
   <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden>
     <div class="dhead" id="work-head"></div>
@@ -540,6 +544,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
   <section class="view" id="view-system-check" role="tabpanel" aria-labelledby="tab-system-check" hidden></section>
+  <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
 </main>
 <footer class="footer" id="footer">
@@ -628,6 +633,7 @@ var S = {
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
+  users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
     form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
   machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
@@ -646,10 +652,13 @@ var S = {
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
   sh: { project: null, data: null, error: '', loading: null, forms: {}, files: {}, sending: {}, results: {}, renderKey: '' },
   knowledge: { data: null, learning: null, learningProject: '', search: '', error: '', loading: false, filter: 'active', type: 'all', editor: null, history: null, itemEditor: null, owner: '', ownerToken: '', actor: '' },
-  integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
+  integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' },
+  licensing: { data: null, status: null, usage: [], error: '', busy: false, statusBusy: false,
+    loadedAt: 0, statusAt: 0, limitsPlan: '' }
 };
 function viewOf(path) {
   if (path.indexOf('/system-check') === 0) return 'system-check';
+  if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
   if (path.indexOf('/work') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
@@ -687,6 +696,7 @@ var MENU_ITEMS = [
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
   { view: 'projects', label: 'Projects', permission: 'projects.manage' },
   { view: 'system-check', label: 'System check', permission: 'node.operations.read' },
+  { view: 'licensing', label: 'Licence', permission: 'licensing.manage' },
   { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' }
 ];
 // Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
@@ -829,9 +839,12 @@ function pollConsoleSession() {
     S.consoleUser = d.authenticated ? d : null;
     syncMenuVisibility();
     render();
+    if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
+    if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
+    if (S.view === 'users' && consoleCan('users.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
@@ -3511,6 +3524,95 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function licensingResponse(response) {
+  return response.json().then(function (data) {
+    if (response.ok) return data;
+    var detail = data.detail || ('HTTP ' + response.status);
+    throw new Error(typeof detail === 'string' ? detail : (detail.message || JSON.stringify(detail)));
+  });
+}
+function loadLicensing() {
+  if (S.licensing.busy || !consoleCan('licensing.manage')) return;
+  S.licensing.busy = true;
+  Promise.all([
+    fetch('/v1/licensing', { cache: 'no-store' }).then(licensingResponse),
+    fetch('/v1/licensing/usage', { cache: 'no-store' }).then(licensingResponse)
+  ]).then(function (results) {
+    S.licensing.data = results[0]; S.licensing.usage = results[1].rows || [];
+    S.licensing.status = results[0]; S.licensing.statusAt = Date.now();
+    S.licensing.limitsPlan = S.licensing.limitsPlan || results[0].plan || 'free';
+    S.licensing.loadedAt = Date.now(); S.licensing.error = '';
+  }).catch(function (error) { S.licensing.error = String(error.message || error); })
+    .then(function () { S.licensing.busy = false; render(); });
+}
+function loadLicenseStatus() {
+  if (S.licensing.statusBusy || !consoleReader()) return;
+  S.licensing.statusBusy = true;
+  fetch('/v1/licensing/status', { cache: 'no-store' }).then(licensingResponse)
+    .then(function (state) { S.licensing.status = state; S.licensing.statusAt = Date.now(); })
+    .catch(function () { /* the page can still render without a status warning */ })
+    .then(function () { S.licensing.statusBusy = false; renderLicenseNotice(); });
+}
+function renderLicenseNotice() {
+  var el = $('#license-warning'), state = S.licensing.data || S.licensing.status;
+  if (!el || !state || !consoleReader() || state.status === 'active') {
+    if (el) el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.setAttribute('data-tone', state.read_only ? 'crit' : 'warn');
+  if (state.read_only) el.textContent = 'AI Flow is read-only because the licence is ' + state.reason + '. Activate or renew a licence on the Licence screen to restore normal operation.';
+  else el.textContent = 'Licence ' + state.reason + '. AI Flow remains available during the 14-day grace period until ' + (state.grace_until ? new Date(state.grace_until).toLocaleString() : 'the grace period ends') + '.';
+}
+function renderLicensing() {
+  var root = $('#view-licensing');
+  if (!root) return;
+  if (!consoleCan('licensing.manage')) { root.innerHTML = '<div class="empty">The Licence screen is available to owners and super administrators.</div>'; return; }
+  var state = S.licensing.data, h = '<div class="dhead"><div><h1>Licence</h1><p>Activate a plan, set resource limits and review monthly AI usage.</p></div><button class="btn sm" data-act="license-refresh">Refresh</button></div>';
+  if (S.licensing.error) h += '<div class="alert" data-tone="crit"><span class="a-detail">' + esc(S.licensing.error) + '</span></div>';
+  if (!state) {
+    h += '<section class="panel"><div class="muted">' + (S.licensing.busy ? 'Loading licence…' : 'Licence status is unavailable.') + '</div></section>';
+    root.innerHTML = h; return;
+  }
+  var statusLabel = state.status === 'active' ? 'Active' : (state.status === 'grace' ? 'Grace period' : 'Read-only');
+  var reasonLabel = state.reason === 'expired' ? 'Expired' : (state.reason === 'invalid' ? 'Invalid signature or claims' : '');
+  h += '<section class="panel"><div class="panel-h"><h2>' + esc(state.plan.charAt(0).toUpperCase() + state.plan.slice(1)) + ' plan</h2><span class="pill" data-tone="' + (state.status === 'active' ? 'ok' : (state.read_only ? 'crit' : 'warn')) + '">' + esc(statusLabel) + '</span><span class="spacer"></span><span class="muted">' + esc(reasonLabel) + '</span></div>';
+  h += '<p class="muted">Expiry: <strong>' + esc(state.expires_at ? new Date(state.expires_at).toLocaleString() : 'No expiry · Free plan') + '</strong>';
+  if (state.grace_until) h += ' · Grace period ends ' + esc(new Date(state.grace_until).toLocaleString());
+  h += '</p><p class="small muted">Installation ID: <span class="mono">' + esc(state.installation_id) + '</span> · Share this ID with the licence issuer for an offline licence file.</p>';
+  h += '<div class="project-table"><table><thead><tr><th>Included resource</th><th>Plan limit</th><th>In use</th></tr></thead><tbody>';
+  [['machines', 'Machines'], ['ai_accounts', 'AI accounts'], ['projects', 'Projects'], ['users', 'Users']].forEach(function (item) {
+    h += '<tr><td>' + item[1] + '</td><td>' + state.limits[item[0]] + '</td><td>' + ((state.usage || {})[item[0]] || 0) + '</td></tr>';
+  });
+  h += '</tbody></table></div></section>';
+  (state.sync_warnings || []).forEach(function (warning) {
+    h += '<div class="alert" data-tone="warn"><span class="a-detail">' + esc(warning) + '</span></div>';
+  });
+  h += '<section class="panel"><div class="panel-h"><h2>Activate or renew</h2><span class="hint">The key is sent only to the configured licence service.</span></div>';
+  h += '<div class="project-form"><label>Licence key<input type="password" autocomplete="new-password" data-license-key placeholder="Enter licence key"></label><div><button class="btn primary" data-act="license-activate"' + (S.licensing.busy ? ' disabled' : '') + '>Activate online</button></div>';
+  h += '<label class="wide">Signed licence file<input type="file" data-license-file accept=".license,.licence,.jwt,text/plain,application/jwt"></label><div><button class="btn" data-act="license-offline"' + (S.licensing.busy ? ' disabled' : '') + '>Activate offline</button></div></div></section>';
+  var plan = S.licensing.limitsPlan || state.plan, selectedLimits = state.plans[plan] || state.limits;
+  h += '<section class="panel"><div class="panel-h"><h2>Plan limits</h2><span class="hint">Adjust the limits used by this installation.</span></div><div class="project-form"><label>Plan<select data-license-plan><option value="free"' + (plan === 'free' ? ' selected' : '') + '>Free</option><option value="team"' + (plan === 'team' ? ' selected' : '') + '>Team</option><option value="business"' + (plan === 'business' ? ' selected' : '') + '>Business</option></select></label>';
+  [['machines', 'Machines'], ['ai_accounts', 'AI accounts'], ['projects', 'Projects'], ['users', 'Users']].forEach(function (item) {
+    h += '<label>' + item[1] + '<input type="number" min="1" max="1000000" data-license-limit="' + item[0] + '" value="' + selectedLimits[item[0]] + '"></label>';
+  });
+  h += '<div><button class="btn primary" data-act="license-save-limits"' + (S.licensing.busy ? ' disabled' : '') + '>Save plan limits</button></div></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Usage report</h2><span class="hint">Tickets use their UTC Done month; tokens and cost use UTC run start month.</span><span class="spacer"></span><a class="btn sm" href="/v1/licensing/usage.csv">Export spreadsheet</a></div><div class="project-table"><table><thead><tr><th>Project</th><th>Month</th><th>Tickets finished</th><th>Input tokens</th><th>Output tokens</th><th>Cost (USD)</th></tr></thead><tbody>';
+  if (!S.licensing.usage.length) h += '<tr><td colspan="6" class="muted">No usage has been recorded yet.</td></tr>';
+  S.licensing.usage.forEach(function (row) { h += '<tr><td>' + esc(row.project) + '</td><td>' + esc(row.month) + '</td><td>' + row.tickets_finished + '</td><td>' + Number(row.tokens_in).toLocaleString() + '</td><td>' + Number(row.tokens_out).toLocaleString() + '</td><td>$' + Number(row.cost_usd).toFixed(6) + '</td></tr>'; });
+  h += '</tbody></table></div></section>';
+  root.innerHTML = h;
+}
+function submitLicense(path, payload, successText) {
+  S.licensing.busy = true; S.licensing.error = ''; renderLicensing();
+  fetch(path, { method: path === '/v1/licensing/limits' ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    .then(licensingResponse).then(function (data) {
+      S.licensing.data = data; toast(successText, 'Licence settings saved.', 'ok');
+    }).catch(function (error) { S.licensing.error = String(error.message || error); })
+    .then(function () { S.licensing.busy = false; if (!S.licensing.error) loadLicensing(); else renderLicensing(); });
+}
+
 function notificationField(field, label, type, placeholder) {
   var value = S.notifications.form[field];
   return '<label>' + esc(label) + '<input type="' + esc(type || 'text') + '" data-notify-field="' + esc(field) + '" value="' +
@@ -3652,6 +3754,22 @@ function renderUsers() {
   var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
   var role = S.consoleUser && S.consoleUser.role || 'unknown';
   var h = '<h1 class="dash-title">Users and roles</h1><p class="lead">Console access is assigned to signed-in accounts. Dashboard and Work board are open to every console role.</p>';
+  if (!consoleCan('users.manage')) { root.innerHTML = h + '<section class="panel"><div class="muted">User management is available to owners and super administrators.</div></section>'; return; }
+  if (S.users.error) h += '<div class="alert" data-tone="crit" role="alert"><span class="a-detail">' + esc(S.users.error) + '</span></div>';
+  var userData = S.users.data || { users: [], count: 0, limit: 0 };
+  h += '<section class="panel"><div class="panel-h"><h2>Console users</h2><span class="hint">' + userData.count + ' of ' + userData.limit + ' enabled user slots in use</span></div>';
+  h += '<p class="small muted">Create an account here. AI Flow generates an initial password for you to share with the user through a secure channel.</p>';
+  h += '<form class="project-form" id="users-create-form"><label>Email<input name="email" type="email" required maxlength="320" autocomplete="off"></label>';
+  h += '<label>Display name<input name="display_name" maxlength="120" autocomplete="name"></label>';
+  h += '<label>Role<select name="role"><option value="lead">Lead</option><option value="owner">Owner</option><option value="super_admin">Super Administrator</option></select></label>';
+  h += '<div><button class="btn primary" type="submit"' + (S.users.busy || !S.users.data ? ' disabled' : '') + '>Create user</button></div></form>';
+  if (S.users.initialPassword) h += '<div class="alert" data-tone="ok"><strong>Initial password</strong><p class="small">Copy this password and share it securely: <code data-initial-password>' + esc(S.users.initialPassword) + '</code></p></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Status</th></tr></thead><tbody>';
+  if (!userData.users.length) h += '<tr><td colspan="4" class="muted">' + (S.users.busy ? 'Loading users…' : 'No console users.') + '</td></tr>';
+  userData.users.forEach(function (item) {
+    h += '<tr><td>' + esc(item.email) + '</td><td>' + esc(item.name || '—') + '</td><td>' + esc(roleLabels[item.role] || item.role) + '</td><td>' + (item.disabled ? 'Disabled' : 'Enabled') + '</td></tr>';
+  });
+  h += '</tbody></table></div></section>';
   h += '<section class="panel"><div class="panel-h"><h2>Your console access</h2><span class="hint">Authenticated session</span></div><div class="facts">';
   h += '<div class="fact"><span class="fl">Signed in as</span><span class="fv">' + esc(S.consoleUser && S.consoleUser.user || 'Unknown user') + '</span></div>';
   h += '<div class="fact"><span class="fl">Role</span><span class="fv">' + esc(roleLabels[role] || role) + '</span></div></div>';
@@ -3659,8 +3777,37 @@ function renderUsers() {
   MENU_ITEMS.forEach(function (item) {
     h += '<tr><td>' + esc(item.label) + '</td><td>' + (viewAllowed(item.view, role) ? 'Available' : 'Not available') + '</td></tr>';
   });
-  h += '</tbody></table></div><p class="small">Role assignment and account invitations are managed through the configured console login process.</p></section>';
+  h += '</tbody></table></div></section>';
   root.innerHTML = h;
+}
+function loadUsers() {
+  if (S.users.busy || !consoleCan('users.manage')) return;
+  S.users.busy = true;
+  fetch('/v1/auth/users', { cache: 'no-store' }).then(licensingResponse)
+    .then(function (data) { S.users.data = data; S.users.loadedAt = Date.now(); S.users.error = ''; })
+    .catch(function (error) { S.users.error = String(error.message || error); })
+    .then(function () { S.users.busy = false; renderUsers(); });
+}
+function submitConsoleUser(form) {
+  if (S.users.busy) return;
+  var fields = new FormData(form), payload = {
+    email: String(fields.get('email') || '').trim(), display_name: String(fields.get('display_name') || '').trim(),
+    role: String(fields.get('role') || 'lead')
+  };
+  S.users.busy = true; S.users.error = ''; renderUsers();
+  fetch('/v1/auth/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload) }).then(licensingResponse)
+    .then(function (data) {
+      S.users.initialPassword = data.initial_password;
+      S.users.data = S.users.data || { users: [], count: 0, limit: 0 };
+      S.users.data.users.unshift({ email: data.email, name: data.name, role: data.role, disabled: false });
+      S.users.data.count += 1;
+      S.users.busy = false;
+      form.reset();
+      toast('User created', data.message, 'ok');
+    })
+    .catch(function (error) { S.users.error = String(error.message || error); })
+    .then(function () { S.users.busy = false; renderUsers(); });
 }
 
 function quickSearchResults(query) {
@@ -3714,6 +3861,7 @@ function chooseSearchResult(kind, key, source) {
 function render() {
   renderLive();
   renderFooter();
+  renderLicenseNotice();
   if (S.view === 'cc') renderDashboard();
   else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
   else if (S.view === 'machines') renderMachines();
@@ -3728,6 +3876,7 @@ function render() {
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
   else if (S.view === 'system-check') renderSystemCheck();
+  else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
@@ -3752,7 +3901,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'notifications'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
 }
@@ -3771,6 +3920,8 @@ function setView(v) {
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
   if (v === 'system-check') loadSystemCheck();
+  if (v === 'licensing') loadLicensing();
+  if (v === 'users') loadUsers();
   if (v === 'notifications') loadNotifications();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
@@ -3793,6 +3944,32 @@ document.addEventListener('click', function (e) {
       .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
       .catch(function (err) { S.systemCheckError = String(err.message || err); })
       .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });
+  }
+  else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }
+  else if (act === 'license-activate') {
+    var licenseKeyField = $('[data-license-key]'), licenseKey = licenseKeyField ? licenseKeyField.value.trim() : '';
+    if (licenseKeyField) licenseKeyField.value = '';
+    if (!licenseKey) { S.licensing.error = 'Enter a licence key.'; renderLicensing(); }
+    else submitLicense('/v1/licensing/activate', { key: licenseKey }, 'Licence activated');
+  }
+  else if (act === 'license-offline') {
+    var licenseFileField = $('[data-license-file]'), licenseFile = licenseFileField && licenseFileField.files && licenseFileField.files[0];
+    if (!licenseFile) { S.licensing.error = 'Choose a signed licence file.'; renderLicensing(); }
+    else {
+      S.licensing.busy = true; S.licensing.error = ''; renderLicensing();
+      licenseFile.text().then(function (contents) {
+        return fetch('/v1/licensing/offline', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ license_file: contents }) }).then(licensingResponse);
+      }).then(function (data) { S.licensing.data = data; toast('Licence activated', 'Offline licence file accepted.', 'ok'); })
+        .catch(function (error) { S.licensing.error = String(error.message || error); })
+        .then(function () { S.licensing.busy = false; if (!S.licensing.error) loadLicensing(); else renderLicensing(); });
+    }
+  }
+  else if (act === 'license-save-limits') {
+    var limitPlanField = $('[data-license-plan]'), limitPlan = limitPlanField ? limitPlanField.value : 'free', limits = {};
+    $$('[data-license-limit]').forEach(function (field) { limits[field.getAttribute('data-license-limit')] = Number(field.value); });
+    S.licensing.limitsPlan = limitPlan;
+    submitLicense('/v1/licensing/limits', { plan: limitPlan, limits: limits }, 'Plan limits saved');
   }
   else if (act === 'notifications-refresh') loadNotifications();
   else if (act === 'notification-test') notificationTest(el.getAttribute('data-id'));
@@ -4067,6 +4244,7 @@ document.addEventListener('change', function (e) {
     S.backup.form[backupField] = e.target.value;
     if (backupField === 'destination_kind') renderBackup();
   }
+  if (e.target && e.target.matches('[data-license-plan]')) { S.licensing.limitsPlan = e.target.value; renderLicensing(); }
   if (e.target && e.target.id === 'ai-filter') {
     S.aiFilter = e.target.value; savePrefs(); renderDBody(); tick();
   }
@@ -4178,6 +4356,7 @@ document.addEventListener('submit', function (e) {
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
   if (e.target.id === 'notification-channel-form') { e.preventDefault(); notificationFormSubmit(); }
   if (e.target.id === 'rh-form') { e.preventDefault(); saveRoleHealth(); }
+  if (e.target.id === 'users-create-form') { e.preventDefault(); submitConsoleUser(e.target); }
 });
 window.addEventListener('popstate', function () {
   S.view = viewOf(location.pathname);

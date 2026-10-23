@@ -37,8 +37,9 @@ SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 # Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
 SCREEN_PAGE = "screens/{view}.md"
 
-# JavaScript renderers run outside the static <section> ranges. Keep this map beside the check so a renderer edit
-# requires the page for the screen it renders. `None` means the renderer is shared by every screen.
+# JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
+# check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
+# unless the changed line names one specific view.
 SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
@@ -79,6 +80,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderRoleHealthSettings": ("machines",),
     "roleHealthPanel": ("machines",),
     "render": None,
+    "viewOf": None,
+    "setView": None,
     "helpUrl": None,
     "hintSeen": None,
     "renderHelp": None,
@@ -92,6 +95,19 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"^\s*\.firstuse\{"),
     re.compile(r'\bid="(?:help-link|firstuse)"'),
     re.compile(r"\bhint-dismiss\b"),
+)
+
+# View-specific navigation, state and event branches live outside the section/render functions. Infer their
+# documentation target from the view name instead of treating them as unmapped shared UI.
+SCREEN_VIEW_UI_PATTERNS = (
+    re.compile(r'\bid="tab-([a-z]+)"'),
+    re.compile(r"\bS\.([a-z]+)\s*=\s*\{"),
+    re.compile(r"\bHINTS\.([a-z]+)\s*="),
+    re.compile(r"\bpath\.indexOf\('/([a-z]+)'"),
+    re.compile(r"\{\s*view:\s*'([a-z]+)'"),
+    re.compile(r",\s*'([a-z]+)'\]\s*\.forEach"),
+    re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z]+)'"),
+    re.compile(r"\bact\s*===\s*'([a-z]+)-[\w-]+'"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -890,14 +906,18 @@ def changed_views(base: str) -> set[str]:
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
+            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
+                              if (match := pattern.search(changed_line)) and match.group(1) in all_views}
             hint_view = None
+            unmapped_renderer = False
             for name, (lo, hi) in functions.items():
                 if lo <= line_no <= hi:
                     if name not in SCREEN_RENDERER_VIEWS:
                         line_views = set()
+                        unmapped_renderer = True
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
-                    line_views |= (all_views if mapped is None else set(mapped))
+                    line_views |= ((specific_views or all_views) if mapped is None else set(mapped))
             # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
             # screen, including edits to the top-bar link, first-use container and dismiss behavior.
             if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:
@@ -911,9 +931,11 @@ def changed_views(base: str) -> set[str]:
                 line_views |= all_views
             if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
                 line_views |= all_views
+            if not unmapped_renderer:
+                line_views |= specific_views
             if line_views:
                 touched |= line_views
-            else:
+            elif changed_line.strip():
                 unmapped.add(line_no)
     if unmapped:
         lines_text = ", ".join(str(n) for n in sorted(unmapped))

@@ -36,3 +36,8 @@ Bundles are temporary and belong to the console user who created them: the creat
 and a download by any other user is refused. Creating a bundle returns its inventory; the archive
 is served only by the separate download action after the inventory has been shown in the Support screen. The bundle
 is not uploaded or sent by AI Flow.
+
+The Support screen uses `POST /v1/support/bundles` to create and scan a bundle and return its inventory, then
+`GET /v1/support/bundles/{bundle_id}/download` to download it after review. Workers submit run results through
+`POST /v1/runs/{run_id}/result`; the control service stores any sanitized support log in temporary storage for
+ticket-specific bundles.

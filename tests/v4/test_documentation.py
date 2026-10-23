@@ -336,6 +336,22 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
         return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in hunks))
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    support_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if 'id="tab-support"' in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("S.support =")),
+        next(i for i, line in enumerate(source_lines, 1) if "path.indexOf('/support')" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "{ view: 'support'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("  support: 'Build a diagnostic bundle")),
+        next(i for i, line in enumerate(source_lines, 1) if "v === 'support'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.view === 'support') renderSupport()" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "'support'].forEach(function (v)" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "act === 'support-build'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if i > 3500 and not line.strip()),
+    ]
+    current_lines = support_lines
+    assert docsite.changed_views("origin/develop") == {"support"}
+
+    current_lines = shared_lines + [hint_line]
     views = docsite.changed_views("origin/develop")
     assert views == set(docsite.console_views())
     all_pages = ["aiflow/v4/control/ui/console.html", *(f"docs/guide/screens/{v}.md" for v in views)]

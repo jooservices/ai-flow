@@ -699,9 +699,9 @@ var MENU_ITEMS = [
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
   { view: 'projects', label: 'Projects', permission: 'projects.manage' },
   { view: 'licensing', label: 'Licence', permission: 'licensing.manage' },
-  { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' },
-  { view: 'support', label: 'Support', permission: 'console.manage' }
+  { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' }
 ];
+MENU_ITEMS.push({ view: 'support', label: 'Support', permission: 'console.manage' });
 // Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
 function viewAllowed(view, role) {
   var item = MENU_ITEMS.filter(function (x) { return x.view === view; })[0];
@@ -3914,8 +3914,8 @@ var HINTS = {
   integrations: 'Connect Jira and GitHub first. Secrets are stored on the control machine and never shown.',
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
-  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.',
-  support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.'
+  support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.',
+  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.'
 };
 function helpUrl(view) { return HELP_BASE + view + '.html'; }
 function hintSeen(view) { try { return localStorage.getItem('aiflow4-hint-' + view) === '1'; } catch (e) { return false; } }

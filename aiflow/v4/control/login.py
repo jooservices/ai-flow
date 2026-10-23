@@ -72,7 +72,7 @@ EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
 PAGES = {"/", "/cc", "/dashboard", "/work", "/machines", "/users", "/delivery", "/sa", "/lead", "/business", "/review",
-         "/stakeholder", "/knowledge", "/integrations", "/projects", "/security"}
+         "/stakeholder", "/knowledge", "/integrations", "/projects", "/security", "/backup"}
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them

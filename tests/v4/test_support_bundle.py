@@ -122,6 +122,56 @@ def test_scanner_detects_secrets_tokens_keys_and_personal_data_and_blocks_offer(
     assert not list(ctx.leases.r.scan_iter(match=ctx.leases.p + "support_bundle:*"))
 
 
+def test_google_api_key_in_log_query_is_redacted_before_bundle_offer(ctx):
+    google_key = "AIza" + "A" * 35
+    opaque_key = "opaque-query-key-value-123456"
+    raw = (f"GET https://maps.example.test/lookup?key={google_key}&lang=en returned 200\n"
+           f"GET https://internal.example.test/lookup?key={opaque_key}&lang=en returned 200")
+    assert "token" in support_bundle.sensitive_findings(raw)
+
+    clean = support_bundle.sanitize_text(raw)
+    assert google_key not in clean and opaque_key not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, raw, (), None))
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=logs)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        log_text = bundle.read("logs/control-service.log").decode("utf-8")
+    assert google_key not in log_text and opaque_key not in log_text
+    assert inventory["scan"] == "passed"
+
+
+@pytest.mark.parametrize("api_key", [
+    "AIza" + "B" * 35,
+    "sk_live_" + "C" * 24,
+    "sk-ant-" + "D" * 24,
+    "SG." + "E" * 20 + "." + "F" * 20,
+])
+def test_common_unlabeled_api_key_formats_are_redacted(api_key):
+    assert "token" in support_bundle.sensitive_findings(api_key)
+    clean = support_bundle.sanitize_text(api_key)
+    assert api_key not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+
+@pytest.mark.parametrize("raw", [
+    "ticket assigned to jane doe after a call",
+    "customer date of birth: 1985-04-12",
+])
+def test_free_form_name_and_date_of_birth_are_redacted_and_block_if_unsanitized(ctx, monkeypatch, raw):
+    assert "personal_data" in support_bundle.sensitive_findings(raw)
+    clean = support_bundle.sanitize_text(raw)
+    assert raw not in clean
+    assert not support_bundle.sensitive_findings(clean)
+
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
+               " VALUES ('test','TESTWP-1','warning','Safe title',%s)", (raw,))
+    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text: text)
+    with pytest.raises(ValueError, match="sensitive content remains"):
+        support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+
+
 def test_secret_scanner_redacts_and_rejects_the_full_quoted_value():
     raw = 'password: "my secret phrase"'
     clean = support_bundle.sanitize_text(raw)
@@ -358,7 +408,7 @@ def test_ticket_bundle_includes_only_selected_ticket_runs_from_last_24_hours_and
         run_logs = [name for name in bundle.namelist() if name.startswith("logs/ticket-runs/")]
         assert len(run_logs) == 1 and run_id in run_logs[0]
         assert len(bundle.read(run_logs[0])) <= support_bundle.MAX_LOG_BYTES
-        assert json.loads(bundle.read("ticket.json"))["key"] == "TESTWP-235"
+        assert json.loads(bundle.read("ticket.json"))["ticket_key"] == "TESTWP-235"
 
 
 def test_worker_attaches_only_a_capped_log_within_the_run_log_directory(tmp_path):

@@ -29,7 +29,7 @@ RUN_LOG_TTL_S = int(RETENTION.total_seconds()) + 3600
 
 _log = logging.getLogger("aiflow4.support_bundle")
 
-_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*)"
+_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*|key)"
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?im)(?P<prefix>\b{_SECRET_NAME}\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*)"
     r"(?P<value>\[REDACTED\]|\\?\"(?:\\.|[^\"\\\r\n])*?\\?\"|\\?'(?:\\.|[^'\\\r\n])*?\\?'|[^\r\n]*?)"
@@ -38,7 +38,9 @@ _SECRET_ASSIGNMENT = re.compile(
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _KNOWN_TOKEN = re.compile(
     r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{16,})\b"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|sk-ant-[A-Za-z0-9_-]{20,}|"
+    r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|SK[0-9a-fA-F]{32}|sk-[A-Za-z0-9_-]{16,})\b"
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
@@ -56,6 +58,17 @@ _PERSON_FIELD = re.compile(
     r"\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)"
     r"(?P<value>[A-Za-z][A-Za-z'-]{0,30}(?:[._][A-Za-z][A-Za-z'-]{0,30})*"
     r"(?:[ \t]+[A-Za-z][A-Za-z'-]{0,30}){0,2})\b(?P<suffix>\\?[\"']?)"
+)
+_PERSON_MENTION = re.compile(
+    r"(?i)(?P<prefix>\b(?:assigned\s+to|reported\s+by|contacted|called|spoke\s+with|"
+    r"talked\s+to|met\s+with)\s+)"
+    r"(?P<value>[a-z][a-z'-]{1,30}[ \t]+[a-z][a-z'-]{1,30})\b"
+)
+_DOB_FIELD = re.compile(
+    r"(?i)(?P<prefix>\b(?:(?:customer|user|person)\s+)?(?:date[ _-]+of[ _-]+birth|"
+    r"birth[ _-]?date|dob)\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*\\?[\"']?)"
+    r"(?P<value>\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
+    r"(?P<suffix>\\?[\"']?)"
 )
 _ADDRESS = re.compile(r"(?i)\b\d{1,6}\s+(?:[A-Z0-9.'-]+\s+){1,5}(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd|court|ct|way)\b")
 _HOME_PATH = re.compile(r"(?i)(/(?:home|users)/)[^/\s]+")
@@ -85,11 +98,13 @@ def sanitize_text(text: str) -> str:
     text = _EMAIL.sub("[REDACTED_EMAIL]", text)
     text = _PHONE.sub("[REDACTED_PHONE]", text)
     text = _SSN.sub("[REDACTED_ID]", text)
+    text = _DOB_FIELD.sub(_redact_dob, text)
     text = _ADDRESS.sub("[REDACTED_ADDRESS]", text)
     text = _IP.sub(_redact_ip, text)
     text = _HOME_PATH.sub(r"\1[REDACTED_USER]", text)
     text = _NAME.sub(_redact_name, text)
-    return _PERSON_FIELD.sub(_redact_person_field, text)
+    text = _PERSON_FIELD.sub(_redact_person_field, text)
+    return _PERSON_MENTION.sub(_redact_person_field, text)
 
 
 def _redact_name(match: re.Match[str]) -> str:
@@ -97,7 +112,11 @@ def _redact_name(match: re.Match[str]) -> str:
 
 
 def _redact_person_field(match: re.Match[str]) -> str:
-    return match.group("prefix") + "[REDACTED_NAME]" + match.group("suffix")
+    return match.group("prefix") + "[REDACTED_NAME]" + match.groupdict().get("suffix", "")
+
+
+def _redact_dob(match: re.Match[str]) -> str:
+    return match.group("prefix") + "[REDACTED_DATE]" + match.group("suffix")
 
 
 def _redact_secret_assignment(match: re.Match[str]) -> str:
@@ -125,8 +144,9 @@ def sensitive_findings(text: str) -> list[str]:
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    has_name = bool(_NAME.search(text) or _PERSON_FIELD.search(text))
-    if _EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _ADDRESS.search(text) or has_ip or has_name:
+    has_name = bool(_NAME.search(text) or _PERSON_FIELD.search(text) or _PERSON_MENTION.search(text))
+    if (_EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _DOB_FIELD.search(text)
+            or _ADDRESS.search(text) or has_ip or has_name):
         findings.append("personal_data")
     return findings
 
@@ -349,7 +369,9 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         ticket = ctx.db.one("SELECT key,project,status,type,summary FROM tickets WHERE key=%s", (ticket_key,))
         if not ticket:
             raise KeyError(ticket_key)
-        files["ticket.json"] = _safe_json(ticket).encode("utf-8")
+        ticket_data = dict(ticket)
+        ticket_data["ticket_key"] = ticket_data.pop("key")
+        files["ticket.json"] = _safe_json(ticket_data).encode("utf-8")
         rows = ctx.db.all("SELECT id,step,started_at FROM runs WHERE ticket_key=%s"
                           " AND started_at >= now() - interval '24 hours' ORDER BY started_at,id", (ticket_key,))
         for row in rows:

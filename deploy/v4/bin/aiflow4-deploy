@@ -1,0 +1,125 @@
+#!/bin/bash
+# Deploy one signed v4 release from GitHub: aiflow4-deploy [--stage-only] <vX.Y.Z>
+set -euo pipefail
+STAGE_ONLY=no
+if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=yes; shift; fi
+VERSION=${1:-}
+if [ $# -ne 1 ] || [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "usage: aiflow4-deploy [--stage-only] vX.Y.Z" >&2; exit 2
+fi
+exec 9>/run/aiflow4-deploy.lock
+flock -w 1800 9 || { echo "another deploy is running" >&2; exit 8; }
+# Settings written by `aiflow4 install control` (domain, join URL, node agent on/off); no secrets.
+[ -r /etc/aiflow/control.env ] && { set -a; . /etc/aiflow/control.env; set +a; }
+
+REPO=/srv/aiflow/control/repos/ai-flow
+RELEASES=/srv/aiflow/control/releases
+IMAGE=ghcr.io/jooservices/ai-flow/control-api
+IDENTITY="https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION"
+mkdir -p "$RELEASES"
+cd "$REPO"
+git fetch -q origin master --tags
+git rev-parse -q --verify "refs/tags/$VERSION^{commit}" >/dev/null || {
+  echo "tag $VERSION is not available in origin" >&2; exit 2;
+}
+if ! git merge-base --is-ancestor "refs/tags/$VERSION" origin/master; then
+  echo "tag $VERSION does not point to a commit on master" >&2; exit 2
+fi
+
+WORK=$(mktemp -d "$RELEASES/.download-$VERSION.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  gh release download "$VERSION" --repo jooservices/ai-flow --dir "$WORK" \
+    --pattern "aiflow4-$VERSION.tar.gz" \
+    --pattern "aiflow4-$VERSION.tar.gz.sigstore.json" \
+    --pattern SHA256SUMS
+else  # a new control host without a signed-in gh: the public release assets, checked below either way
+  for asset in "aiflow4-$VERSION.tar.gz" "aiflow4-$VERSION.tar.gz.sigstore.json" SHA256SUMS; do
+    curl -fsSL --max-time 600 -o "$WORK/$asset" \
+      "https://github.com/jooservices/ai-flow/releases/download/$VERSION/$asset"
+  done
+fi
+TAR="$WORK/aiflow4-$VERSION.tar.gz"
+BUNDLE="$TAR.sigstore.json"
+(cd "$WORK" && sha256sum --check SHA256SUMS)
+cosign verify-blob "$TAR" --bundle "$BUNDLE" \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+docker pull "$IMAGE:$VERSION"
+cosign verify "$IMAGE:$VERSION" \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+
+B="/srv/aiflow/build/$VERSION"
+rm -rf "$B" && mkdir -p "$B"
+tar -xzf "$TAR" -C "$B"
+mkdir -p "$RELEASES"
+STAGED="$RELEASES/.$VERSION.new"
+rm -rf "$STAGED" && mkdir -p "$STAGED"
+install -m 0644 "$TAR" "$STAGED/$(basename "$TAR")"
+install -m 0644 "$BUNDLE" "$STAGED/$(basename "$BUNDLE")"
+install -m 0644 "$WORK/SHA256SUMS" "$STAGED/SHA256SUMS"
+rm -rf "$RELEASES/$VERSION"
+mv "$STAGED" "$RELEASES/$VERSION"
+
+# A canary needs the signed node assets to be served before the fleet CURRENT pointer moves or the control
+# containers restart. The auto-deployer uses this mode to stage the archive first, then targets one node.
+if [ "$STAGE_ONLY" = yes ]; then
+  echo "staged signed release $VERSION"
+  exit 0
+fi
+
+# Pre-upgrade check (docs/v4/fleet-upgrade.md), run from the new image before any control container or CURRENT
+# changes: migrations only add NNN_*.sql files, and no online node falls outside the version skew policy.
+# A blocked check exits 9, keeps the running release and records the reasons (write_audit, incident).
+CUR=$(cat "$RELEASES/CURRENT" 2>/dev/null || true)
+if [ "${AIFLOW4_SKIP_UPGRADE_CHECK:-}" != 1 ]; then
+  CHECK=(docker run --rm --network aiflow4-control --env-file /etc/aiflow/secrets/control/aiflow4.env
+         -e "AIFLOW4_VERSION=$VERSION")
+  BASELINE="/srv/aiflow/build/$CUR/aiflow/v4/control/migrations"
+  CHECK_ARGS=(upgrade-check --target "$VERSION" --current "${CUR:-none}")
+  if [ -n "$CUR" ] && [ -d "$BASELINE" ]; then
+    CHECK+=(-v "$BASELINE:/srv/aiflow/upgrade-baseline:ro"); CHECK_ARGS+=(--baseline /srv/aiflow/upgrade-baseline)
+  fi
+  if ! "${CHECK[@]}" "$IMAGE:$VERSION" "${CHECK_ARGS[@]}"; then
+    echo "pre-upgrade check blocked $VERSION; the control plane keeps ${CUR:-its release}" >&2
+    exit 9
+  fi
+fi
+
+CF="$B/deploy/v4/control/compose.yaml"
+healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = healthy ]; }
+for svc in control-api-a control-api-b; do
+  AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERSION \
+    docker compose -f "$CF" up -d --no-deps "$svc" 2>&1 | grep -v -e '^$' | tail -1
+  for i in $(seq 1 40); do healthy "aiflow4-$svc" && break; sleep 2; done
+  healthy "aiflow4-$svc" || { echo "$svc did not become healthy" >&2; exit 5; }
+  sleep 4
+  docker rm -f aiflow4-control-api >/dev/null 2>&1 || true
+done
+AIFLOW4_IMAGE_REPOSITORY=$IMAGE AIFLOW4_IMAGE_TAG=$VERSION AIFLOW4_VERSION=$VERSION \
+  docker compose -f "$CF" up -d --no-deps control-loops 2>&1 | grep -v -e '^$' | tail -1
+
+install -m 0755 "$B/deploy/v4/bin/aiflow4-node-install" "$B/deploy/v4/bin/aiflow4-deploy" \
+  "$B/deploy/v4/bin/aiflow4-autodeploy" "$B/deploy/v4/bin/aiflow4-develop-install" \
+  "$B/deploy/v4/bin/aiflow4-deploy-develop" "$B/deploy/v4/bin/aiflow4-autodeploy-develop" /usr/local/sbin/
+[ ! -f "$B/deploy/v4/bin/aiflow4-control-install" ] ||
+  install -m 0755 "$B/deploy/v4/bin/aiflow4-control-install" /usr/local/sbin/
+install -m 0644 "$B"/deploy/v4/control/systemd/aiflow4-autodeploy.* /etc/systemd/system/
+systemctl daemon-reload && systemctl enable -q --now aiflow4-autodeploy.timer
+mkdir -p /root/.bridge/out/release
+rm -f /root/.bridge/out/release/*.tar.gz*
+cp "$TAR" "$BUNDLE" "$WORK/SHA256SUMS" /root/.bridge/out/release/
+printf '%s\n' "$VERSION" > /root/.bridge/out/release/VERSION
+# A control host set up by `aiflow4 install control` runs no node agent until it is joined as a node
+# (AIFLOW4_DEPLOY_NODE_AGENT=0 in /etc/aiflow/control.env).
+if [ "${AIFLOW4_DEPLOY_NODE_AGENT:-1}" != 0 ]; then
+  aiflow4-node-install "$RELEASES/$VERSION/$(basename "$TAR")" "$VERSION" \
+    "$RELEASES/$VERSION/$(basename "$BUNDLE")" "$(awk 'NR==1 {print $1}' "$WORK/SHA256SUMS")"
+fi
+printf '%s\n' "$VERSION" > "$RELEASES/CURRENT.tmp"
+mv -f "$RELEASES/CURRENT.tmp" "$RELEASES/CURRENT"
+ls -1dt "$RELEASES"/v[0-9]*.[0-9]*.[0-9]*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf
+for i in $(seq 1 30); do curl -fsS http://127.0.0.1/healthz >/dev/null 2>&1 && break; sleep 2; done
+echo "deployed $VERSION"

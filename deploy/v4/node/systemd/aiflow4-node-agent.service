@@ -1,0 +1,13 @@
+[Unit]
+Description=AI Flow v4 node agent (heartbeat, metrics, workers)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/aiflow/node.env
+ExecStart=/srv/aiflow/current/.venv/bin/aiflow4 node-agent --slots ${AIFLOW4_SLOTS}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

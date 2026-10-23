@@ -1,0 +1,112 @@
+#!/bin/bash
+# Install a signed AI Flow v4 release on this node.
+#   aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>
+# Legacy two-argument upgrades are disabled because those agents execute this script from an unverified archive.
+# Bootstrap them manually only after an administrator verifies the archive with a trusted cosign installation.
+set -euo pipefail
+if [ $# -ne 2 ] && [ $# -ne 4 ]; then
+  echo "usage: aiflow4-node-install <release.tar.gz> <vX.Y.Z> <release.sigstore.json> <sha256>" >&2; exit 2
+fi
+TAR=$1; VERSION=$2; BUNDLE=${3:-}; EXPECTED_SHA256=${4:-}
+if [[ ! $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "release version must be vX.Y.Z" >&2; exit 2
+fi
+NODE_ENV=${AIFLOW4_NODE_ENV:-/etc/aiflow/node.env}
+if [ -r "$NODE_ENV" ]; then  # systemd-run does not pass the agent's environment
+  set -a; . "$NODE_ENV"; set +a
+fi
+CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://10.44.0.10}
+NODE_NAME=${AIFLOW4_NODE_NAME:-$(uname -n)}
+TOKEN_FILE=${AIFLOW4_NODE_TOKEN_FILE:-/srv/aiflow/state/node.token}
+# curl reads the node token from a config on stdin, so it never shows in the process list.
+control() {
+  local token
+  token=$(cat "$TOKEN_FILE" 2>/dev/null) || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fsS -K - --max-time 120 "$@"
+}
+report_failure() {
+  local body
+  body=$(printf '{"release_version": "%s", "detail": "installer: %s"}' "$VERSION" "${1//\"/}")
+  control -X POST -H 'Content-Type: application/json' --data "$body" \
+    "$CONTROL_URL/v1/nodes/$NODE_NAME/release-failures" >/dev/null 2>&1 \
+    || echo "could not report the rejected release to the control API" >&2
+}
+reject() {
+  echo "$1" >&2
+  report_failure "$1"
+  exit 4
+}
+
+if [ $# -eq 2 ]; then
+  reject "legacy automatic upgrade is disabled; manually bootstrap from a signature-verified release with all four installer arguments"
+fi
+if [[ ! $EXPECTED_SHA256 =~ ^[0-9a-f]{64}$ ]]; then
+  echo "invalid release checksum" >&2; exit 2
+fi
+if [[ ! -f $TAR || ! -f $BUNDLE ]]; then
+  echo "release tarball or signature bundle is missing" >&2; exit 2
+fi
+ACTUAL_SHA256=$(sha256sum "$TAR" | awk '{print $1}')
+if [[ $ACTUAL_SHA256 != "$EXPECTED_SHA256" ]]; then
+  reject "release checksum verification failed for $VERSION"
+fi
+IDENTITY="https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION"
+if ! command -v cosign >/dev/null 2>&1; then
+  reject "cosign is required to verify signed releases; install cosign on this node, then run: aiflow4-node-install <release.tar.gz> $VERSION <release.sigstore.json> <sha256>"
+fi
+if ! cosign verify-blob "$TAR" --bundle "$BUNDLE" \
+    --certificate-identity "$IDENTITY" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+  reject "release signature verification failed for $VERSION"
+fi
+
+RELEASES=/srv/aiflow/releases
+REL=$RELEASES/$VERSION
+mkdir -p "$RELEASES"
+if [ ! -x "$REL/.venv/bin/aiflow4" ]; then
+  BUILD=$(mktemp -d "$RELEASES/.${VERSION}.XXXXXX")
+  trap 'rm -rf "$BUILD"' EXIT
+  if ! tar -xzf "$TAR" -C "$BUILD"; then
+    echo "could not unpack release $VERSION" >&2; exit 1
+  fi
+  if ! (cd "$BUILD" && UV_LINK_MODE=copy UV_PYTHON=python3.12 uv sync --frozen --no-dev -q); then
+    echo "uv sync failed for $VERSION" >&2; exit 1
+  fi
+  echo "$VERSION" > "$BUILD/RELEASE"
+  rm -rf "$REL"
+  mv "$BUILD" "$REL"
+  trap - EXIT
+fi
+
+# Only replace the installed updater after the archive has passed verification and unpacked successfully.
+install -m 0755 "$REL/deploy/v4/bin/aiflow4-node-install" /usr/local/sbin/aiflow4-node-install.new
+mv -f /usr/local/sbin/aiflow4-node-install.new /usr/local/sbin/aiflow4-node-install
+PREV=$(readlink -f /srv/aiflow/current 2>/dev/null || true)
+ln -sfn "$REL" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
+install -m 0644 "$REL"/deploy/v4/node/systemd/*.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable -q aiflow4-node-agent
+# Worker services resolve their executable through /srv/aiflow/current when they start. Restart active workers
+# after switching the symlink so a canary's runs execute the candidate release rather than an older process.
+mapfile -t WORKERS < <(systemctl list-units --state=active --plain --no-legend 'aiflow4-worker@*.service' | awk 'NF {print $1}')
+if ((${#WORKERS[@]})); then
+  systemctl restart "${WORKERS[@]}"
+fi
+# A failed start is the signal the health check below needs in order to restore PREV. Let that check run even
+# when systemctl reports the candidate's failed start as an error.
+systemctl restart aiflow4-node-agent || true
+sleep 15
+if ! systemctl is-active --quiet aiflow4-node-agent || ! /srv/aiflow/current/.venv/bin/aiflow4 version >/dev/null 2>&1; then
+  if [ -n "$PREV" ] && [ "$PREV" != "$REL" ] && [ -d "$PREV" ]; then
+    echo "agent unhealthy on $VERSION; rolling back to $(basename "$PREV")" >&2
+    ln -sfn "$PREV" /srv/aiflow/current.new && mv -T /srv/aiflow/current.new /srv/aiflow/current
+    systemctl reset-failed aiflow4-node-agent || true
+    systemctl restart aiflow4-node-agent || true
+    # a fleet rollout treats this as a failed health check and halts (docs/v4/fleet-upgrade.md)
+    report_failure "agent unhealthy on $VERSION; switched back to $(basename "$PREV")"
+    exit 6
+  fi
+fi
+# Keep the last five versioned releases.
+ls -1dt "$RELEASES"/v[0-9]*.[0-9]*.[0-9]*/ 2>/dev/null | tail -n +6 | xargs -r rm -rf
+echo "installed $VERSION: $(/srv/aiflow/current/.venv/bin/aiflow4 version)"

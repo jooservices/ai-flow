@@ -16,6 +16,7 @@ from . import agents, deploy, events, github, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
+from .incidents import find_incidents as find_incidents
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 from .memory import cases as memory_cases
@@ -807,11 +808,15 @@ class Supervisor:
     def block(self, key: str, reason: str, kind: str = "Other") -> None:
         """Move the ticket to Blocked, say why on the ticket and in the field Blocked reason, and remember where it came from."""
         self.release_slot(key)
+        rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
         for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
             self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
         try:
             status = str(self.jira.view(key).get("status", ""))
-            self.redis.set(f"blocked:{key}", json.dumps({"status": status, "kind": kind}), 30 * DAY)
+            blocked = {"status": status, "kind": kind}
+            if rework_rounds:
+                blocked["rework_rounds"] = rework_rounds
+            self.redis.set(f"blocked:{key}", json.dumps(blocked), 30 * DAY)
             self.jira.set_field(key, self.cfg.blocked_reason_field, f"{kind}: {reason}"[:250])
         except (JiraError, RedisError) as error:
             log(f"{key}: could not record the block reason: {error}")
@@ -886,6 +891,10 @@ class Supervisor:
             return
         self.redis.delete(f"blocked:{key}")
         events.emit("ticket.unblocked", ticket=key)
+        self.clear_blocked_reason(key)
+
+    def clear_blocked_reason(self, key: str) -> None:
+        """Clear a stale Jira Blocked reason after a ticket becomes terminal or is unblocked."""
         try:
             self.jira.set_field(key, self.cfg.blocked_reason_field, None)
         except JiraError as error:
@@ -954,7 +963,13 @@ class Supervisor:
                 for issue in self.jira.search(f"key in ({', '.join(trees)})", 100):
                     path, branch = trees[issue["key"]]
                     if issue["status"] == "Done":
-                        repo.cleanup(issue["key"])
+                        merged_pr = False
+                        try:
+                            pr = GitHub(repo.github_slug()).find(branch)
+                            merged_pr = bool(pr and pr.get("state") == "MERGED")
+                        except (GitError, GitHubError) as error:
+                            log(f"{issue['key']}: cannot check pull request before cleanup ({error})")
+                        repo.cleanup(issue["key"], merged_pr=merged_pr)
                         log(f"{issue['key']}: removed the worktree and branch of a finished ticket")
                     elif issue["status"] == "Declined":
                         repo.remove_worktree(path)
@@ -1446,19 +1461,82 @@ class Supervisor:
             self.redis.delete(f"gatepoll:{key}")  # something changed: look again at the next tick
         return worked
 
-    def _gate(self, key: str, view: dict[str, Any], repo: Repo, base: str) -> bool:
-        branch = repo.remote_branch(key)
-        if not branch:
-            self.block(key, "The ticket branch is not on origin, so there is no pull request to check.", kind="Config")
-            return True
-        gh = GitHub(repo.github_slug())
+    def gate_pr(self, key: str, gh: GitHub) -> dict[str, Any] | None:
+        """Read the known PR before checking origin, where a merged PR's branch may already be gone."""
+        number = self.state(key, "pr")
+        if number:
+            return gh.view(int(number))
+        comments = getattr(self.jira, "comments", None)
+        if not callable(comments):
+            return None
+        for comment in reversed(comments(key, 12)):
+            match = re.search(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)", str(comment.get("body", "")))
+            if match:
+                return gh.view(int(match.group(1)))
+        return None
+
+    def gate_is_terminal(self, key: str, repo: Repo, base: str, gh: GitHub, pr: dict[str, Any]) -> bool | None:
+        """Refresh Jira and GitHub; return true when Done or merged, false when still active, None on read failure."""
         try:
-            pr = gh.find(branch)
-            if pr is None:
-                self.block(key, f"No pull request exists for branch {branch}.", kind="Config")
+            current = self.jira.view(key)
+            if current.get("status") == "Done":
+                self.clear_blocked_reason(key)
                 return True
+            pr = gh.view(int(pr["number"]))
+            if pr.get("state") == "MERGED":
+                self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.", merged_pr=True)
+                return True
+        except (JiraError, GitHubError, ValueError, KeyError) as error:
+            log(f"{key}: cannot confirm ticket and pull-request state ({error})")
+            return None
+        return False
+
+    def block_gate(self, key: str, repo: Repo, base: str, gh: GitHub, pr: dict[str, Any] | None, reason: str,
+                   kind: str = "Config") -> bool:
+        """Re-read Jira and GitHub immediately before a gate block so stale workers cannot block merged work."""
+        if pr is not None:
+            terminal = self.gate_is_terminal(key, repo, base, gh, pr)
+            if terminal is not False:
+                return terminal is True
+        else:
+            try:
+                if self.jira.view(key).get("status") == "Done":
+                    self.clear_blocked_reason(key)
+                    return True
+            except JiraError as error:
+                log(f"{key}: cannot confirm ticket state before blocking ({error})")
+                return False
+        self.block(key, reason, kind=kind)
+        return True
+
+    def _gate(self, key: str, view: dict[str, Any], repo: Repo, base: str) -> bool:
+        try:
+            current = self.jira.view(key)
+            if current.get("status") == "Done":
+                self.clear_blocked_reason(key)
+                return True
+            gh = GitHub(repo.github_slug())
+            pr = self.gate_pr(key, gh)
+            if pr is not None and pr.get("state") == "MERGED":
+                self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.", merged_pr=True)
+                return True
+            branch = repo.remote_branch(key)
+            if branch and (pr is None or pr.get("headRefName") != branch):
+                pr = gh.find(branch)
+            if pr is None:
+                reason = ("The ticket branch is not on origin, so there is no pull request to check." if not branch
+                          else f"No pull request exists for branch {branch}.")
+                return self.block_gate(key, repo, base, gh, None, reason)
+            if pr.get("state") == "MERGED":
+                self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.", merged_pr=True)
+                return True
+            if not branch and pr.get("state") != "CLOSED":
+                return self.block_gate(key, repo, base, gh, pr,
+                                       "The ticket branch is not on origin, so there is no pull request to check.")
+            if not branch:
+                branch = str(pr.get("headRefName", ""))
             info = self.gate_facts(key, repo, gh, base, branch, pr)
-        except (GitHubError, GitError, ValueError) as error:
+        except (GitHubError, GitError, JiraError, ValueError, KeyError) as error:
             log(f"{key}: gate check failed: {error}")
             return False
         action, detail = decide(info)
@@ -1470,7 +1548,7 @@ class Supervisor:
             return False
         self.redis.set(f"pr:{key}", str(pr["number"]), 30 * DAY)
         if action == "done":
-            self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.")
+            self.finish(key, repo, base, pr, f"Pull request {pr['url']} is merged into {base}.", merged_pr=True)
         elif action == "closed":
             repo.cleanup(key, remote=False)
             self.teardown_ticket_database(key)
@@ -1478,11 +1556,22 @@ class Supervisor:
             self.jira.comment(key, f"AI Flow: pull request {pr['url']} was closed without merging; declining the ticket.")
             self.jira.transition(key, "Declined")
         elif action == "update":
+            terminal = self.gate_is_terminal(key, repo, base, gh, pr)
+            if terminal is None:
+                return False
+            if terminal:
+                return True
             return self.update_branch(key, gh, pr, base)
         elif action == "rework":
+            terminal = self.gate_is_terminal(key, repo, base, gh, pr)
+            if terminal is None:
+                return False
+            if terminal:
+                return True
             self.rework_from_gate(key, repo, gh, pr, info, detail)
         elif action == "block":
-            self.block(key, f"{detail} ({pr['url']}).", kind="CI" if "CI" in detail else "Human")
+            kind = "CI" if "CI" in detail else "Human"
+            return self.block_gate(key, repo, base, gh, pr, f"{detail} ({pr['url']}).", kind)
         elif action == "wait":
             self.note_gate(key, f"{detail} ({pr['url']})")
             return False
@@ -1641,7 +1730,11 @@ class Supervisor:
             if count >= 3:
                 self.block(key, f"Merging {pr['url']} keeps failing; needs the owner.", kind="Other")
             return count >= 3
-        self.finish(key, repo, base, gh.view(pr["number"]), f"Merged {pr['url']} into {base} ({self.cfg.project(key).merge_method}) after CI, feedback and {'the human approval' if approved else 'QA'}.")
+        self.finish(
+            key, repo, base, gh.view(pr["number"]),
+            f"Merged {pr['url']} into {base} ({self.cfg.project(key).merge_method}) after CI, feedback and {'the human approval' if approved else 'QA'}.",
+            merged_pr=True,
+        )
         return True
 
     # ---- Require human: Human review -> Ready to merge ------------------------------------------------------
@@ -1733,7 +1826,7 @@ class Supervisor:
             return False
         return True
 
-    def finish(self, key: str, repo: Repo, base: str, pr: dict[str, Any], message: str) -> None:
+    def finish(self, key: str, repo: Repo, base: str, pr: dict[str, Any], message: str, merged_pr: bool = False) -> None:
         cleanup_status = "Worktree and branch removed."
         step = "refresh base"
         defer_refresh = bool(self.cfg.project(key).deploy_command.strip())
@@ -1741,7 +1834,7 @@ class Supervisor:
             if not defer_refresh:
                 repo.refresh_base(base)
             step = "cleanup"
-            repo.cleanup(key)
+            repo.cleanup(key, merged_pr=merged_pr)
         except GitError as error:
             log(f"{key}: {step}: {error}")
             cleanup_status = f"Cleanup failed ({error}); remove the worktree by hand."
@@ -1750,6 +1843,7 @@ class Supervisor:
         self.remember_case(key, repo, pr)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
+        self.clear_blocked_reason(key)
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")

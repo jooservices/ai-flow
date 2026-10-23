@@ -130,6 +130,26 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(server.commands[-1], ["SET", "p:dbticket:JAIF-7", "my-project"])
         client.close()
 
+    def test_operator_queue_is_a_prefixed_redis_list(self):
+        def handler(_number, parts):
+            return {
+                "LRANGE": b"*2\r\n$2\r\n{}\r\n$2\r\n[]\r\n",
+                "EVAL": b":2\r\n",
+            }.get(parts[0], b"-ERR unknown\r\n")
+
+        server = FakeServer(handler)
+        self.addCleanup(server.stop)
+        client = Redis("127.0.0.1", server.port, 0, "aiworkflow:", "", retries=1)
+        self.addCleanup(client.close)
+
+        self.assertEqual(client.list_values("operator:queue"), ["{}", "[]"])
+        client.replace_list("operator:queue", ["first", "second"])
+
+        self.assertEqual(server.commands[0], ["LRANGE", "aiworkflow:operator:queue", "0", "-1"])
+        self.assertEqual(server.commands[1][0], "EVAL")
+        self.assertEqual(server.commands[1][2:4], ["1", "aiworkflow:operator:queue"])
+        self.assertEqual(server.commands[1][4:], ["first", "second"])
+
     def test_deploy_enqueue_uses_atomic_lock_pending_and_dedupe_keys(self):
         def handler(number, parts):
             if parts[0] == "EVAL":

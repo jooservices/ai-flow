@@ -1,0 +1,19 @@
+#cloud-config
+# Proxmox snippet template. Do not upload this file as is: render one copy per VM just before `qm start` with
+#   deploy/v4/bin/aiflow4-cloud-init-user-data --provider proxmox --name NODE ... --out /var/lib/vz/snippets/NODE.yaml
+# which mints the five-minute, one-use join token and writes it below. Delete the rendered snippet after boot.
+hostname: __AIFLOW4_NODE_NAME__
+manage_etc_hosts: true
+write_files:
+  - path: /run/aiflow4/join-token
+    owner: root:root
+    permissions: '0600'
+    content: '__AIFLOW4_JOIN_TOKEN__'
+runcmd:
+  # One entry, so a missing token or failed download stops before anything else runs.
+  - - sh
+    - -ec
+    - |
+      [ -s /run/aiflow4/join-token ] || { echo "aiflow4: join token missing; render per-VM user-data" >&2; exit 1; }
+      curl -fsSL --max-time 60 '__AIFLOW4_CONTROL_URL__/v1/install.sh' -o /run/aiflow4/install.sh
+      sh /run/aiflow4/install.sh --token-file /run/aiflow4/join-token

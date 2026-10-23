@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import agents, events, notify, runner, usage
+from . import agents, events, github, notify, runner, usage
 from .config import PROJECT_DIR
+from .github import GitHub, GitHubError
+from .gitops import GitError, Repo
 from .incidents import WORKED, Incident, find_incidents
 from .jira import JiraError
 
@@ -30,9 +33,12 @@ TICKET = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 
 def parse_output(text: str) -> tuple[tuple[str, str] | None, list[tuple[str, dict[str, Any]]], str, str]:
-    """(last RESULT as (kind, text), ACTION lines as (name, args), OPTIONS, RECOMMEND)."""
+    """(valid final RESULT as (kind, text), ACTION lines as (name, args), OPTIONS, RECOMMEND)."""
     results = RESULT.findall(text)
-    result = (results[-1][0], results[-1][1].strip()) if results else None
+    final_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    final_result = RESULT.fullmatch(final_lines[-1]) if final_lines else None
+    result = ((final_result.group(1), final_result.group(2).strip())
+              if final_result and final_result.group(2).strip() and len(results) == 1 else None)
     actions: list[tuple[str, dict[str, Any]]] = []
     for name, raw in ACTION.findall(text):
         try:
@@ -75,33 +81,124 @@ class Operator:
         leased = {name.split(":", 1)[1] for name in self.redis.scan("lease:*")}
         blocked = self.redis.get_many([f"blocked:{i['key']}" for i in issues]) if issues else []
         cycles = self.redis.get_many([f"cycles:{i['key']}" for i in issues]) if issues else []
+        status_times = self.redis.get_many([f"statussince:{i['key']}" for i in issues]) if issues else []
+        pull_request_numbers = self.redis.get_many([f"pr:{i['key']}" for i in issues]) if issues else []
+        gate_entries = self.redis.get_many([f"gateentry:{i['key']}" for i in issues]) if issues else []
+        pushed_times = self.redis.get_many([f"pushed:{i['key']}" for i in issues]) if issues else []
         tickets = []
-        for issue, why, rounds in zip(issues, blocked, cycles):
-            tickets.append(dict(key=issue["key"], status=issue["status"], updated=epoch(issue.get("updated", ""), now), labels=issue.get("labels", []),
-                                leased=issue["key"] in leased, blocked_kind=(json.loads(why).get("kind", "") if why else ""),
-                                reason=issue.get("summary", ""), cycles=int(rounds or 0)))
+        for issue, why, rounds, since, number, entry, pushed in zip(issues, blocked, cycles, status_times,
+                                                                     pull_request_numbers, gate_entries, pushed_times):
+            key, status = issue["key"], issue["status"]
+            labels = issue.get("labels", [])
+            is_leased = key in leased
+            updated = epoch(issue.get("updated", ""), now)
+            try:
+                status_since = float(since) if since else updated
+            except (TypeError, ValueError):
+                status_since = updated
+            minutes_in_status = max(0, (now - status_since) / 60)
+            gate_times = []
+            for value in (entry, pushed):
+                try:
+                    if value:
+                        gate_times.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            gate_since = max(gate_times) if gate_times else status_since
+            minutes_waiting_for_ci = max(0, (now - gate_since) / 60)
+            try:
+                blocked_data = json.loads(why) if why else {}
+            except (TypeError, ValueError):
+                blocked_data = {}
+            if not isinstance(blocked_data, dict):
+                blocked_data = {}
+            try:
+                rework_rounds = int(rounds or blocked_data.get("rework_rounds", 0) or 0)
+            except (TypeError, ValueError):
+                rework_rounds = 0
+            blocked_kind = blocked_data.get("kind", "")
+            potential = "aiflow-hold" not in labels and "needs-owner" not in labels and (
+                (status == "Blocked" and minutes_in_status >= self.policy.blocked_minutes)
+                or (status == "In QA" and not is_leased and
+                    (minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes))
+                or (status in WORKED and status != "In QA" and not is_leased and minutes_in_status >= self.policy.stuck_minutes)
+                or rework_rounds > self.policy.rework_limit
+            )
+            last_comments = []
+            if potential:
+                try:
+                    last_comments = self.jira.comments(key, 3)
+                except (JiraError, ValueError, TypeError):
+                    pass
+            pull_request = {"number": number} if number else None
+            ci_state = "unknown"
+            inspect_ci = minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes
+            if status == "In QA" and not is_leased and number and inspect_ci:
+                try:
+                    project = self.cfg.project(key)
+                    repo = Repo(self.cfg.root, project.repo, project.company)
+                    pr = GitHub(repo.github_slug()).view(int(number))
+                    ci_state, failing = github.checks_state(pr.get("statusCheckRollup"))
+                    pull_request = {"number": int(number), "url": pr.get("url", ""), "state": pr.get("state", ""),
+                                    "head": pr.get("headRefName", ""), "ci_state": ci_state, "failing_checks": failing}
+                except (GitError, GitHubError, subprocess.TimeoutExpired, ValueError, OSError):
+                    # Missing repository or GitHub data is not evidence that CI is still waiting.
+                    pass
+            tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
+                                leased=is_leased, blocked_kind=blocked_kind, reason=issue.get("summary", ""),
+                                cycles=rework_rounds, rework_rounds=rework_rounds, last_comments=last_comments,
+                                pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
+                                minutes_waiting_for_ci=int(minutes_waiting_for_ci)))
         beats = {slot: (int(v) if (v := self.redis.get(f"hb:{slot}")) else None) for slot in self.cfg.expected_slots}
-        return dict(now=now, tickets=tickets, heartbeats=beats, stale_seconds=self.cfg.heartbeat_stale_seconds, pool=self.sup.online_pool())
+        pool = self.sup.online_pool()
+        role_pools = {role: self.sup.eligible_agents(role, "", None, pool) for role in ("developer", "reviewer", "qa")}
+        thresholds = {name: getattr(self.policy, name) for name in ("blocked_minutes", "stuck_minutes", "ci_wait_minutes", "rework_limit")}
+        return dict(now=now, tickets=tickets, heartbeats=beats, stale_seconds=self.cfg.heartbeat_stale_seconds,
+                    role_pools=role_pools, thresholds=thresholds)
 
     def sync_queue(self, incidents: list[Incident]) -> None:
         """Queue each new incident once; forget the ones that no longer exist."""
-        current = {incident.id for incident in incidents}
-        for name in self.redis.scan("operator:queue:*"):
-            if name.split("operator:queue:", 1)[1] not in current:
-                events.emit("operator.resolved", incident=name.split("operator:queue:", 1)[1])
-                self.redis.delete(name)
+        current = {incident.id: incident for incident in incidents}
+        existing = self.redis.list_values("operator:queue")
+        queue: list[str] = []
+        queued: set[str] = set()
+        resolved: set[str] = set()
+        for value in existing:
+            try:
+                previous = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(previous, dict):
+                continue
+            incident_id = previous.get("id", "")
+            if not incident_id:
+                continue
+            if incident_id not in current:
+                if incident_id not in resolved:
+                    events.emit("operator.resolved", incident=incident_id)
+                    resolved.add(incident_id)
+                continue
+            if incident_id not in queued:
+                incident = current[incident_id]
+                queue.append(json.dumps(dict(id=incident.id, kind=incident.kind, subject=incident.subject,
+                                             summary=incident.summary, facts=incident.facts)))
+                queued.add(incident_id)
         for incident in incidents:
-            name = f"operator:queue:{incident.id}"
-            if self.redis.get(name) is None:
-                events.emit("operator.incident", incident=incident.id, kind=incident.kind, subject=incident.subject, summary=incident.summary[:300])
-                self.redis.set(name, json.dumps(dict(kind=incident.kind, subject=incident.subject, summary=incident.summary, facts=incident.facts)), 7 * DAY)
+            if incident.id in queued:
+                continue
+            events.emit("operator.incident", incident=incident.id, kind=incident.kind, subject=incident.subject,
+                        summary=incident.summary[:300])
+            queue.append(json.dumps(dict(id=incident.id, kind=incident.kind, subject=incident.subject,
+                                         summary=incident.summary, facts=incident.facts)))
+            queued.add(incident.id)
+        self.redis.replace_list("operator:queue", queue)
 
     # ---- one cycle ---------------------------------------------------------------------------------------------
     def cycle(self) -> bool:
         """Called by every worker loop; True when an operator run happened."""
         if not self.active() or not self.redis.acquire("operator:cycle", self.cfg.owner, 60):
             return False
-        self.sync_queue(find_incidents(self.state(), self.policy))
+        self.sync_queue(find_incidents(self.state()))
         self.flush_notifications()
         return self.run_next()
 
@@ -116,12 +213,17 @@ class Operator:
     def run_next(self) -> bool:
         if self.limits_reached():
             return False
-        for name in sorted(self.redis.scan("operator:queue:*")):
-            incident_id = name.split("operator:queue:", 1)[1]
-            if self.redis.get(f"operator:cool:{incident_id}") is not None:
+        for value in self.redis.list_values("operator:queue"):
+            try:
+                raw = json.loads(value)
+            except (TypeError, ValueError):
                 continue
-            raw = json.loads(self.redis.get(name) or "{}")
-            if not raw:
+            if not isinstance(raw, dict):
+                continue
+            incident_id = raw.get("id", "")
+            if not incident_id:
+                continue
+            if self.redis.get(f"operator:cool:{incident_id}") is not None:
                 continue
             incident = Incident(incident_id, raw["kind"], raw["subject"], raw["summary"], raw.get("facts", {}))
             return self.handle(incident)
@@ -194,22 +296,32 @@ class Operator:
         began = time.monotonic()
         why, text, quota = self.run_ai(agent, self.prompt(incident), incident.id.replace(":", "-"))
         self.sup.log_usage(incident.ticket or "operator", "operator", agent, (time.monotonic() - began) / 60, why, 0 if why == "ok" else None)
-        if quota:
-            self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
-            self.redis.delete(f"operator:cool:{incident.id}")
-            return True
         result, actions, options, recommend = parse_output(text)
         events.emit("operator.run", incident=incident.id, agent=agent, why=why, minutes=round((time.monotonic() - began) / 60, 2),
                     result=result[0] if result else "NONE", actions=len(actions))
+        if quota:
+            self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)
+            self.redis.delete(f"operator:cool:{incident.id}")
+            self.audit(incident, agent, f"AI run ended without a usable RESULT ({why})", [],
+                       [f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS]])
+            return True
         done, refused = [], []
-        for name, args in actions[:MAX_ACTIONS]:
-            (done if self.perform(name, args) else refused).append(f"{name} {json.dumps(args, sort_keys=True)[:200]}")
-        if len(actions) > MAX_ACTIONS:
-            refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
         if result is None:
+            refused.extend(f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS])
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
             self.audit(incident, agent, "no usable RESULT line (" + why + ")", done, refused)
             return True
         kind, detail = result
+        if kind == "NO-ACTION":
+            refused.extend(f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS])
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
+        else:
+            for name, args in actions[:MAX_ACTIONS]:
+                (done if self.perform(name, args) else refused).append(f"{name} {json.dumps(args, sort_keys=True)[:200]}")
+            if len(actions) > MAX_ACTIONS:
+                refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")
         if kind == "ESCALATE":
             self.escalate(incident, detail, options, recommend)
         self.audit(incident, agent, f"{kind}: {detail}", done, refused)

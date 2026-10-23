@@ -6,7 +6,7 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 
 ## How it works
 1. **Find** (plain code, no AI, no tokens): the control (`aiflow-control.service`, not a worker) lists the incidents every pass. An incident has a stable id (`kind:subject`), so the same problem is queued once; it leaves the queue by itself when it is gone.
-2. **Queue**: Redis, one entry per incident (`aiworkflow:operator:queue:<id>`).
+2. **Queue**: Redis list `aiworkflow:operator:queue`, rewritten each pass with one JSON entry per incident.
 3. **Run**: one incident at a time, an AI (default Claude, another usable one replaces it) is started **read-only**, without a GitHub login, with a time limit. It reads the facts and asks for actions.
 4. **Act**: the supervisor performs only the actions below. Anything else is refused and shown in the audit comment.
 5. **Audit**: every run comments what it saw, what it did and why, on the ticket (or on the health ticket for a machine incident).

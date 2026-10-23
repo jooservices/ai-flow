@@ -1,0 +1,20 @@
+#cloud-config
+# Generic cloud image template. Render one copy per instance just before creating it with
+#   deploy/v4/bin/aiflow4-cloud-init-user-data --provider cloud --name NODE ... --out NODE.user-data
+# which mints the five-minute, one-use join token and writes it below; pass the file as the instance's
+# user-data (for example `--user-data file://NODE.user-data`) and delete it once the instance is running.
+hostname: __AIFLOW4_NODE_NAME__
+manage_etc_hosts: true
+write_files:
+  - path: /run/aiflow4/join-token
+    owner: root:root
+    permissions: '0600'
+    content: '__AIFLOW4_JOIN_TOKEN__'
+runcmd:
+  # One entry, so a missing token or failed download stops before anything else runs.
+  - - sh
+    - -ec
+    - |
+      [ -s /run/aiflow4/join-token ] || { echo "aiflow4: join token missing; render per-VM user-data" >&2; exit 1; }
+      curl -fsSL --max-time 60 '__AIFLOW4_CONTROL_URL__/v1/install.sh' -o /run/aiflow4/install.sh
+      sh /run/aiflow4/install.sh --token-file /run/aiflow4/join-token

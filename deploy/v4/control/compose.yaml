@@ -1,0 +1,83 @@
+# AI Flow v4 control processes; joins the networks of aiflow4-control (registry, OpenObserve, Traefik)
+# and aiflow4-services. Alert channels and credentials are managed in the Notifications screen.
+name: aiflow4-app
+
+x-app: &app
+  image: ${AIFLOW4_IMAGE_REPOSITORY:-aiflow4/control}:${AIFLOW4_IMAGE_TAG:-latest}
+  restart: unless-stopped
+  env_file: [/etc/aiflow/secrets/control/aiflow4.env]
+  environment: &app-environment
+    AIFLOW4_ENV: lab
+    AIFLOW4_VERSION: ${AIFLOW4_VERSION:-4.0.0a1}
+    AIFLOW4_CONTROL_REPO: /srv/aiflow/control/repos/aiflow-control
+    AIFLOW4_JOIN_CONTROL_URL: ${AIFLOW4_JOIN_CONTROL_URL:-}
+    AIFLOW4_GITHUB_APP_DIR: /etc/aiflow/secrets/github
+    AIFLOW4_JIRA_SECRET_DIR: /etc/aiflow/secrets/jira  # Jira connected on the Integrations screen (writable)
+    AIFLOW4_MEMORY_EMBEDDING_CACHE_DIR: /var/cache/aiflow4-memory/fastembed
+    HF_HOME: /var/cache/aiflow4-memory/huggingface
+    AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
+    AIFLOW4_O2_SOURCE: control
+    AIFLOW4_SUPPORT_LOG_DIR: /var/log/aiflow4
+    OTEL_SERVICE_NAME: aiflow4-control
+  volumes:
+    - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
+    - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
+    - /etc/aiflow/secrets/control:/etc/aiflow/secrets/control
+    - /etc/aiflow/secrets/console:/etc/aiflow/secrets/console
+    - /srv/aiflow/control/backups:/srv/aiflow/backups
+    - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
+    - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
+    - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
+    - /srv/aiflow/control/logs:/var/log/aiflow4
+  logging: { driver: journald, options: { tag: "{{.Name}}" } }
+  networks: [control, services, edge]
+
+services:
+  # Two control-api containers behind one Traefik service: a deploy recreates them one at a time, so the
+  # policy hook of running AI steps never meets a missing control API (its failure mode is "block").
+  control-api-a: &api
+    <<: *app
+    container_name: aiflow4-control-api-a
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-api-a
+    command: ["control-api", "--port", "8080"]
+    mem_limit: 2g
+    healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"], interval: 5s, timeout: 5s, retries: 5, start_period: 5s }
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: aiflow4-edge
+      traefik.http.routers.api.rule: "PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)"
+      traefik.http.routers.api.entrypoints: web
+      traefik.http.services.api.loadbalancer.server.port: "8080"
+      traefik.http.services.api.loadbalancer.healthcheck.path: /healthz
+      traefik.http.services.api.loadbalancer.healthcheck.interval: 3s
+
+  control-api-b:
+    <<: *api
+    container_name: aiflow4-control-api-b
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-api-b
+
+  control-loops:
+    <<: *app
+    container_name: aiflow4-control-loops
+    environment:
+      <<: *app-environment
+      AIFLOW4_O2_SOURCE: control-loops
+    command: ["control-loops"]
+    mem_limit: 2g
+
+  # The UI restore command uses this profile; it inherits shared mounts and adds a writable repository bind.
+  control-restore:
+    <<: *app
+    profiles: ["restore"]
+    # Inherit x-app.volumes so operator-added mounted backup destinations are available during restore.
+    # The UI restore command adds a writable repository mount at an alternate path.
+    command: ["version"]
+
+networks:
+  control: { name: aiflow4-control, external: true }
+  services: { name: aiflow4-services, external: true }
+  edge: { name: aiflow4-edge, external: true }

@@ -678,7 +678,7 @@ def test_infra_bundle_runs_the_services_with_pinned_images_and_persistent_data()
     assert not any(n.get("external") for n in infra["networks"].values())
     for name in ("postgres", "redis"):
         assert "ports" not in services[name]  # internal only
-    assert services["mailpit"]["container_name"] == "aiflow4-svc-mailpit"  # AIFLOW4_SMTP_HOST of the app
+    assert services["mailpit"]["container_name"] == "aiflow4-svc-mailpit"
     assert services["openobserve"]["environment"]["ZO_BASE_URI"] == "/o2"
     assert "./o2.env" in services["openobserve"]["env_file"]
     gatus = yaml.safe_load((ROOT / "deploy/v4/control/gatus.yaml").read_text())

@@ -1,8 +1,8 @@
 """Dashboards: Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge),
-Integrations (/integrations, control/jira_connect.py), Backup (/backup), Projects (/projects) and Support (/support),
-fed by /v1/state and relevant view APIs.
+Integrations (/integrations, control/jira_connect.py), Backup (/backup), Notifications (/notifications) and
+Support (/support), fed by /v1/state and relevant view APIs.
 
 All views are fed by the live registry; the Business view adds
 /v1/business/<project>/change-requests (see control/business.py).
@@ -14,8 +14,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+
+from ..console_auth import COOKIE_NAME, role_satisfies, verify_session
 
 HERE = Path(__file__).parent
 
@@ -44,6 +46,15 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/backup", include_in_schema=False)
     @app.get("/support", include_in_schema=False)
     def console() -> FileResponse:
+        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/notifications", include_in_schema=False)
+    def notifications(request: Request) -> FileResponse:
+        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        if not user:
+            raise HTTPException(401, "authenticated console session required")
+        if not role_satisfies(user.role, {"notifications.manage"}):
+            raise HTTPException(403, "administrator role required")
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     @app.get("/v1/tickets/{key}")

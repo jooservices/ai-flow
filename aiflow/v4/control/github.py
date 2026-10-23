@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import base64
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -356,6 +357,36 @@ class GitHubApp:
             state = {"success": "success", "pending": "pending"}.get(c["state"], "failure")
             out.append({"name": c["context"], "state": state, "url": c.get("target_url", "")})
         return out
+
+    def failing_job_log(self, repo: str, sha: str, lines: int = 200) -> dict:
+        """The tail of the log of the first failing GitHub Actions job of a commit (AC6 of JAIF-255): a developer
+        never has to ask for a CI log. Returns the job name, its URL and at most `lines` lines (20,000 characters)."""
+        lines = max(1, min(int(lines), 1000))
+        perms = {"actions": "read", "metadata": "read"}
+        base = f"/repos/{self.org}/{repo}"
+        runs = self.api("GET", f"{base}/actions/runs?head_sha={quote(sha, safe='')}&per_page=20", repo=repo,
+                        permissions=perms) or {}
+        for run in runs.get("workflow_runs", []):
+            if run.get("status") == "completed" and run.get("conclusion") in ("success", "skipped", "neutral"):
+                continue
+            jobs = self.api("GET", f"{base}/actions/runs/{run['id']}/jobs?per_page=100", repo=repo,
+                            permissions=perms) or {}
+            for job in jobs.get("jobs", []):
+                if job.get("conclusion") not in ("failure", "timed_out", "cancelled"):
+                    continue
+                token, _ = self.token(repo, perms)
+                response = self.c.request("GET", f"{base}/actions/jobs/{job['id']}/logs", follow_redirects=True,
+                                          headers={"Authorization": f"Bearer {token}"})
+                if response.status_code != 200:
+                    raise GitHubError(f"GET job log -> {response.status_code}: {response.text[:200]}")
+                text = re.sub(r"\x1b\[[0-9;]*m", "", response.text)
+                text = re.sub(r"(?m)^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", text)
+                tail = "\n".join(text.splitlines()[-lines:])[-20_000:]
+                failed_steps = [s.get("name", "") for s in job.get("steps", []) if s.get("conclusion") == "failure"]
+                return {"found": True, "job": job.get("name", ""), "workflow": run.get("name", ""),
+                        "conclusion": job.get("conclusion", ""), "url": job.get("html_url", ""),
+                        "failed_steps": failed_steps, "lines": len(tail.splitlines()), "tail": tail}
+        return {"found": False, "job": "", "tail": "", "message": "no failing GitHub Actions job for this commit"}
 
     # --- project version releases ---------------------------------------------------------------------------
     def branch_sha(self, repo: str, branch: str) -> str:

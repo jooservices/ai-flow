@@ -672,7 +672,7 @@ def reconcile_merge_backs(ctx, project: Any) -> int:
 def candidates(ctx, account: str, node: str) -> list[dict[str, Any]]:
     repo = ctx.repo()
     acc = repo.account(account)
-    if not acc or acc.node != node or not ({"master", "release"} & set(acc.roles or [])):
+    if not acc or not acc.runs_on(node) or not ({"master", "release"} & set(acc.roles or [])):
         return []
     dbnode = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
     allowed_projects = set(repo.projects_for_node(node, dbnode.get("projects") or [], dbnode.get("dynamic", False)))

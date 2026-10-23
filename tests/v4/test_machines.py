@@ -32,7 +32,7 @@ def release_fixture(monkeypatch, tmp_path):
     (directory / "SHA256SUMS").write_text("0" * 64 + "  aiflow4-v1.2.3.tar.gz\n")
 
 
-def test_machine_screen_renders_machine_specs_account_controls_quota_and_join_countdown():
+def test_machine_screen_renders_machine_specs_account_controls_machine_usage_and_join_countdown():
     node_js = shutil.which("node")
     if not node_js:
         import pytest
@@ -47,7 +47,8 @@ S.consoleUser = {permissions: ['nodes.manage']};
 S.data = {nodes: [{name:'node-ui',status:'online',has_agent:true,accepting_work:true,slots_total:8,sessions_busy:2,
   metrics:{mem_used:1073741824,mem_total:8589934592,cpus:8},last_heartbeat:new Date().toISOString(),heartbeat_age_s:2}],
   accounts:[{id:'codex-node-ui-01',node:'node-ui',provider:'codex',parallel:2,jobs:['develop','verify'],status:'idle',paused:false,
-    quota_used:0.75,quota_resets_at:new Date(Date.now()+3600000).toISOString(),tokens_today:12000,cost_today:0.42,quota:{}},
+    quota_used:0.75,quota_resets_at:new Date(Date.now()+3600000).toISOString(),tokens_today:12000,cost_today:0.42,quota:{},
+    machines:[{node:'node-ui',tokens_today:12000,cost_today:0.42}]},
     {id:'claude-node-ui-01',node:'node-ui',provider:'claude',parallel:1,jobs:['develop'],status:'signed_out',paused:false,
       sign_in_pending:true,quota:{}}],
   active_runs:[],recent_runs:[],projects:[{key:'TESTWP'}],tickets:[],incidents:[],events:[],totals:{},versions:{}};
@@ -65,11 +66,12 @@ var localStorage = {getItem:function(){return null;},setItem:function(){}}; var 
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     html = result.stdout
-    for expected in ("Machines and AI", "Memory", "Processors", "Sessions busy", "Quota used", "Limit resets",
-                     "Today", "Stop new work", "Sessions and jobs", "Sign in again", "Sign-in pending",
+    for expected in ("Machines and AI", "Memory", "Processors", "Sessions busy", "Tokens today", "Cost today",
+                     "$0.420", "12k", "Stop new work", "Sessions and jobs", "Sign in again", "Sign-in pending",
                      "Finish sign-in", "A1B2C3", "data-countdown", "Add a machine", "Add AI account",
                      'data-act="open-node" data-id="node-ui">Machine details'):
         assert expected in html
+    assert "Quota used" not in html and "Limit resets" not in html and "quota-history" not in html
 
 
 def test_machine_join_command_waits_for_join_and_expires_after_five_minutes(client, ctx, monkeypatch, tmp_path):

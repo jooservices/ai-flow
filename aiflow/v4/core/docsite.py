@@ -98,6 +98,16 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderUsers": ("users",),
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
+    "accountAssignedTo": ("cc", "machines"),
+    "accountPendingOnMachine": ("cc", "machines"),
+    "sharedAccountRequest": ("cc", "machines"),
+    "createSharedAccount": ("cc", "machines"),
+    "enableAccountMachine": ("cc", "machines"),
+    "saveAccountLimit": ("cc", "machines"),
+    "removeAccountMachine": ("cc", "machines"),
+    "retryAccountSignin": ("cc", "machines"),
+    "removeAccountEverywhere": ("cc", "machines"),
+    "accountMachinesSection": ("cc", "machines"),
     "escCall": ("cc", "machines"),
     "loadEscalations": ("cc", "machines"),
     "answerDecision": ("cc", "machines"),
@@ -143,6 +153,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin"), "projects"),
     (re.compile(r"^\s*systemCheck(?:Error|Busy)?:"), "system-check"),
+    (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
+    (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
 )
 
 SCREEN_SHARED_UI_PATTERNS = (
@@ -1007,7 +1019,11 @@ def changed_views(base: str) -> set[str]:
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
     lines = source.splitlines()
-    base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
+    # `base...HEAD` diffs from the merge base, so old-side hunk coordinates belong to that tree rather than
+    # the possibly advanced base branch. Resolve against the same tree to keep screen mapping stable after merges.
+    merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], cwd=ROOT, text=True,
+                                capture_output=True, check=True).stdout.strip()
+    base_source = subprocess.run(["git", "show", f"{merge_base}:{rel}"], cwd=ROOT, text=True,
                                  capture_output=True, check=True).stdout
     base_lines = base_source.splitlines()
     all_views = set(console_views())
@@ -1096,7 +1112,7 @@ def changed_views(base: str) -> set[str]:
             if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
                 line_views |= all_views
             shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
-            if shared_ui_change and not specific_views:
+            if shared_ui_change and not (specific_views or navigation_views):
                 line_views |= all_views
             for pattern, mapped in SCREEN_VIEW_PATTERNS:
                 if pattern.search(changed_line):

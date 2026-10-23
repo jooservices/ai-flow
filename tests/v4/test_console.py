@@ -27,7 +27,7 @@ var document = {addEventListener: function () {}, documentElement: {setAttribute
 var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
 var location = {pathname: '/cc'};
 var localStorage = {getItem: function () { return null; }, setItem: function () {}};
-var fetch = function () {};
+var fetch = function () { return new Promise(function () {}); };
 var setInterval = function () {};
 """
 OWNER_PERMISSIONS = sorted(ROLE_PERMISSIONS["owner"])
@@ -56,7 +56,8 @@ def console_session(role: str) -> dict:
             "permissions": sorted(ROLE_PERMISSIONS[role])}
 
 
-def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
+def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None,
+                 accounts: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
@@ -67,7 +68,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
                         else OWNER_PERMISSIONS}
     driver = f"""
 var node = {json.dumps(node)};
-S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
+S.data = {{nodes: [node], accounts: {json.dumps(accounts or [])}, active_runs: [], recent_runs: [], projects: [], tickets: [],
           incidents: [], events: [], totals: {{}}, versions: {{}}}};
 S.consoleUser = {json.dumps(console_user)};
 S.nodeOperations = {{[node.name]: {json.dumps(operations or [])}}};
@@ -189,6 +190,29 @@ console.log(dashboard.innerHTML);
     return result.stdout
 
 
+def render_machine_overview(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Command Center")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machineOverview = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
+S.data = {json.dumps(state)};
+S.consoleUser = {json.dumps(console_session('owner'))};
+S.services = []; S.analytics = [];
+S.autonomy.data = {{budget: {{used_minutes: 0, daily_budget_minutes: 60, remaining_minutes: 60}}, report: {{
+  week_start: '2026-10-19', trend: [], finished_without_person: [], needed_person: [], repeated_failures: [], quota_accounts: []}}}};
+renderCC();
+console.log(machineOverview.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def render_machines(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
@@ -209,6 +233,96 @@ console.log(machines.innerHTML);
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def render_account(account: dict) -> str:
+    driver = f"""
+S.data = {{nodes: [], accounts: [{json.dumps(account)}], active_runs: [], recent_runs: [], incidents: [], events: [],
+          totals: {{}}, versions: {{}}}};
+S.consoleUser = {json.dumps(console_session('owner'))};
+console.log(drawerAcc({json.dumps(account['id'])}));
+"""
+    return run_script(driver)
+
+
+def test_machines_screen_uses_assignment_state_and_shared_actions():
+    account = {"id": "shared-01", "provider": "claude", "node": "node1", "shared": False,
+               "shared_managed": True, "sign_in_pending": False, "status": "signed_out", "paused": False,
+               "session_limit": 2, "parallel": 2, "jobs": ["develop"],
+               "machines": [{"node": "node1", "signed_in": False, "sign_in_pending": True,
+                             "shared_assignment": True, "removable": True,
+                             "signin": {"link": "https://claude.example.test/device", "code": "ABCD-2345",
+                                        "expires_at": "2026-10-23T12:00:00+00:00"}}]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+    rendered_pending = render_machines({"nodes": [machine], "accounts": [account]})
+    assert "Sign-in pending" in rendered_pending
+    assert "ABCD-2345" in rendered_pending
+    assert 'data-act="acc-retry-signin"' in rendered_pending
+    assert 'data-act="acc-remove-machine"' in rendered_pending
+    assert 'data-act="account-pause"' not in rendered_pending
+    assert 'data-act="account-edit"' not in rendered_pending
+    assert 'data-act="account-signin"' not in rendered_pending
+    assert 'data-act="account-signin-complete"' not in rendered_pending
+    assert 'data-act="account-remove"' not in rendered_pending
+
+    signed_in = {**account, "status": "idle", "machines": [{"node": "node1", "signed_in": True,
+                                                                  "sign_in_pending": False, "shared_assignment": True,
+                                                                  "removable": True,
+                                                                  "signin": None}]}
+    rendered_signed_in = render_machines({"nodes": [machine], "accounts": [signed_in]})
+    assert "total limit 2 sessions" in rendered_signed_in
+    assert 'data-act="acc-remove-machine"' in rendered_signed_in
+    assert 'data-act="account-pause"' not in rendered_signed_in
+    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-signin"' not in rendered_signed_in
+    assert 'data-act="account-remove"' not in rendered_signed_in
+
+    assignment_only = {**signed_in, "shared_managed": False,
+                       "machines": [{"node": "node1", "signed_in": True, "sign_in_pending": False,
+                                     "shared_assignment": True, "removable": True, "signin": None}]}
+    rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
+    assert 'data-act="acc-remove-machine"' in rendered_assignment
+    assert 'data-act="account-pause"' not in rendered_assignment
+    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-signin"' not in rendered_assignment
+
+
+def test_unassigned_shared_account_does_not_reappear_on_its_original_machine():
+    account = {"id": "claude-01", "provider": "claude", "node": "node1", "machines": [],
+               "shared": False, "shared_managed": False, "sign_in_pending": True, "status": "signed_out",
+               "paused": False, "session_limit": 1, "parallel": 1, "jobs": ["develop"]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+
+    rendered = render_machines({"nodes": [machine], "accounts": [account]})
+
+    assert "No AI accounts on this machine." in rendered
+    assert "claude-01" not in rendered
+    assert 'data-act="account-signin"' not in rendered
+    assert 'data-act="account-remove"' not in rendered
+
+
+def test_unassigned_shared_account_has_a_confirmed_remove_action():
+    account = {"id": "new-account", "provider": "claude", "node": "", "machines": [],
+               "shared": False, "shared_managed": True, "status": "signed_out", "provider_status": "signed_out",
+               "paused": False, "session_limit": 2, "parallel": 2, "runs_active": 0, "jobs": [], "roles": [],
+               "tier": "middle", "explicit_only": False, "quota": {}, "quota_awareness": {}, "worker": {},
+               "recent_runs": []}
+    rendered = render_account(account)
+
+    assert 'data-act="acc-remove-all" data-account="new-account" data-count="0">Remove account</button>' in rendered
+    outcome = run_script("""
+var prompt = '';
+var request = null;
+window.confirm = function (text) { prompt = text; return true; };
+fetch = function (url, options) { request = {url: url, method: options.method}; return new Promise(function () {}); };
+removeAccountEverywhere('new-account', 0);
+console.log(JSON.stringify({prompt: prompt, request: request}));
+""")
+    result = json.loads(outcome)
+    assert "not enabled on any machine" in result["prompt"]
+    assert result["request"] == {"url": "/v1/shared-accounts/new-account?confirm=true", "method": "DELETE"}
 
 
 def render_integrations(user: dict, jira: dict | None = None) -> str:
@@ -1294,8 +1408,14 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
         ],
         "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
                    "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
-                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}}],
+                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}},
+                  {"name": "worker-2", "ip": "192.0.2.56", "role": "worker", "status": "online",
+                   "has_agent": True, "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 0, "mem_total": 8589934592, "cpus": 8}}],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
+                      "machines": [{"node": "worker-1", "tokens_today": 120, "cost_today": .03},
+                                   {"node": "worker-2", "tokens_today": 30, "cost_today": .01}], "parallel": 4,
+                      "tokens_today": 999, "cost_today": .99,
                       "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
                       "quota_awareness": awareness}],
         "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
@@ -1328,11 +1448,36 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
+    overview = render_machine_overview(state)
+    second_card_start = overview.index('data-id="worker-2"')
+    second_card = overview[second_card_start:overview.index("</button>", second_card_start)]
+    assert "codex-alpha" in second_card
 
     machines = render_machines(state)
-    assert "codex-alpha" in machines and "quota-history" in machines and "comfortable" in machines
-    assert "used 40% quota" in machines and "left 60%" in machines
-    assert "Largest context run" in machines and "Burn tokens/hour: 1h 1k, 24h 800, window 700" in machines
+    assert "codex-alpha" in machines and "quota-history" not in machines and "comfortable" not in machines
+    assert "used 40% quota" not in machines and "left 60%" not in machines
+    second_machine_start = machines.index('<article class="machine-card"><div class="machine-head"><h3>worker-2')
+    second_machine = machines[second_machine_start:machines.index("</article>", second_machine_start)]
+    assert "codex-alpha" in second_machine and "Configured AI sessions <strong>4 / 8</strong>" in second_machine
+    assert "Tokens today <strong>30</strong>" in second_machine and "Cost today <strong>$0.010</strong>" in second_machine
+    drawer = render_drawer(state["nodes"][1], console_session("owner"), accounts=state["accounts"])
+    assert "aiflow4-worker@codex-alpha" in drawer
+
+    account = {**state["accounts"][0], "tier": "middle", "roles": ["dev"], "runs_active": 2,
+               "session_limit": 4, "shared": True,
+               "machines": [{"node": "worker-1", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 4,
+                             "tokens_today": 120, "cost_today": .03},
+                            {"node": "worker-2", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 2,
+                             "tokens_today": 30, "cost_today": .01}]}
+    account_detail = run_script(f"S.data = {json.dumps({'accounts': [account], 'nodes': state['nodes'], 'recent_runs': []})};"
+                                "S.consoleUser = " + json.dumps(console_session_user()) + ";"
+                                "console.log(drawerAcc('codex-alpha'));")
+    assert account_detail.count('class="quota-history"') == 1
+    assert "Tokens · today" in account_detail and "Cost · today" in account_detail
+    assert "<td>120</td><td>$0.030</td>" in account_detail
+    assert "<td>30</td><td>$0.010</td>" in account_detail
 
 
 def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():

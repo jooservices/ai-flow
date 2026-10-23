@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from aiflow.v4.control.incidents import check_idle_flow, check_stack_pins, idle_minutes
+from aiflow.v4.control.incidents import check_idle_flow, check_stack_pins, idle_minutes, idle_reasons
 from aiflow.v4.control.loops import watchdog
 from tests.v4.conftest import add_ticket, join_node
 
@@ -115,3 +115,15 @@ def test_the_watchdog_runs_both_checks(client, ctx, repo):
     age(ctx, "TESTWP-956", 30)
     watchdog(ctx)
     assert incident(ctx, "flow_idle") and incident(ctx, "config_pin", "TESTWP:php")
+
+
+def test_shared_account_signed_in_on_a_secondary_machine_counts_as_ready(client, ctx, repo):
+    online_node(client)
+    token = join_node(client, "node1").json()["node_token"]
+    client.post("/v1/nodes/node1/heartbeat", json={"tools": HEALTHY}, headers={"Authorization": f"Bearer {token}"})
+    ctx.db.run("UPDATE accounts SET node='', status='idle'")
+    ctx.db.run("INSERT INTO account_machines (account_id, node, status) SELECT id, 'node1', 'signed_in' FROM accounts")
+    ctx.db.run("INSERT INTO account_machines (account_id, node, status) SELECT id, 'cc', 'pending' FROM accounts")
+    assert not [r for r in idle_reasons(ctx, {"TESTWP"}) if "no AI account is ready" in r]
+    ctx.db.run("UPDATE account_machines SET status='pending'")
+    assert [r for r in idle_reasons(ctx, {"TESTWP"}) if "no AI account is ready" in r]

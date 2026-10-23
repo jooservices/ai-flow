@@ -149,6 +149,48 @@ def test_candidate_claim_rechecks_live_gate_before_any_release_step(client, ctx)
     assert getattr(ctx.github, "releases", {}) == {}
 
 
+def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-231")
+    secondary = node_headers(client, "node-secondary")
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    enabled = client.post("/v1/shared-accounts/claude-01/machines", json={"node": "node-secondary"})
+    assert enabled.status_code == 201, enabled.text
+    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=secondary).status_code == 200
+
+    candidates = client.get("/v1/version-releases/candidates", params={"account": "claude-01"},
+                            headers=secondary).json()
+
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+
+
+def test_version_release_claim_is_refused_when_shared_account_is_at_capacity(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-232")
+    headers = node_headers(client)
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    limited = client.put("/v1/shared-accounts/claude-01/session-limit", json={"session_limit": 1})
+    assert limited.status_code == 200 and limited.json()["session_limit"] == 1
+    add_ticket(ctx.db, "TESTWP-233")
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,started_at)"
+               " VALUES (%s,'TESTWP-233','TESTWP','dev','claude-01','claude','cc',1,'running',now())",
+               (str(uuid.uuid4()),))
+
+    response = claim_release(client, headers)
+
+    assert response.status_code == 409
+    assert "limit" in response.text or "capacity" in response.text
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release' AND status='running'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
+    assert getattr(ctx.github, "merges", []) == []
+    assert getattr(ctx.github, "tags", {}) == {}
+    assert getattr(ctx.github, "releases", {}) == {}
+
+
 def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_project(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-21")

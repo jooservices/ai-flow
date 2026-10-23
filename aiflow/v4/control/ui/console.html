@@ -2235,7 +2235,7 @@ function roleHealthPanel(rh) {
   h += '<div class="tablebox"><table style="min-width:900px"><thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">State</th><th scope="col">Success rate</th><th scope="col">Cost per finished ticket</th><th scope="col">Rework rounds</th><th scope="col">Note</th></tr></thead><tbody>';
   rows.forEach(function (r) {
     var tone = r.mode === 'on' ? 'ok' : r.mode === 'probation' ? 'warn' : 'crit';
-    var label = r.mode === 'on' ? 'On' : r.mode === 'probation' ? 'Off · probation ticket available' : 'Off · probation done today';
+    var label = r.mode === 'on' ? 'On' : r.mode === 'probation' ? 'Off · probation ticket available' : 'Off · probation running';
     var note = r.note || '';
     if (r.probation) note += (note ? ' ' : '') + 'Probation: ' + r.probation.streak + ' of ' + r.probation.needed + ' in a row succeeded' + (r.probation.open_ticket ? ' · working on ' + r.probation.open_ticket : '') + '.';
     h += '<tr><td class="mono">' + esc(r.account) + '</td><td>' + esc(RH_ROLE[r.role] || r.role) + '</td><td>' + pill(tone, label) + '</td>';
@@ -3819,7 +3819,7 @@ function drawerAcc(id) {
 }
 function drawerInc(id) {
   var i = incBy(id); if (!i) return drawerShell('incident', '#' + esc(id), '', '<div class="empty">Closed and no longer listed.</div>');
-  var b = '<div style="font-size:13.5px">' + esc(i.detail) + '</div><div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
+  var b = '<div style="font-size:13.5px;white-space:pre-wrap">' + esc(i.detail) + '</div><div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
   b += '<div class="dsec"><h4>What happens</h4><div style="font-size:13px">' + ({
     node_down: 'Runs on the node keep their lease for 90 s; then the watchdog marks them lost and moves their tickets back to To Do with a comment. The incident closes on the next heartbeat.',
     account_quota: 'The account takes no ticket until it passes its next check; its tickets go to the other accounts.',
@@ -3827,7 +3827,7 @@ function drawerInc(id) {
     quota_prediction: 'New work is routed to other accounts of this provider because the current burn rate predicts exhaustion before reset.',
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
-    role_health: 'This AI account failed too many of its latest runs in this role, so the role is switched off for it; its other roles keep working. AI Flow gives the role one easy probation ticket a day and switches it back on after two in a row succeed. Thresholds are on the Command Center, under AI quality by role.',
+    role_health: 'A role is switched off for an account only while the pool keeps at least two enabled accounts and no more than half are switched off. If every eligible account scores badly, AI Flow keeps the role on and reports the most frequent failure kind. Completed pull requests and clean no-change runs are successes. A corrected history or installed missing tool restores the role immediately; otherwise successful probation runs can restore it without a day-long wait. Failure counts and involved tickets appear above. Thresholds are on the Command Center, under AI quality by role.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',

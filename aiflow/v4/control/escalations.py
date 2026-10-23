@@ -115,8 +115,12 @@ AMBIGUITY_RE = re.compile(
     r"\bhow (?:does|do|is|are) the existing\b|\bexisting (?:convention|pattern|helper|implementation|code)\b|"
     r"\bnaming convention\b|\bfolder structure\b|\bcode ?style\b", re.I | re.S)
 REPOSITORY_FACT_RE = re.compile(
+    r"\b(?:which|what)\s+(?:http\s+)?(?:status code|response status|http method|request method|method)\b"
+    r".{0,180}(?:/v\d+/|\b(?:endpoint|route|api|handler)\b)|"
     r"\b(?:which|what)\s+(?:http\s+)?(?:request\s+)?method\b.{0,120}"
     r"(?:/\w[\w./{}:-]*|\b(?:endpoint|route|url)\b)|"
+    r"\bwhat\s+does\s+(?:(?:get|post|put|patch|delete|head|options)\s+)?`?/v\d+/[^`\s]+`?"
+    r".{0,100}\b(?:return|respond|produce|do)\b|"
     r"\bwhat\s+does\b.{0,120}(?:`?/\w[\w./{}:-]*`?|\b(?:endpoint|route|handler|function)\b)"
     r".{0,80}\b(?:return|respond|produce|do)\b|"
     r"\b(?:which|what)\s+(?:status code|response|parameter|header)\b.{0,100}"
@@ -298,36 +302,87 @@ class _ConnectionQueries:
 
 
 def resume_waiting(ctx, decision: dict, text: str, skip_ticket: str = "") -> list[str]:
-    """The owner answered: waiting tickets lose the owner-escalated label and go back to work with the answer."""
+    """Resume persisted owner answers. A failed Jira write leaves a `resuming` escalation for the next retry."""
     resumed = []
-    for key in decision.get("waiting_tickets") or []:
+    pending = ctx.db.all("SELECT DISTINCT ticket_key FROM escalations WHERE decision_id=%s AND resolution='resuming'"
+                         " ORDER BY ticket_key", (decision["id"],))
+    keys = [row["ticket_key"] for row in pending]
+    if not keys:  # compatibility for callers that have not yet persisted a resumption
+        keys = list(decision.get("waiting_tickets") or [])
+    for key in keys:
         try:
             if key != skip_ticket:
                 ctx.jira.remove_label(key, "owner-escalated")
                 ctx.db.run("UPDATE tickets SET labels=array_remove(labels,'owner-escalated') WHERE key=%s", (key,))
-                ctx.jira.comment(key, f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
-                                      f"Next: back to To Do; the developer continues with {citation(decision)}")
+                comment = (f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
+                           f"Next: back to To Do; the developer continues with {citation(decision)}")
+                try:
+                    comments = ctx.jira.recent_comments(key, limit=100)
+                except Exception:  # noqa: BLE001 - comment history is only a duplicate guard
+                    comments = []
+                if not any(str(item.get("body") or "").strip() == comment for item in comments):
+                    ctx.jira.comment(key, comment)
                 status = ctx.jira.transition_to(key, "To Do")
+                if status != "To Do":
+                    raise RuntimeError(f"{key} did not transition back to To Do")
                 ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
-            ctx.db.run("UPDATE escalations SET answer=%s, resolution='person', reached_person=true,"
-                       " resolved_at=coalesce(resolved_at, now())"
-                       " WHERE ticket_key=%s AND decision_id=%s", (text, key, decision["id"]))
+            ctx.db.run("UPDATE escalations SET answer=%s, resolution='person', reached_person=true, resolved_at=now()"
+                       " WHERE ticket_key=%s AND decision_id=%s AND resolution='resuming'",
+                       (text, key, decision["id"]))
             resumed.append(key)
         except Exception as exc:  # noqa: BLE001 - one ticket must not keep the others waiting
             log.warning("resuming %s after decision %s failed: %s", key, decision["id"], exc)
     return resumed
 
 
+def _store_owner_answer(db, decision_id: int, text: str, by: str) -> dict:
+    """Save the owner's choice and mark every affected escalation retryable in one transaction."""
+    with db.pool.connection() as connection:
+        with connection.transaction():
+            row = connection.execute("SELECT * FROM owner_decisions WHERE id=%s FOR UPDATE", (decision_id,)).fetchone()
+            if not row or row["status"] not in ("asked", "decided"):
+                raise LookupError("this question is not waiting for an answer")
+            was_asked = row["status"] == "asked"
+            if was_asked:
+                row = connection.execute(
+                    "UPDATE owner_decisions SET status='decided', decision=%s, decided_by=%s, decided_at=now()"
+                    " WHERE id=%s AND status='asked' RETURNING *", (text[:3000], by, decision_id)).fetchone()
+            pending = connection.execute(
+                "UPDATE escalations SET answer=%s, resolution='resuming', reached_person=true, resolved_at=NULL"
+                " WHERE decision_id=%s AND resolution IN ('person','waiting','resuming') RETURNING id",
+                (row["decision"], decision_id)).fetchall()
+            if not was_asked and not pending:
+                raise LookupError("this question is not waiting for an answer")
+            return row
+
+
 def answer_decision(ctx, decision_id: int, choice: str, note: str, by: str) -> dict:
     row = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (decision_id,))
-    if not row or row["status"] != "asked":
+    if not row or row["status"] not in ("asked", "decided"):
         raise LookupError("this question is not waiting for an answer")
-    chosen = row["recommended"] if choice.strip().lower() in ("", "recommended", "default") else choice.strip()
-    text = chosen + (f" ({note.strip()})" if note.strip() else "")
-    row = ctx.db.one("UPDATE owner_decisions SET status='decided', decision=%s, decided_by=%s, decided_at=now()"
-                     " WHERE id=%s RETURNING *", (text[:3000], by, decision_id))
+    if row["status"] == "asked":
+        chosen = row["recommended"] if choice.strip().lower() in ("", "recommended", "default") else choice.strip()
+        text = chosen + (f" ({note.strip()})" if note.strip() else "")
+        row = _store_owner_answer(ctx.db, decision_id, text, by)
+    else:
+        text = row["decision"]
+        row = _store_owner_answer(ctx.db, decision_id, text, row["decided_by"] or by)
     resume_waiting(ctx, row, text)
-    return row
+    return ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (decision_id,))
+
+
+def retry_resumptions(ctx) -> list[str]:
+    """Retry tickets whose saved owner decision could not yet be written back to Jira."""
+    decisions = ctx.db.all(
+        "SELECT DISTINCT d.* FROM owner_decisions d JOIN escalations e ON e.decision_id=d.id"
+        " WHERE d.status='decided' AND e.resolution='resuming' ORDER BY d.id")
+    resumed = []
+    for decision in decisions:
+        keys = [row["ticket_key"] for row in ctx.db.all(
+            "SELECT DISTINCT ticket_key FROM escalations WHERE decision_id=%s AND resolution='resuming'"
+            " ORDER BY ticket_key", (decision["id"],))]
+        resumed.extend(resume_waiting(ctx, {**decision, "waiting_tickets": keys}, decision["decision"]))
+    return resumed
 
 
 def retire_decision(db, decision_id: int) -> dict | None:
@@ -378,9 +433,9 @@ def owner_answered_on_ticket(ctx, ticket: str) -> dict | None:
         if not answer:
             continue
         text = answer[:3000]
-        decided = ctx.db.one("UPDATE owner_decisions SET status='decided', decision=%s, decided_by='owner', decided_at=now()"
-                             " WHERE id=%s AND status='asked' RETURNING *", (text, row["id"]))
-        if not decided:
+        try:
+            decided = _store_owner_answer(ctx.db, row["id"], text, "owner")
+        except LookupError:
             continue
         raised = ctx.db.one("SELECT question FROM escalations WHERE ticket_key=%s AND decision_id=%s"
                             " ORDER BY id DESC LIMIT 1", (ticket, row["id"]))
@@ -408,6 +463,9 @@ def amend_description(description: str, criterion: str, decision_id: int, enviro
         return None
     name, original = found.group("name").replace(" ", ""), found.group("body").strip()
     tag = f"amended {today}, register D{decision_id}"
+    if tag in original:
+        summary = f"{name} {'removed' if '[removed' in original else 'narrowed'}"
+        return description, summary
     if narrowed.strip().upper() == "REMOVED":
         replacement = f"{found.group('lead')}{name}: [removed, {tag}] Not verifiable in this environment. Original: {original}"
         summary = f"{name} removed"
@@ -425,27 +483,26 @@ def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: st
     row = ctx.db.one("SELECT description FROM tickets WHERE key=%s", (ticket,))
     if not row or not criterion:
         return None
-    done = ctx.db.one("SELECT * FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s AND title LIKE %s",
-                      (ticket, f"{criterion.upper()} %"))
-    if done:  # the same criterion is amended once
+    existing = ctx.db.one("SELECT * FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s AND title LIKE %s",
+                          (ticket, f"{criterion.upper()} %"))
+    if existing and existing["decision"] != "pending":  # the same completed criterion is amended once
+        done = existing
         return {"decision": done, "summary": done["decision"], "citation": citation(done), "already": True}
-    entry = ctx.db.one(
+    entry = existing or ctx.db.one(
         "INSERT INTO owner_decisions (topic,kind,title,question,decision,project,source,ticket_key,decided_by,decided_at)"
         " VALUES (%s,'amendment',%s,%s,%s,%s,'amendment',%s,%s,now()) RETURNING *",
         (unique_topic(ctx.db, f"amend {ticket} {criterion}"), f"{criterion.upper()} of {ticket} amended", reason[:2000],
          "pending", project, ticket, by))
     amended = amend_description(row["description"] or "", criterion, entry["id"], environment, narrowed)
     if not amended:
-        ctx.db.run("DELETE FROM owner_decisions WHERE id=%s", (entry["id"],))
+        if not existing:
+            ctx.db.run("DELETE FROM owner_decisions WHERE id=%s AND kind='amendment' AND decision='pending'",
+                       (entry["id"],))
         return None
     text, summary = amended
-    try:
-        ctx.jira.set_description(ticket, text)
-    except Exception:
-        # The register entry is only complete after Jira accepted the amendment. A failed write must not make a
-        # retry look like an already-applied amendment.
-        ctx.db.run("DELETE FROM owner_decisions WHERE id=%s AND kind='amendment' AND decision='pending'", (entry["id"],))
-        raise
+    # Keep the pending register row if Jira is unavailable or the process stops here. A retry finds the same row
+    # and replays this ticket update instead of treating the pending entry as a completed amendment.
+    ctx.jira.set_description(ticket, text)
     ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (text, ticket))
     entry = ctx.db.one("UPDATE owner_decisions SET decision=%s WHERE id=%s RETURNING *",
                        (f"{summary}: {reason}"[:3000], entry["id"]))
@@ -661,6 +718,11 @@ def register(db) -> dict[str, list[dict]]:
     rows = db.all("SELECT * FROM owner_decisions WHERE status<>'retired' ORDER BY id DESC LIMIT 500")
     def public(row: dict) -> dict:
         return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
+    resuming = db.all("SELECT DISTINCT d.*, ARRAY(SELECT DISTINCT pending.ticket_key FROM escalations pending"
+                      " WHERE pending.decision_id=d.id AND pending.resolution='resuming' ORDER BY pending.ticket_key)"
+                      " AS resuming_tickets FROM owner_decisions d JOIN escalations e ON e.decision_id=d.id"
+                      " WHERE d.status='decided' AND e.resolution='resuming' ORDER BY d.id DESC LIMIT 100")
     return {"decisions": [public(r) for r in rows if r["kind"] == "decision" and r["status"] == "decided"],
             "asked": [public(r) for r in rows if r["status"] == "asked"],
+            "resuming": [public(r) for r in resuming],
             "amendments": [public(r) for r in rows if r["kind"] == "amendment"]}

@@ -96,12 +96,12 @@ The GitHub App needs the `actions: read` permission.
 ## Numbers (AC7)
 
 `GET /v1/escalations` (and `escalations` in `GET /v1/master/report`) return, for the last eight UTC weeks, escalations
-per class and per project, the share resolved without a person, whether this week is below last week, the **top
-three causes with the fix for each** and the amendments for review. Open and waiting records do not count as resolved
-without a person; a waiting ticket records its owner resolution when the shared answer arrives. Command Center shows
-them in the panel
-*Escalations and owner decisions* (weekly table by class, table by project, the open questions with one button per
-option, the register, the amendments). The target is a falling line.
+per class and per project in each week, the share resolved without a person, whether this week is below last week,
+the **top three causes with the fix for each** and the amendments for review. Open and waiting records do not count
+as resolved without a person; a waiting ticket records its owner resolution when the shared answer arrives. An owner
+choice is saved before Jira updates begin; failed ticket updates stay visible as resuming and the control loop retries
+them. Command Center shows them in the panel *Escalations and owner decisions* (weekly class table, week-by-project
+table, the open questions with one button per option, the register, and the amendments). The target is a falling line.
 
 ## Tests
 
@@ -120,3 +120,7 @@ The policy hook responds through `POST /v1/policy/decide`. Command Center reads 
 `POST /v1/decisions/{decision_id}/answer`, and retires entries with
 `POST /v1/decisions/{decision_id}/retire`. Escalation totals are also included in `GET /v1/master/report`; the
 master snapshot is available through `GET /v1/master/autonomy`.
+
+Other worker Jira writes stay fenced to the claimed ticket: `POST /v1/jira/{key}/comment` posts a comment, and
+`POST /v1/jira/{key}/fields` updates its fields or labels. Both require the run ID and fence; an impact run may
+comment but cannot change fields.

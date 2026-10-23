@@ -443,6 +443,8 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .dash-title{margin:4px 0 0;font-size:24px;letter-spacing:-.025em}
 .dash-section{display:flex;flex-direction:column;gap:12px}
 .dash-section-title{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.dashboard-layout-headings{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 8px}
+.dashboard-layout-headings .dash-section-title{flex:1 1 240px}
 .dash-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
 .dash-kpi{min-width:0;text-align:left;display:flex;flex-direction:column;gap:4px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:13px;cursor:pointer}
 .dash-kpi:hover{border-color:var(--accent)}
@@ -479,6 +481,27 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--provider-codex)}svg .provider-grok{fill:var(--provider-grok)}svg .provider-opencode{fill:var(--provider-opencode)}
 @media (max-width:900px){.dash-grid{grid-template-columns:minmax(0,1fr)}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.dash-kpis{grid-template-columns:minmax(0,1fr)}.roadmap-row{grid-template-columns:minmax(0,1fr) 52px}.roadmap-track{grid-column:1/-1;grid-row:2}.command-search{padding-top:4vh}.tabs{max-width:100%;width:100%}.project-picker{min-width:100%}}
+/* customizable layout: 12-column grid, small 4 / medium 6 / large 8 / full 12; one block per row on a phone */
+.blocks{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px;align-items:start;min-width:0}
+.block-cell{grid-column:span 12;min-width:0;display:flex;flex-direction:column;gap:8px}
+.block-cell[hidden]{display:none}
+.block-cell[data-size="small"]{grid-column:span 4}
+.block-cell[data-size="medium"]{grid-column:span 6}
+.block-cell[data-size="large"]{grid-column:span 8}
+.block-cell>[data-block]{width:100%}
+.layout-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0}
+.layout-hidden{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:100%}
+.blocks.editing .block-cell{outline:1px dashed var(--faint);outline-offset:4px;border-radius:14px}
+.block-cell.dragging{opacity:.55;outline:2px solid var(--accent)!important}
+.block-tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px;background:var(--accent-weak);border:1px solid var(--line);border-radius:10px}
+.block-sizes{display:flex;flex-wrap:wrap;gap:4px}
+.block-sizes .btn[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.block-handle{flex:1 1 140px;display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:4px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);cursor:grab;touch-action:none;user-select:none;text-align:left}
+.block-handle:active{cursor:grabbing}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+@media (pointer:coarse){.block-handle,.block-tools .btn,.layout-bar .btn{min-height:44px}}
+@media (max-width:1000px){.block-cell[data-size="small"],.block-cell[data-size="medium"]{grid-column:span 6}.block-cell[data-size="large"]{grid-column:span 12}}
+@media (max-width:720px){.blocks{display:flex;flex-direction:column}.block-cell,.block-cell[data-size]{width:100%}}
 </style>
 </head>
 <body>
@@ -569,6 +592,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawer-title"></aside>
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="sr-only" id="layout-live" role="status" aria-live="polite"></div>
 <div class="command-search" id="command-search" hidden>
   <button class="command-scrim" type="button" data-act="search-close" aria-label="Close search"></button>
   <section class="command-dialog" role="dialog" aria-modal="true" aria-labelledby="command-search-title">
@@ -633,9 +657,10 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
+  layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
   consoleUser: null, consoleSessionLoaded: false,
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
-    loading: false, error: '', editing: '', temporaryPassword: '' },
+    loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '' },
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
@@ -836,13 +861,21 @@ function escalationsPanel() {
     h += '<td>' + esc(w.total) + '</td><td>' + (w.share_without_person_pct == null ? '—' : esc(w.share_without_person_pct) + '%') + '</td></tr>';
   });
   h += '</tbody></table></div>';
-  var projects = {};
-  (m.weeks || []).forEach(function (w) { Object.keys(w.by_project || {}).forEach(function (p) { var row = projects[p] = projects[p] || {}; Object.keys(w.by_project[p]).forEach(function (c) { row[c] = (row[c] || 0) + w.by_project[p][c]; }); }); });
-  if (Object.keys(projects).length) {
-    h += '<div class="tablebox"><table><thead><tr><th>Project (all weeks shown)</th>';
+  var projectRows = [];
+  (m.weeks || []).forEach(function (w) {
+    Object.keys(w.by_project || {}).sort().forEach(function (p) {
+      projectRows.push({ week: w.week_start, project: p, counts: w.by_project[p] || {} });
+    });
+  });
+  if (projectRows.length) {
+    h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Project</th>';
     (m.classes || []).forEach(function (c) { h += '<th>' + esc(labels[c] || c) + '</th>'; });
     h += '</tr></thead><tbody>';
-    Object.keys(projects).sort().forEach(function (p) { h += '<tr><td class="mono">' + esc(p) + '</td>'; (m.classes || []).forEach(function (c) { h += '<td>' + esc(projects[p][c] || 0) + '</td>'; }); h += '</tr>'; });
+    projectRows.forEach(function (row) {
+      h += '<tr><td class="mono">' + esc(row.week) + '</td><td class="mono">' + esc(row.project) + '</td>';
+      (m.classes || []).forEach(function (c) { h += '<td>' + esc(row.counts[c] || 0) + '</td>'; });
+      h += '</tr>';
+    });
     h += '</tbody></table></div>';
   }
   var writer = consoleCan('console.write');
@@ -855,6 +888,13 @@ function escalationsPanel() {
     } else h += '<div class="muted">Options: ' + esc((d.options || []).join(' · ')) + ' · Recommended: ' + esc(d.recommended) + '</div>';
     h += '</div>';
   });
+  if ((reg.resuming || []).length) {
+    h += '<h3>Applying saved owner decisions</h3><div class="muted">Jira updates retry automatically; the saved owner choice is retained.</div>';
+    (reg.resuming || []).forEach(function (d) {
+      h += '<div class="review-fact"><div class="label mono">D' + esc(d.id) + ' · ' + esc((d.resuming_tickets || []).join(', ')) + '</div>';
+      h += '<div class="value">' + esc(d.title) + '</div><div class="muted">Saved answer: ' + esc(d.decision) + '</div></div>';
+    });
+  }
   h += '<h3>Owner decision register</h3><div class="tablebox"><table><thead><tr><th>#</th><th>Decision</th><th>Applied</th><th>By</th><th></th></tr></thead><tbody>';
   if (!(reg.decisions || []).length) h += '<tr><td colspan="5" class="empty">No decision recorded.</td></tr>';
   (reg.decisions || []).forEach(function (d) {
@@ -924,6 +964,7 @@ function pollConsoleSession() {
     S.consoleUser = d.authenticated ? d : null; S.consoleSessionLoaded = true;
     document.documentElement.classList.remove('role-loading');
     applyRoleNavigation();
+    loadLayouts();
     if (S.consoleUser && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
       location.replace(S.consoleUser.landing_page || '/cc'); return;
     }
@@ -933,7 +974,7 @@ function pollConsoleSession() {
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
-    if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();
+    if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.userAdmin.loadedAt > 30000 && !S.userAdmin.loading) loadUsers(true);
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (consoleCan('view.machines_ai')) pollServices();
@@ -1009,7 +1050,7 @@ function loadUsers(force) {
   u.loading = true; u.error = ''; renderUsers();
   adminRequest('/v1/console/users').then(function (d) {
     u.users = d.users || []; u.projects = d.projects || []; u.roleOptions = d.role_options || []; u.audit = d.audit || [];
-    u.error = ''; u.loading = false; renderUsers();
+    u.error = ''; u.loadedAt = Date.now(); u.loading = false; renderUsers();
   }).catch(function (e) { u.error = String(e.message || e); u.loading = false; renderUsers(); });
 }
 var ROLE_VIEW_LABELS = { 'view.dashboard': 'Dashboard', 'view.work_board': 'Work board', 'view.delivery': 'Delivery',
@@ -1030,7 +1071,7 @@ function projectChoices(selected, all) {
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
-  var u = S.userAdmin, h = '<section class="panel"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
+  var u = S.userAdmin, h = '<section class="panel" data-block="users"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
   if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
   if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
   if (u.loading && !u.users) h += '<div class="muted">Loading people…</div>';
@@ -1056,7 +1097,7 @@ function renderUsers() {
     if (!(u.users || []).length) h += '<tr><td colspan="6" class="muted">No people have been added.</td></tr>';
     h += '</tbody></table></div>';
   }
-  h += '</section><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
+  h += '</section><div class="users-layout-secondary" data-block="access"><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
     '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required></label>' +
     '<label>Name<input class="in" data-user-name autocomplete="off"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', []) +
     '</div></div><div>' + projectChoices([], true) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
@@ -1073,8 +1114,9 @@ function renderUsers() {
     (u.audit || []).map(function (item) { return '<tr><td>' + esc(item.ts ? new Date(item.ts).toLocaleString() : '') + '</td><td>' + esc(item.actor) +
       '</td><td>' + esc(item.action.replace(/_/g, ' ')) + '</td><td>' + esc(item.result) + '<div class="small muted">' +
       esc(JSON.stringify(item.payload || {})) + '</div></td></tr>'; }).join('') +
-    '</tbody></table></div></section>';
+    '</tbody></table></div></section></div>';
   root.innerHTML = h;
+  applyLayout('users', root);
   $$('[data-user-refresh]', root).forEach(function (b) { b.onclick = function () { loadUsers(true); }; });
   $$('[data-user-password-dismiss]', root).forEach(function (b) { b.onclick = function () { u.temporaryPassword = ''; renderUsers(); }; });
   $$('[data-user-edit]', root).forEach(function (b) { b.onclick = function () { u.editing = b.dataset.userEdit; renderUsers(); }; });
@@ -1558,7 +1600,7 @@ function providerUsageChart(rows) {
   return svg + '</svg>';
 }
 function renderDashboard() {
-  if (S.consoleUser && !consoleCan('view.machines_ai')) { renderCC(); return; }
+  var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
@@ -1583,13 +1625,13 @@ function renderDashboard() {
     return '<div class="flow-step"><b>' + tickets.filter(function (t) { return t.status === c[0]; }).length + '</b><span>' + esc(c[1]) + '</span></div>';
   }).join('');
   var h = '<h1 class="dash-title">Dashboard</h1><section class="dash-section" aria-labelledby="dashboard-work-title"><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
-  h += '<div class="dash-kpis" aria-label="Work summary">';
+  h += '<div class="dash-kpis" data-block="kpis" aria-label="Work summary">';
   h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Active projects</span><span class="value">' + openProjects + '</span><span class="detail">' + d.projects.length + ' configured projects</span></button>';
   h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">AI working</span><span class="value">' + inProgress + '</span><span class="detail">tickets in progress</span></button>';
   h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Waiting for you</span><span class="value">' + waiting.length + '</span><span class="detail">human review or owner decision</span></button>';
   h += '<button class="dash-kpi" data-act="view" data-view="delivery"><span class="label">Runs · 24 h</span><span class="value">' + Number(totals.runs_24h || 0) + '</span><span class="detail">' + Number(totals.done_24h || 0) + ' completed · ' + Number(totals.failed_24h || 0) + ' failed</span></button></div>';
-  h += '<div class="dash-grid"><section class="panel" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
-  h += '<section class="panel"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
+  h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
+  h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';
   h += '<div class="tablebox"><table class="dash-table"><thead><tr><th><button class="sort-btn" data-act="dashboard-sort" data-key="key">Project' + (S.dashboardSort === 'key' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="open">Open' + (S.dashboardSort === 'open' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="building">Building' + (S.dashboardSort === 'building' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="waiting">Waiting' + (S.dashboardSort === 'waiting' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th><th><button class="sort-btn" data-act="dashboard-sort" data-key="done">Done' + (S.dashboardSort === 'done' ? (S.dashboardSortDir > 0 ? ' ↑' : ' ↓') : '') + '</button></th></tr></thead><tbody>';
   projectRows.forEach(function (row) {
@@ -1597,8 +1639,8 @@ function renderDashboard() {
     h += '<tr><td><button class="linkbtn" data-act="dashboard-project" data-p="' + esc(p.key) + '" aria-label="Open ' + esc(p.key) + ' on the Work board">' + esc(p.key) + '</button><div class="small">' + esc(p.repo) + (selectedKey === p.key ? ' · selected' : '') + '</div></td><td>' + c.open + '</td><td>' + c.building + '</td><td>' + c.waiting + '</td><td>' + c.done + '</td></tr>';
   });
   if (!projectRows.length) h += '<tr><td colspan="5" class="empty">No matching projects.</td></tr>';
-  h += '</tbody></table></div></section></div>';
-  h += '<div class="dash-grid"><section class="panel"><div class="panel-h"><h2>What is being built</h2><span class="hint">Live runs and the selected project roadmap · ' + esc(selectedKey || 'no project selected') + '</span><span class="spacer"></span><button class="btn sm" data-act="view" data-view="work">Open Work board</button></div>';
+  h += '</tbody></table></div></section>';
+  h += '<section class="panel" data-block="building"><div class="panel-h"><h2>What is being built</h2><span class="hint">Live runs and the selected project roadmap · ' + esc(selectedKey || 'no project selected') + '</span><span class="spacer"></span><button class="btn sm" data-act="view" data-view="work">Open Work board</button></div>';
   if (recentRuns.length) {
     h += '<div class="att">';
     recentRuns.forEach(function (run) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(run.ticket) + '"><span class="pill" data-tone="info">Running</span><span class="t"><span class="mono muted">' + esc(run.ticket) + '</span> ' + esc(run.summary || '') + '<span class="d">' + esc(run.project) + ' · ' + esc(PROVIDER[run.provider] || run.provider || '') + ' · ' + esc(run.step) + '</span></span><span class="mono">' + mmss(run.elapsed_s) + '</span></button>'; });
@@ -1614,20 +1656,20 @@ function renderDashboard() {
     });
     h += '</div>';
   }
-  h += '</section><section class="panel"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
+  h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section></div></section>';
+  h += '</div></section></section>';
+  if (canSeeMachines) {
   var providers = Object.keys(PROVIDER).filter(function (key) { return d.accounts.some(function (a) { return a.provider === key; }); });
   var tokenTotal = S.analytics.reduce(function (n, row) { return n + Number(row.tokens_in || 0) + Number(row.tokens_out || 0); }, 0);
   var costTotal = S.analytics.reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
-  h += '<section class="dash-section" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><div class="dash-grid">';
-  h += '<section class="panel"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
+  h += '<section class="dash-section" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><section class="panel" data-block="usage"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
   if (S.anError) h += '<div class="empty">Usage chart unavailable: ' + esc(S.anError) + '</div>';
   h += providerUsageChart(S.analytics);
   h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + key + '"></i><span class="provider-name">' + esc(PROVIDER[key]) + '</span></span>'; }).join('') + '</div></section>';
-  h += '<section class="panel"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Control plane records run usage</span></div><div class="facts"><div class="fact"><span class="fl">Tokens · 24 h</span><span class="fv mono">' + tok((totals.tokens_in_24h || 0) + (totals.tokens_out_24h || 0)) + '</span></div><div class="fact"><span class="fl">Cost · 24 h</span><span class="fv mono">' + usd(totals.cost_24h) + '</span></div><div class="fact"><span class="fl">Tokens · 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section></div>';
-  h += '<section class="panel"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Quota used and left, reset, burn rate, forecast, and seven-day history per account</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
+  h += '<section class="panel" data-block="tokens"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Control plane records run usage</span></div><div class="facts"><div class="fact"><span class="fl">Tokens · 24 h</span><span class="fv mono">' + tok((totals.tokens_in_24h || 0) + (totals.tokens_out_24h || 0)) + '</span></div><div class="fact"><span class="fl">Cost · 24 h</span><span class="fv mono">' + usd(totals.cost_24h) + '</span></div><div class="fact"><span class="fl">Tokens · 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section></div>';
+  h += '<section class="panel" data-block="quota"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Quota used and left, reset, burn rate, forecast, and seven-day history per account</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
   if (!d.accounts.length) h += '<tr><td colspan="4" class="empty">No AI accounts are configured.</td></tr>';
   d.accounts.forEach(function (a) {
     var reset = quotaResetText(a);
@@ -1636,9 +1678,11 @@ function renderDashboard() {
   h += '</tbody></table></div></section></section>';
   h += toolWaitsPanel(d);
   if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
+  }
   h += escalationsPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
+  applyLayout('cc', root);
 }
 function projTicketsFor(projectKey) { return D().tickets.filter(function (t) { return t.project === projectKey; }); }
 function quotaResetText(account) {
@@ -1655,7 +1699,7 @@ function masterAutonomyPanel() {
   if (!consoleReader()) return '<section class="panel"><div class="panel-h"><h2>Master autonomy</h2></div><div class="muted">Sign in to view the autonomy report and daily budget.</div></section>';
   if (!S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
   var data = S.autonomy.data, budget = data && data.budget, report = data && data.report;
-  var h = '<section class="panel" id="p-master-autonomy"><div class="panel-h"><h2>Master autonomy</h2><span class="hint">Weekly report and daily model time budget</span></div>';
+  var h = '<section class="panel" data-block="autonomy" id="p-master-autonomy"><div class="panel-h"><h2>Master autonomy</h2><span class="hint">Weekly report and daily model time budget</span></div>';
   if (S.autonomy.error) h += '<div class="stakeholder-error">' + esc(S.autonomy.error) + '</div>';
   if (!data) return h + '<div class="muted">' + (S.autonomy.busy ? 'Loading autonomy report…' : 'Autonomy report unavailable.') + '</div></section>';
   h += '<div class="grid-2"><div class="review-fact"><div class="label">Today · UTC</div><div class="value">' + esc(budget.used_minutes) + ' / ' + esc(budget.daily_budget_minutes) + ' minutes used · ' + esc(budget.remaining_minutes) + ' remaining</div></div>';
@@ -2149,7 +2193,7 @@ function epicProgress(all) {
 function epicsPanel(all, act, id) {
   var rows = epicProgress(all);
   if (!rows.length) return '';
-  var h = '<section class="panel" id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">Epics</h2><span class="hint">Progress of the work under each epic</span><span class="spacer"></span><div class="legend"><span><i class="st-done"></i>Done</span><span><i class="st-verify"></i>In verify or review</span><span><i class="st-progress"></i>In progress</span><span><i class="st-wait"></i>Needs owner</span><span><i class="st-todo"></i>Not started</span></div></div><div class="epics">';
+  var h = '<section class="panel"' + (id === 'd-epics' ? ' data-block="epics"' : '') + ' id="' + id + '" aria-labelledby="h-' + id + '"><div class="panel-h"><h2 id="h-' + id + '">Epics</h2><span class="hint">Progress of the work under each epic</span><span class="spacer"></span><div class="legend"><span><i class="st-done"></i>Done</span><span><i class="st-verify"></i>In verify or review</span><span><i class="st-progress"></i>In progress</span><span><i class="st-wait"></i>Needs owner</span><span><i class="st-todo"></i>Not started</span></div></div><div class="epics">';
   rows.forEach(function (r) {
     var e = r.epic, c = r.counts;
     var n = r.items || 1, seg = function (k) { return c[k] ? '<span class="st-' + k + '" style="width:' + (100 * c[k] / n).toFixed(2) + '%" title="' + c[k] + '"></span>' : ''; };
@@ -2179,7 +2223,7 @@ function renderDBody() {
 
   var boardOnly = S.view === 'work', h = '';
   if (!boardOnly) {
-  h = '<section class="kpis" aria-label="Project summary">';
+  h = '<section class="kpis" data-block="kpis" aria-label="Project summary">';
   h += kpi('Tickets', String(work.length), all.length - work.length + ' epics', '', 'd-board');
   h += kpi('Done', done + (work.length ? ' · ' + Math.round(100 * done / work.length) + '%' : ''), 'merged or closed', '', 'd-epics');
   h += kpi('Ready for AI', String(work.filter(function (t) { return t.status === 'To Do' && t.labels.indexOf('aiflow-ready') >= 0; }).length), 'To Do with aiflow-ready', '', 'd-board');
@@ -2192,7 +2236,7 @@ function renderDBody() {
   h += epicsPanel(all, 'epic', 'd-epics');
   }
 
-  h += '<section class="panel"' + (boardOnly ? '' : ' id="d-board"') + ' aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
+  h += '<section class="panel" data-block="board"' + (boardOnly ? '' : ' id="d-board"') + ' aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
   STATUS_COLS.forEach(function (c) {
     var items = list.filter(function (t) { return t.status === c[0]; });
     if (c[0] === 'Done') items.sort(function (a, b) { return (a.updated_age_s || 0) - (b.updated_age_s || 0); });
@@ -2205,7 +2249,7 @@ function renderDBody() {
   h += '</div></section>';
 
   if (!boardOnly) {
-  h += '<section class="panel" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
+  h += '<section class="panel" data-block="attention" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
   var att = [];
   work.forEach(function (t) {
     var lr = t.last_run;
@@ -2219,28 +2263,28 @@ function renderDBody() {
     h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(x[0].key) + '"><span class="flag" data-tone="' + x[1] + '">' + esc(x[2]) + '</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(x[0].key) + '</span> ' + esc(x[0].summary) + '</div><div class="d">' + esc(x[3]) + '</div></span><span class="muted">Open</span></button>';
   });
   h += '</div></section>';
-  h += '<section class="panel" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
+  h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();
   }
   var target = S.view === 'work' ? $('#work-body') : $('#dbody');
   if (target) target.innerHTML = h;
+  if (target && S.view === 'delivery') applyLayout('delivery', target);
 }
 
 /* ---------- Human review ---------- */
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
-  var rows = S.reviews || [], metrics = S.reviewMetrics || {}, h = '<section class="panel"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Waiting items and the reasons people are needed · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
+  var rows = S.reviews || [], metrics = S.reviewMetrics || {}, h = '<section class="panel" data-block="queue"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Waiting items and the reasons people are needed · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
   h += '<div class="review-filters"><label>Project <select data-review-project aria-label="Filter human review by project"><option value="">All projects</option>';
   (S.reviewProjects || []).forEach(function (p) { h += '<option value="' + esc(p) + '"' + (S.reviewProject === p ? ' selected' : '') + '>' + esc(p) + '</option>'; });
   h += '</select></label><a class="btn sm" href="/v1/reviews/export.csv' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : '') + '" download>Export metrics CSV</a></div>';
-  h += reviewMetricsPanel(metrics);
   if (!reviewByRole()) h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Reviewer access is required for actions; the token stays in this page until it is closed.</span>';
   if (S.reviewsError) h += '<div class="empty" style="color:var(--crit)">Could not load the review queue: ' + esc(S.reviewsError) + '</div>';
   else if (S.reviews === null) h += '<div class="empty">Loading review queue…</div>';
   else if (!rows.length) h += '<div class="empty">No items are waiting for a person in this project.</div>';
-  h += '</section>';
+  h += '</section>' + reviewMetricsPanel(metrics);
   if (rows.length) {
-    h += '<div class="review-list">';
+    h += '<div class="review-list" data-block="items">';
     rows.forEach(function (t) {
       var pr = t.pr || {}, ver = t.verify || {}, diff = [
         ['Files changed', pr.changed_files], ['Additions', pr.additions], ['Deletions', pr.deletions]
@@ -2275,12 +2319,13 @@ function renderReviews() {
   }
   h += reviewThreadsPanel(S.reviewThreads || [], rows);
   root.innerHTML = h;
+  applyLayout('review', root);
 }
 function reviewThreadsPanel(threads, waiting) {
   var waitingKeys = {}; (waiting || []).forEach(function (ticket) { waitingKeys[ticket.key] = true; });
   var archived = (threads || []).filter(function (item) { return !waitingKeys[item.key] && item.thread && item.thread.length; });
   if (!archived.length) return '';
-  var h = '<section class="panel"><div class="panel-h"><h2>AI question threads</h2><span class="hint">Recent questions and answers, including work no longer waiting</span></div>';
+  var h = '<section class="panel" data-block="threads"><div class="panel-h"><h2>AI question threads</h2><span class="hint">Recent questions and answers, including work no longer waiting</span></div>';
   archived.forEach(function (item) {
     h += '<article class="review-thread"><strong><span class="mono muted">' + esc(item.key) + '</span> ' + esc(item.summary || '') + '</strong>';
     item.thread.forEach(function (line) { h += '<div class="review-thread-line"><span class="muted">' + esc(line.author || line.kind) + ' · ' + esc(line.created_at || '') + '</span><div>' + esc(line.text || '') + '</div></div>'; });
@@ -2292,7 +2337,7 @@ function reviewMetricsPanel(metrics) {
   var weekly = metrics.weekly || [], max = 1;
   weekly.forEach(function (w) { max = Math.max(max, w.total || 0); });
   function value(v, suffix) { return v == null ? '—' : String(v) + (suffix || ''); }
-  var h = '<section class="panel"><div class="panel-h"><h2>People needed</h2><span class="hint">UTC calendar weeks</span></div><div class="review-kpis">';
+  var h = '<section class="panel" data-block="metrics"><div class="panel-h"><h2>People needed</h2><span class="hint">UTC calendar weeks</span></div><div class="review-kpis">';
   h += '<div class="review-kpi"><div class="label">This week · eight weeks ago</div><strong>' + value(metrics.people_needed_this_week, '') + ' · ' + value(metrics.people_needed_eight_weeks_ago, '') + '</strong></div>';
   h += '<div class="review-kpi"><div class="label">Finished with no person</div><strong>' + value(metrics.finished_with_no_person_pct, '%') + '</strong></div>';
   h += '<div class="review-kpi"><div class="label">Median person wait</div><strong>' + value(metrics.median_wait_minutes, ' min') + '</strong></div>';
@@ -2379,7 +2424,7 @@ function knowledgeDate(value) { return value ? when(value) : '—'; }
 function renderLearningKnowledge(k, canManage) {
   var d = k.learning || { counts: [], newest: [], most_used: [], items: [], effectiveness: {} };
   var stats = d.effectiveness || {}, items = d.items || [];
-  var h = '<section class="panel"><div class="panel-h"><h2 style="margin:0">Learning and study cases</h2><span class="hint">Automatic run, ticket, rework and incident records for ' + esc(S.project || 'general knowledge') + '.</span></div>';
+  var h = '<section class="panel" data-block="learning"><div class="panel-h"><h2 style="margin:0">Learning and study cases</h2><span class="hint">Automatic run, ticket, rework and incident records for ' + esc(S.project || 'general knowledge') + '.</span></div>';
   h += '<div class="lead-controls"><label>Search this project and general knowledge<input data-knowledge-search value="' + esc(k.search || '') + '" placeholder="Search by meaning or words"></label><button class="btn" data-act="knowledge-search">Search</button>';
   if (canManage) h += '<button class="btn primary" data-act="knowledge-item-new">Add knowledge item</button>';
   h += '</div><div class="knowledge-actions" style="margin:12px 0">' +
@@ -2432,11 +2477,12 @@ function renderKnowledge() {
   var root = $('#view-knowledge'); if (!root) return;
   if (!consoleCan('knowledge.read')) {
     root.innerHTML = '<section class="panel"><h1>Knowledge and Skills</h1><div class="muted">Sign in with a role that can view knowledge resources.</div></section>';
+    applyLayout('knowledge', root);
     return;
   }
   var canManage = consoleCan('knowledge.manage'), canApprove = consoleCan('knowledge.approve');
   var k = S.knowledge, d = k.data || { resources: [], proposals: [] }, rows = d.resources || [];
-  var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Knowledge and Skills</h1>' +
+  var h = '<section class="panel" data-block="header"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Knowledge and Skills</h1>' +
     '<span class="hint">Study cases, knowledge, skills, agents, guides and policies are versioned in aiflow-control.</span><span class="spacer"></span>' +
     (canManage ? '<button class="btn primary" data-act="knowledge-new">New resource</button>' : '') +
     '<button class="btn" data-act="knowledge-refresh">Refresh</button></div>';
@@ -2452,7 +2498,7 @@ function renderKnowledge() {
   var visible = rows.filter(function (r) {
     return (k.type === 'all' || r.type === k.type) && (k.filter === 'all' || (k.filter === 'archived') === Boolean(r.archived));
   });
-  h += '<div class="knowledge-grid"><section class="panel"><div class="panel-h"><h2 style="margin:0">Resources</h2><span class="pill">' + visible.length + '</span></div><div class="knowledge-list">';
+  h += '<section class="panel" data-block="resources"><div class="panel-h"><h2 style="margin:0">Resources</h2><span class="pill">' + visible.length + '</span></div><div class="knowledge-list">';
   if (!visible.length) h += '<div class="empty">No resources in this view yet.</div>';
   visible.forEach(function (r) {
     h += '<article class="knowledge-item"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3>' + esc(r.title) + '</h3>' +
@@ -2463,10 +2509,10 @@ function renderKnowledge() {
       '<button class="btn sm" data-act="knowledge-history" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '">History</button>' +
       (canManage ? '<button class="btn sm" data-act="knowledge-archive" data-kind="' + esc(r.type) + '" data-id="' + esc(r.id) + '" data-archived="' + (!r.archived) + '">' + (r.archived ? 'Restore active' : 'Archive') + '</button>' : '') + '</div></article>';
   });
-  h += '</div></section><div class="stack">';
+  h += '</div></section>';
   var e = k.editor;
   if (e && canManage) {
-    h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">' + (e.version == null ? 'Create resource' : 'Edit resource') + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-cancel">Cancel</button></div>' +
+    h += '<section class="panel" data-block="editor"><div class="panel-h"><h2 style="margin:0">' + (e.version == null ? 'Create resource' : 'Edit resource') + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-cancel">Cancel</button></div>' +
       '<div class="knowledge-form"><label>Type<select data-knowledge-field="type">' + Object.keys(KNOWLEDGE_TYPES).map(function (type) {
         return '<option value="' + type + '"' + (e.type === type ? ' selected' : '') + '>' + KNOWLEDGE_TYPES[type] + '</option>';
       }).join('') + '</select></label><label>Id<input data-knowledge-field="id" value="' + esc(e.id) + '" placeholder="lowercase-slug or project key"></label>' +
@@ -2477,7 +2523,7 @@ function renderKnowledge() {
   }
   if (k.history) {
     var versions = k.history.history || [], pendingHistory = k.history.proposals || [];
-    h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">History · ' + esc(k.history.id) + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-history-close">Close</button></div><div class="knowledge-history">';
+    h += '<section class="panel" data-block="history"><div class="panel-h"><h2 style="margin:0">History · ' + esc(k.history.id) + '</h2><span class="spacer"></span><button class="btn sm" data-act="knowledge-history-close">Close</button></div><div class="knowledge-history">';
     if (!versions.length && !pendingHistory.length) h += '<div class="empty">No history is available.</div>';
     versions.forEach(function (v) {
       var older = versions.filter(function (x) { return x.version === v.version - 1; })[0];
@@ -2493,7 +2539,7 @@ function renderKnowledge() {
     h += '</div></section>';
   }
   var pending = d.proposals || [];
-  h += '<section class="panel"><div class="panel-h"><h2 style="margin:0">Policy approvals</h2><span class="pill" data-tone="' + (pending.length ? 'warn' : 'ok') + '">' + pending.length + ' pending</span></div>';
+  h += '<section class="panel" data-block="approvals"><div class="panel-h"><h2 style="margin:0">Policy approvals</h2><span class="pill" data-tone="' + (pending.length ? 'warn' : 'ok') + '">' + pending.length + ' pending</span></div>';
   if (canApprove) h += '<div class="knowledge-form"><label>Approver name<input data-knowledge-owner value="' + esc(k.owner || (S.consoleUser && S.consoleUser.user) || '') + '" placeholder="Approver name" autocomplete="name"></label>' +
     '<label class="review-auth">Owner access token (not needed with an authorized console session)<input type="password" autocomplete="new-password" data-owner-token value="' + esc(k.ownerToken) + '" aria-label="Owner access token"></label></div>';
   h += '<div class="small">Policy proposals do not affect running decisions until an authorized administrator merges the pull request.</div>';
@@ -2503,9 +2549,10 @@ function renderKnowledge() {
       '<details><summary>View proposed change</summary><div class="knowledge-grid" style="margin-top:8px"><div><div class="small">Before · v' + p.base_version + '</div><pre>' + esc(p.base_content || '(new policy)') + '</pre></div><div><div class="small">After' + (p.archived ? ' · archived after merge' : '') + '</div><pre>' + esc(p.content) + '</pre></div></div></details>' +
       '<a href="' + esc(p.pr_url) + '" target="_blank" rel="noopener">Review PR #' + p.pr_number + ' ' + ICON.ext + '</a>' + (canApprove ? '<div class="knowledge-actions"><button class="btn primary" data-act="knowledge-approve" data-proposal="' + p.proposal_id + '">Approve and merge policy</button></div>' : '') + '</article>';
   });
-  h += '</section></div></div>';
+  h += '</section>';
   h += renderLearningKnowledge(k, canManage);
   root.innerHTML = h;
+  applyLayout('knowledge', root);
 }
 function loadBackups(force) {
   if (!consoleCan('backup.read')) return;
@@ -3185,7 +3232,7 @@ function analyticsChart(rows) {
 }
 function analyticsPanel() {
   var rows = S.analytics.filter(function (r) { return r.project === S.project; });
-  var h = '<section class="panel" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
+  var h = '<section class="panel" data-block="analytics" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
   if (S.anError) h += '<div class="empty">Analytics unavailable: ' + esc(S.anError) + '</div>';
   h += analyticsChart(rows);
   if (!rows.length) return h + '<div class="empty">No runs for this project in the last ' + ANALYTICS_DAYS + ' days.</div></section>';
@@ -3591,7 +3638,7 @@ function jobChecks(selected, attr) {
 function renderMachines() {
   var root = $('#view-machines'); if (!root) return;
   var state = S.machines, data = D(), nodes = (data.nodes || []).filter(function (n) { return n.has_agent || n.status !== 'joined'; });
-  var h = '<section class="panel"><div class="panel-h"><h2>Machines and AI</h2><span class="hint">Add machines and manage AI accounts, sessions, jobs and quota.</span><span class="spacer"></span>';
+  var h = '<section class="panel" data-block="machines"><div class="panel-h"><h2>Machines and AI</h2><span class="hint">Add machines and manage AI accounts, sessions, jobs and quota.</span><span class="spacer"></span>';
   if (consoleCan('nodes.manage')) h += '<button class="btn primary" data-act="machine-add-toggle">Add a machine</button>';
   h += '</div>';
   if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
@@ -3665,7 +3712,7 @@ function renderMachines() {
   h += '</div></section>';
   if (state.addMachine && consoleCan('nodes.manage')) {
     var j = state.join, projects = data.projects || [];
-    h += '<section class="panel"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
+    h += '<section class="panel" data-block="add-machine"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
     h += '<form class="project-form" id="machines-join-form" onsubmit="return false"><label>Machine name<input id="machine-name" required maxlength="63" value="' + esc(j.name) + '"></label>';
     h += '<label>Role<select id="machine-role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
     h += '<label>Project<select id="machine-project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
@@ -3675,6 +3722,7 @@ function renderMachines() {
     h += '<div class="small wide">This screen checks for the machine through live heartbeats. It will appear in the machine list after its agent joins.</div></form></section>';
   }
   root.innerHTML = h;
+  applyLayout('machines', root);
 }
 /* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
 function projectChecksCell(c) {
@@ -3691,7 +3739,7 @@ function projectChecksCell(c) {
 function toolWaitsPanel(d) {
   var waits = d.tool_waits || [];
   if (!waits.length) return '';
-  var h = '<section class="panel" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Tickets waiting for a tool</h2><span class="hint">Parked for a machine that has the tool; the owner is not asked</span></div>';
+  var h = '<section class="panel" data-block="tool-waits" id="p-tool-waits" aria-labelledby="h-tool-waits"><div class="panel-h"><h2 id="h-tool-waits">Tickets waiting for a tool</h2><span class="hint">Parked for a machine that has the tool; the owner is not asked</span></div>';
   h += '<table><thead><tr><th>Tool</th><th>Waiting tickets</th><th>Projects</th><th>Missing on</th><th>Maintenance ticket</th></tr></thead><tbody>';
   waits.forEach(function (w) {
     h += '<tr><td class="mono">' + esc(w.requirement) + '</td><td class="mono" title="' + esc(w.tickets.map(function (t) { return t.key; }).join(', ')) + '">' + esc(w.count) + '</td><td>' + esc((w.projects || []).join(', ')) + '</td><td>' + esc((w.machines || []).join(', ')) + '</td><td class="mono">' + (w.maintenance_ticket ? esc(w.maintenance_ticket) : '<span class="muted">after 24 h without a capable machine</span>') + '</td></tr>';
@@ -4022,6 +4070,7 @@ function captureNotificationPreferences() {
   state.preferencesDirty = true;
 }
 
+
 function quickSearchResults(query) {
   var q = String(query || '').trim().toLowerCase(), role = S.consoleUser && S.consoleUser.role;
   var views = MENU_ITEMS.filter(function (item) { return viewAllowed(item.view, role) && (!q || item.label.toLowerCase().indexOf(q) >= 0); })
@@ -4071,6 +4120,7 @@ function chooseSearchResult(kind, key, source) {
 }
 
 function render() {
+  if (S.layouts.drag) return;
   renderLive();
   renderFooter();
   renderLicenseNotice();
@@ -4155,6 +4205,7 @@ function setView(v) {
   }
   if (S.view === v) return;
   S.view = v;
+  S.layouts.mode = '';
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
   showView();
   try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
@@ -4171,6 +4222,252 @@ function setView(v) {
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
+/* ---------- customizable layout (docs/v4/console-layouts.md) ----------
+   Every section of a page is a block (data-block="<id>"). The server keeps one layout per person and page
+   (/v1/console/layouts): order, size (small, medium, large, full) and hidden. applyLayout() wraps the rendered blocks
+   in a grid after each render; layout mode adds a handle, size buttons and Hide to every block. */
+var LAYOUT_PAGES = { cc: 'dashboard', delivery: 'delivery', review: 'review', machines: 'machines', knowledge: 'knowledge', users: 'users' };
+var LAYOUT_SIZES = [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large'], ['full', 'Full width']];
+/* Ids in the model's order; ids the model does not know (a block newer than the saved layout) go to the end. */
+function layoutOrder(blocks, ids) {
+  var rank = {}; (blocks || []).forEach(function (b, i) { rank[b.id] = i; });
+  var known = ids.filter(function (id) { return rank[id] != null; }).sort(function (a, b) { return rank[a] - rank[b]; });
+  return known.concat(ids.filter(function (id) { return rank[id] == null; }));
+}
+/* Put the blocks on screen (in their new order) back into the model; blocks that are not on screen keep their place. */
+function layoutMerge(blocks, present) {
+  var onScreen = {}; present.forEach(function (b) { onScreen[b.id] = true; });
+  var queue = present.slice(), out = [];
+  (blocks || []).forEach(function (b) { out.push(onScreen[b.id] && queue.length ? queue.shift() : b); });
+  return out.concat(queue);
+}
+/* Move one block among the blocks that are shown. where: -1, 1, 'start' or 'end'. */
+function layoutMove(blocks, id, where, shown) {
+  var vis = blocks.map(function (b) { return b.id; }).filter(function (i) { return shown.indexOf(i) >= 0; });
+  var at = vis.indexOf(id); if (at < 0) return null;
+  var to = where === 'start' ? 0 : where === 'end' ? vis.length - 1 : at + where;
+  if (to < 0 || to >= vis.length || to === at) return { blocks: blocks, position: at + 1, total: vis.length, moved: false };
+  var list = blocks.slice(), from = list.map(function (b) { return b.id; }).indexOf(id), item = list.splice(from, 1)[0];
+  var ti = list.map(function (b) { return b.id; }).indexOf(vis[to]);
+  list.splice(to > at ? ti + 1 : ti, 0, item);
+  return { blocks: list, position: to + 1, total: vis.length, moved: true };
+}
+function layoutModel(view) { var page = LAYOUT_PAGES[view]; return page && S.layouts.pages[page] || null; }
+function layoutRoot(view) { return view === 'delivery' ? $('#dbody') : $('#view-' + view); }
+function layoutBlocksIn(container) {
+  return Array.prototype.filter.call(container.children, function (el) { return el.hasAttribute && el.hasAttribute('data-block'); });
+}
+function layoutHidden(blocks, view) {
+  var hidden = (blocks || []).filter(function (b) { return b.hidden; });
+  if (view === 'cc' && S.consoleUser && !consoleCan('view.machines_ai')) {
+    var restricted = ['usage', 'tokens', 'quota', 'tool-waits', 'autonomy'];
+    hidden = hidden.filter(function (b) { return restricted.indexOf(b.id) < 0; });
+  }
+  return hidden;
+}
+/* Every Dashboard block shares one grid so a person can move it across Work, AI and machines, and extra panels. */
+function applyLayout(view, root) {
+  var page = LAYOUT_PAGES[view], model = layoutModel(view);
+  if (!page || !root || !model || !root.children) return;
+  var editing = S.layouts.mode === page, meta = {}, hidden = layoutHidden(model.blocks, view);
+  model.blocks.forEach(function (b) { meta[b.id] = b; });
+  var bar = document.createElement('div');
+  bar.className = 'layout-bar'; bar.setAttribute('data-layout-bar', page);
+  bar.innerHTML = layoutBarHtml(editing, hidden, page);
+  var grid = document.createElement('div'), els, byId = {};
+  grid.className = 'blocks' + (editing ? ' editing' : ''); grid.setAttribute('data-layout-page', page);
+  if (view === 'cc') {
+    var headings = document.createElement('div');
+    headings.className = 'dashboard-layout-headings';
+    headings.setAttribute('aria-label', 'Dashboard sections');
+    Array.prototype.slice.call(root.querySelectorAll('.dash-section')).forEach(function (section) {
+      var title = section.querySelector('.dash-section-title');
+      if (title) headings.appendChild(title);
+    });
+    els = Array.prototype.slice.call(root.querySelectorAll('[data-block]'));
+    els.forEach(function (el) { byId[el.getAttribute('data-block')] = el; });
+    var dashboardIds = layoutOrder(model.blocks, Object.keys(byId));
+    var dashboardShown = dashboardIds.filter(function (id) { return !(meta[id] && meta[id].hidden); });
+    root.appendChild(bar); root.appendChild(headings); root.appendChild(grid);
+    dashboardIds.forEach(function (id) {
+      var el = byId[id]; if (!el) return;
+      var b = meta[id] || { id: id, title: id, size: 'full', hidden: false };
+      var cell = document.createElement('div');
+      cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden;
+      if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, dashboardShown.indexOf(id) + 1, dashboardShown.length));
+      cell.appendChild(el); grid.appendChild(cell);
+    });
+    Array.prototype.slice.call(root.querySelectorAll('.dash-section')).forEach(function (section) { section.remove(); });
+    var title = root.querySelector('.dash-title');
+    var after = title ? title.nextSibling : root.firstChild;
+    root.insertBefore(bar, after);
+    root.insertBefore(headings, bar.nextSibling);
+    root.insertBefore(grid, headings.nextSibling);
+    return;
+  }
+  els = layoutBlocksIn(root);
+  if (!els.length) return;
+  root.insertBefore(bar, els[0]);
+  root.insertBefore(grid, els[0]);
+  els.forEach(function (el) { byId[el.getAttribute('data-block')] = el; });
+  var ids = layoutOrder(model.blocks, Object.keys(byId));
+  var shown = ids.filter(function (id) { return !(meta[id] && meta[id].hidden); });
+  ids.forEach(function (id) {
+    var b = meta[id] || { id: id, title: id, size: 'full', hidden: false };
+    var cell = document.createElement('div');
+    cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden;
+    if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, shown.indexOf(id) + 1, shown.length));
+    cell.appendChild(byId[id]); grid.appendChild(cell);
+  });
+}
+function layoutTools(b, position, total) {
+  var t = esc(b.title || b.id), id = esc(b.id);
+  var h = '<div class="block-tools" role="group" aria-label="Layout of ' + t + '">';
+  h += '<button type="button" class="block-handle" data-layout-handle data-id="' + id + '" title="Drag to move, or use the arrow keys" aria-label="Move ' + t + ', position ' + position + ' of ' + total + '. Arrow keys move it.">';
+  h += '<span aria-hidden="true">⠿</span> <span class="block-title">' + t + '</span></button>';
+  h += '<span class="block-sizes" role="group" aria-label="Width of ' + t + '">';
+  LAYOUT_SIZES.forEach(function (s) {
+    h += '<button type="button" class="btn sm" data-act="layout-size" data-id="' + id + '" data-size="' + s[0] + '" aria-pressed="' + (b.size === s[0]) + '" aria-label="' + s[1] + ' width for ' + t + '">' + s[1] + '</button>';
+  });
+  return h + '</span><button type="button" class="btn sm" data-act="layout-hide" data-id="' + id + '" aria-label="Hide ' + t + '">Hide</button></div>';
+}
+function layoutBarHtml(editing, hidden, page) {
+  if (!editing) return '<button type="button" class="btn sm" data-act="layout-edit">Customize layout</button>';
+  var h = '<button type="button" class="btn sm primary" data-act="layout-done">Done</button><button type="button" class="btn sm" data-act="layout-reset">Reset this page</button>';
+  h += '<span class="small muted">' + (page === 'dashboard' ? 'Arrange all Dashboard blocks together across Work and AI and machines. ' : '') +
+    'Drag a handle to move a block, or focus it and press the arrow keys. Choose a width or hide a block. Changes are saved for you.</span>';
+  h += '<div class="layout-hidden" role="group" aria-label="Hidden blocks">';
+  if (!hidden.length) h += '<span class="small muted">No hidden blocks.</span>';
+  else {
+    h += '<span class="small">Hidden blocks:</span>';
+    hidden.forEach(function (b) { h += '<button type="button" class="btn sm" data-act="layout-show" data-id="' + esc(b.id) + '" aria-label="Show ' + esc(b.title || b.id) + '">Show ' + esc(b.title || b.id) + '</button>'; });
+  }
+  return h + '</div>';
+}
+function layoutAnnounce(text) {
+  var el = document.getElementById('layout-live'); if (!el) return;
+  el.textContent = '';
+  setTimeout(function () { el.textContent = text; }, 30);
+}
+function layoutTitle(model, id) { var b = model.blocks.filter(function (x) { return x.id === id; })[0]; return b ? (b.title || b.id) : id; }
+function layoutRequest(page, method, payload) {
+  var options = { method: method };
+  if (payload != null) { options.headers = { 'Content-Type': 'application/json' }; options.body = payload; }
+  var request = S.layouts.chain.then(function () {
+    return fetch('/v1/console/layouts/' + page, options).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return method === 'DELETE' ? r.json() : null;
+    });
+  });
+  S.layouts.chain = request.catch(function () {});
+  return request;
+}
+function layoutPersist(page, model) {
+  var payload = JSON.stringify({ blocks: model.blocks.map(function (b) { return { id: b.id, size: b.size, hidden: !!b.hidden }; }) });
+  layoutRequest(page, 'PUT', payload).catch(function () {
+    toast('Layout not saved', 'The change is shown here but could not be stored. Try it again.', 'warn');
+  });
+}
+/* Apply a changed block list: store it, redraw, announce it and put the focus where the person was working. */
+function layoutCommit(blocks, say, focus) {
+  var model = layoutModel(S.view), page = LAYOUT_PAGES[S.view]; if (!model) return;
+  model.blocks = blocks; model.customized = true;
+  layoutPersist(page, model);
+  render();
+  layoutAnnounce(say);
+  var target = focus && $(focus); if (target && target.focus) target.focus();
+}
+function layoutAction(act, el) {
+  var page = LAYOUT_PAGES[S.view], model = layoutModel(S.view), id = el.getAttribute('data-id');
+  if (!page || !model) return;
+  var handle = '[data-layout-handle][data-id="' + id + '"]';
+  if (act === 'layout-edit') {
+    S.layouts.mode = page; render(); layoutAnnounce('Layout mode is on. Each block has a handle: focus it and use the arrow keys to move the block.');
+    var first = $('[data-layout-handle]'); if (first && first.focus) first.focus();
+  } else if (act === 'layout-done') {
+    S.layouts.mode = ''; render(); layoutAnnounce('Layout mode is off. Your layout is saved.');
+    var edit = $('[data-act="layout-edit"]'); if (edit && edit.focus) edit.focus();
+  } else if (act === 'layout-size') {
+    var size = el.getAttribute('data-size'), label = LAYOUT_SIZES.filter(function (s) { return s[0] === size; })[0];
+    var changed = model.blocks.map(function (b) { return b.id === id ? Object.assign({}, b, { size: size }) : b; });
+    layoutCommit(changed, layoutTitle(model, id) + ' set to ' + (label ? label[1].toLowerCase() : size) + ' width.', '[data-act="layout-size"][data-id="' + id + '"][data-size="' + size + '"]');
+  } else if (act === 'layout-hide' || act === 'layout-show') {
+    var hide = act === 'layout-hide';
+    var next = model.blocks.map(function (b) { return b.id === id ? Object.assign({}, b, { hidden: hide }) : b; });
+    layoutCommit(next, layoutTitle(model, id) + (hide ? ' is hidden. It is listed under hidden blocks.' : ' is shown again.'), hide ? '[data-act="layout-show"][data-id="' + id + '"], [data-layout-handle]' : handle);
+  } else if (act === 'layout-reset') {
+    if (typeof window.confirm === 'function' && !window.confirm('Return this page to the default layout for your role?')) return;
+    layoutRequest(page, 'DELETE').then(function (d) {
+      S.layouts.pages[page] = d; render();
+      layoutAnnounce('This page is back to the default layout for your role.');
+      var done = $('[data-act="layout-done"]'); if (done && done.focus) done.focus();
+    }).catch(function () { toast('Layout not reset', 'The default layout could not be restored. Try again.', 'warn'); });
+  }
+}
+function layoutKey(e) {
+  var handle = e.target.closest && e.target.closest('[data-layout-handle]'); if (!handle) return;
+  var where = { ArrowUp: -1, ArrowLeft: -1, ArrowDown: 1, ArrowRight: 1, Home: 'start', End: 'end' }[e.key];
+  if (where == null) return;
+  e.preventDefault();
+  var model = layoutModel(S.view), id = handle.getAttribute('data-id'); if (!model) return;
+  var siblings = Array.prototype.slice.call(handle.closest('.blocks').children);
+  var shown = siblings.filter(function (c) { return !c.hidden; }).map(function (c) { return c.getAttribute('data-block-id'); });
+  var result = layoutMove(model.blocks, id, where, shown); if (!result) return;
+  var title = layoutTitle(model, id);
+  if (!result.moved) { layoutAnnounce(title + ' is already ' + (result.position === 1 ? 'first' : 'last') + '. Position ' + result.position + ' of ' + result.total + '.'); return; }
+  layoutCommit(result.blocks, title + ' moved to position ' + result.position + ' of ' + result.total + '.', '[data-layout-handle][data-id="' + id + '"]');
+}
+function layoutDragStart(e) {
+  var handle = e.target.closest && e.target.closest('[data-layout-handle]');
+  if (!handle || (e.button != null && e.button > 0)) return;
+  var cell = handle.closest('.block-cell'); if (!cell) return;
+  e.preventDefault();
+  try { handle.setPointerCapture(e.pointerId); } catch (x) { /* not supported */ }
+  S.layouts.drag = { cell: cell, id: cell.getAttribute('data-block-id') };
+  cell.classList.add('dragging');
+}
+function layoutDragMove(e) {
+  var drag = S.layouts.drag; if (!drag) return;
+  if (e.clientY < 70) window.scrollBy(0, -24); else if (e.clientY > window.innerHeight - 70) window.scrollBy(0, 24);
+  var over = document.elementFromPoint(e.clientX, e.clientY), target = over && over.closest && over.closest('.block-cell');
+  if (!target || target === drag.cell || target.parentNode !== drag.cell.parentNode || target.hidden) return;
+  var kids = Array.prototype.slice.call(drag.cell.parentNode.children);
+  // The other blocks make room: the dragged block takes the place of the one it passes.
+  if (kids.indexOf(drag.cell) < kids.indexOf(target)) target.parentNode.insertBefore(drag.cell, target.nextSibling);
+  else target.parentNode.insertBefore(drag.cell, target);
+}
+function layoutDragEnd() {
+  var drag = S.layouts.drag; if (!drag) return;
+  S.layouts.drag = null;
+  drag.cell.classList.remove('dragging');
+  var model = layoutModel(S.view); if (!model) return;
+  var cells = Array.prototype.slice.call(drag.cell.parentNode.children);
+  var present = cells.map(function (c) {
+    var id = c.getAttribute('data-block-id');
+    return model.blocks.filter(function (b) { return b.id === id; })[0] || { id: id, title: id, size: 'full', hidden: false };
+  });
+  var merged = layoutMerge(model.blocks, present);
+  if (merged.map(function (b) { return b.id; }).join() === model.blocks.map(function (b) { return b.id; }).join()) { render(); return; }
+  var shown = cells.filter(function (c) { return !c.hidden; }).map(function (c) { return c.getAttribute('data-block-id'); });
+  layoutCommit(merged, layoutTitle(model, drag.id) + ' moved to position ' + (shown.indexOf(drag.id) + 1) + ' of ' + shown.length + '.', '[data-layout-handle][data-id="' + drag.id + '"]');
+}
+function loadLayouts() {
+  var who = S.consoleUser && S.consoleUser.user;
+  if (!who || S.layouts.busy || S.layouts.person === who) return;
+  S.layouts.busy = true;
+  fetch('/v1/console/layouts', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) { S.layouts.pages = d.pages || {}; S.layouts.person = who; })
+    .catch(function () { /* the pages keep their natural layout until the next try */ })
+    .then(function () { S.layouts.busy = false; render(); });
+}
+document.addEventListener('pointerdown', layoutDragStart);
+document.addEventListener('pointermove', layoutDragMove);
+document.addEventListener('pointerup', layoutDragEnd);
+document.addEventListener('pointercancel', layoutDragEnd);
+document.addEventListener('keydown', layoutKey);
+
 /* ---------- interactions ---------- */
 document.addEventListener('click', function (e) {
   if (e.target.closest('[data-stop]')) return;
@@ -4182,6 +4479,7 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act.indexOf('layout-') === 0) layoutAction(act, el);
   else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
   else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }
   else if (act === 'license-activate') {

@@ -1411,6 +1411,27 @@ renderDBody(); console.log(body.innerHTML);
     assert 'class="card" data-act="open-ticket" data-key="BETA-4"' not in result.stdout
 
 
+def test_escalation_project_breakdown_keeps_each_week_separate():
+    rendered = run_script(r"""
+S.consoleUser = {permissions: ['console.read', 'console.write']};
+S.esc.data = {metrics: {classes: ['missing_tool_or_environment', 'policy_message'],
+  labels: {missing_tool_or_environment: 'Missing tool', policy_message: 'Policy message'},
+  person_classes: [], this_week: {total: 4, share_without_person_pct: 100}, falling: true, top_causes: [],
+  weeks: [
+    {week_start: '2026-10-12', total: 3, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 2, policy_message: 0}, BETA: {missing_tool_or_environment: 1, policy_message: 0}}},
+    {week_start: '2026-10-19', total: 4, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 1, policy_message: 2}, BETA: {missing_tool_or_environment: 0, policy_message: 1}}}
+  ]}, register: {asked: [], resuming: [], decisions: [], amendments: []}};
+console.log(escalationsPanel());
+""")
+    assert '<th>Week</th><th>Project</th>' in rendered
+    assert '<td class="mono">2026-10-12</td><td class="mono">ALPHA</td><td>2</td><td>0</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">ALPHA</td><td>1</td><td>2</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">BETA</td><td>0</td><td>1</td>' in rendered
+    assert 'Project (all weeks shown)' not in rendered
+
+
 def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal():
     page = html()
     style = css()

@@ -72,6 +72,7 @@ def test_each_of_the_seven_classes_is_covered_by_the_recorded_escalations():
 @pytest.mark.parametrize("question", [
     "Which HTTP method does `/v1/foo` use?",
     "What does `/v1/work/claim` return?",
+    "Which status code does POST `/v1/escalations/raise` return?",
 ])
 def test_repository_answerable_route_question_does_not_reach_a_person(ctx, question):
     put_ticket(ctx, "TESTWP-401", "Acceptance criteria:\n- AC1: document the existing route")
@@ -554,6 +555,9 @@ def test_amendment_can_remove_a_criterion_and_triage_can_amend_through_the_regis
     assert done["action"] == "amended" and done["summary"] == "AC2 removed"
     assert "[removed" in ctx.db.one("SELECT description FROM tickets WHERE key='JOOWP-302'")["description"]
     assert esc.amend_description("no criteria here", "AC1", 1, "") is None
+    description, summary = esc.amend_description("- AC3: needs a device", "AC3", 77, "devices", today="2026-10-23")
+    assert summary == "AC3 narrowed"
+    assert esc.amend_description(description, "AC3", 77, "devices", today="2026-10-23") == (description, summary)
 
 
 def test_failed_jira_amendment_can_be_retried(ctx, monkeypatch):
@@ -572,14 +576,58 @@ def test_failed_jira_amendment_can_be_retried(ctx, monkeypatch):
     monkeypatch.setattr(ctx.jira, "set_description", fail_once)
     with pytest.raises(RuntimeError, match="Jira temporarily unavailable"):
         esc.amend_ticket(ctx, key, "JOOWP", "AC4", "dev_vm", "No Dev VM exists")
-    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))["n"] == 0
+    pending = ctx.db.one("SELECT id,decision FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))
+    assert pending and pending["decision"] == "pending"
     assert ctx.db.one("SELECT description FROM tickets WHERE key=%s", (key,))["description"] == original
 
     retried = esc.amend_ticket(ctx, key, "JOOWP", "AC4", "dev_vm", "No Dev VM exists")
     assert retried and retried["already"] is False
+    assert retried["decision"]["id"] == pending["id"]
     assert calls["n"] == 2
     assert "[narrowed" in ctx.db.one("SELECT description FROM tickets WHERE key=%s", (key,))["description"]
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))["n"] == 1
+
+
+def test_saved_owner_decision_retries_a_failed_ticket_resume(ctx, monkeypatch):
+    first_key, second_key = "JOOWP-329", "JOOWP-330"
+    export_decision = {**NEW, "topic": "Export format", "keywords": ["export", "format"]}
+    for key in (first_key, second_key):
+        add_ticket(ctx.db, key, status="Needs owner", labels=("owner-escalated",))
+        ctx.jira.status_of[key] = "Needs owner"
+    question = "Should the new export be CSV or JSON by default?"
+    for key in (first_key, second_key):
+        esc.dev_question(ctx, run_of(key), question)
+        asked = esc.triage_decision(ctx, run_of(key), export_decision, question)
+    assert asked["action"] == "waiting"
+    decision_id = asked["decision_id"]
+
+    real_transition = ctx.jira.transition_to
+    state = {"failed": False}
+
+    def fail_second_transition_once(key, target):
+        if key == second_key and not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("Jira transition unavailable")
+        return real_transition(key, target)
+
+    monkeypatch.setattr(ctx.jira, "transition_to", fail_second_transition_once)
+    monkeypatch.setattr(ctx.jira, "recent_comments", lambda key, limit=10: [
+        {"body": body} for comment_key, body in ctx.jira.comments if comment_key == key
+    ])
+    answer = esc.answer_decision(ctx, decision_id, "CSV", "owner selected CSV", "owner")
+    assert answer["status"] == "decided" and answer["decision"] == "CSV (owner selected CSV)"
+    waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (second_key,))
+    assert waiting == {"resolution": "resuming", "reached_person": True, "answer": answer["decision"]}
+    assert esc.register(ctx.db)["resuming"][0]["resuming_tickets"] == [second_key]
+    assert ctx.jira.status_of[second_key] == "Needs owner"
+
+    assert esc.retry_resumptions(ctx) == [second_key]
+    resumed = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (second_key,))
+    assert resumed == {"resolution": "person", "reached_person": True, "answer": answer["decision"]}
+    assert ctx.jira.status_of[second_key] == "To Do"
+    assert [body for key, body in ctx.jira.comments if key == second_key].count(
+        f"AI Flow · owner decision\nWhat: {export_decision['topic']}\nResult: {answer['decision']}\n"
+        f"Next: back to To Do; the developer continues with {esc.citation(answer)}") == 1
 
 
 def test_amendments_appear_in_the_weekly_report_and_never_block(client, ctx):

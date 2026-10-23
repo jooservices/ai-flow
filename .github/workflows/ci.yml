@@ -187,9 +187,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          LOGS="$RUNNER_TEMP/aiflow-acceptance-logs"
+          mkdir -p "$LOGS"
+          QUERY_LOG="$LOGS/release-list.log"
+          printf 'Querying published releases for %s\n' "$GITHUB_REPOSITORY" > "$QUERY_LOG"
           # A successful empty query means no published release exists. Query/auth failures must fail this job.
-          TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json isDraft,isPrerelease,publishedAt,tagName \
-            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | sort_by(.publishedAt) | reverse | .[:2] | .[].tagName')
+          if TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json isDraft,isPrerelease,publishedAt,tagName \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | sort_by(.publishedAt) | reverse | .[:2] | .[].tagName' 2>>"$QUERY_LOG"); then
+            printf 'Published release query succeeded. Results:\n%s\n' "$TAGS" >> "$QUERY_LOG"
+          else
+            status=$?
+            {
+              printf 'gh release list failed with exit status %s. Output:\n' "$status"
+              printf '%s\n' "$TAGS"
+            } >> "$QUERY_LOG"
+            exit "$status"
+          fi
           echo "target=$(printf '%s\n' "$TAGS" | sed -n 1p)" >> "$GITHUB_OUTPUT"
           echo "previous=$(printf '%s\n' "$TAGS" | sed -n 2p)" >> "$GITHUB_OUTPUT"
 
@@ -227,10 +240,20 @@ jobs:
         with:
           persist-credentials: false
       - name: Download nightly acceptance logs
+        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: clean-install-acceptance-nightly
           path: ${{ runner.temp }}/aiflow-acceptance-logs
+      - name: Ensure nightly bug ticket has diagnostic logs
+        if: always()
+        env:
+          ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/aiflow-acceptance-logs
+        run: |
+          mkdir -p "$ACCEPTANCE_LOG_DIR"
+          if ! compgen -G "$ACCEPTANCE_LOG_DIR/*.log" >/dev/null; then
+            printf 'The acceptance log artifact was unavailable; inspect the workflow run for job logs.\n' > "$ACCEPTANCE_LOG_DIR/artifact-download.log"
+          fi
       - name: Open the bug ticket
         env:
           GH_TOKEN: ${{ github.token }}

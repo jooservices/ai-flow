@@ -636,7 +636,7 @@ def _workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
-def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug():
+def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug(tmp_path):
     ci = _workflow("ci.yml")
     assert "schedule" in ci["on"] and "pull_request" in ci["on"]
     fast, full = ci["jobs"]["acceptance-fast"], ci["jobs"]["acceptance-full"]
@@ -657,20 +657,39 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     nightly_download = next(s for s in nightly_bug["steps"]
                             if s.get("uses", "").startswith("actions/download-artifact@"))
     assert nightly_download["with"]["name"] == "clean-install-acceptance-nightly"
+    assert nightly_download["continue-on-error"] == "true"
+    nightly_fallback = next(s for s in nightly_bug["steps"]
+                            if "Ensure nightly bug ticket has diagnostic logs" in s.get("name", ""))
+    assert nightly_fallback["if"] == "always()" and "artifact-download.log" in nightly_fallback["run"]
     nightly_open = next(s for s in nightly_bug["steps"] if "open-bug-ticket.sh" in s.get("run", ""))
     assert nightly_open["env"]["ACCEPTANCE_LOG_DIR"] == "${{ runner.temp }}/aiflow-acceptance-logs"
     assert "does not automatically open a bug issue" in DOC.read_text()
 
     release = _workflow("release-v4.yml")
-    for workflow, job_name in ((ci, "acceptance-full"), (release, "acceptance")):
+    for index, (workflow, job_name) in enumerate(((ci, "acceptance-full"), (release, "acceptance"))):
         steps = workflow["jobs"][job_name]["steps"]
         release_list = next(s for s in steps if "Two newest published releases" in s.get("name", ""))
         command = release_list["run"]
         assert "set -euo pipefail" in command
+        assert 'mkdir -p "$LOGS"' in command and 'QUERY_LOG="$LOGS/release-list.log"' in command
+        assert "if TAGS=$(gh release list" in command and '2>>"$QUERY_LOG"' in command
+        assert "gh release list failed with exit status" in command and 'exit "$status"' in command
         assert "gh release list" in command and "|| true" not in command
         assert "sort_by(.publishedAt)" in command
         assert 'target=$(printf' in command and 'sed -n 1p' in command
         assert 'previous=$(printf' in command and 'sed -n 2p' in command
+        runner_temp = tmp_path / f"release-query-{index}"
+        env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp),
+               "GITHUB_REPOSITORY": "jooservices/ai-flow", "GITHUB_OUTPUT": str(tmp_path / f"output-{index}")}
+        failed_query = subprocess.run(
+            ["bash", "-c", "gh() { printf 'simulated GitHub API failure\\n' >&2; return 73; }\n" + command],
+            env=env, capture_output=True, text=True,
+        )
+        assert failed_query.returncode == 73
+        query_log = runner_temp / "aiflow-acceptance-logs" / "release-list.log"
+        assert query_log.is_file()
+        assert "failed with exit status 73" in query_log.read_text()
+        assert "simulated GitHub API failure" in query_log.read_text()
 
     gate = release["jobs"]["acceptance"]
     full_step = next(s for s in gate["steps"] if "clean-install-acceptance.sh full" in s.get("run", ""))
@@ -695,6 +714,10 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     release_download = next(s for s in bug["steps"]
                             if s.get("uses", "").startswith("actions/download-artifact@"))
     assert release_download["with"]["name"] == "clean-install-acceptance-release"
+    assert release_download["continue-on-error"] == "true"
+    release_fallback = next(s for s in bug["steps"]
+                            if "Ensure release bug ticket has diagnostic logs" in s.get("name", ""))
+    assert release_fallback["if"] == "always()" and "artifact-download.log" in release_fallback["run"]
     candidate_upload = next(s for s in release["jobs"]["release"]["steps"]
                             if s.get("uses", "").startswith("actions/upload-artifact@"))
     assert candidate_upload["if"] == "always()" and candidate_upload["with"]["name"] == "clean-install-candidate-release"

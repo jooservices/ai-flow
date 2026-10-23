@@ -47,7 +47,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: aiflow4-edge
-      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || PathPrefix(`/business`) || PathPrefix(`/review`) || PathPrefix(`/stakeholder`) || PathPrefix(`/integrations`) || PathPrefix(`/help`) || PathPrefix(`/backup`) || Path(`/`) || Path(`/healthz`) || PathPrefix(`/login`) || PathPrefix(`/logout`)"
+      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || PathPrefix(`/business`) || PathPrefix(`/review`) || PathPrefix(`/stakeholder`) || PathPrefix(`/integrations`) || PathPrefix(`/help`) || PathPrefix(`/backup`) || PathPrefix(`/projects`) || PathPrefix(`/machines`) || Path(`/`) || Path(`/healthz`) || PathPrefix(`/login`) || PathPrefix(`/logout`)"
       traefik.http.routers.api.entrypoints: web
       traefik.http.services.api.loadbalancer.server.port: "8080"
       traefik.http.services.api.loadbalancer.healthcheck.path: /healthz

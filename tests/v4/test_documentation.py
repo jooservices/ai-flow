@@ -55,6 +55,17 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
         assert (site / "screens" / f"{view}.html").is_file()
 
 
+def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
+    users = (GUIDE / "screens" / "users.md").read_text()
+    sa = (GUIDE / "screens" / "sa.md").read_text()
+    console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    assert "Super Administrator" in users and "Owners and Leads cannot open" in users
+    assert "does not add, edit, or disable users" in users
+    hint = re.search(r"users: '([^']+)'", console).group(1)
+    assert "See the role and screen permissions" in hint
+    assert "Owner or Super Administrator" in sa and "console.write" in sa
+
+
 def test_help_route_serves_the_screen_pages(monkeypatch, site):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -93,6 +104,8 @@ def test_docs_contain_no_secrets():
 def test_site_builds_with_api_reference_generated_from_code(site):
     api = (site / "reference" / "api.html").read_text()
     assert "/v1/state" in api and "generated from the code" in api
+    assert "control API version v9.9.9" in api
+    assert "generated_at" in api and "array of object" in api and "required" in api
     assert not (GUIDE / "reference").exists()  # never written by hand
     assert (site / "index.html").is_file() and (site / "runbooks" / "ticket_stuck.html").is_file()
     assert 'href="../runbooks/upgrade_blocked.html"' in (site / "admin" / "upgrade.html").read_text()
@@ -134,6 +147,38 @@ def test_api_route_discovery_uses_the_fully_mounted_control_app():
     reference = docsite.api_reference_markdown()
     assert "GET /v1/tickets/{key}" in reference
     assert "GET /v1/services" in reference
+
+
+def test_generated_api_reference_shows_request_and_response_schema_fields():
+    reference = docsite.api_reference_markdown("v4-review")
+    assert "control API version v4-review" in reference
+    assert "Request body (application/json, required):" in reference
+    request = reference.split("### `POST /v1/github/pr`", 1)[1].split("\n### ", 1)[0]
+    assert "- `base`: string (required)" in request
+    assert "- `body`: string (optional)" in request
+    assert "Response `200`: Command Center, Delivery, and SA snapshot" in reference
+    assert "- `generated_at`: string (date-time) (required)" in reference
+    assert "- `nodes[].name`: string (required)" in reference
+    assert "- `totals.runs_24h`: integer (required)" in reference
+    api_module = "aiflow/v4/control/api.py"
+    schema_line = next(number for number, line in enumerate((ROOT / api_module).read_text().splitlines(), 1)
+                       if line.startswith("STATE_RESPONSE_SCHEMA ="))
+    state_spans = docsite.api_route_contract_spans()[api_module]["GET /v1/state"]
+    assert any(start <= schema_line <= end for start, end in state_spans)
+
+
+def test_shared_state_response_helper_is_tracked_against_its_routes():
+    module = "aiflow/v4/control/state.py"
+    contracts = docsite.api_route_contract_spans()[module]
+    assert {"GET /v1/state", "GET /v1/deploy/state"} <= set(contracts)
+    gaps = docsite.documentation_gaps([module], routes=docsite.api_routes_by_module())
+    assert gaps
+    assert "/v1/state" in " ".join(gaps)
+    assert "/v1/deploy/state" in " ".join(gaps)
+    docs = "docs/v4/state-api.md"
+    text = "The shared snapshot is served by GET /v1/state and GET /v1/deploy/state."
+    assert docsite.documentation_gaps([module, docs], read=lambda _path: text,
+                                      routes=docsite.api_routes_by_module()) == []
 
 
 def test_unchanged_ui_api_routes_are_not_reported_as_removed(monkeypatch):
@@ -383,8 +428,10 @@ def test_release_artifact_includes_the_site(tmp_path):
                    cwd=ROOT, env=env, check=True, capture_output=True)
     with tarfile.open(tarball) as tar:
         names = tar.getnames()
+        api = tar.extractfile("docs-site/reference/api.html").read().decode()
     assert "docs-site/index.html" in names and "docs-site/runbooks/ticket_stuck.html" in names
     assert "docs-site/reference/api.html" in names
+    assert "control API version v9.9.9" in api
     assert any(n.startswith("aiflow/v4/") for n in names) and "deploy/v4/README.md" in names
     release = (ROOT / ".github/workflows/release-v4.yml").read_text()
     assert release.index("add-docs-site.sh") < release.index("sha256sum")

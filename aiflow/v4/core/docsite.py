@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import typing
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -52,6 +53,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderReviews": ("review",),
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
+    "renderMachines": ("machines",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),
@@ -143,14 +145,14 @@ def _mounted_control_app():
 
 
 # --- API reference, generated from the FastAPI app --------------------------------------------------------------
-def api_reference_markdown() -> str:
+def api_reference_markdown(version: str = "") -> str:
     """Markdown for every route of the control API, from the app's OpenAPI schema."""
     from .. import VERSION
 
     schema = _mounted_control_app().openapi()
     out = ["# API reference", "",
            f"**Assumes:** you know HTTP and JSON, you have a role or a token that may call the endpoint, and you use "
-           f"control API version {VERSION}. This page is generated from the code in the mounted FastAPI control app "
+           f"control API version {version or VERSION}. This page is generated from the code in the mounted FastAPI control app "
            "when "
            "the documentation site is built; do not edit it by hand.", "",
            "Console routes need a signed-in session when console login is on. Node, worker, reviewer and owner "
@@ -171,17 +173,106 @@ def api_reference_markdown() -> str:
             text = " ".join((op.get("description") or op.get("summary") or "").split())
             if text:
                 out += [text, ""]
-            params = [f"`{p['name']}` ({p['in']}{', required' if p.get('required') else ''})"
+            params = [f"`{p['name']}` ({p['in']}, {_schema_type(p.get('schema') or {}, schema['components']['schemas'])}"
+                      f"{', required' if p.get('required') else ', optional'})"
                       for p in op.get("parameters", [])]
             if params:
                 out += ["Parameters: " + ", ".join(params), ""]
-            body = (((op.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema") or {}
-            if body.get("$ref"):
-                name = body["$ref"].rsplit("/", 1)[-1]
-                fields = ", ".join(f"`{k}`" for k in (schema["components"]["schemas"].get(name, {}).get("properties") or {}))
-                out += [f"Body: `{name}`" + (f" with {fields}" if fields else ""), ""]
-            out += ["Responses: " + ", ".join(f"`{c}`" for c in sorted(op.get("responses", {}))), ""]
+            request = op.get("requestBody") or {}
+            request_content = request.get("content") or {}
+            for content_type, media in sorted(request_content.items()):
+                body = media.get("schema") or {}
+                out += [f"Request body ({content_type}{', required' if request.get('required') else ', optional'}):",
+                        *_schema_markdown(body, schema["components"]["schemas"]), ""]
+            for code, response in sorted(op.get("responses", {}).items()):
+                response = _resolve_openapi_ref(response, schema)
+                out += [f"Response `{code}`: {response.get('description', '').strip() or 'No description.'}"]
+                for content_type, media in sorted((response.get("content") or {}).items()):
+                    out += [f"\nSchema ({content_type}):", *_schema_markdown(
+                        media.get("schema") or {}, schema["components"]["schemas"])]
+                out.append("")
     return "\n".join(out) + "\n"
+
+
+def _resolve_openapi_ref(value: dict, schema: dict) -> dict:
+    """Resolve an OpenAPI component reference without mutating the source schema."""
+    result = value
+    seen = set()
+    while isinstance(result, dict) and result.get("$ref"):
+        ref = result["$ref"]
+        if ref in seen or not ref.startswith("#/components/"):
+            return result
+        seen.add(ref)
+        node = schema
+        try:
+            for part in ref.removeprefix("#/").split("/"):
+                node = node[part]
+        except (KeyError, TypeError):
+            return result
+        result = node
+    return result
+
+
+def _schema_type(value: dict, components: dict, seen: frozenset[str] = frozenset()) -> str:
+    """Readable JSON type for an OpenAPI schema, including references, arrays and unions."""
+    if not isinstance(value, dict):
+        return "any"
+    ref = value.get("$ref")
+    if ref:
+        name = ref.rsplit("/", 1)[-1]
+        if name in seen:
+            return name
+        return _schema_type(components.get(name, {}), components, seen | {name})
+    for union in ("anyOf", "oneOf"):
+        if value.get(union):
+            return " or ".join(_schema_type(item, components, seen) for item in value[union])
+    kind = value.get("type")
+    if isinstance(kind, list):
+        return " or ".join(map(str, kind))
+    if kind == "array":
+        return f"array of {_schema_type(value.get('items') or {}, components, seen)}"
+    if kind:
+        suffix = f" ({value['format']})" if value.get("format") else ""
+        return str(kind) + suffix
+    if value.get("properties"):
+        return "object"
+    if value.get("enum"):
+        return "string"
+    return "any"
+
+
+def _schema_markdown(value: dict, components: dict, prefix: str = "", required: bool = True,
+                     depth: int = 0, seen: frozenset[str] = frozenset()) -> list[str]:
+    """List the schema's fields with JSON types and required status; recurse through nested objects."""
+    value = _resolve_openapi_ref(value, {"components": {"schemas": components}})
+    ref_name = value.get("$ref", "").rsplit("/", 1)[-1] if isinstance(value, dict) else ""
+    if ref_name:
+        if ref_name in seen:
+            return [f"- `{prefix or 'value'}`: {ref_name} (recursive)" ]
+        seen = seen | {ref_name}
+    if not isinstance(value, dict):
+        return [f"- `{prefix or 'value'}`: any" ]
+    properties = value.get("properties") or {}
+    if not properties:
+        return [f"- `{prefix or 'value'}`: {_schema_type(value, components, seen)}"
+                f"{' (required)' if required else ' (optional)'}"]
+    rows = []
+    required_names = set(value.get("required") or ())
+    for name, field in sorted(properties.items()):
+        path = f"{prefix}.{name}" if prefix else name
+        is_required = name in required_names
+        description = " ".join(str(field.get("description", "")).split())
+        suffix = f" — {description}" if description else ""
+        rows.append(f"- `{path}`: {_schema_type(field, components, seen)} "
+                    f"({'required' if is_required else 'optional'}){suffix}")
+        nested = _resolve_openapi_ref(field, {"components": {"schemas": components}})
+        if depth < 2 and isinstance(nested, dict):
+            if nested.get("type") == "array":
+                nested = nested.get("items") or {}
+            if nested.get("properties") or nested.get("$ref"):
+                rows.extend(_schema_markdown(nested, components, path + "[]" if field.get("type") == "array" else path,
+                                             True, depth + 1, seen))
+    return rows
 
 
 # --- Markdown subset -> HTML -------------------------------------------------------------------------------------
@@ -306,11 +397,11 @@ SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens
             ("runbooks", "Runbooks"), ("reference", "Reference")]
 
 
-def collect_pages(guide: Path = GUIDE, with_api: bool = True) -> dict[str, str]:
+def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
     if with_api:
-        pages[API_PAGE] = api_reference_markdown()
+        pages[API_PAGE] = api_reference_markdown(version)
     return pages
 
 
@@ -334,7 +425,7 @@ def check_links(pages: dict[str, str]) -> list[str]:
 
 def build(out: Path, version: str = "", guide: Path = GUIDE, with_api: bool = True) -> list[str]:
     """Write the static site to `out`; returns the relative HTML paths. Raises ValueError for broken links."""
-    pages = collect_pages(guide, with_api)
+    pages = collect_pages(guide, with_api, version)
     errors = check_links(pages)
     if errors:
         raise ValueError("documentation site has broken links:\n" + "\n".join(errors))
@@ -379,10 +470,116 @@ def site_dir() -> Path | None:
 
 
 # --- CI: documentation must follow the product ----------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _control_function_registry():
+    """Parse control functions and imports so route contracts include shared response helpers they call."""
+    modules: dict[str, tuple[str, ast.Module]] = {}
+    path_modules: dict[Path, str] = {}
+    for path in sorted(CONTROL.rglob("*.py")):
+        relative = path.relative_to(ROOT).with_suffix("")
+        parts = list(relative.parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        module = ".".join(parts)
+        modules[module] = (path.relative_to(ROOT).as_posix(), ast.parse(path.read_text(encoding="utf-8")))
+        path_modules[path.resolve()] = module
+    functions = {module: {node.name: node for node in ast.walk(tree)
+                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                 for module, (_, tree) in modules.items()}
+
+    def imported_targets(module: str, node: ast.AST) -> dict[str, tuple[str, str | None]]:
+        targets = {}
+        module_parts = module.split(".")
+        is_package = Path(modules[module][0]).name == "__init__.py"
+        package = module if is_package else ".".join(module_parts[:-1])
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                target = item.name
+                alias = item.asname or item.name.split(".")[0]
+                bound = target if item.asname else item.name.split(".")[0]
+                if bound in modules:
+                    targets[alias] = (bound, None)
+            return targets
+        if not isinstance(node, ast.ImportFrom):
+            return targets
+        base = package
+        if node.level:
+            pieces = base.split(".") if base else []
+            if node.level > len(pieces) + 1:
+                return targets
+            base = ".".join(pieces[:len(pieces) - node.level + 1])
+        target_module = ".".join(p for p in (base, node.module or "") if p)
+        for item in node.names:
+            alias = item.asname or item.name
+            if node.module is None:
+                candidate = ".".join(p for p in (target_module, item.name) if p)
+                if candidate in modules:
+                    targets[alias] = (candidate, None)
+            elif target_module in modules:
+                targets[alias] = (target_module, item.name)
+        return targets
+
+    module_imports = {module: {} for module in modules}
+    for module, (_, tree) in modules.items():
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                module_imports[module].update(imported_targets(module, node))
+    return modules, functions, module_imports, imported_targets, path_modules
+
+
+def _called_control_function_spans(endpoint, registry) -> list[tuple[str, tuple[int, int]]]:
+    """Find control helpers called directly by an API endpoint."""
+    modules, functions, module_imports, imported_targets, path_modules = registry
+    endpoint_code = getattr(endpoint, "__code__", None)
+    if endpoint_code is None:
+        return []
+    source_path = Path(endpoint_code.co_filename).resolve()
+    module = path_modules.get(source_path)
+    if module is None:
+        return []
+    start = endpoint_code.co_firstlineno
+    endpoint_node = next((fn for fn in functions.get(module, {}).values()
+                          if fn.name == endpoint.__name__
+                          and min([fn.lineno, *(item.lineno for item in getattr(fn, "decorator_list", ()))])
+                          <= start <= (fn.end_lineno or fn.lineno)), None)
+    if endpoint_node is None:
+        return []
+
+    imports = dict(module_imports[module])
+    for inner in ast.walk(endpoint_node):
+        if isinstance(inner, (ast.Import, ast.ImportFrom)):
+            imports.update(imported_targets(module, inner))
+    calls = set()
+    for inner in ast.walk(endpoint_node):
+        if not isinstance(inner, ast.Call):
+            continue
+        func = inner.func
+        if isinstance(func, ast.Name):
+            if func.id in functions.get(module, {}):
+                calls.add((module, func.id))
+            elif func.id in imports and imports[func.id][1]:
+                calls.add(imports[func.id])
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            target = imports.get(func.value.id)
+            if target and target[1] is None:
+                calls.add((target[0], func.attr))
+    result = []
+    for target_module, target_function in sorted(calls):
+        target_node = functions.get(target_module, {}).get(target_function or "")
+        if target_node is None or (target_module == module and target_function == endpoint.__name__):
+            continue
+        decorators = getattr(target_node, "decorator_list", ())
+        first = min([target_node.lineno, *(item.lineno for item in decorators)])
+        result.append((modules[target_module][0], (first, target_node.end_lineno or target_node.lineno)))
+    return result
+
+
+@lru_cache(maxsize=1)
 def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
     """Repo-relative API module -> method and route contract -> source spans of its handlers.
     Derived from the running app, so a new route module is watched without editing this file."""
     found: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    helper_registry = _control_function_registry()
     for route in _mounted_control_app().routes:
         endpoint = getattr(route, "endpoint", None)
         code = getattr(endpoint, "__code__", None)
@@ -399,6 +596,7 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
             span = (code.co_firstlineno, code.co_firstlineno)
         module = file.relative_to(ROOT).as_posix()
         schemas = _schema_spans(route)
+        helpers = _called_control_function_spans(endpoint, helper_registry)
         for method in sorted(getattr(route, "methods", ())):
             if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
                 contract = f"{method} {path}"
@@ -406,6 +604,8 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
                 # The request/response models are part of the route's contract: editing one changes the API.
                 for schema_module, schema_span in schemas:
                     found.setdefault(schema_module, {}).setdefault(contract, []).append(schema_span)
+                for helper_module, helper_span in helpers:
+                    found.setdefault(helper_module, {}).setdefault(contract, []).append(helper_span)
     return found
 
 
@@ -440,9 +640,44 @@ def _schema_spans(route) -> list[tuple[str, tuple[int, int]]]:
             continue
         if ROOT in file.parents:
             spans.append((file.relative_to(ROOT).as_posix(), (first, first + len(source) - 1)))
+    # OpenAPI responses may use a schema constant rather than a Pydantic model. Track the source assignment
+    # whenever the mounted route uses that exact object, so edits to the schema are attributed to its route.
+    response_ids: set[int] = set()
+
+    def collect_ids(value) -> None:
+        if isinstance(value, dict):
+            response_ids.add(id(value))
+            for key, item in value.items():
+                collect_ids(key)
+                collect_ids(item)
+        elif isinstance(value, (list, tuple)):
+            response_ids.add(id(value))
+            for item in value:
+                collect_ids(item)
+
+    collect_ids(getattr(route, "responses", {}))
+    endpoint_globals = getattr(route.endpoint, "__globals__", {})
+    source_file = Path(getattr(route.endpoint, "__code__").co_filename).resolve()
+    if ROOT in source_file.parents and response_ids:
+        try:
+            tree = ast.parse(source_file.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            tree = None
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    names = [node.target.id]
+                else:
+                    continue
+                if any(id(endpoint_globals.get(name)) in response_ids for name in names):
+                    spans.append((source_file.relative_to(ROOT).as_posix(),
+                                  (node.lineno, node.end_lineno or node.lineno)))
     return spans
 
 
+@lru_cache(maxsize=1)
 def api_routes_by_module() -> dict[str, set[str]]:
     """Repo-relative file of every module that registers control API routes -> its route paths."""
     return {module: {contract.split(" ", 1)[1] for contract in contracts}

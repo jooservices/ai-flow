@@ -1,13 +1,14 @@
 # Users and roles
 
-**Assumes:** you are signed in with the `users.manage` permission (Owner or Super Administrator).
+**Assumes:** you are signed in as a Super Administrator. In this version, Owners and Leads cannot open this screen.
 
-Users and roles (`/users`) lists the people who can sign in to the console and the role of each.
+Users and roles (`/users`) shows the signed-in account, its role, and which console screens that role can use. It does not list or edit other accounts.
 
-## Common tasks
+## What you can do here
 
-- Add a user and give them a role.
-- Change a role to widen or narrow the screens a person can open. The console hides screens a role may not use, and the API enforces the same permissions.
-- Disable a user who should no longer sign in.
+- Check which screens are available to your account.
+- Review the role assigned to your signed-in account.
+
+Invitations and role assignments use the configured console login process; this screen does not add, edit, or disable users.
 
 See the [security guide](../admin/security.md) for the recommendations on sign-in and access.

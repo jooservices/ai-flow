@@ -1,5 +1,7 @@
 # Safe containers for project checks
 
+**Console screens:** `projects`
+
 Projects can opt into a Docker-compatible runtime for checks that use `docker build`, `docker compose up`,
 `docker compose run`, or `docker run` with the current worktree mounted. In Command Center, enable **Checks need
 Docker containers** when adding a project. Existing projects can enable the runtime for a repository in
@@ -56,3 +58,15 @@ commands, host-root mounts, `/etc/aiflow/secrets`, and paths in another worktree
 
 The storage and mount checks run again in the node broker, after the control-plane policy hook. That keeps the
 runtime safe for project check scripts as well as direct commands from an AI tool.
+
+## Control API
+
+In **Projects**, the `containers` project or repository setting is checked during preflight, saved with the
+control-repository project configuration, and used to hold a ticket until its node reports the safe runtime.
+The relevant control API contracts are `POST /v1/projects/preflight`, `POST /v1/projects`,
+`GET /v1/projects/{key}/repositories`, and `PUT /v1/projects/{key}/repositories`.
+
+The node and worker admission path uses `GET /v1/version-releases/candidates`, `POST /v1/version-releases/claim`,
+and `POST /v1/work/claim` to avoid offering container work to a node without the runtime. A run passes permitted
+container commands through `POST /v1/policy/decide`; node operations remain managed through
+`POST /v1/nodes/{name}/operations`.

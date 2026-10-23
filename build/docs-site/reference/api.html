@@ -1,0 +1,1632 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>API reference - AI Flow</title><link rel="stylesheet" href="../style.css"></head><body><nav><a href="../index.html"><strong>AI Flow documentation</strong></a><h2>User guides</h2><a href="../user/administrator.html">User guide: Administrator</a><a href="../user/ba.html">User guide: BA</a><a href="../user/business.html">User guide: Business</a><a href="../user/delivery.html">User guide: Delivery</a><a href="../user/product_owner.html">User guide: Product owner</a><a href="../user/reviewer.html">User guide: Reviewer</a><a href="../user/sa.html">User guide: SA</a><a href="../user/stakeholder.html">User guide: Stakeholder</a><a href="../user/team_lead.html">User guide: Team Lead</a><h2>Console screens</h2><a href="../screens/backup.html">Backup &amp; Restore</a><a href="../screens/business.html">Business</a><a href="../screens/cc.html">Command Center</a><a href="../screens/delivery.html">Delivery</a><a href="../screens/integrations.html">Integrations</a><a href="../screens/knowledge.html">Knowledge</a><a href="../screens/lead.html">Team Lead</a><a href="../screens/licensing.html">Licence</a><a href="../screens/machines.html">Machines and AI</a><a href="../screens/notifications.html">Notifications</a><a href="../screens/projects.html">Projects</a><a href="../screens/review.html">Human review</a><a href="../screens/sa.html">SA health</a><a href="../screens/stakeholder.html">Stakeholder</a><a href="../screens/support.html">Support</a><a href="../screens/users.html">Users and roles</a><a href="../screens/work.html">Work board</a><h2>Administrator guide</h2><a href="../admin/backup.html">Administrator guide: backup</a><a href="../admin/install.html">Administrator guide: install</a><a href="../admin/security.html">Administrator guide: security</a><a href="../admin/upgrade.html">Administrator guide: upgrade</a><h2>Runbooks</h2><a href="../runbooks/account_quota.html">Runbook: account_quota</a><a href="../runbooks/backup_failure.html">Runbook: backup_failure</a><a href="../runbooks/backup_restore_test.html">Runbook: backup_restore_test</a><a href="../runbooks/canary_rollback.html">Runbook: canary_rollback</a><a href="../runbooks/canary_under_observed.html">Runbook: canary_under_observed</a><a href="../runbooks/config_pin.html">Runbook: config_pin</a><a href="../runbooks/fleet_rollback.html">Runbook: fleet_rollback</a><a href="../runbooks/fleet_rollout.html">Runbook: fleet_rollout</a><a href="../runbooks/flow_idle.html">Runbook: flow_idle</a><a href="../runbooks/index.html">Runbooks</a><a href="../runbooks/jira_auth.html">Runbook: jira_auth</a><a href="../runbooks/master_invalid_plan.html">Runbook: master_invalid_plan</a><a href="../runbooks/node_down.html">Runbook: node_down</a><a href="../runbooks/node_no_ai.html">Runbook: node_no_ai</a><a href="../runbooks/node_services.html">Runbook: node_services</a><a href="../runbooks/node_tools.html">Runbook: node_tools</a><a href="../runbooks/openobserve_delivery.html">Runbook: openobserve_delivery</a><a href="../runbooks/quota_high.html">Runbook: quota_high</a><a href="../runbooks/quota_prediction.html">Runbook: quota_prediction</a><a href="../runbooks/release_verification.html">Runbook: release_verification</a><a href="../runbooks/role_coverage.html">Runbook: role_coverage</a><a href="../runbooks/role_health.html">Runbook: role_health</a><a href="../runbooks/run_hard_limit.html">Runbook: run_hard_limit</a><a href="../runbooks/run_slow.html">Runbook: run_slow</a><a href="../runbooks/ticket_stuck.html">Runbook: ticket_stuck</a><a href="../runbooks/upgrade_blocked.html">Runbook: upgrade_blocked</a><a href="../runbooks/version_skew.html">Runbook: version_skew</a><h2>Reference</h2><a href="../reference/api.html">API reference</a></nav><main><h1 id="api-reference">API reference</h1>
+<p><strong>Assumes:</strong> you know HTTP and JSON, you have a role or a token that may call the endpoint, and you use control API version 4.0.0a1. This page is generated from the code in the mounted FastAPI control app when the documentation site is built; do not edit it by hand.</p>
+<p>Console routes need a signed-in session when console login is on. Node, worker, reviewer and owner routes need their bearer token (see <a href="../admin/security.html">Security</a>). Examples never contain a real token.</p>
+<h2 id="accounts">accounts</h2>
+<h3 id="delete-v1-accounts-account-id"><code>DELETE /v1/accounts/{account_id}</code></h3>
+<p>Remove Managed Account</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>confirm</code>: boolean (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="patch-v1-accounts-account-id"><code>PATCH /v1/accounts/{account_id}</code></h3>
+<p>Update Managed Account</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>action</code>: string or null (optional)</li><li><code>jobs</code>: array of string or null (optional)</li><li><code>sessions</code>: integer or null (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-probe"><code>POST /v1/accounts/{account_id}/probe</code></h3>
+<p>Account Probe</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>cost_usd</code>: number (optional)</li><li><code>credential_expires_at</code>: string (date-time) or null (optional)</li><li><code>duration_ms</code>: integer (optional)</li><li><code>error_kind</code>: string (optional)</li><li><code>model</code>: string (optional)</li><li><code>ok</code>: boolean (required)</li><li><code>quota</code>: object (optional)</li><li><code>reset_at</code>: string (date-time) or null (optional)</li><li><code>summary</code>: string (optional)</li><li><code>tokens_in</code>: integer (optional)</li><li><code>tokens_out</code>: integer (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-accounts-account-id-sign-in"><code>GET /v1/accounts/{account_id}/sign-in</code></h3>
+<p>Account Sign In Details</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-sign-in"><code>POST /v1/accounts/{account_id}/sign-in</code></h3>
+<p>Restart Account Sign In</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-sign-in-complete"><code>POST /v1/accounts/{account_id}/sign-in/complete</code></h3>
+<p>Complete Account Sign In</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-sign-in-status"><code>POST /v1/accounts/{account_id}/sign-in/status</code></h3>
+<p>Report Account Sign In Status</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>code</code>: string (optional)</li><li><code>error</code>: string (optional)</li><li><code>request_id</code>: string (required)</li><li><code>sign_in_url</code>: string (optional)</li><li><code>status</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-signin-complete"><code>POST /v1/accounts/{account_id}/signin-complete</code></h3>
+<p>A successful provider login unlocks the local worker's credential probe for this machine.</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>request_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-accounts-account-id-signin-prompt"><code>POST /v1/accounts/{account_id}/signin-prompt</code></h3>
+<p>A machine reports the provider's sign-in link and device code so Command Center can show them. The credential itself is created by the provider CLI on the machine and never sent here.</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>code</code>: string (required)</li><li><code>expires_in_s</code>: integer (optional)</li><li><code>link</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-accounts-account-id-spec"><code>GET /v1/accounts/{account_id}/spec</code></h3>
+<p>Account Spec</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="analytics">analytics</h2>
+<h3 id="get-v1-analytics-daily"><code>GET /v1/analytics/daily</code></h3>
+<p>Analytics Daily</p>
+<p>Parameters: <code>days</code> (query, integer, optional), <code>project</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-analytics-usage"><code>GET /v1/analytics/usage</code></h3>
+<p>Analytics Usage</p>
+<p>Parameters: <code>days</code> (query, integer, optional), <code>group_by</code> (query, string, optional), <code>project</code> (query, string, optional), <code>ticket</code> (query, string, optional), <code>account</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="auth">auth</h2>
+<h3 id="post-v1-auth-login"><code>POST /v1/auth/login</code></h3>
+<p>Login</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="post-v1-auth-logout"><code>POST /v1/auth/logout</code></h3>
+<p>Logout</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="get-v1-auth-me"><code>GET /v1/auth/me</code></h3>
+<p>Me</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="get-v1-auth-users"><code>GET /v1/auth/users</code></h3>
+<p>Console Users</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="post-v1-auth-users"><code>POST /v1/auth/users</code></h3>
+<p>Create Console User</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h2 id="backups">backups</h2>
+<h3 id="get-v1-backups"><code>GET /v1/backups</code></h3>
+<p>Backup Status</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="put-v1-backups-config"><code>PUT /v1/backups/config</code></h3>
+<p>Backup Configure</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>destination_kind</code>: string (optional)</li><li><code>destination_path</code>: string (optional)</li><li><code>retention_days</code>: integer (optional)</li><li><code>s3_bucket</code>: string (optional)</li><li><code>s3_endpoint</code>: string (optional)</li><li><code>s3_prefix</code>: string (optional)</li><li><code>s3_region</code>: string (optional)</li><li><code>schedule</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-backups-key"><code>POST /v1/backups/key</code></h3>
+<p>Backup Key Download</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="post-v1-backups-run"><code>POST /v1/backups/run</code></h3>
+<p>Backup Request</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h2 id="business">business</h2>
+<h3 id="get-v1-business-key-change-requests"><code>GET /v1/business/{key}/change-requests</code></h3>
+<p>Business Change Requests</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-business-key-change-requests"><code>POST /v1/business/{key}/change-requests</code></h3>
+<p>Business Change Request</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>description</code>: string (optional)</li><li><code>epic</code>: string (optional)</li><li><code>title</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-business-key-release-progress"><code>GET /v1/business/{key}/release-progress</code></h3>
+<p>Business Release Progress</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-business-key-release-readiness"><code>GET /v1/business/{key}/release-readiness</code></h3>
+<p>Business Release Readiness</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="console">console</h2>
+<h3 id="get-v1-console-layouts"><code>GET /v1/console/layouts</code></h3>
+<p>Console Layouts</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="delete-v1-console-layouts-page"><code>DELETE /v1/console/layouts/{page}</code></h3>
+<p>Console Layout Reset</p>
+<p>Parameters: <code>page</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-console-layouts-page"><code>PUT /v1/console/layouts/{page}</code></h3>
+<p>Console Layout Save</p>
+<p>Parameters: <code>page</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>blocks</code>: array of object (required)</li><li><code>blocks[].hidden</code>: boolean (optional)</li><li><code>blocks[].id</code>: string (required)</li><li><code>blocks[].size</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-console-session"><code>GET /v1/console/session</code></h3>
+<p>Console Session</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="get-v1-console-users"><code>GET /v1/console/users</code></h3>
+<p>Console Users</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-console-users"><code>POST /v1/console/users</code></h3>
+<p>Add Console User</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>display_name</code>: string (optional)</li><li><code>email</code>: string (required)</li><li><code>project_keys</code>: array of string or null (optional)</li><li><code>roles</code>: array of string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-console-users-email"><code>PUT /v1/console/users/{email}</code></h3>
+<p>Update Console User</p>
+<p>Parameters: <code>email</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>project_keys</code>: array of string or null (optional)</li><li><code>roles</code>: array of string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="patch-v1-console-users-email-disabled"><code>PATCH /v1/console/users/{email}/disabled</code></h3>
+<p>Set Console User Disabled</p>
+<p>Parameters: <code>email</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>disabled</code>: boolean (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-console-view-as"><code>POST /v1/console/view-as</code></h3>
+<p>Console View As</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>role</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-console-view-as-stop"><code>POST /v1/console/view-as/stop</code></h3>
+<p>Console Stop View As</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h2 id="decisions">decisions</h2>
+<h3 id="post-v1-decisions"><code>POST /v1/decisions</code></h3>
+<p>Decision Add</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>decision</code>: string (required)</li><li><code>keywords</code>: array of string (optional)</li><li><code>patterns</code>: array of string (optional)</li><li><code>project</code>: string (optional)</li><li><code>title</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-decisions-decision-id-answer"><code>POST /v1/decisions/{decision_id}/answer</code></h3>
+<p>Decision Answer</p>
+<p>Parameters: <code>decision_id</code> (path, integer, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>choice</code>: string (optional)</li><li><code>note</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-decisions-decision-id-retire"><code>POST /v1/decisions/{decision_id}/retire</code></h3>
+<p>Decision Retire</p>
+<p>Parameters: <code>decision_id</code> (path, integer, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="deploy">deploy</h2>
+<h3 id="get-v1-deploy-ci-state"><code>GET /v1/deploy/ci-state</code></h3>
+<p>CI state of a commit (pending|failed|ok|none) through the connection for its repository.</p>
+<p>Parameters: <code>repo</code> (query, string, required), <code>sha</code> (query, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-deploy-state"><code>GET /v1/deploy/state</code></h3>
+<p>The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token.</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="escalations">escalations</h2>
+<h3 id="get-v1-escalations"><code>GET /v1/escalations</code></h3>
+<p>Escalation Overview</p>
+<p>Parameters: <code>weeks</code> (query, integer, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-escalations-raise"><code>POST /v1/escalations/raise</code></h3>
+<p>A developer run stopped on a question: classify it and resolve the classes that never need a person.</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>question</code>: string (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-escalations-triage"><code>POST /v1/escalations/triage</code></h3>
+<p>The triage AI's decision goes through the register: applied, amended, asked once, or refused.</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>answer</code>: string (optional)</li><li><code>criterion</code>: string (optional)</li><li><code>decision</code>: string (required)</li><li><code>escalation_class</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>keywords</code>: array of string (optional)</li><li><code>narrowed</code>: string (optional)</li><li><code>options</code>: array of string (optional)</li><li><code>question</code>: string (optional)</li><li><code>recommended</code>: string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>topic</code>: string (optional)</li><li><code>why</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="events">events</h2>
+<h3 id="post-v1-events"><code>POST /v1/events</code></h3>
+<p>Events In</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>events</code>: array of object (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="github">github</h2>
+<h3 id="get-v1-github-checks"><code>GET /v1/github/checks</code></h3>
+<p>Github Checks</p>
+<p>Parameters: <code>run_id</code> (query, string, required), <code>fence</code> (query, integer, required), <code>sha</code> (query, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-github-ci-log"><code>GET /v1/github/ci-log</code></h3>
+<p>The tail of the failing CI job log of the run's pull request: a developer never has to ask for it.</p>
+<p>Parameters: <code>run_id</code> (query, string, required), <code>fence</code> (query, integer, required), <code>branch</code> (query, string, optional), <code>sha</code> (query, string, optional), <code>lines</code> (query, integer, optional), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-comment"><code>POST /v1/github/comment</code></h3>
+<p>Github Comment</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>body</code>: string (required)</li><li><code>fence</code>: integer (required)</li><li><code>number</code>: integer (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-delete-branch"><code>POST /v1/github/delete-branch</code></h3>
+<p>Delete the ticket's remote work branch through the connection assigned to its repository.</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>branch</code>: string (required)</li><li><code>fence</code>: integer (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-github-git-git-path"><code>GET /v1/github/git/{git_path}</code></h3>
+<p>Github Git Proxy Get</p>
+<p>Parameters: <code>git_path</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-git-git-path"><code>POST /v1/github/git/{git_path}</code></h3>
+<p>Github Git Proxy Post</p>
+<p>Parameters: <code>git_path</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-merge"><code>POST /v1/github/merge</code></h3>
+<p>Github Merge</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>method</code>: string (optional)</li><li><code>number</code>: integer (required)</li><li><code>run_id</code>: string (required)</li><li><code>title</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-pr"><code>POST /v1/github/pr</code></h3>
+<p>Github Pr</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>base</code>: string (required)</li><li><code>body</code>: string (optional)</li><li><code>draft</code>: boolean (optional)</li><li><code>fence</code>: integer (required)</li><li><code>head</code>: string (required)</li><li><code>repo</code>: string (required)</li><li><code>run_id</code>: string (required)</li><li><code>title</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-token"><code>POST /v1/github/token</code></h3>
+<p>Github Token</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>branch</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>repo</code>: string (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-github-update-branch"><code>POST /v1/github/update-branch</code></h3>
+<p>Github Update Branch</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>body</code>: string (required)</li><li><code>fence</code>: integer (required)</li><li><code>number</code>: integer (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="healthz">healthz</h2>
+<h3 id="get-healthz"><code>GET /healthz</code></h3>
+<p>Healthz</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h2 id="install-sh">install.sh</h2>
+<h3 id="get-v1-install-sh"><code>GET /v1/install.sh</code></h3>
+<p>Node Install Script</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (text/plain):</p>
+<ul><li><code>value</code>: string (required)</li></ul>
+<h2 id="integrations">integrations</h2>
+<h3 id="get-v1-integrations-github"><code>GET /v1/integrations/github</code></h3>
+<p>Github Connection Status</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="get-v1-integrations-github-connections"><code>GET /v1/integrations/github/connections</code></h3>
+<p>Github Connections Status</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-integrations-github-connections-token"><code>POST /v1/integrations/github/connections/token</code></h3>
+<p>Github Add Token</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>account</code>: string (optional)</li><li><code>label</code>: string (optional)</li><li><code>token</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="delete-v1-integrations-github-connections-connection-id"><code>DELETE /v1/integrations/github/connections/{connection_id}</code></h3>
+<p>Github Remove Connection</p>
+<p>Parameters: <code>connection_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-integrations-github-connections-connection-id-test"><code>POST /v1/integrations/github/connections/{connection_id}/test</code></h3>
+<p>Github Test Connection</p>
+<p>Parameters: <code>connection_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-integrations-github-connections-connection-id-token"><code>PUT /v1/integrations/github/connections/{connection_id}/token</code></h3>
+<p>Github Replace Token</p>
+<p>Parameters: <code>connection_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>account</code>: string (optional)</li><li><code>label</code>: string (optional)</li><li><code>token</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-integrations-github-imports"><code>POST /v1/integrations/github/imports</code></h3>
+<p>Github Import App</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-integrations-github-imports-pending-id-connect"><code>POST /v1/integrations/github/imports/{pending_id}/connect</code></h3>
+<p>Github Import Connect</p>
+<p>Parameters: <code>pending_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>installation_id</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-github-imports-pending-id-install"><code>GET /v1/integrations/github/imports/{pending_id}/install</code></h3>
+<p>Github Import Install</p>
+<p>Parameters: <code>pending_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-github-imports-pending-id-installations"><code>GET /v1/integrations/github/imports/{pending_id}/installations</code></h3>
+<p>Github Import Installations</p>
+<p>Parameters: <code>pending_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-github-installation-settings"><code>GET /v1/integrations/github/installation-settings</code></h3>
+<p>Github Open Installation Settings</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h3 id="get-v1-integrations-github-manifest-callback"><code>GET /v1/integrations/github/manifest/callback</code></h3>
+<p>Github Manifest Callback</p>
+<p>Parameters: <code>code</code> (query, string, required), <code>state</code> (query, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-github-manifest-start"><code>GET /v1/integrations/github/manifest/start</code></h3>
+<p>Github Manifest Start</p>
+<p>Parameters: <code>organization</code> (query, string, required), <code>connection</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (text/html):</p>
+<ul><li><code>value</code>: string (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-github-setup"><code>GET /v1/integrations/github/setup</code></h3>
+<p>Github Install Setup</p>
+<p>Parameters: <code>installation_id</code> (query, integer, required), <code>state</code> (query, string, required), <code>setup_action</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-integrations-jira"><code>GET /v1/integrations/jira</code></h3>
+<p>Jira Status</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-integrations-jira-api-token"><code>POST /v1/integrations/jira/api-token</code></h3>
+<p>Jira Api Token</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-integrations-jira-disconnect"><code>POST /v1/integrations/jira/disconnect</code></h3>
+<p>Jira Disconnect</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="get-v1-integrations-jira-oauth-callback"><code>GET /v1/integrations/jira/oauth/callback</code></h3>
+<p>Jira Oauth Callback</p>
+<p>Parameters: <code>state</code> (query, string, optional), <code>code</code> (query, string, optional), <code>error</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-integrations-jira-oauth-start"><code>POST /v1/integrations/jira/oauth/start</code></h3>
+<p>Jira Oauth Start</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h2 id="jira">jira</h2>
+<h3 id="post-v1-jira-key-comment"><code>POST /v1/jira/{key}/comment</code></h3>
+<p>Jira Comment</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>add_labels</code>: array of string (optional)</li><li><code>body</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>fields</code>: object (optional)</li><li><code>remove_labels</code>: array of string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>to</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-jira-key-description"><code>POST /v1/jira/{key}/description</code></h3>
+<p>Jira Description</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>add_labels</code>: array of string (optional)</li><li><code>body</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>fields</code>: object (optional)</li><li><code>remove_labels</code>: array of string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>to</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-jira-key-fields"><code>POST /v1/jira/{key}/fields</code></h3>
+<p>Jira Fields</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>add_labels</code>: array of string (optional)</li><li><code>body</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>fields</code>: object (optional)</li><li><code>remove_labels</code>: array of string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>to</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-jira-key-transition"><code>POST /v1/jira/{key}/transition</code></h3>
+<p>Jira Transition</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>add_labels</code>: array of string (optional)</li><li><code>body</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>fields</code>: object (optional)</li><li><code>remove_labels</code>: array of string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>to</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="knowledge">knowledge</h2>
+<h3 id="get-v1-knowledge-items"><code>GET /v1/knowledge/items</code></h3>
+<p>Knowledge Items</p>
+<p>Parameters: <code>project</code> (query, string, optional), <code>q</code> (query, string, optional), <code>include_retired</code> (query, boolean, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-knowledge-items"><code>POST /v1/knowledge/items</code></h3>
+<p>Knowledge Item Save</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>actor</code>: string (optional)</li><li><code>content</code>: string (required)</li><li><code>epic</code>: string (optional)</li><li><code>kind</code>: string (required)</li><li><code>project</code>: string (optional)</li><li><code>scope</code>: string (optional)</li><li><code>title</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-knowledge-items-item-id-action"><code>POST /v1/knowledge/items/{item_id}/{action}</code></h3>
+<p>Knowledge Item Action</p>
+<p>Parameters: <code>item_id</code> (path, integer, required), <code>action</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>actor</code>: string (optional)</li><li><code>content</code>: string (optional)</li><li><code>duplicate_id</code>: integer or null (optional)</li><li><code>epic</code>: string (optional)</li><li><code>project</code>: string (optional)</li><li><code>scope</code>: string (optional)</li><li><code>title</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-knowledge-proposals-proposal-id-approve"><code>POST /v1/knowledge/proposals/{proposal_id}/approve</code></h3>
+<p>Knowledge Approve</p>
+<p>Parameters: <code>proposal_id</code> (path, integer, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>approved_by</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-knowledge-resources"><code>GET /v1/knowledge/resources</code></h3>
+<p>Knowledge Resources</p>
+<p>Parameters: <code>include_archived</code> (query, boolean, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-knowledge-resources"><code>POST /v1/knowledge/resources</code></h3>
+<p>Knowledge Save</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>actor</code>: string (required)</li><li><code>archived</code>: boolean (optional)</li><li><code>content</code>: string (required)</li><li><code>id</code>: string (optional)</li><li><code>title</code>: string (required)</li><li><code>type</code>: string (required)</li><li><code>version</code>: integer or null (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-knowledge-resources-kind-resource-id-history"><code>GET /v1/knowledge/resources/{kind}/{resource_id}/history</code></h3>
+<p>Knowledge History</p>
+<p>Parameters: <code>kind</code> (path, string, required), <code>resource_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-knowledge-resources-kind-resource-id-restore"><code>POST /v1/knowledge/resources/{kind}/{resource_id}/restore</code></h3>
+<p>Knowledge Restore</p>
+<p>Parameters: <code>kind</code> (path, string, required), <code>resource_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>actor</code>: string (required)</li><li><code>version</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="licensing">licensing</h2>
+<h3 id="get-v1-licensing"><code>GET /v1/licensing</code></h3>
+<p>Licensing State</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-licensing-activate"><code>POST /v1/licensing/activate</code></h3>
+<p>Activate License</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>key</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-licensing-limits"><code>PUT /v1/licensing/limits</code></h3>
+<p>Update License Limits</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>limits</code>: object (required)</li><li><code>plan</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-licensing-offline"><code>POST /v1/licensing/offline</code></h3>
+<p>Activate License Offline</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>license_file</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-licensing-status"><code>GET /v1/licensing/status</code></h3>
+<p>Licensing Status</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="get-v1-licensing-usage"><code>GET /v1/licensing/usage</code></h3>
+<p>Licensing Usage</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="get-v1-licensing-usage-csv"><code>GET /v1/licensing/usage.csv</code></h3>
+<p>Licensing Usage Csv</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<h2 id="machines">machines</h2>
+<h3 id="post-v1-machines-name-accounts"><code>POST /v1/machines/{name}/accounts</code></h3>
+<p>Add Managed Account</p>
+<p>Parameters: <code>name</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>jobs</code>: array of string (required)</li><li><code>provider</code>: string (required)</li><li><code>sessions</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="master">master</h2>
+<h3 id="post-v1-master-actions"><code>POST /v1/master/actions</code></h3>
+<p>Master Action</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>account_id</code>: string (optional)</li><li><code>action</code>: string (required)</li><li><code>add_labels</code>: array of string (optional)</li><li><code>category</code>: string (optional)</li><li><code>detail</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>fields</code>: object (optional)</li><li><code>headline</code>: string (optional)</li><li><code>intent</code>: string (optional)</li><li><code>kind</code>: string (optional)</li><li><code>next</code>: string (optional)</li><li><code>observation_key</code>: string (optional)</li><li><code>options</code>: array of string (optional)</li><li><code>pause_minutes</code>: integer (optional)</li><li><code>remove_labels</code>: array of string (optional)</li><li><code>result</code>: string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>severity</code>: string (optional)</li><li><code>signature</code>: string (optional)</li><li><code>subject</code>: string (optional)</li><li><code>target_run_id</code>: string (optional)</li><li><code>target_status</code>: string (optional)</li><li><code>ticket</code>: string (optional)</li><li><code>title</code>: string (optional)</li><li><code>what</code>: string (optional)</li><li><code>why</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-master-autonomy"><code>GET /v1/master/autonomy</code></h3>
+<p>Master Autonomy</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="put-v1-master-autonomy-budget"><code>PUT /v1/master/autonomy/budget</code></h3>
+<p>Master Budget Update</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>daily_budget_minutes</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-master-candidate"><code>GET /v1/master/candidate</code></h3>
+<p>Master Cycle Candidate</p>
+<p>Parameters: <code>account</code> (query, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-master-context"><code>GET /v1/master/context</code></h3>
+<p>Master Context</p>
+<p>Parameters: <code>run_id</code> (query, string, required), <code>fence</code> (query, integer, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-master-flow-bugs"><code>POST /v1/master/flow-bugs</code></h3>
+<p>Master Flow Bugs</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-master-plan-outcome"><code>POST /v1/master/plan-outcome</code></h3>
+<p>Master Plan Outcome</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>run_id</code>: string (required)</li><li><code>valid</code>: boolean (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-master-report"><code>GET /v1/master/report</code></h3>
+<p>Master Report</p>
+<p>Parameters: <code>weeks</code> (query, integer, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="memory">memory</h2>
+<h3 id="get-v1-memory-search"><code>GET /v1/memory/search</code></h3>
+<p>Memory Search</p>
+<p>Parameters: <code>q</code> (query, string, optional), <code>project</code> (query, string, optional), <code>limit</code> (query, integer, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-memory-study-cases"><code>GET /v1/memory/study-cases</code></h3>
+<p>Memory Study Cases</p>
+<p>Parameters: <code>project</code> (query, string, optional), <code>limit</code> (query, integer, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="nodes">nodes</h2>
+<h3 id="post-v1-nodes-join"><code>POST /v1/nodes/join</code></h3>
+<p>Join</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>ip</code>: string (optional)</li><li><code>join_token</code>: string (required)</li><li><code>name</code>: string or null (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-join-tokens"><code>POST /v1/nodes/join-tokens</code></h3>
+<p>Issue Join Token</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>name</code>: string (required)</li><li><code>project</code>: string (required)</li><li><code>provision_key</code>: string (required)</li><li><code>role</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-join-tokens-inspect"><code>POST /v1/nodes/join-tokens/inspect</code></h3>
+<p>Inspect Join Token</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>join_token</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="delete-v1-nodes-name"><code>DELETE /v1/nodes/{name}</code></h3>
+<p>Remove Managed Node</p>
+<p>Parameters: <code>name</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>confirm</code>: boolean (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-check-probes"><code>POST /v1/nodes/{name}/check-probes</code></h3>
+<p>A node reports which check commands of a project ran on a clean checkout and which could not.</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>project</code>: string (required)</li><li><code>results</code>: array of object (optional)</li><li><code>signature</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-check-probes-token"><code>POST /v1/nodes/{name}/check-probes/token</code></h3>
+<p>Read-only token for the clean checkout on which a node runs a project's check commands.</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>project</code>: string (required)</li><li><code>repo</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-nodes-name-health"><code>GET /v1/nodes/{name}/health</code></h3>
+<p>What an installer needs to call a new node healthy: a fresh heartbeat and a green project preflight.</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-heartbeat"><code>POST /v1/nodes/{name}/heartbeat</code></h3>
+<p>Node Heartbeat</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>credential_expiries</code>: object (optional)</li><li><code>metrics</code>: object (optional)</li><li><code>release_protocol</code>: integer (optional)</li><li><code>release_version</code>: string (optional)</li><li><code>services</code>: object (optional)</li><li><code>slots_total</code>: integer (optional)</li><li><code>slots_used</code>: integer (optional)</li><li><code>tools</code>: object (optional)</li><li><code>workers</code>: array of object (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-join-command"><code>POST /v1/nodes/{name}/join-command</code></h3>
+<p>Create Join Command</p>
+<p>Parameters: <code>name</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>name</code>: string (required)</li><li><code>project</code>: string (optional)</li><li><code>role</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-nodes-name-operations"><code>GET /v1/nodes/{name}/operations</code></h3>
+<p>Node Operations</p>
+<p>Parameters: <code>name</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-operations"><code>POST /v1/nodes/{name}/operations</code></h3>
+<p>Create Node Operation</p>
+<p>Parameters: <code>name</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>action</code>: string (required)</li><li><code>component</code>: string (optional)</li></ul>
+<p>Response <code>202</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-nodes-name-operations-next"><code>GET /v1/nodes/{name}/operations/next</code></h3>
+<p>Next Node Operation</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-operations-operation-id-result"><code>POST /v1/nodes/{name}/operations/{operation_id}/result</code></h3>
+<p>Finish Node Operation</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>operation_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>result</code>: object (optional)</li><li><code>status</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-release-failures"><code>POST /v1/nodes/{name}/release-failures</code></h3>
+<p>Release Failure</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>detail</code>: string (optional)</li><li><code>release_version</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-nodes-name-work-acceptance"><code>PUT /v1/nodes/{name}/work-acceptance</code></h3>
+<p>Set Node Work Acceptance</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>accepting_work</code> (query, boolean, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>confirm</code>: boolean (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-nodes-name-worktrees-sweep"><code>POST /v1/nodes/{name}/worktrees/sweep</code></h3>
+<p>Which of a node's worktree directories can go: every directory of a ticket that is Done, and the per-run checkouts (intake, impact, triage) of a ticket that has no run in progress.</p>
+<p>Parameters: <code>name</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>dirs</code>: array of string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="notifications">notifications</h2>
+<h3 id="get-v1-notifications"><code>GET /v1/notifications</code></h3>
+<p>Notification Settings</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="put-v1-notifications-channels"><code>PUT /v1/notifications/channels</code></h3>
+<p>Notification Channel Save</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="delete-v1-notifications-channels-channel-id"><code>DELETE /v1/notifications/channels/{channel_id}</code></h3>
+<p>Notification Channel Delete</p>
+<p>Parameters: <code>channel_id</code> (path, integer, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-notifications-channels-channel-id-test"><code>POST /v1/notifications/channels/{channel_id}/test</code></h3>
+<p>Notification Channel Test</p>
+<p>Parameters: <code>channel_id</code> (path, integer, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-notifications-preferences"><code>PUT /v1/notifications/preferences</code></h3>
+<p>Notification Preferences Save</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h2 id="notify">notify</h2>
+<h3 id="post-v1-notify-triage"><code>POST /v1/notify/triage</code></h3>
+<p>Triage Alert</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>detail</code>: string (required)</li><li><code>fence</code>: integer (required)</li><li><code>run_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="policy">policy</h2>
+<h3 id="post-v1-policy-decide"><code>POST /v1/policy/decide</code></h3>
+<p>Policy Decide</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="projects">projects</h2>
+<h3 id="get-v1-projects"><code>GET /v1/projects</code></h3>
+<p>Managed Projects</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-projects"><code>POST /v1/projects</code></h3>
+<p>Add Project</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>base</code>: string (optional)</li><li><code>checks</code>: array of string (optional)</li><li><code>containers</code>: boolean (optional)</li><li><code>merge_method</code>: string (optional)</li><li><code>parallel_limit</code>: integer (optional)</li><li><code>priority</code>: integer (optional)</li><li><code>project</code>: string (required)</li><li><code>repo</code>: string (required)</li><li><code>site</code>: string (required)</li><li><code>stack</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-projects-catalog"><code>GET /v1/projects/catalog</code></h3>
+<p>Project Catalog</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-projects-preflight"><code>POST /v1/projects/preflight</code></h3>
+<p>Project Preflight Endpoint</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>base</code>: string (optional)</li><li><code>containers</code>: boolean (optional)</li><li><code>project</code>: string (required)</li><li><code>repo</code>: string (required)</li><li><code>site</code>: string (required)</li><li><code>stack</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="delete-v1-projects-key"><code>DELETE /v1/projects/{key}</code></h3>
+<p>Remove Project</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-projects-key-close"><code>POST /v1/projects/{key}/close</code></h3>
+<p>Close Project</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Request body (application/json, optional):</p>
+<ul><li><code>value</code>: object or null (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-projects-key-pause"><code>POST /v1/projects/{key}/pause</code></h3>
+<p>Pause Project</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>paused</code>: boolean (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-projects-key-report"><code>GET /v1/projects/{key}/report</code></h3>
+<p>Project Report</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>epic</code> (query, string or null, optional), <code>format</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-projects-key-repositories"><code>GET /v1/projects/{key}/repositories</code></h3>
+<p>Project Repositories</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-projects-key-repositories"><code>PUT /v1/projects/{key}/repositories</code></h3>
+<p>Save Project Repositories</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>epic_repositories</code>: object (optional)</li><li><code>repositories</code>: array of object (optional)</li><li><code>repositories[].base</code>: string (optional)</li><li><code>repositories[].checks</code>: array of string (optional)</li><li><code>repositories[].connection</code>: string (optional)</li><li><code>repositories[].containers</code>: boolean or null (optional)</li><li><code>repositories[].repo</code>: string (required)</li><li><code>repositories[].stack</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-projects-key-study-cases"><code>GET /v1/projects/{key}/study-cases</code></h3>
+<p>Project Study Cases</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>limit</code> (query, integer, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-projects-key-versions"><code>GET /v1/projects/{key}/versions</code></h3>
+<p>Project Versions</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="releases">releases</h2>
+<h3 id="get-v1-releases-sha-tar-gz"><code>GET /v1/releases/{sha}.tar.gz</code></h3>
+<p>Release File</p>
+<p>Parameters: <code>sha</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-releases-version-tar-gz-sigstore-json"><code>GET /v1/releases/{version}.tar.gz.sigstore.json</code></h3>
+<p>Release Signature</p>
+<p>Parameters: <code>version</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-releases-version-sha256sums"><code>GET /v1/releases/{version}/SHA256SUMS</code></h3>
+<p>Release Checksums</p>
+<p>Parameters: <code>version</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-releases-version-manifest"><code>GET /v1/releases/{version}/manifest</code></h3>
+<p>Release Manifest</p>
+<p>Parameters: <code>version</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="reviews">reviews</h2>
+<h3 id="get-v1-reviews"><code>GET /v1/reviews</code></h3>
+<p>Queue waiting items with their action set and project-filtered human-review metrics.</p>
+<p>Parameters: <code>project</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-reviews-export-csv"><code>GET /v1/reviews/export.csv</code></h3>
+<p>Export Review Metrics</p>
+<p>Parameters: <code>project</code> (query, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-answer"><code>POST /v1/reviews/{key}/answer</code></h3>
+<p>Answer Review Question</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>answer</code>: string (optional)</li><li><code>comment</code>: string (optional)</li><li><code>question</code>: string (optional)</li><li><code>reason</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-approve"><code>POST /v1/reviews/{key}/approve</code></h3>
+<p>Approve Review</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-ask-ai"><code>POST /v1/reviews/{key}/ask-ai</code></h3>
+<p>Ask Review Ai</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>answer</code>: string (optional)</li><li><code>comment</code>: string (optional)</li><li><code>question</code>: string (optional)</li><li><code>reason</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-reject"><code>POST /v1/reviews/{key}/reject</code></h3>
+<p>Reject Review</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>answer</code>: string (optional)</li><li><code>comment</code>: string (optional)</li><li><code>question</code>: string (optional)</li><li><code>reason</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-rework"><code>POST /v1/reviews/{key}/rework</code></h3>
+<p>Request Review Rework</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>answer</code>: string (optional)</li><li><code>comment</code>: string (optional)</li><li><code>question</code>: string (optional)</li><li><code>reason</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-reviews-key-skip-gate"><code>POST /v1/reviews/{key}/skip-gate</code></h3>
+<p>Skip Review Gate</p>
+<p>Parameters: <code>key</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="role-health">role-health</h2>
+<h3 id="get-v1-role-health"><code>GET /v1/role-health</code></h3>
+<p>Role Health State</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="put-v1-role-health-settings"><code>PUT /v1/role-health/settings</code></h3>
+<p>Role Health Settings</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>failure_percent</code>: integer (required)</li><li><code>window_runs</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="runs">runs</h2>
+<h3 id="post-v1-runs-run-id-heartbeat"><code>POST /v1/runs/{run_id}/heartbeat</code></h3>
+<p>Run Heartbeat</p>
+<p>Parameters: <code>run_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>progress</code>: object (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-runs-run-id-release"><code>POST /v1/runs/{run_id}/release</code></h3>
+<p>Run Release</p>
+<p>Parameters: <code>run_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>fence</code>: integer (required)</li><li><code>progress</code>: object (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-runs-run-id-result"><code>POST /v1/runs/{run_id}/result</code></h3>
+<p>Run Result</p>
+<p>Parameters: <code>run_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>branch</code>: string (optional)</li><li><code>cost_usd</code>: number (optional)</li><li><code>details</code>: object (optional)</li><li><code>error_kind</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>head_sha</code>: string (optional)</li><li><code>outcome</code>: string (required)</li><li><code>pr_url</code>: string (optional)</li><li><code>quota</code>: object (optional)</li><li><code>reset_at</code>: string (date-time) or null (optional)</li><li><code>summary</code>: string (optional)</li><li><code>tokens_in</code>: integer (optional)</li><li><code>tokens_out</code>: integer (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="services">services</h2>
+<h3 id="get-v1-services"><code>GET /v1/services</code></h3>
+<p>Active checks from Gatus (name, group, up, response time).</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h2 id="shared-accounts">shared-accounts</h2>
+<h3 id="get-v1-shared-accounts"><code>GET /v1/shared-accounts</code></h3>
+<p>List Accounts</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<h3 id="post-v1-shared-accounts"><code>POST /v1/shared-accounts</code></h3>
+<p>Create Account</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>explicit_only</code>: boolean (optional)</li><li><code>id</code>: string (required)</li><li><code>provider</code>: string (required)</li><li><code>roles</code>: array of string (optional)</li><li><code>session_limit</code>: integer (optional)</li><li><code>tier</code>: string (optional)</li></ul>
+<p>Response <code>201</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="delete-v1-shared-accounts-account-id"><code>DELETE /v1/shared-accounts/{account_id}</code></h3>
+<p>Remove Account</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>confirm</code> (query, boolean, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-shared-accounts-account-id-machines"><code>POST /v1/shared-accounts/{account_id}/machines</code></h3>
+<p>Enable Machine</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>node</code>: string (required)</li></ul>
+<p>Response <code>201</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="delete-v1-shared-accounts-account-id-machines-node"><code>DELETE /v1/shared-accounts/{account_id}/machines/{node}</code></h3>
+<p>Remove Machine</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>node</code> (path, string, required), <code>confirm</code> (query, boolean, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-shared-accounts-account-id-machines-node-signin"><code>POST /v1/shared-accounts/{account_id}/machines/{node}/signin</code></h3>
+<p>Start a fresh sign-in attempt on one machine: a new request id makes its agent run the provider login again (a failed or expired attempt otherwise leaves the machine waiting without a link).</p>
+<p>Parameters: <code>account_id</code> (path, string, required), <code>node</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="put-v1-shared-accounts-account-id-session-limit"><code>PUT /v1/shared-accounts/{account_id}/session-limit</code></h3>
+<p>Set Limit</p>
+<p>Parameters: <code>account_id</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>session_limit</code>: integer (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="stakeholder">stakeholder</h2>
+<h3 id="get-v1-stakeholder-key"><code>GET /v1/stakeholder/{key}</code></h3>
+<p>Stakeholder View</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-stakeholder-key-verdict"><code>POST /v1/stakeholder/{key}/verdict</code></h3>
+<p>Stakeholder Verdict</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>actual</code>: string (optional)</li><li><code>change_key</code>: string (required)</li><li><code>environment</code>: string (required)</li><li><code>expected</code>: string (optional)</li><li><code>release_commit</code>: string (optional)</li><li><code>screenshot_data</code>: string (optional)</li><li><code>screenshot_filename</code>: string (optional)</li><li><code>sender</code>: string (required)</li><li><code>target_key</code>: string (optional)</li><li><code>verdict</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="state">state</h2>
+<h3 id="get-v1-state"><code>GET /v1/state</code></h3>
+<p>State</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Command Center, Delivery, and SA snapshot</p>
+<p>Schema (application/json):</p>
+<ul><li><code>accounts</code>: array of object (required)</li><li><code>accounts[].check_failed</code>: boolean (required)</li><li><code>accounts[].cooldown</code>: object or null (required)</li><li><code>accounts[].cooldown.reason</code>: string (required)</li><li><code>accounts[].cooldown.seconds_left</code>: integer (required)</li><li><code>accounts[].cooldown_since</code>: string (date-time) or null (required)</li><li><code>accounts[].cooldown_until</code>: string (date-time) or null (required)</li><li><code>accounts[].cost_today</code>: number (required)</li><li><code>accounts[].credential_expires_at</code>: string (required)</li><li><code>accounts[].credential_expiry_warning</code>: boolean (required)</li><li><code>accounts[].effort</code>: string or null (required)</li><li><code>accounts[].explicit_only</code>: boolean (required)</li><li><code>accounts[].id</code>: string (required)</li><li><code>accounts[].idle_since</code>: string (date-time) or null (required)</li><li><code>accounts[].jobs</code>: array of string (required)</li><li><code>accounts[].last_error</code>: string (required)</li><li><code>accounts[].model</code>: string (required)</li><li><code>accounts[].node</code>: string (required)</li><li><code>accounts[].parallel</code>: integer (required)</li><li><code>accounts[].paused</code>: boolean (required)</li><li><code>accounts[].provider</code>: string (required)</li><li><code>accounts[].provider_status</code>: string (required)</li><li><code>accounts[].quota</code>: object (required)</li><li><code>accounts[].quota_awareness</code>: object (required)</li><li><code>accounts[].quota_awareness.at_risk</code>: boolean (required)</li><li><code>accounts[].quota_awareness.burn_rates</code>: object (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_day</code>: object (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_day.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_day.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_day.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_day.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_hour</code>: object (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_hour.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_hour.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_hour.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.last_hour.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.burn_rates.whole_window</code>: object (required)</li><li><code>accounts[].quota_awareness.burn_rates.whole_window.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.burn_rates.whole_window.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.whole_window.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.burn_rates.whole_window.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.confidence</code>: string (required)</li><li><code>accounts[].quota_awareness.history</code>: array of object (required)</li><li><code>accounts[].quota_awareness.history[].cost_usd</code>: number (required)</li><li><code>accounts[].quota_awareness.history[].day</code>: string (required)</li><li><code>accounts[].quota_awareness.history[].runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.history[].tokens</code>: integer (required)</li><li><code>accounts[].quota_awareness.history[].tokens_in</code>: integer (required)</li><li><code>accounts[].quota_awareness.history[].tokens_out</code>: integer (required)</li><li><code>accounts[].quota_awareness.is_estimate</code>: boolean (required)</li><li><code>accounts[].quota_awareness.largest_run</code>: object or null (required)</li><li><code>accounts[].quota_awareness.largest_run.context_tokens</code>: integer (required)</li><li><code>accounts[].quota_awareness.largest_run.cost_usd</code>: number (required)</li><li><code>accounts[].quota_awareness.largest_run.duration_s</code>: number (required)</li><li><code>accounts[].quota_awareness.largest_run.model</code>: string (required)</li><li><code>accounts[].quota_awareness.largest_run.ticket</code>: string or null (required)</li><li><code>accounts[].quota_awareness.largest_run.tokens</code>: integer (required)</li><li><code>accounts[].quota_awareness.rate_spread_ratio</code>: number or null (required)</li><li><code>accounts[].quota_awareness.runs_24h</code>: integer (required)</li><li><code>accounts[].quota_awareness.source</code>: string (required)</li><li><code>accounts[].quota_awareness.usage_7d</code>: object (required)</li><li><code>accounts[].quota_awareness.usage_7d.cost_usd</code>: number (required)</li><li><code>accounts[].quota_awareness.usage_7d.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.usage_7d.tokens</code>: integer (required)</li><li><code>accounts[].quota_awareness.usage_7d.tokens_in</code>: integer (required)</li><li><code>accounts[].quota_awareness.usage_7d.tokens_out</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows</code>: array of object (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates</code>: object (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_day</code>: object (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_day.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_day.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_day.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_day.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_hour</code>: object (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_hour.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_hour.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_hour.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.last_hour.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.whole_window</code>: object (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.whole_window.cost_usd_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.whole_window.runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.whole_window.steady_runs</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].burn_rates.whole_window.tokens_per_hour</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].cost_usd</code>: number (required)</li><li><code>accounts[].quota_awareness.windows[].label</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].left_pct</code>: number or null (required)</li><li><code>accounts[].quota_awareness.windows[].left_tokens</code>: integer or null (required)</li><li><code>accounts[].quota_awareness.windows[].name</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].prediction</code>: object (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.before_reset</code>: boolean (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.confidence</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.exhaustion_at</code>: string (date-time) or null (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.remaining_at_reset_pct</code>: number or null (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.remaining_now_pct</code>: number or null (required)</li><li><code>accounts[].quota_awareness.windows[].prediction.status</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].quota_tokens</code>: number or null (required)</li><li><code>accounts[].quota_awareness.windows[].reset_at</code>: string (date-time) or null (required)</li><li><code>accounts[].quota_awareness.windows[].reset_source</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].source</code>: string (required)</li><li><code>accounts[].quota_awareness.windows[].tokens</code>: integer (required)</li><li><code>accounts[].quota_awareness.windows[].used_pct</code>: number or null (required)</li><li><code>accounts[].quota_awareness.windows[].used_tokens</code>: integer (required)</li><li><code>accounts[].quota_resets_at</code>: string (date-time) or null (required)</li><li><code>accounts[].quota_used</code>: number or null (required)</li><li><code>accounts[].roles</code>: array of string (required)</li><li><code>accounts[].run</code>: object or null (required)</li><li><code>accounts[].run.elapsed_s</code>: integer or null (required)</li><li><code>accounts[].run.fence</code>: integer (required)</li><li><code>accounts[].run.id</code>: string (required)</li><li><code>accounts[].run.progress</code>: object (required)</li><li><code>accounts[].run.step</code>: string (required)</li><li><code>accounts[].run.summary</code>: string or null (optional)</li><li><code>accounts[].run.ticket</code>: string (required)</li><li><code>accounts[].runs_active</code>: integer (required)</li><li><code>accounts[].sign_in_pending</code>: boolean (required)</li><li><code>accounts[].sign_in_status</code>: string (required)</li><li><code>accounts[].status</code>: string (required)</li><li><code>accounts[].tier</code>: string (required)</li><li><code>accounts[].tokens_today</code>: integer (required)</li><li><code>accounts[].worker</code>: object (required)</li><li><code>active_runs</code>: array of object (required)</li><li><code>active_runs[].account</code>: string (required)</li><li><code>active_runs[].elapsed_s</code>: integer or null (required)</li><li><code>active_runs[].fence</code>: integer (required)</li><li><code>active_runs[].heartbeat_age_s</code>: integer or null (required)</li><li><code>active_runs[].id</code>: string (required)</li><li><code>active_runs[].lease_ms</code>: integer (required)</li><li><code>active_runs[].model</code>: string (required)</li><li><code>active_runs[].node</code>: string (required)</li><li><code>active_runs[].progress</code>: object (required)</li><li><code>active_runs[].project</code>: string (required)</li><li><code>active_runs[].provider</code>: string (required)</li><li><code>active_runs[].step</code>: string (required)</li><li><code>active_runs[].summary</code>: string or null (required)</li><li><code>active_runs[].ticket</code>: string (required)</li><li><code>control_repo</code>: string (required)</li><li><code>env</code>: string (required)</li><li><code>events</code>: array of object (required)</li><li><code>events[].account</code>: string (required)</li><li><code>events[].node</code>: string (required)</li><li><code>events[].outcome</code>: string (required)</li><li><code>events[].reason</code>: string (required)</li><li><code>events[].ticket</code>: string (required)</li><li><code>events[].ts</code>: string (date-time) (required)</li><li><code>events[].type</code>: string (required)</li><li><code>generated_at</code>: string (date-time) (required)</li><li><code>incidents</code>: array of object (required)</li><li><code>incidents[].closed_at</code>: string (date-time) or null (optional)</li><li><code>incidents[].detail</code>: string (required)</li><li><code>incidents[].id</code>: integer (required)</li><li><code>incidents[].kind</code>: string (required)</li><li><code>incidents[].opened_at</code>: string (date-time) (required)</li><li><code>incidents[].severity</code>: string (required)</li><li><code>incidents[].subject</code>: string (required)</li><li><code>incidents[].title</code>: string (required)</li><li><code>incidents_recent</code>: array of object (required)</li><li><code>incidents_recent[].closed_at</code>: string (date-time) or null (optional)</li><li><code>incidents_recent[].detail</code>: string (required)</li><li><code>incidents_recent[].id</code>: integer (required)</li><li><code>incidents_recent[].kind</code>: string (required)</li><li><code>incidents_recent[].opened_at</code>: string (date-time) (required)</li><li><code>incidents_recent[].severity</code>: string (required)</li><li><code>incidents_recent[].subject</code>: string (required)</li><li><code>incidents_recent[].title</code>: string (required)</li><li><code>links</code>: object (required)</li><li><code>links.gatus</code>: string (required)</li><li><code>links.mail</code>: string (required)</li><li><code>links.o2</code>: string (required)</li><li><code>nodes</code>: array of object (required)</li><li><code>nodes[].accepting_work</code>: boolean (required)</li><li><code>nodes[].accounts_assigned</code>: integer (required)</li><li><code>nodes[].capabilities</code>: array of string (required)</li><li><code>nodes[].desired_services</code>: array of object (required)</li><li><code>nodes[].desired_services[].healthcheck_configured</code>: boolean (required)</li><li><code>nodes[].desired_services[].name</code>: string (required)</li><li><code>nodes[].desired_services[].unit</code>: string (required)</li><li><code>nodes[].has_agent</code>: boolean (required)</li><li><code>nodes[].heartbeat_age_s</code>: integer or null (required)</li><li><code>nodes[].idle_since</code>: string (date-time) or null (required)</li><li><code>nodes[].in_control_repo</code>: boolean (required)</li><li><code>nodes[].ip</code>: string (required)</li><li><code>nodes[].joined_at</code>: string (date-time) (required)</li><li><code>nodes[].last_heartbeat</code>: string (date-time) or null (required)</li><li><code>nodes[].metrics</code>: object (required)</li><li><code>nodes[].missing_tools</code>: array of string (required)</li><li><code>nodes[].name</code>: string (required)</li><li><code>nodes[].notes</code>: string (required)</li><li><code>nodes[].projects</code>: array of string (required)</li><li><code>nodes[].purpose</code>: string (required)</li><li><code>nodes[].release</code>: string (required)</li><li><code>nodes[].required_tools</code>: array of string (required)</li><li><code>nodes[].role</code>: string (required)</li><li><code>nodes[].services</code>: array of object (required)</li><li><code>nodes[].services[].detail</code>: string (required)</li><li><code>nodes[].services[].endpoint</code>: string (required)</li><li><code>nodes[].services[].healthy</code>: boolean (required)</li><li><code>nodes[].services[].image</code>: string (required)</li><li><code>nodes[].services[].name</code>: string (required)</li><li><code>nodes[].services[].projects</code>: array of string (required)</li><li><code>nodes[].services[].state</code>: string (required)</li><li><code>nodes[].sessions_busy</code>: integer (required)</li><li><code>nodes[].slots_total</code>: integer (required)</li><li><code>nodes[].slots_used</code>: integer (required)</li><li><code>nodes[].status</code>: string (required)</li><li><code>nodes[].tools</code>: object (required)</li><li><code>nodes[].version_policy</code>: object (required)</li><li><code>nodes[].version_policy.compatible</code>: boolean (required)</li><li><code>nodes[].version_policy.reason</code>: string (required)</li><li><code>nodes[].version_policy.state</code>: string (required)</li><li><code>projects</code>: array of object (required)</li><li><code>projects[].base</code>: string (required)</li><li><code>projects[].close_suggested</code>: boolean (required)</li><li><code>projects[].closed</code>: boolean (required)</li><li><code>projects[].closed_at</code>: string (date-time) or null (required)</li><li><code>projects[].closed_by</code>: string (required)</li><li><code>projects[].counts</code>: object (required)</li><li><code>projects[].environments</code>: object (required)</li><li><code>projects[].key</code>: string (required)</li><li><code>projects[].repo</code>: string (required)</li><li><code>projects[].report_version</code>: integer (required)</li><li><code>projects[].repositories</code>: array of string (required)</li><li><code>projects[].status</code>: string (required)</li><li><code>projects[].work_minutes</code>: object (required)</li><li><code>projects[].work_minutes.hard</code>: integer (required)</li><li><code>projects[].work_minutes.target</code>: integer (required)</li><li><code>projects[].work_minutes.warn</code>: integer (required)</li><li><code>recent_runs</code>: array of object (required)</li><li><code>recent_runs[].account</code>: string (required)</li><li><code>recent_runs[].cost_usd</code>: number (required)</li><li><code>recent_runs[].duration_s</code>: integer or null (required)</li><li><code>recent_runs[].ended_age_s</code>: integer or null (required)</li><li><code>recent_runs[].error_kind</code>: string (required)</li><li><code>recent_runs[].id</code>: string (required)</li><li><code>recent_runs[].model</code>: string (required)</li><li><code>recent_runs[].node</code>: string (required)</li><li><code>recent_runs[].outcome</code>: string (required)</li><li><code>recent_runs[].pr_url</code>: string (required)</li><li><code>recent_runs[].provider</code>: string (required)</li><li><code>recent_runs[].step</code>: string (required)</li><li><code>recent_runs[].summary</code>: string or null (required)</li><li><code>recent_runs[].ticket</code>: string (required)</li><li><code>recent_runs[].tokens_in</code>: integer (required)</li><li><code>recent_runs[].tokens_out</code>: integer (required)</li><li><code>release_progress</code>: array of object (required)</li><li><code>release_progress[].done_count</code>: integer (required)</li><li><code>release_progress[].late_tickets</code>: array of object (required)</li><li><code>release_progress[].late_tickets[].added_at</code>: string (date-time) or null (required)</li><li><code>release_progress[].late_tickets[].added_late</code>: boolean (required)</li><li><code>release_progress[].late_tickets[].key</code>: string (required)</li><li><code>release_progress[].late_tickets[].status</code>: string (required)</li><li><code>release_progress[].late_tickets[].summary</code>: string (required)</li><li><code>release_progress[].open_tickets</code>: array of object (required)</li><li><code>release_progress[].open_tickets[].added_at</code>: string (date-time) or null (required)</li><li><code>release_progress[].open_tickets[].added_late</code>: boolean (required)</li><li><code>release_progress[].open_tickets[].key</code>: string (required)</li><li><code>release_progress[].open_tickets[].status</code>: string (required)</li><li><code>release_progress[].open_tickets[].summary</code>: string (required)</li><li><code>release_progress[].project</code>: string (required)</li><li><code>release_progress[].ready</code>: boolean (required)</li><li><code>release_progress[].reasons</code>: array of object (required)</li><li><code>release_progress[].reasons[].bug</code>: string (optional)</li><li><code>release_progress[].reasons[].cause</code>: string (required)</li><li><code>release_progress[].reasons[].detail</code>: string (optional)</li><li><code>release_progress[].reasons[].status</code>: string (optional)</li><li><code>release_progress[].reasons[].summary</code>: string (required)</li><li><code>release_progress[].reasons[].ticket</code>: string or null (required)</li><li><code>release_progress[].release</code>: object (required)</li><li><code>release_progress[].release.detail</code>: string (required)</li><li><code>release_progress[].release.github_release_url</code>: string (required)</li><li><code>release_progress[].release.status</code>: string (required)</li><li><code>release_progress[].release.steps</code>: array of object (required)</li><li><code>release_progress[].release.steps[].at</code>: string (date-time) or null (required)</li><li><code>release_progress[].release.steps[].detail</code>: string (required)</li><li><code>release_progress[].release.steps[].node</code>: string (required)</li><li><code>release_progress[].release.steps[].run_id</code>: string (required)</li><li><code>release_progress[].release.steps[].state</code>: string (required)</li><li><code>release_progress[].release.steps[].step</code>: string (required)</li><li><code>release_progress[].release.steps[].url</code>: string (optional)</li><li><code>release_progress[].release.tag</code>: string (required)</li><li><code>release_progress[].release.tracker</code>: string (required)</li><li><code>release_progress[].release_date</code>: string or null (required)</li><li><code>release_progress[].released</code>: boolean (required)</li><li><code>release_progress[].started_at</code>: string (date-time) or null (required)</li><li><code>release_progress[].ticket_count</code>: integer (required)</li><li><code>release_progress[].tickets</code>: array of object (required)</li><li><code>release_progress[].tickets[].added_at</code>: string (date-time) or null (required)</li><li><code>release_progress[].tickets[].added_late</code>: boolean (required)</li><li><code>release_progress[].tickets[].key</code>: string (required)</li><li><code>release_progress[].tickets[].status</code>: string (required)</li><li><code>release_progress[].tickets[].summary</code>: string (required)</li><li><code>release_progress[].version</code>: string (required)</li><li><code>release_progress[].version_id</code>: string (required)</li><li><code>release_readiness</code>: array of object (required)</li><li><code>release_readiness[].done_count</code>: integer (required)</li><li><code>release_readiness[].project</code>: string (required)</li><li><code>release_readiness[].ready</code>: boolean (required)</li><li><code>release_readiness[].reasons</code>: array of object (required)</li><li><code>release_readiness[].reasons[].bug</code>: string (optional)</li><li><code>release_readiness[].reasons[].cause</code>: string (required)</li><li><code>release_readiness[].reasons[].detail</code>: string (optional)</li><li><code>release_readiness[].reasons[].status</code>: string (optional)</li><li><code>release_readiness[].reasons[].summary</code>: string (required)</li><li><code>release_readiness[].reasons[].ticket</code>: string or null (required)</li><li><code>release_readiness[].ticket_count</code>: integer (required)</li><li><code>release_readiness[].tickets</code>: array of string (required)</li><li><code>release_readiness[].version</code>: string (required)</li><li><code>release_readiness[].version_id</code>: string (required)</li><li><code>role_health</code>: object (required)</li><li><code>role_health.metrics_days</code>: integer (required)</li><li><code>role_health.roles</code>: array of object (required)</li><li><code>role_health.roles[].account</code>: string (required)</li><li><code>role_health.roles[].cost_per_finished_ticket</code>: number or null (required)</li><li><code>role_health.roles[].disabled_at</code>: string (date-time) or null (required)</li><li><code>role_health.roles[].enabled</code>: boolean (required)</li><li><code>role_health.roles[].failure_score</code>: number or null (required)</li><li><code>role_health.roles[].finished_tickets</code>: integer (required)</li><li><code>role_health.roles[].mode</code>: string (required)</li><li><code>role_health.roles[].note</code>: string (required)</li><li><code>role_health.roles[].probation</code>: object or null (required)</li><li><code>role_health.roles[].probation.needed</code>: integer (required)</li><li><code>role_health.roles[].probation.open_ticket</code>: string (required)</li><li><code>role_health.roles[].probation.results</code>: array of string (required)</li><li><code>role_health.roles[].probation.streak</code>: integer (required)</li><li><code>role_health.roles[].provider</code>: string (required)</li><li><code>role_health.roles[].rework_rounds</code>: integer (required)</li><li><code>role_health.roles[].role</code>: string (required)</li><li><code>role_health.roles[].scored_runs</code>: integer (required)</li><li><code>role_health.roles[].success_rate</code>: number or null (required)</li><li><code>role_health.settings</code>: object (required)</li><li><code>role_health.settings.defaults</code>: object (required)</li><li><code>role_health.settings.defaults.failure_percent</code>: integer (required)</li><li><code>role_health.settings.defaults.window_runs</code>: integer (required)</li><li><code>role_health.settings.failure_percent</code>: number (required)</li><li><code>role_health.settings.updated_at</code>: string (date-time) or null (required)</li><li><code>role_health.settings.updated_by</code>: string (required)</li><li><code>role_health.settings.window_runs</code>: integer (required)</li><li><code>rollout</code>: object or null (required)</li><li><code>rollout.batch_size</code>: integer (required)</li><li><code>rollout.failed_node</code>: string (required)</li><li><code>rollout.id</code>: integer (required)</li><li><code>rollout.nodes</code>: array of object (required)</li><li><code>rollout.nodes[].detail</code>: string (required)</li><li><code>rollout.nodes[].from</code>: string (required)</li><li><code>rollout.nodes[].node</code>: string (required)</li><li><code>rollout.nodes[].status</code>: string (required)</li><li><code>rollout.nodes[].wave</code>: integer (required)</li><li><code>rollout.previous</code>: string (required)</li><li><code>rollout.reason</code>: string (required)</li><li><code>rollout.rollback</code>: string (required)</li><li><code>rollout.started_at</code>: string (date-time) (required)</li><li><code>rollout.status</code>: string (required)</li><li><code>rollout.target</code>: string (required)</li><li><code>rollout.wave</code>: integer (required)</li><li><code>sa</code>: object (required)</li><li><code>sa.network_issues</code>: array of object (required)</li><li><code>sa.network_issues[].account</code>: string (optional)</li><li><code>sa.network_issues[].attempts</code>: integer (optional)</li><li><code>sa.network_issues[].data</code>: object (optional)</li><li><code>sa.network_issues[].detail</code>: string (optional)</li><li><code>sa.network_issues[].error_kind</code>: string (optional)</li><li><code>sa.network_issues[].id</code>: integer or string (optional)</li><li><code>sa.network_issues[].node</code>: string (optional)</li><li><code>sa.network_issues[].outcome</code>: string (optional)</li><li><code>sa.network_issues[].project</code>: string (optional)</li><li><code>sa.network_issues[].reason</code>: string (optional)</li><li><code>sa.network_issues[].retry</code>: boolean (optional)</li><li><code>sa.network_issues[].run_id</code>: string (optional)</li><li><code>sa.network_issues[].source</code>: string (required)</li><li><code>sa.network_issues[].status</code>: string (optional)</li><li><code>sa.network_issues[].step</code>: string (optional)</li><li><code>sa.network_issues[].ticket</code>: string (optional)</li><li><code>sa.network_issues[].ts</code>: string (date-time) (optional)</li><li><code>sa.network_issues[].type</code>: string (optional)</li><li><code>sa.policy_denials</code>: array of object (required)</li><li><code>sa.policy_denials[].account</code>: string (required)</li><li><code>sa.policy_denials[].command</code>: string or null (required)</li><li><code>sa.policy_denials[].id</code>: integer (required)</li><li><code>sa.policy_denials[].node</code>: string (required)</li><li><code>sa.policy_denials[].reason</code>: string (required)</li><li><code>sa.policy_denials[].run_id</code>: string (required)</li><li><code>sa.policy_denials[].ticket</code>: string (required)</li><li><code>sa.policy_denials[].ts</code>: string (date-time) (required)</li><li><code>sa.provider_blocks</code>: array of object (required)</li><li><code>sa.provider_blocks[].check_failed</code>: boolean (required)</li><li><code>sa.provider_blocks[].cooldown</code>: object or null (required)</li><li><code>sa.provider_blocks[].cooldown.reason</code>: string (required)</li><li><code>sa.provider_blocks[].cooldown.seconds_left</code>: integer (required)</li><li><code>sa.provider_blocks[].cooldown_since</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].cooldown_until</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].cost_today</code>: number (required)</li><li><code>sa.provider_blocks[].credential_expires_at</code>: string (required)</li><li><code>sa.provider_blocks[].credential_expiry_warning</code>: boolean (required)</li><li><code>sa.provider_blocks[].effort</code>: string or null (required)</li><li><code>sa.provider_blocks[].explicit_only</code>: boolean (required)</li><li><code>sa.provider_blocks[].id</code>: string (required)</li><li><code>sa.provider_blocks[].idle_since</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].jobs</code>: array of string (required)</li><li><code>sa.provider_blocks[].last_error</code>: string (required)</li><li><code>sa.provider_blocks[].model</code>: string (required)</li><li><code>sa.provider_blocks[].node</code>: string (required)</li><li><code>sa.provider_blocks[].parallel</code>: integer (required)</li><li><code>sa.provider_blocks[].paused</code>: boolean (required)</li><li><code>sa.provider_blocks[].provider</code>: string (required)</li><li><code>sa.provider_blocks[].provider_status</code>: string (required)</li><li><code>sa.provider_blocks[].quota</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.at_risk</code>: boolean (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_day</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_day.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_day.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_day.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_day.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_hour</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_hour.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_hour.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_hour.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.last_hour.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.whole_window</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.whole_window.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.whole_window.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.whole_window.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.burn_rates.whole_window.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.confidence</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.history</code>: array of object (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].cost_usd</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].day</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].tokens_in</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.history[].tokens_out</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.is_estimate</code>: boolean (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run</code>: object or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.context_tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.cost_usd</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.duration_s</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.model</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.ticket</code>: string or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.largest_run.tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.rate_spread_ratio</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.runs_24h</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.source</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d.cost_usd</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d.tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d.tokens_in</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.usage_7d.tokens_out</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows</code>: array of object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_day</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_day.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_day.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_day.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_day.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_hour</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_hour.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_hour.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_hour.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.last_hour.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.whole_window</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.whole_window.cost_usd_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.whole_window.runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.whole_window.steady_runs</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].burn_rates.whole_window.tokens_per_hour</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].cost_usd</code>: number (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].label</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].left_pct</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].left_tokens</code>: integer or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].name</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction</code>: object (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.before_reset</code>: boolean (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.confidence</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.exhaustion_at</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.remaining_at_reset_pct</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.remaining_now_pct</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].prediction.status</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].quota_tokens</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].reset_at</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].reset_source</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].source</code>: string (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].used_pct</code>: number or null (required)</li><li><code>sa.provider_blocks[].quota_awareness.windows[].used_tokens</code>: integer (required)</li><li><code>sa.provider_blocks[].quota_resets_at</code>: string (date-time) or null (required)</li><li><code>sa.provider_blocks[].quota_used</code>: number or null (required)</li><li><code>sa.provider_blocks[].roles</code>: array of string (required)</li><li><code>sa.provider_blocks[].run</code>: object or null (required)</li><li><code>sa.provider_blocks[].run.elapsed_s</code>: integer or null (required)</li><li><code>sa.provider_blocks[].run.fence</code>: integer (required)</li><li><code>sa.provider_blocks[].run.id</code>: string (required)</li><li><code>sa.provider_blocks[].run.progress</code>: object (required)</li><li><code>sa.provider_blocks[].run.step</code>: string (required)</li><li><code>sa.provider_blocks[].run.summary</code>: string or null (optional)</li><li><code>sa.provider_blocks[].run.ticket</code>: string (required)</li><li><code>sa.provider_blocks[].runs_active</code>: integer (required)</li><li><code>sa.provider_blocks[].sign_in_pending</code>: boolean (required)</li><li><code>sa.provider_blocks[].sign_in_status</code>: string (required)</li><li><code>sa.provider_blocks[].status</code>: string (required)</li><li><code>sa.provider_blocks[].tier</code>: string (required)</li><li><code>sa.provider_blocks[].tokens_today</code>: integer (required)</li><li><code>sa.provider_blocks[].worker</code>: object (required)</li><li><code>sa.recommendations</code>: array of object (required)</li><li><code>sa.recommendations[].kind</code>: string (required)</li><li><code>sa.recommendations[].reason</code>: string (required)</li><li><code>sa.recommendations[].subject</code>: string (required)</li><li><code>sa.slots</code>: object (required)</li><li><code>sa.slots.pressure_since</code>: string (date-time) or null (required)</li><li><code>sa.slots.total</code>: integer (required)</li><li><code>sa.slots.used</code>: integer (required)</li><li><code>sa.slots.utilization_percent</code>: number or null (required)</li><li><code>sa.thresholds</code>: object (required)</li><li><code>sa.thresholds.credential_expiry_days</code>: number (required)</li><li><code>sa.thresholds.idle_days</code>: number (required)</li><li><code>sa.thresholds.role_cooldown_minutes</code>: number (required)</li><li><code>sa.thresholds.slots_duration_minutes</code>: number (required)</li><li><code>sa.thresholds.slots_used_percent</code>: number (required)</li><li><code>tickets</code>: array of object (required)</li><li><code>tickets[].blocked_by</code>: array of string (required)</li><li><code>tickets[].epic</code>: string (required)</li><li><code>tickets[].key</code>: string (required)</li><li><code>tickets[].labels</code>: array of string (required)</li><li><code>tickets[].last_run</code>: object or null (required)</li><li><code>tickets[].last_run.account</code>: string (required)</li><li><code>tickets[].last_run.cost_usd</code>: number (required)</li><li><code>tickets[].last_run.duration_s</code>: integer or null (required)</li><li><code>tickets[].last_run.ended_age_s</code>: integer or null (required)</li><li><code>tickets[].last_run.error_kind</code>: string (required)</li><li><code>tickets[].last_run.id</code>: string (required)</li><li><code>tickets[].last_run.model</code>: string (required)</li><li><code>tickets[].last_run.node</code>: string (required)</li><li><code>tickets[].last_run.outcome</code>: string (required)</li><li><code>tickets[].last_run.pr_url</code>: string (required)</li><li><code>tickets[].last_run.provider</code>: string (required)</li><li><code>tickets[].last_run.step</code>: string (required)</li><li><code>tickets[].last_run.summary</code>: string or null (required)</li><li><code>tickets[].last_run.ticket</code>: string (required)</li><li><code>tickets[].last_run.tokens_in</code>: integer (required)</li><li><code>tickets[].last_run.tokens_out</code>: integer (required)</li><li><code>tickets[].parent_key</code>: string or null (required)</li><li><code>tickets[].priority</code>: string (required)</li><li><code>tickets[].project</code>: string (required)</li><li><code>tickets[].repository</code>: string (required)</li><li><code>tickets[].run</code>: object or null (required)</li><li><code>tickets[].run.account</code>: string (required)</li><li><code>tickets[].run.elapsed_s</code>: integer or null (required)</li><li><code>tickets[].run.fence</code>: integer (required)</li><li><code>tickets[].run.heartbeat_age_s</code>: integer or null (required)</li><li><code>tickets[].run.id</code>: string (required)</li><li><code>tickets[].run.lease_ms</code>: integer (required)</li><li><code>tickets[].run.model</code>: string (required)</li><li><code>tickets[].run.node</code>: string (required)</li><li><code>tickets[].run.progress</code>: object (required)</li><li><code>tickets[].run.project</code>: string (required)</li><li><code>tickets[].run.provider</code>: string (required)</li><li><code>tickets[].run.step</code>: string (required)</li><li><code>tickets[].run.summary</code>: string or null (required)</li><li><code>tickets[].run.ticket</code>: string (required)</li><li><code>tickets[].status</code>: string (required)</li><li><code>tickets[].summary</code>: string (required)</li><li><code>tickets[].type</code>: string (required)</li><li><code>tickets[].updated_age_s</code>: integer or null (required)</li><li><code>tool_waits</code>: array of object (required)</li><li><code>tool_waits[].action</code>: string (required)</li><li><code>tool_waits[].count</code>: integer (required)</li><li><code>tool_waits[].machines</code>: array of string (required)</li><li><code>tool_waits[].maintenance_ticket</code>: string (required)</li><li><code>tool_waits[].projects</code>: array of string (required)</li><li><code>tool_waits[].requirement</code>: string (required)</li><li><code>tool_waits[].since</code>: string (date-time) (required)</li><li><code>tool_waits[].tickets</code>: array of object (required)</li><li><code>tool_waits[].tickets[].action</code>: string (required)</li><li><code>tool_waits[].tickets[].detail</code>: string (required)</li><li><code>tool_waits[].tickets[].key</code>: string (required)</li><li><code>tool_waits[].tickets[].machine</code>: string (required)</li><li><code>tool_waits[].tickets[].requirement</code>: string (required)</li><li><code>tool_waits[].tickets[].since</code>: string (date-time) (required)</li><li><code>tool_waits[].tickets[].summary</code>: string (required)</li><li><code>totals</code>: object (required)</li><li><code>totals.cost_24h</code>: number (required)</li><li><code>totals.done_24h</code>: integer (required)</li><li><code>totals.failed_24h</code>: integer (required)</li><li><code>totals.runs_24h</code>: integer (required)</li><li><code>totals.tokens_in_24h</code>: integer (required)</li><li><code>totals.tokens_out_24h</code>: integer (required)</li><li><code>version</code>: string (required)</li><li><code>version_policy</code>: object (required)</li><li><code>version_policy.control</code>: string (required)</li><li><code>version_policy.max_minor_lag</code>: integer (required)</li><li><code>versions</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="support">support</h2>
+<h3 id="post-v1-support-bundles"><code>POST /v1/support/bundles</code></h3>
+<p>Create Support Bundle</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>ticket_key</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-support-bundles-bundle-id-download"><code>GET /v1/support/bundles/{bundle_id}/download</code></h3>
+<p>Download Support Bundle</p>
+<p>Parameters: <code>bundle_id</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="tickets">tickets</h2>
+<h3 id="get-v1-tickets-key"><code>GET /v1/tickets/{key}</code></h3>
+<p>Ticket</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="get-v1-tickets-key-timeline"><code>GET /v1/tickets/{key}/timeline</code></h3>
+<p>Ticket Timeline</p>
+<p>Parameters: <code>key</code> (path, string, required)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="version-releases">version-releases</h2>
+<h3 id="get-v1-version-releases-candidates"><code>GET /v1/version-releases/candidates</code></h3>
+<p>Version Release Candidates</p>
+<p>Parameters: <code>account</code> (query, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-version-releases-claim"><code>POST /v1/version-releases/claim</code></h3>
+<p>Version Release Claim</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>account</code>: string (required)</li><li><code>project</code>: string (required)</li><li><code>repository</code>: string (optional)</li><li><code>version_id</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-version-releases-version-id-complete"><code>POST /v1/version-releases/{version_id}/complete</code></h3>
+<p>Version Release Complete</p>
+<p>Parameters: <code>version_id</code> (path, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>checks</code>: array of object (optional)</li><li><code>error</code>: string (optional)</li><li><code>fence</code>: integer (required)</li><li><code>head_sha</code>: string (optional)</li><li><code>run_id</code>: string (required)</li><li><code>source_sha</code>: string (optional)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h2 id="work">work</h2>
+<h3 id="get-v1-work-candidates"><code>GET /v1/work/candidates</code></h3>
+<p>Candidates</p>
+<p>Parameters: <code>account</code> (query, string, required), <code>authorization</code> (header, string, optional)</p>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: object (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul>
+<h3 id="post-v1-work-claim"><code>POST /v1/work/claim</code></h3>
+<p>Claim</p>
+<p>Parameters: <code>authorization</code> (header, string, optional)</p>
+<p>Request body (application/json, required):</p>
+<ul><li><code>account</code>: string (required)</li><li><code>step</code>: string (optional)</li><li><code>ticket</code>: string (required)</li></ul>
+<p>Response <code>200</code>: Successful Response</p>
+<p>Schema (application/json):</p>
+<ul><li><code>value</code>: any (required)</li></ul>
+<p>Response <code>422</code>: Validation Error</p>
+<p>Schema (application/json):</p>
+<ul><li><code>detail</code>: array of object (optional)</li><li><code>detail[].ctx</code>: object (optional)</li><li><code>detail[].input</code>: any (optional)</li><li><code>detail[].loc</code>: array of string or integer (required)</li><li><code>detail[].msg</code>: string (required)</li><li><code>detail[].type</code>: string (required)</li></ul></main></body></html>

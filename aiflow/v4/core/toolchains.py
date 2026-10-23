@@ -13,6 +13,12 @@ from collections.abc import Iterable
 NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker",
               "safe-container-runtime", "git", "node", "uv", "gh")
 
+# Supported catalogue tools the control plane can recognize and arrange on a node when a developer run needs one.
+# Stack membership and pins remain explicit in STACK_TOOLS; a tool absent from this catalogue must be pinned by its
+# project's stack before a missing-tool report can create a wait.
+CATALOG_TOOLS = ("php", "composer", "wp", "python3", "playwright", "playwright-browser",
+                 "gitleaks", "xdebug", "cosign", "podman")
+
 # Shared folder for Playwright's browsers: installed by root, readable by the AI user, handed to runs through
 # PLAYWRIGHT_BROWSERS_PATH (see worker/notes.py project_env).
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/aiflow4/playwright-browsers"
@@ -55,6 +61,10 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "python3": ("python3", "python"),
     "playwright": ("playwright",),
     "playwright-browser": ("playwright_browser", "playwright-browser", "playwright"),
+    "gitleaks": ("gitleaks",),
+    "xdebug": ("xdebug",),
+    "cosign": ("cosign",),
+    "podman": ("podman",),
 }
 
 # A tool that is installed but cannot work on this machine (e.g. Chromium without a system library) is reported
@@ -133,7 +143,7 @@ def tools_for_stacks_in_project(stacks: str | Iterable[str] | None,
 
 def tools_for_stacks(stacks: Iterable[str]) -> list[str]:
     """The union of the reported node tools and the tools of every stack, in stable order (what a node reports)."""
-    out = list(NODE_TOOLS)
+    out = list(NODE_TOOLS) + list(CATALOG_TOOLS)
     for stack in stacks:
         for tool in STACK_TOOLS.get(stack, ()):
             if tool not in out:
@@ -201,10 +211,16 @@ _ABSENT = r"(?:not installed|not found|command not found|is missing|missing|unav
 
 
 def known_requirements() -> list[str]:
-    """Tool and service names AI Flow can tell apart in free text (what a node reports, plus test services)."""
+    """Reportable tool and service names AI Flow can identify in free text."""
     from .services import SERVICES
-    names = list(NODE_TOOLS) + [t for tools in STACK_TOOLS.values() for t in tools] + list(SERVICES)
+    names = (list(NODE_TOOLS) + list(CATALOG_TOOLS) + [t for tools in STACK_TOOLS.values() for t in tools]
+             + list(SERVICES))
     return list(dict.fromkeys(names))
+
+
+def has_missing_marker(text: str) -> bool:
+    """Whether the AI explicitly used the machine-requirement marker, even if its name is unknown."""
+    return bool(MISSING_MARKER.search(text or ""))
 
 
 def parse_missing_requirements(text: str) -> list[str]:
@@ -213,7 +229,10 @@ def parse_missing_requirements(text: str) -> list[str]:
     marker = MISSING_MARKER.search(text or "")
     if marker:
         names = [n.lower() for n in re.split(r"\s*(?:,|\band\b)\s*", marker.group(1).strip(), flags=re.I) if n]
-        return list(dict.fromkeys(names))
+        known = set(known_requirements())
+        from .services import ALIASES
+        return list(dict.fromkeys(ALIASES.get(name, name) for name in names
+                                  if ALIASES.get(name, name) in known))
     found = []
     for name in known_requirements():
         quoted = re.escape(name)
@@ -225,4 +244,5 @@ def parse_missing_requirements(text: str) -> list[str]:
 
 def tool_present(tools: dict[str, object] | None, name: str) -> bool:
     """True when a node reported the tool with a real version (not absent, `missing` or `timeout`)."""
-    return str((tools or {}).get(name, "missing")) not in {"", "missing", "timeout"}
+    value = str((tools or {}).get(name, "missing"))
+    return value not in {"", "missing", "timeout"} and not value.startswith(BROKEN_PREFIX)

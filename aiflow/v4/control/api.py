@@ -3664,7 +3664,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             auto = escalations.pending_answer(ctx.db, t["key"])
             if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
                 extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
-            escalations.owner_answered_on_ticket(ctx, t["key"])
+            owner_answer = escalations.owner_answered_on_ticket(ctx, t["key"])
+            if owner_answer:
+                extra["triage_answer"] = owner_answer["answer"]
+                extra["triage_question"] = owner_answer["question"]
         if body.step == "triage":
             extra.update(triage_context)
         if body.step == "intake":

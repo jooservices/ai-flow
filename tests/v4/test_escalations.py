@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +66,19 @@ def test_every_recorded_escalation_gets_its_class(ctx, item):
 
 def test_each_of_the_seven_classes_is_covered_by_the_recorded_escalations():
     assert {i["expected_class"] for i in FIXTURE["escalations"]} == set(esc.CLASSES)
+
+
+def test_repository_answerable_http_method_question_does_not_reach_a_person(ctx):
+    put_ticket(ctx, "TESTWP-401", "Acceptance criteria:\n- AC1: document the existing route")
+    question = "Which HTTP method does `/v1/foo` use?"
+    raised = esc.dev_question(ctx, run_of("TESTWP-401"), question)
+    assert raised["class"] == esc.AMBIGUITY and not raised["resolved"]
+    answered = esc.triage_decision(ctx, run_of("TESTWP-401"), {
+        "decision": "ANSWER", "answer": "GET, as declared by the route in the repository.",
+        "why": "The route declaration answers this fact.", "class": esc.AMBIGUITY}, question)
+    assert answered == {"action": "answered", "class": esc.AMBIGUITY}
+    row = ctx.db.one("SELECT class,resolution,reached_person FROM escalations WHERE ticket_key='TESTWP-401'")
+    assert row == {"class": esc.AMBIGUITY, "resolution": "triage", "reached_person": False}
 
 
 # --- AC8: replay of 2026-10-22 and 23 ---------------------------------------------------------------------------
@@ -278,6 +293,56 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     assert esc.dev_question(ctx, run_of("JOOWP-324"), "Failed payment email: now or after a day?")["class"] == esc.TAKEN
 
 
+def test_concurrent_triage_for_duplicate_questions_creates_one_owner_ask(ctx):
+    keys = ("JOOWP-325", "JOOWP-326")
+    question = "Should a failed payment email go out immediately or after 24 hours?"
+    for key in keys:
+        put_ticket(ctx, key, "Acceptance criteria:\n- AC1: x")
+        esc.record(ctx.db, key, "JOOWP", "dev", f"dev-{key}", esc.BUSINESS, question, resolution="open")
+    barrier = threading.Barrier(2)
+
+    def apply(key):
+        barrier.wait(timeout=5)
+        return esc.triage_decision(ctx, run_of(key), NEW, question)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(apply, keys))
+    assert {result["action"] for result in results} == {"asked", "waiting"}
+    assert len({result["decision_id"] for result in results}) == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
+    register_row = ctx.db.one("SELECT waiting_tickets FROM owner_decisions WHERE status='asked'")
+    assert set(register_row["waiting_tickets"]) == set(keys)
+    assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 1
+
+
+def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(client, ctx):
+    key = "TESTWP-327"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="To Do")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "triage-run", esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    future = datetime.now(timezone.utc) + timedelta(minutes=1)
+    ctx.jira.recent_comment_data[key] = [
+        {"author": "AI Flow", "created": future.isoformat(),
+         "body": "AI Flow · owner decision required\nOptions: 14 days; 30 days. Recommended default: 30 days."},
+        {"author": "Owner", "created": (future + timedelta(seconds=1)).isoformat(),
+         "body": "Use 14 days, not the recommended 30 days."},
+    ]
+    headers = node_headers(client, "cc")
+    claim = client.post("/v1/work/claim", json={"ticket": key, "account": "claude-01"}, headers=headers).json()
+    assert claim["claimed"]
+    assert claim["triage_question"] == question
+    assert claim["triage_answer"] == "Use 14 days, not the recommended 30 days."
+    entry = ctx.db.one("SELECT status,decision,decided_by FROM owner_decisions WHERE id=%s", (asked["decision"]["id"],))
+    assert entry == {"status": "decided", "decision": "Use 14 days, not the recommended 30 days.",
+                     "decided_by": "owner"}
+    escalation = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (key,))
+    assert escalation == {"resolution": "person", "reached_person": True,
+                          "answer": "Use 14 days, not the recommended 30 days."}
+
+
 def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_time(client, ctx, tmp_path, monkeypatch):
     headers = node_headers(client, "node1")
     alerts = []
@@ -401,6 +466,32 @@ def test_amendment_can_remove_a_criterion_and_triage_can_amend_through_the_regis
     assert done["action"] == "amended" and done["summary"] == "AC2 removed"
     assert "[removed" in ctx.db.one("SELECT description FROM tickets WHERE key='JOOWP-302'")["description"]
     assert esc.amend_description("no criteria here", "AC1", 1, "") is None
+
+
+def test_failed_jira_amendment_can_be_retried(ctx, monkeypatch):
+    key = "JOOWP-328"
+    original = "Acceptance criteria:\n- AC4: capture a screenshot on the Dev VM"
+    put_ticket(ctx, key, original)
+    real_set_description = ctx.jira.set_description
+    calls = {"n": 0}
+
+    def fail_once(ticket, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Jira temporarily unavailable")
+        real_set_description(ticket, text)
+
+    monkeypatch.setattr(ctx.jira, "set_description", fail_once)
+    with pytest.raises(RuntimeError, match="Jira temporarily unavailable"):
+        esc.amend_ticket(ctx, key, "JOOWP", "AC4", "dev_vm", "No Dev VM exists")
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))["n"] == 0
+    assert ctx.db.one("SELECT description FROM tickets WHERE key=%s", (key,))["description"] == original
+
+    retried = esc.amend_ticket(ctx, key, "JOOWP", "AC4", "dev_vm", "No Dev VM exists")
+    assert retried and retried["already"] is False
+    assert calls["n"] == 2
+    assert "[narrowed" in ctx.db.one("SELECT description FROM tickets WHERE key=%s", (key,))["description"]
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE kind='amendment' AND ticket_key=%s", (key,))["n"] == 1
 
 
 def test_amendments_appear_in_the_weekly_report_and_never_block(client, ctx):

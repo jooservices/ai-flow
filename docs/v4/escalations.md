@@ -54,7 +54,10 @@ Triage output cannot relabel a question to bypass that boundary. The control pla
 
 The owner picks an option (or the recommended default) on screen. The entry becomes **decided**, and every waiting
 ticket loses the label and returns to To Do with the decision cited. If the owner answers in a Jira comment and moves
-the ticket back instead, the entry is closed with a pointer to the ticket and the recommended default it was asked with.
+the ticket back instead, the next developer claim reads the human comment posted after the ask, stores that actual
+answer in the register, and passes the question and answer to the developer prompt. The recommended default is never
+substituted for a missing comment; the ask stays pending until an answer is available. Other waiting tickets resume
+with the captured answer.
 
 ## Unreachable criteria are amended (AC4)
 

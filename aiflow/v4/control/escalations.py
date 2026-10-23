@@ -111,6 +111,11 @@ AMBIGUITY_RE = re.compile(
     r"\bwhere (?:is|are|does|do|should (?:the|this|i put))\b.{0,50}\b(?:defined|implemented|configured|located|live|stored|put|go)\b|"
     r"\bhow (?:does|do|is|are) the existing\b|\bexisting (?:convention|pattern|helper|implementation|code)\b|"
     r"\bnaming convention\b|\bfolder structure\b|\bcode ?style\b", re.I | re.S)
+REPOSITORY_FACT_RE = re.compile(
+    r"\b(?:which|what)\s+(?:http\s+)?(?:request\s+)?method\b.{0,120}"
+    r"(?:/\w[\w./{}:-]*|\b(?:endpoint|route|url)\b)|"
+    r"\b(?:which|what)\s+(?:status code|response|parameter|header)\b.{0,100}"
+    r"\b(?:endpoint|route|api|function|handler)\b", re.I | re.S)
 
 
 def _search(pattern: str, text: str) -> bool:
@@ -160,7 +165,7 @@ def classify(db, text: str, project: str = "") -> Classification:
         return Classification(BUSINESS, f"already asked ({pending['title']}); waiting for the owner", pending=pending)
     if IRREVERSIBLE_RE.search(text):
         return Classification(IRREVERSIBLE, "an irreversible or production action")
-    if AMBIGUITY_RE.search(text):
+    if AMBIGUITY_RE.search(text) or REPOSITORY_FACT_RE.search(text):
         return Classification(AMBIGUITY, "the repository (ticket, spec or code) can answer this")
     return Classification(BUSINESS, "a business decision no source answers")
 
@@ -214,39 +219,65 @@ def add_decision(db, title: str, decision: str, keywords: list[str] | None = Non
 def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str], recommended: str, topic: str,
         keywords: list[str]) -> dict:
     """A new kind of decision is asked once: a pending register entry carries the options and the recommended
-    default. A decision already taken is applied, and a question already asked only adds the ticket to the wait."""
+    default. A decision already taken is applied, and a question already asked only adds the ticket to the wait.
+    Matching and insertion share a transaction lock so concurrent triage runs cannot create duplicate asks."""
     db = ctx.db
     full = f"{text}\n{why}"
-    decided = match_decision(db, full, project)
-    if decided:
-        return {"action": "applied", "decision": decided, "citation": cite(db, decided)}
-    pending = match_decision(db, full, project, "asked") or db.one(
-        "SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets)", (ticket,))
-    if pending:
-        db.run("UPDATE owner_decisions SET waiting_tickets=CASE WHEN %s = ANY(waiting_tickets) THEN waiting_tickets"
-               " ELSE array_append(waiting_tickets,%s) END WHERE id=%s", (ticket, ticket, pending["id"]))
-        return {"action": "waiting", "decision": pending, "citation": f"Question D{pending['id']} \"{pending['title']}\""}
-    options = [o.strip() for o in options if o.strip()]
-    if recommended and recommended not in options:
-        options.append(recommended)
-    row = db.one("INSERT INTO owner_decisions (topic,title,question,options,recommended,patterns,project,status,source,"
-                 "ticket_key,waiting_tickets) VALUES (%s,%s,%s,%s,%s,%s,%s,'asked','ask',%s,%s) RETURNING *",
-                 (unique_topic(db, topic or why[:60]), (topic or why)[:200], f"{text}\n{why}".strip()[:3000], J(options),
-                  recommended[:500], J(keyword_patterns(keywords, topic or why)), "", ticket, [ticket]))
-    return {"action": "asked", "decision": row, "citation": f"Question D{row['id']} \"{row['title']}\""}
+    with db.pool.connection() as connection:
+        with connection.transaction():
+            # A single short critical section is preferable to relying on model-generated topics or keywords
+            # being identical for equivalent questions. All matching and creation uses this same connection.
+            connection.execute("SELECT pg_advisory_xact_lock(255, 255)")
+            locked_db = _ConnectionQueries(connection)
+            decided = match_decision(locked_db, full, project)
+            if decided:
+                return {"action": "applied", "decision": decided, "citation": cite(locked_db, decided)}
+            pending = match_decision(locked_db, full, project, "asked") or locked_db.one(
+                "SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets)", (ticket,))
+            if pending:
+                locked_db.run("UPDATE owner_decisions SET waiting_tickets=CASE WHEN %s = ANY(waiting_tickets) THEN waiting_tickets"
+                              " ELSE array_append(waiting_tickets,%s) END WHERE id=%s", (ticket, ticket, pending["id"]))
+                return {"action": "waiting", "decision": pending,
+                        "citation": f"Question D{pending['id']} \"{pending['title']}\""}
+            cleaned_options = [o.strip() for o in options if o.strip()]
+            if recommended and recommended not in cleaned_options:
+                cleaned_options.append(recommended)
+            row = locked_db.one(
+                "INSERT INTO owner_decisions (topic,title,question,options,recommended,patterns,project,status,source,"
+                "ticket_key,waiting_tickets) VALUES (%s,%s,%s,%s,%s,%s,%s,'asked','ask',%s,%s) RETURNING *",
+                (unique_topic(locked_db, topic or why[:60]), (topic or why)[:200], f"{text}\n{why}".strip()[:3000],
+                 J(cleaned_options), recommended[:500], J(keyword_patterns(keywords, topic or why)), "", ticket, [ticket]))
+            return {"action": "asked", "decision": row, "citation": f"Question D{row['id']} \"{row['title']}\""}
 
 
-def resume_waiting(ctx, decision: dict, text: str) -> list[str]:
+class _ConnectionQueries:
+    """Small DB facade for queries that must participate in one psycopg transaction."""
+
+    def __init__(self, connection) -> None:
+        self.connection = connection
+
+    def all(self, sql: str, params: Any = None) -> list[dict]:
+        return list(self.connection.execute(sql, params).fetchall())
+
+    def one(self, sql: str, params: Any = None) -> dict | None:
+        return self.connection.execute(sql, params).fetchone()
+
+    def run(self, sql: str, params: Any = None) -> int:
+        return self.connection.execute(sql, params).rowcount
+
+
+def resume_waiting(ctx, decision: dict, text: str, skip_ticket: str = "") -> list[str]:
     """The owner answered: waiting tickets lose the owner-escalated label and go back to work with the answer."""
     resumed = []
     for key in decision.get("waiting_tickets") or []:
         try:
-            ctx.jira.remove_label(key, "owner-escalated")
-            ctx.db.run("UPDATE tickets SET labels=array_remove(labels,'owner-escalated') WHERE key=%s", (key,))
-            ctx.jira.comment(key, f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
-                                  f"Next: back to To Do; the developer continues with {citation(decision)}")
-            status = ctx.jira.transition_to(key, "To Do")
-            ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
+            if key != skip_ticket:
+                ctx.jira.remove_label(key, "owner-escalated")
+                ctx.db.run("UPDATE tickets SET labels=array_remove(labels,'owner-escalated') WHERE key=%s", (key,))
+                ctx.jira.comment(key, f"AI Flow · owner decision\nWhat: {decision['title']}\nResult: {text}\n"
+                                      f"Next: back to To Do; the developer continues with {citation(decision)}")
+                status = ctx.jira.transition_to(key, "To Do")
+                ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
             ctx.db.run("UPDATE escalations SET answer=%s, resolution='person', reached_person=true,"
                        " resolved_at=coalesce(resolved_at, now())"
                        " WHERE ticket_key=%s AND decision_id=%s", (text, key, decision["id"]))
@@ -272,13 +303,59 @@ def retire_decision(db, decision_id: int) -> dict | None:
     return db.one("UPDATE owner_decisions SET status='retired' WHERE id=%s RETURNING *", (decision_id,))
 
 
-def owner_answered_on_ticket(ctx, ticket: str) -> None:
-    """The owner moved a waiting ticket back to work in Jira instead of the console: the question becomes a decided
-    entry that names the ticket (the answer is in its comments) and the recommended default it was asked with."""
-    for row in ctx.db.all("SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets)", (ticket,)):
-        text = f"Answered by the owner on {ticket} (see the ticket comments). Recommended default: {row['recommended']}"
-        ctx.db.run("UPDATE owner_decisions SET status='decided', decision=%s, decided_by='owner', decided_at=now()"
-                   " WHERE id=%s", (text[:3000], row["id"]))
+def _comment_time(comment: dict) -> datetime | None:
+    value = str(comment.get("created") or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def owner_answered_on_ticket(ctx, ticket: str) -> dict | None:
+    """Capture the owner's Jira comment when they move an asked ticket back to work.
+
+    A question comment posted by AI Flow is not an answer. If no later human comment is available, leave the
+    decision pending instead of silently applying the recommended default.
+    """
+    rows = ctx.db.all("SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets) ORDER BY id",
+                      (ticket,))
+    if not rows or not ctx.jira:
+        return None
+    try:
+        comments = ctx.jira.recent_comments(ticket, limit=30)
+    except Exception as exc:  # noqa: BLE001 - a Jira read failure must not fabricate an owner decision
+        log.warning("comments of %s for owner decision failed: %s", ticket, type(exc).__name__)
+        return None
+    eligible = []
+    for comment in comments:
+        body = str(comment.get("body") or "").strip()
+        author = str(comment.get("author") or "").strip().lower()
+        created = _comment_time(comment)
+        if (not body or not created or body.lower().startswith(("ai flow", "aiflow"))
+                or "automation for jira" in author or "ai flow" in author):
+            continue
+        eligible.append((created, body))
+    for row in rows:
+        answer = next((body for created, body in sorted(eligible, reverse=True)
+                       if created > row["created_at"].astimezone(timezone.utc)), "")
+        if not answer:
+            continue
+        text = answer[:3000]
+        decided = ctx.db.one("UPDATE owner_decisions SET status='decided', decision=%s, decided_by='owner', decided_at=now()"
+                             " WHERE id=%s AND status='asked' RETURNING *", (text, row["id"]))
+        if not decided:
+            continue
+        raised = ctx.db.one("SELECT question FROM escalations WHERE ticket_key=%s AND decision_id=%s"
+                            " ORDER BY id DESC LIMIT 1", (ticket, row["id"]))
+        # The decision is shared by every ticket that joined the ask. Resume the other waiters and record the
+        # actual owner answer against each escalation; the current ticket is already being claimed for work.
+        resume_waiting(ctx, {**decided, "waiting_tickets": row.get("waiting_tickets") or []}, text,
+                       skip_ticket=ticket)
+        return {"decision": decided, "answer": text, "question": (raised or {}).get("question") or row["question"],
+                "ticket": ticket}
+    return None
 
 
 # --- ticket amendment (AC4) ---------------------------------------------------------------------------------
@@ -327,7 +404,13 @@ def amend_ticket(ctx, ticket: str, project: str, criterion: str, environment: st
         ctx.db.run("DELETE FROM owner_decisions WHERE id=%s", (entry["id"],))
         return None
     text, summary = amended
-    ctx.jira.set_description(ticket, text)
+    try:
+        ctx.jira.set_description(ticket, text)
+    except Exception:
+        # The register entry is only complete after Jira accepted the amendment. A failed write must not make a
+        # retry look like an already-applied amendment.
+        ctx.db.run("DELETE FROM owner_decisions WHERE id=%s AND kind='amendment' AND decision='pending'", (entry["id"],))
+        raise
     ctx.db.run("UPDATE tickets SET description=%s, synced_at=now() WHERE key=%s", (text, ticket))
     entry = ctx.db.one("UPDATE owner_decisions SET decision=%s WHERE id=%s RETURNING *",
                        (f"{summary}: {reason}"[:3000], entry["id"]))

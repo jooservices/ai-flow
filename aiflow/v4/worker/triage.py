@@ -80,7 +80,8 @@ def parse_decision(text: str) -> dict | None:
         out["criterion"] = criterion.group(0).replace(" ", "").upper() if criterion else ""
         return out if out["criterion"] and why else None
     out["options"], out["recommended"] = _items(f.get("options", "")), f.get("recommended", "").strip()
-    return out if why and len(out["options"]) >= 2 and out["recommended"] else None
+    return out if (out["class"] in ESCALATION_CLASSES and why and len(out["options"]) >= 2
+                   and out["recommended"]) else None
 
 
 def safe_directory_env(path: Path) -> dict[str, str]:

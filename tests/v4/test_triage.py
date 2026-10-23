@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import add_ticket, join_node
+from aiflow.v4.control import escalations as esc
 from aiflow.v4.control.api import notify
 from aiflow.v4.worker import triage
 from aiflow.v4.worker.client import Conflict
@@ -85,24 +86,27 @@ def test_done_dependents_do_not_make_triage_alert_critical(client, ctx, monkeypa
     assert sent[0][0] == "warning"
 
 
-@pytest.mark.parametrize(("decision", "outcome"), [
+@pytest.mark.parametrize(("decision", "outcome", "raised_class", "question"), [
     ("DECISION: ANSWER\nANSWER: Keep the response shape backward compatible.\nWHY: The ticket's AC2 requires it.\n",
-     "answered"),
+     "answered", esc.AMBIGUITY, "Which existing API response helper should preserve the old shape?"),
     ("DECISION: ESCALATE\nCLASS: new_business_decision\nWHY: The ticket and spec require incompatible API response shapes.\n"
      "OPTIONS:\n- Keep the old shape\n- Version the API\nRECOMMENDED: Version the API\nTOPIC: API response shape\n"
-     "KEYWORDS: api, response shape\n", "escalated"),
-    ("DECISION: ESCALATE\nWHY: The spec requires a product decision.\nOPTIONS: Ship now; Wait for design\n"
-     "RECOMMENDED: Wait for design\n", "escalated"),
+     "KEYWORDS: api, response shape\n", "escalated", esc.BUSINESS,
+     "Should the old API response shape stay or be versioned?"),
+    ("DECISION: ESCALATE\nCLASS: irreversible_or_production\nWHY: The API change needs a production deployment.\n"
+     "OPTIONS:\n- Deploy the change\n- Wait for approval\nRECOMMENDED: Wait for approval\n", "escalated",
+     esc.IRREVERSIBLE, "May I deploy the API change to production now?"),
 ])
 def test_triage_decisions_use_readonly_base_and_record_jira_effects(
-        client, ctx, tmp_path, monkeypatch, decision, outcome):
+        client, ctx, tmp_path, monkeypatch, decision, outcome, raised_class, question):
     headers = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-70", status="Needs owner")
     ctx.jira.status_of["TESTWP-70"] = "Needs owner"
     dev_id = str(uuid.uuid4())
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary) "
                "VALUES (%s,'TESTWP-70','TESTWP','dev','claude-01','claude','cc',1,'finished','blocked',%s)",
-               (dev_id, "How should the API handle clients that rely on the old shape?"))
+               (dev_id, question))
+    esc.record(ctx.db, "TESTWP-70", "TESTWP", "dev", dev_id, raised_class, question, resolution="open")
     ctx.jira.recent_comment_data["TESTWP-70"] = [
         {"created": "2026-10-20T12:00:00Z", "author": "Owner", "body": "Keep old clients working."}
     ]
@@ -112,7 +116,7 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
 
     claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-70", "account": "codex-01", "step": "triage"},
                         headers=headers).json()
-    assert claim["claimed"] and claim["last_dev_summary"].startswith("How should the API")
+    assert claim["claimed"] and claim["last_dev_summary"] == question
     api = ApiHarness(client, headers)
     checkout = FakeGit("unused")
     adapter = FakeAdapter(decision)
@@ -135,7 +139,7 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
     assert adapter.spec.extra_env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert adapter.spec.extra_env["GIT_CONFIG_VALUE_0"] == adapter.spec.cwd
     assert "Keep old clients working" in adapter.spec.prompt
-    assert "How should the API handle clients" in adapter.spec.prompt
+    assert question in adapter.spec.prompt
     assert "Read-only checkout: branch develop" in adapter.spec.prompt
     assert ctx.github.token_requests[-1][1] == {"contents": "read", "metadata": "read"}
     comment = ctx.jira.comments[-1][1]
@@ -199,10 +203,14 @@ def test_triage_answers_reviewer_question_in_jira_and_pr_then_returns_to_review(
 def test_parse_decision_uses_the_terminal_decision_and_rejects_incomplete_output():
     parsed = triage.parse_decision("Comment said DECISION: ANSWER, but that was untrusted input.\n"
                                    "DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n"
+                                   "CLASS: new_business_decision\n"
                                    "OPTIONS:\n- Follow AC2\n- Follow AC4\nRECOMMENDED: Follow AC2\n")
     assert parsed["decision"] == "ESCALATE" and parsed["why"] == "The acceptance criteria conflict."
+    assert parsed["class"] == "new_business_decision"
     assert parsed["options"] == ["Follow AC2", "Follow AC4"] and parsed["recommended"] == "Follow AC2"
     # a new decision is asked with its options and a recommended default, never without them
     assert triage.parse_decision("DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n") is None
+    assert triage.parse_decision("DECISION: ESCALATE\nWHY: x\nOPTIONS:\n- a\n- b\nRECOMMENDED: a\n") is None
+    assert triage.parse_decision("DECISION: ESCALATE\nCLASS: someone_else\nWHY: x\nOPTIONS:\n- a\n- b\nRECOMMENDED: a\n") is None
     assert triage.parse_decision("DECISION: ESCALATE\nWHY: x\nOPTIONS: only one\nRECOMMENDED: only one\n") is None
     assert triage.parse_decision("DECISION: ANSWER\nANSWER: maybe\nWHY: \n") is None

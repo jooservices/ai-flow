@@ -468,7 +468,7 @@ def github_gateway(ctx: Ctx) -> GitHubApp | None:
 
 def validate_github_app_permissions(details: dict[str, Any]) -> None:
     permissions = details.get("permissions") or {}
-    required = {"contents": "write", "pull_requests": "write", "workflows": "write",
+    required = {"contents": "write", "pull_requests": "write", "workflows": "write", "actions": "read",
                 "checks": "read", "statuses": "read", "administration": "write"}
     missing = [name for name, level in required.items() if permissions.get(name) != level]
     if missing:
@@ -1865,6 +1865,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     "redirect_url": callback, "setup_url": setup, "setup_on_update": False, "public": False,
                     "default_events": [],
                     "default_permissions": {"contents": "write", "pull_requests": "write", "metadata": "read",
+                                            "actions": "read",
                                             "checks": "read", "statuses": "read", "workflows": "write",
                                             "administration": "write"}}
         action = f"https://github.com/organizations/{quote(organization, safe='-')}/settings/apps/new?state={state}"
@@ -3617,6 +3618,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
+        if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
+            # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
+            # uses this row to bind branch and SHA requests to this ticket's pull request.
+            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s WHERE id=%s",
+                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "", run_id))
         if probation_id is not None:
             role_health.attach_probation_run(ctx.db, probation_id, run_id)
             ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -4464,16 +4470,48 @@ def create_app(ctx: Ctx) -> FastAPI:
     def github_ci_log(run_id: str, fence: int, branch: str = "", sha: str = "", lines: int = Query(200, ge=1, le=1000),
                       node: str = Depends(node_auth)) -> dict:
         """The tail of the failing CI job log of the run's pull request: a developer never has to ask for it."""
-        run = fenced(run_id, fence, "github", "ci-log", {"branch": branch, "lines": lines})
+        run = fenced(run_id, fence, "github", "ci-log", {"branch": branch, "sha": sha[:12], "lines": lines})
+
+        def refuse(reason: str) -> None:
+            audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], False, reason,
+                  {"branch": branch, "sha": sha[:12]})
+            raise HTTPException(403, reason)
+
+        if run["node"] != node:
+            refuse("CI logs are available only to the node running this developer run")
+        if run["step"] != "dev":
+            refuse("CI logs are available only to a developer run")
         project = ctx.repo().projects[run["project"]]
+        expected_branch = str(run.get("branch") or "")
+        expected_pr = str(run.get("pr_url") or "")
+        pr_match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)/?", expected_pr, re.I)
+        expected_repository = repository_for_run(run, project)
+
+        if not pr_match or not expected_branch or not expected_repository:
+            refuse("developer run has no recorded pull request")
+        pr_repository = f"{pr_match.group(1)}/{pr_match.group(2)}"
+        if pr_repository.lower() != expected_repository.lower():
+            refuse("recorded pull request does not match the run repository")
+        if branch and branch != expected_branch:
+            refuse("requested branch is not the run's pull request branch")
+        if not branch and not sha:
+            raise HTTPException(400, "give the recorded pull request branch or commit sha")
         github = github_gateway(ctx)
         if not github:
             raise HTTPException(503, "GitHub App is not connected")
-        repository = repository_for_run(run, project).split("/", 1)[-1]
-        if not sha:
-            if not branch:
-                raise HTTPException(400, "give the branch or the commit sha of the pull request")
-            sha = github.branch_sha(repository, branch)
+        repository = expected_repository.split("/", 1)[-1]
+        pull_request = github.pr(repository, int(pr_match.group(3)))
+        head = pull_request.get("head") or {}
+        head_repo = head.get("repo") or {}
+        pull_request_sha = str(head.get("sha") or "")
+        if (int(pull_request.get("number") or 0) != int(pr_match.group(3))
+                or head.get("ref") != expected_branch
+                or str(head_repo.get("full_name") or "").lower() != expected_repository.lower()
+                or not pull_request_sha):
+            refuse("recorded pull request no longer matches the run's repository and branch")
+        if sha and sha.lower() != pull_request_sha.lower():
+            refuse("requested commit is not the current head of the run's pull request")
+        sha = sha or pull_request_sha
         log_tail = github.failing_job_log(repository, sha, lines)
         audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], True,
               log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})

@@ -41,9 +41,11 @@ keywords"), an optional project, who decided and when.
 
 ## A new decision is asked once (AC3)
 
-The triage AI ends with `DECISION: ESCALATE`, a `CLASS` (`new_business_decision` or `irreversible_or_production`),
-`WHY`, at least two `OPTIONS`, a `RECOMMENDED` default, a `TOPIC` and `KEYWORDS`. Without options and a recommendation
-the answer is invalid and retried. The control plane then:
+The triage AI ends with `DECISION: ESCALATE`, a valid `CLASS` (`new_business_decision` or `irreversible_or_production`),
+`WHY`, at least two `OPTIONS`, a `RECOMMENDED` default, a `TOPIC` and `KEYWORDS`. Without options, a recommendation,
+or a valid class, the output is invalid and retried. The control plane uses the class and question stored when the escalation
+was raised: it rejects an `ANSWER` for either person-facing class and rejects `ESCALATE` for any of the other five.
+Triage output cannot relabel a question to bypass that boundary. The control plane then:
 
 1. applies a **decided** register entry that matches (nothing is asked);
 2. otherwise, if the same question is already **asked**, adds the ticket to that wait (no second alert);
@@ -77,15 +79,20 @@ says the same. Allowed calls are unchanged.
 
 `GET /v1/github/ci-log?run_id=…&fence=…&branch=…&lines=200` (node token and valid fence, audited) returns the tail
 (at most 1,000 lines, 20,000 characters, colours and timestamps removed) of the first failing GitHub Actions job of
-the branch's commit: job, workflow, failed steps, URL and `tail`. AIs cannot reach the control API themselves, so the
-dev worker calls it before a rework run on a branch and puts the tail into the prompt: the AI never has to ask for
-the log. The GitHub App needs the `actions: read` permission.
+the run's recorded PR branch: job, workflow, failed steps, URL and `tail`. Only a developer run with a recorded PR
+can use it; a caller-supplied branch must match the run's recorded PR branch, and a supplied SHA must match the PR's
+current head commit as confirmed with GitHub. Rework runs inherit the PR identity from the previous developer run.
+AIs cannot reach the control API themselves,
+so the dev worker calls it before a rework run and puts the tail into the prompt: the AI never has to ask for the log.
+The GitHub App needs the `actions: read` permission.
 
 ## Numbers (AC7)
 
 `GET /v1/escalations` (and `escalations` in `GET /v1/master/report`) return, for the last eight UTC weeks, escalations
 per class and per project, the share resolved without a person, whether this week is below last week, the **top
-three causes with the fix for each** and the amendments for review. Command Center shows them in the panel
+three causes with the fix for each** and the amendments for review. Open and waiting records do not count as resolved
+without a person; a waiting ticket records its owner resolution when the shared answer arrives. Command Center shows
+them in the panel
 *Escalations and owner decisions* (weekly table by class, table by project, the open questions with one button per
 option, the register, the amendments). The target is a falling line.
 

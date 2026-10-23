@@ -236,19 +236,23 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     put_ticket(ctx, "JOOWP-323", "Acceptance criteria:\n- AC1: y")
     ctx.jira.status_of.update({"JOOWP-322": "Needs owner", "JOOWP-323": "Needs owner"})
     question = "Should a failed payment email go out immediately or after 24 hours?"
+    esc.dev_question(ctx, run_of("JOOWP-322"), question)
     first = esc.triage_decision(ctx, run_of("JOOWP-322"), NEW, question)
     assert first["action"] == "asked" and first["options"] == NEW["options"] + [] and first["recommended"] == NEW["recommended"]
     pending = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert pending["status"] == "asked" and pending["options"] == NEW["options"] and pending["decision"] == ""
     # another ticket asks the same thing: it joins the wait, nobody is asked again
+    esc.dev_question(ctx, run_of("JOOWP-323"), "Failed payment: send the email now or later?")
     second = esc.triage_decision(ctx, run_of("JOOWP-323"), NEW, "Failed payment: send the email now or later?")
     assert second["action"] == "waiting" and second["decision_id"] == first["decision_id"]
+    waiting = ctx.db.one("SELECT resolution,reached_person,resolved_at FROM escalations WHERE ticket_key='JOOWP-323'")
+    assert waiting == {"resolution": "waiting", "reached_person": False, "resolved_at": None}
+    waiting_metrics = esc.weekly_metrics(ctx.db, weeks=1)["this_week"]
+    assert waiting_metrics["total"] == 2 and waiting_metrics["reached_person"] == 1
+    assert waiting_metrics["without_person"] == 0
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 1
     assert set(ctx.db.one("SELECT waiting_tickets FROM owner_decisions WHERE id=%s", (first["decision_id"],))["waiting_tickets"]) == {
         "JOOWP-322", "JOOWP-323"}
-    # and a developer question of the same family does not reach a person either
-    again = esc.dev_question(ctx, run_of("JOOWP-323"), "Failed payment: is the email immediate?")
-    assert again["class"] == esc.BUSINESS and not again["resolved"]
     assert ctx.db.one("SELECT count(*) AS n FROM escalations WHERE reached_person")["n"] == 1
 
     # the owner answers on screen: the choice becomes a register entry and the waiting tickets resume
@@ -257,10 +261,17 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     entry = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert entry["status"] == "decided" and entry["decision"] == "Email after 24 hours (see support)"
     assert entry["decided_by"] == "owner@example.test"
+    resolved_waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key='JOOWP-323'")
+    assert resolved_waiting == {"resolution": "person", "reached_person": True,
+                                "answer": "Email after 24 hours (see support)"}
+    answered_metrics = esc.weekly_metrics(ctx.db, weeks=1)["this_week"]
+    assert answered_metrics["reached_person"] == 2 and answered_metrics["without_person"] == 0
     assert {k for k, _ in [(t[0], 0) for t in ctx.jira.transitions]} >= {"JOOWP-322", "JOOWP-323"}
     assert all(ctx.jira.status_of[k] == "To Do" for k in ("JOOWP-322", "JOOWP-323"))
     assert ("remove", "JOOWP-322", "owner-escalated") in ctx.jira.labels
     # from now on the decision is applied and cited; a person is not asked
+    esc.record(ctx.db, "JOOWP-324", "JOOWP", "dev", "run", esc.BUSINESS,
+               "Failed payment email: now or after a day?", resolution="open")
     third = esc.triage_decision(ctx, run_of("JOOWP-324"), NEW, "Failed payment email: now or after a day?")
     assert third["action"] == "applied" and f"D{first['decision_id']}" in third["citation"]
     assert third["answer"].startswith("Email after 24 hours")
@@ -279,6 +290,7 @@ def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_ti
         ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary)"
                    " VALUES (%s,%s,'TESTWP','dev','claude-01','claude','cc',1,'finished','blocked',%s)",
                    (str(uuid.uuid4()), key, "What is the refund window for customers?"))
+        esc.dev_question(ctx, run_of(key), "What is the refund window for customers?")
         claim = client.post("/v1/work/claim", json={"ticket": key, "account": "codex-01", "step": "triage"}, headers=headers).json()
         assert claim["claimed"] and claim["owner_register"] and claim["owner_register"][0]["title"]
         monkeypatch.setattr(triage, "Git", lambda *a, **k: FakeGit("x"))
@@ -302,10 +314,38 @@ def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_ti
 
 def test_a_class_that_never_needs_a_person_cannot_be_escalated(ctx):
     put_ticket(ctx, "JOOWP-330", "Acceptance criteria:\n- AC1: x")
+    esc.record(ctx.db, "JOOWP-330", "JOOWP", "dev", "run", esc.MISSING, "needs a browser", resolution="open")
     refused = esc.triage_decision(ctx, run_of("JOOWP-330"), {"decision": "ESCALATE", "class": esc.MISSING,
                                                              "why": "needs a browser", "options": ["a", "b"],
                                                              "recommended": "a"}, "q")
     assert refused["action"] == "refused" and "never reaches a person" in refused["reason"]
+    assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 0
+
+
+@pytest.mark.parametrize("cls", esc.PERSON_CLASSES)
+def test_triage_cannot_answer_a_person_facing_raised_class(ctx, cls):
+    key = "JOOWP-331" if cls == esc.BUSINESS else "JOOWP-332"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: x")
+    esc.record(ctx.db, key, "JOOWP", "dev", "run", cls, "the stored owner question", resolution="open")
+    result = esc.triage_decision(ctx, run_of(key), {"decision": "ANSWER", "answer": "AI chose this",
+                                                    "why": "repository answer", "class": esc.AMBIGUITY},
+                                 "a different question the repository can answer")
+    assert result["action"] == "refused" and result["class"] == cls
+    row = ctx.db.one("SELECT class,question,resolution,reached_person FROM escalations WHERE ticket_key=%s", (key,))
+    assert row == {"class": cls, "question": "the stored owner question", "resolution": "open", "reached_person": False}
+
+
+@pytest.mark.parametrize("cls", [c for c in esc.CLASSES if c not in esc.PERSON_CLASSES])
+def test_triage_cannot_escalate_a_raised_class_that_never_reaches_a_person(ctx, cls):
+    key = f"JOOWP-{340 + esc.CLASSES.index(cls)}"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: x")
+    esc.record(ctx.db, key, "JOOWP", "dev", "run", cls, "the stored question", resolution="open")
+    result = esc.triage_decision(ctx, run_of(key), {"decision": "ESCALATE", "class": esc.BUSINESS,
+                                                    "why": "owner should choose", "options": ["a", "b"],
+                                                    "recommended": "a"}, "spoofed person-facing question")
+    assert result["action"] == "refused" and result["class"] == cls
+    assert ctx.db.one("SELECT resolution,reached_person FROM escalations WHERE ticket_key=%s", (key,)) == {
+        "resolution": "open", "reached_person": False}
     assert ctx.db.one("SELECT count(*) AS n FROM owner_decisions WHERE status='asked'")["n"] == 0
 
 
@@ -352,12 +392,14 @@ def test_unreachable_criterion_is_amended_on_the_ticket_and_in_the_register(ctx)
 def test_amendment_can_remove_a_criterion_and_triage_can_amend_through_the_register(ctx):
     put_ticket(ctx, "JOOWP-302", "Acceptance criteria:\n- AC1: a\n- AC2: video of the device")
     run = run_of("JOOWP-302")
+    esc.record(ctx.db, "JOOWP-302", "JOOWP", "dev", "run", esc.UNREACHABLE,
+               "AC2 requires video of a device; no device exists in this environment", resolution="open")
+    missing = esc.triage_decision(ctx, run, {"decision": "AMEND", "criterion": "AC9", "narrowed": "", "why": "x"}, "q")
+    assert missing["action"] == "refused"
     done = esc.triage_decision(ctx, run, {"decision": "AMEND", "criterion": "AC2", "narrowed": "REMOVED",
                                           "why": "No device exists in the fleet."}, "AC2 needs a video of a device")
     assert done["action"] == "amended" and done["summary"] == "AC2 removed"
     assert "[removed" in ctx.db.one("SELECT description FROM tickets WHERE key='JOOWP-302'")["description"]
-    missing = esc.triage_decision(ctx, run, {"decision": "AMEND", "criterion": "AC9", "narrowed": "", "why": "x"}, "q")
-    assert missing["action"] == "refused"
     assert esc.amend_description("no criteria here", "AC1", 1, "") is None
 
 
@@ -427,7 +469,15 @@ def test_the_policy_hook_returns_the_explained_reason_and_a_policy_message_is_no
 def test_the_ci_log_tail_is_read_through_the_control_api(client, ctx, monkeypatch):
     headers = node_headers(client, "cc")
     add_ticket(ctx.db, "TESTWP-9")
+    prior_dev = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,branch,head_sha,details)"
+               " VALUES (%s,'TESTWP-9','TESTWP','dev','claude-01','claude','cc',1,'finished','done',"
+               "'https://github.com/jooservices/test-aiflow-wp/pull/9','TESTWP-9-x','sha-TESTWP-9-x',%s::jsonb)",
+               (prior_dev, json.dumps({"repository": "jooservices/test-aiflow-wp"})))
     claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-9", "account": "claude-01"}, headers=headers).json()
+    current_run = ctx.db.one("SELECT step,pr_url,branch,head_sha FROM runs WHERE id=%s", (claim["run_id"],))
+    assert current_run == {"step": "dev", "pr_url": "https://github.com/jooservices/test-aiflow-wp/pull/9",
+                           "branch": "TESTWP-9-x", "head_sha": "sha-TESTWP-9-x"}
     seen = []
 
     def failing_job_log(repo, sha, lines=200):
@@ -436,6 +486,8 @@ def test_the_ci_log_tail_is_read_through_the_control_api(client, ctx, monkeypatc
                 "url": "https://github.com/jooservices/test-aiflow-wp/actions/runs/1/job/2", "failed_steps": ["Run tests"],
                 "lines": 2, "tail": "FAILED tests/v4/test_x.py::test_y\nAssertionError: 1 != 2"}
 
+    ctx.github.pr_data = {9: {"number": 9, "head": {"ref": "TESTWP-9-x", "sha": "sha-TESTWP-9-x",
+                              "repo": {"full_name": "jooservices/test-aiflow-wp"}}}}
     monkeypatch.setattr(ctx.github, "failing_job_log", failing_job_log, raising=False)
     got = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
                                                    "branch": "TESTWP-9-x", "lines": 50}, headers=headers)
@@ -443,11 +495,33 @@ def test_the_ci_log_tail_is_read_through_the_control_api(client, ctx, monkeypatc
     body = got.json()
     assert body["found"] and body["job"] == "Test (v4)" and "AssertionError: 1 != 2" in body["tail"]
     assert seen == [("test-aiflow-wp", "sha-TESTWP-9-x", 50)]
+    wrong_branch = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                            "branch": "develop"}, headers=headers)
+    assert wrong_branch.status_code == 403 and "not the run's pull request branch" in wrong_branch.text
+    wrong_sha = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                         "sha": "another-commit"}, headers=headers)
+    assert wrong_sha.status_code == 403 and "not the current head" in wrong_sha.text
+    direct_sha = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                         "sha": "sha-TESTWP-9-x", "lines": 25}, headers=headers)
+    assert direct_sha.status_code == 200 and direct_sha.json()["sha"] == "sha-TESTWP-9-x"
+    assert seen[-1] == ("test-aiflow-wp", "sha-TESTWP-9-x", 25)
+    ctx.github.pr_data[9]["head"]["ref"] = "develop"
+    wrong_remote_branch = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                                   "branch": "TESTWP-9-x"}, headers=headers)
+    assert wrong_remote_branch.status_code == 403 and "no longer matches" in wrong_remote_branch.text
+    ctx.github.pr_data[9]["head"]["ref"] = "TESTWP-9-x"
+    ctx.db.run("UPDATE runs SET pr_url='https://github.com/another-owner/test-aiflow-wp/pull/9' WHERE id=%s",
+               (claim["run_id"],))
+    wrong_pr = client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"],
+                                                        "branch": "TESTWP-9-x"}, headers=headers)
+    assert wrong_pr.status_code == 403 and "does not match the run repository" in wrong_pr.text
+    ctx.db.run("UPDATE runs SET pr_url='https://github.com/jooservices/test-aiflow-wp/pull/9' WHERE id=%s",
+               (claim["run_id"],))
     assert client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"] + 1,
                                                     "branch": "b"}, headers=headers).status_code == 409
     assert client.get("/v1/github/ci-log", params={"run_id": claim["run_id"], "fence": claim["fence"]},
                       headers=headers).status_code == 400
-    assert ctx.db.one("SELECT accepted FROM write_audit WHERE target='github' AND action='ci-log'")["accepted"]
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE target='github' AND action='ci-log' AND accepted")["n"] == 2
 
     # the worker puts the tail in the prompt of the next run on the pull request, so the AI never asks for it
     project = {"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "base": "develop", "checks": [],
@@ -461,6 +535,20 @@ def test_the_ci_log_tail_is_read_through_the_control_api(client, ctx, monkeypatc
     prompt = build_prompt(c, "TESTWP-9-x", None, tail)
     assert "never ask for the CI log" in prompt and "AssertionError: 1 != 2" in prompt
     assert fetch_ci_log(ApiHarness(client, headers), Claimed(**{**c.__dict__, "branch": "", "findings": ""}), "b") == ""
+
+
+def test_ci_log_rejects_a_non_developer_run_even_with_a_recorded_pull_request(client, ctx):
+    headers = node_headers(client, "cc")
+    add_ticket(ctx.db, "TESTWP-10")
+    run_id = str(uuid.uuid4())
+    lease = ctx.leases.claim("TESTWP-10", run_id, ctx.settings.lease_ms)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash,pr_url,branch,head_sha)"
+               " VALUES (%s,'TESTWP-10','TESTWP','verify','claude-01','claude','cc',%s,'token',"
+               "'https://github.com/jooservices/test-aiflow-wp/pull/10','TESTWP-10-x','commit-10')",
+               (run_id, lease.fence))
+    response = client.get("/v1/github/ci-log", params={"run_id": run_id, "fence": lease.fence,
+                                                        "branch": "TESTWP-10-x"}, headers=headers)
+    assert response.status_code == 403 and "only to a developer run" in response.text
 
 
 def test_github_app_reads_the_tail_of_the_first_failing_job(monkeypatch):

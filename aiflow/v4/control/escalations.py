@@ -247,7 +247,8 @@ def resume_waiting(ctx, decision: dict, text: str) -> list[str]:
                                   f"Next: back to To Do; the developer continues with {citation(decision)}")
             status = ctx.jira.transition_to(key, "To Do")
             ctx.db.run("UPDATE tickets SET status=%s, synced_at=now() WHERE key=%s", (status, key))
-            ctx.db.run("UPDATE escalations SET answer=%s, resolved_at=coalesce(resolved_at, now())"
+            ctx.db.run("UPDATE escalations SET answer=%s, resolution='person', reached_person=true,"
+                       " resolved_at=coalesce(resolved_at, now())"
                        " WHERE ticket_key=%s AND decision_id=%s", (text, key, decision["id"]))
             resumed.append(key)
         except Exception as exc:  # noqa: BLE001 - one ticket must not keep the others waiting
@@ -339,7 +340,7 @@ def record(db, ticket: str, project: str, source: str, run_id: str, cls: str, qu
            reached_person: bool = False) -> dict:
     return db.one("INSERT INTO escalations (ticket_key,project,source,run_id,class,question,reason,decision_id,"
                   "resolution,reached_person,answer,resolved_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                  "CASE WHEN %s='open' THEN NULL ELSE now() END) RETURNING *",
+                  "CASE WHEN %s IN ('open','waiting') THEN NULL ELSE now() END) RETURNING *",
                   (ticket, project, source, run_id, cls, question[:3000], reason[:500], decision_id, resolution,
                    reached_person, answer[:3000], resolution))
 
@@ -356,7 +357,8 @@ def settle(db, ticket: str, project: str, source: str, run_id: str, cls: str, qu
         return record(db, ticket, project, source, run_id, cls, question, reason, resolution, decision_id, answer,
                       reached_person)
     return db.one("UPDATE escalations SET class=%s, reason=%s, resolution=%s, decision_id=coalesce(%s, decision_id),"
-                  " answer=%s, reached_person=%s, run_id=%s, resolved_at=CASE WHEN %s='open' THEN NULL ELSE now() END"
+                  " answer=%s, reached_person=%s, run_id=%s,"
+                  " resolved_at=CASE WHEN %s IN ('open','waiting') THEN NULL ELSE now() END"
                   " WHERE id=%s RETURNING *",
                   (cls, reason[:500], resolution, decision_id, answer[:3000], reached_person, run_id or current["run_id"],
                    resolution, current["id"]))
@@ -426,16 +428,27 @@ def triage_decision(ctx, run: dict, decision: dict, question: str) -> dict:
     answered | applied | amended | asked | waiting | refused."""
     db, ticket, project, run_id = ctx.db, run["ticket_key"], run["project"], str(run["id"])
     kind = decision["decision"]
+    raised = open_escalation(db, ticket)
+    if not raised:
+        return {"action": "refused", "class": "", "reason": "there is no open raised escalation to decide"}
+    # The class and question come from the fenced raise path. Triage output cannot relabel a question to
+    # bypass the owner boundary or change which decision is being answered.
+    cls = raised["class"]
+    question = raised["question"]
+    if cls not in CLASSES:
+        return {"action": "refused", "class": cls, "reason": "the raised escalation has an invalid class"}
     if kind == "ANSWER":
-        c = classify(db, question, project)
-        cls = decision.get("class") or (c.cls if c.cls not in PERSON_CLASSES else AMBIGUITY)
         if cls in PERSON_CLASSES:
-            cls = AMBIGUITY
+            return {"action": "refused", "class": cls,
+                    "reason": f"{LABELS[cls]} requires the owner; triage cannot answer it"}
         settle(db, ticket, project, "triage", run_id, cls, question, decision.get("why", ""), "triage", None,
                decision.get("answer", ""))
         return {"action": "answered", "class": cls}
     if kind == "AMEND":
-        amended = amend_ticket(ctx, ticket, project, decision.get("criterion", ""), classify(db, question, project).environment,
+        if cls != UNREACHABLE:
+            return {"action": "refused", "class": cls,
+                    "reason": "only an unreachable acceptance criterion can be amended"}
+        amended = amend_ticket(ctx, ticket, project, decision.get("criterion", ""), environment_of(question),
                                decision.get("why", ""), decision.get("narrowed", ""), by="triage")
         if not amended:
             return {"action": "refused", "class": UNREACHABLE,
@@ -444,7 +457,6 @@ def triage_decision(ctx, run: dict, decision: dict, question: str) -> dict:
                amended["decision"]["id"], amended["summary"])
         return {"action": "amended", "class": UNREACHABLE, "citation": amended["citation"], "summary": amended["summary"],
                 "decision_id": amended["decision"]["id"]}
-    cls = decision.get("class") or BUSINESS
     if cls not in PERSON_CLASSES:
         return {"action": "refused", "class": cls,
                 "reason": f"{LABELS.get(cls, cls)} never reaches a person: answer it (DECISION: ANSWER) or amend the ticket"}
@@ -502,7 +514,7 @@ def weekly_metrics(db, weeks: int = ACTIVE_WINDOW_WEEKS, now: datetime | None = 
         per[row["class"]] = per.get(row["class"], 0) + 1
         if row["reached_person"]:
             bucket["reached_person"] += 1
-        elif row["resolution"] != "open":
+        elif row["resolution"] not in ("open", "waiting"):
             bucket["without_person"] += 1
     trend = []
     for bucket in series.values():

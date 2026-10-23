@@ -51,6 +51,12 @@ The site stays available for the full AI process, including repeated test loops 
 runs. When the process exits, the worker removes both containers, the data volume and the network. Projects without
 the `wordpress` stack do not call the site provisioner and incur no site startup cost.
 
+## Browser reports from a run
+
+When a run stops with `POST /v1/escalations/raise` because a browser cannot start, the control API names the missing
+browser (`chromium`, `firefox` or `webkit`) as the requirement. It never reports `playwright-browser`, which is only
+the browser folder.
+
 ## Lab acceptance proof
 
 The two-machine lab proof for JOOWP-204, JOOWP-210 and JOOWP-243 is a post-merge canary check, per the owner

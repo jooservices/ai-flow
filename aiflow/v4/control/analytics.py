@@ -26,11 +26,33 @@ GROUP BY 1, 2, 3
 ORDER BY 1 DESC, 2, 3
 """
 
+DAILY_USAGE_SQL = """
+SELECT (r.started_at AT TIME ZONE 'UTC')::date AS day, r.provider AS key,
+       count(*) AS runs, coalesce(sum(r.tokens_in), 0) AS tokens_in,
+       coalesce(sum(r.tokens_out), 0) AS tokens_out, coalesce(sum(r.cost_usd), 0) AS cost_usd
+FROM runs r
+WHERE r.started_at >= ((now() AT TIME ZONE 'UTC')::date - %(back)s::int)::timestamp AT TIME ZONE 'UTC'
+  AND r.provider <> 'human'
+  AND (%(project_keys_is_null)s OR r.project = ANY(%(project_keys)s))
+GROUP BY 1, 2
+ORDER BY 1 DESC, 2
+"""
+
 
 def daily(db, days: int = 14, project: str = "") -> list[dict[str, Any]]:
     """One row per (day, project, account) that had runs in the last `days` UTC days, today included."""
     rows = db.all(DAILY_SQL, {"failed": list(FAILED), "back": days - 1, "project": project})
     return [_row(r) for r in rows]
+
+
+def daily_usage(db, days: int = 14, project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    """Usage by AI provider and UTC day, scoped to the projects visible to the caller."""
+    rows = db.all(DAILY_USAGE_SQL, {"back": days - 1, "project_keys_is_null": project_keys is None,
+                                   "project_keys": list(project_keys or ())})
+    return [{"day": row["day"].isoformat(), "key": row["key"], "runs": int(row["runs"]),
+             "tokens_in": int(row["tokens_in"]), "tokens_out": int(row["tokens_out"]),
+             "tokens": int(row["tokens_in"] + row["tokens_out"]),
+             "cost_usd": round(float(row["cost_usd"]), 6)} for row in rows]
 
 
 USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",

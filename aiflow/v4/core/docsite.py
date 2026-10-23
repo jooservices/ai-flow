@@ -74,6 +74,17 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderSystemCheck": ("system-check",),
     "renderNotifications": ("notifications",),
     "renderProjects": ("projects",),
+    "addProjectRepository": ("projects",),
+    "saveProjectRepositories": ("projects",),
+    "githubAppTarget": ("integrations",),
+    "addGitHubToken": ("integrations",),
+    "githubConnectionAction": ("integrations",),
+    "githubManifestStart": ("integrations",),
+    "replaceGitHubToken": ("integrations",),
+    "removeGitHubConnection": ("integrations",),
+    "loadGitHubIntegrations": ("integrations",),
+    "importGitHubApp": ("integrations",),
+    "connectImportedGitHubApp": ("integrations",),
     "renderUsers": ("users",),
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
@@ -103,6 +114,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
 # therefore requires the corresponding Help page to be reviewed for every screen. Individual hint strings below
 # `HINTS` are mapped to their own screen instead.
+# Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
+SCREEN_LINE_VIEWS = (
+    (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
+    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin"), "projects"),
+)
+
 SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"^\s*\.firstuse\{"),
     re.compile(r'\bid="(?:help-link|firstuse)"'),
@@ -951,6 +968,9 @@ def changed_views(base: str) -> set[str]:
                 line_views.add("system-check")
             if "rh-form" in changed_line:
                 line_views.add("machines")
+            for pattern, view in SCREEN_LINE_VIEWS:
+                if pattern.search(changed_line):
+                    line_views.add(view)
             if "A signed-in person whose roles grant review.actions" in changed_line:
                 line_views.add("review")
             if not changed_line.strip():

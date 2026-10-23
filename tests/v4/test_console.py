@@ -516,18 +516,20 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/notifications']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,notifications"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
+    assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects']" in page
+    assert "else if (S.view === 'notifications') renderNotifications();" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'notifications']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -1011,12 +1013,13 @@ def test_command_center_menu_order_and_role_visibility():
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"),
+        ("projects", "Projects"), ("notifications", "Notifications"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
     required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
-                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage", "projects": "projects.manage"}
+                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage",
+                "projects": "projects.manage", "notifications": "notifications.manage"}
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
   getAttribute: function () { return item.view; }, setAttribute: function () {}}; });

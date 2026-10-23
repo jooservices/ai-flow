@@ -421,6 +421,8 @@ def _playwright_fixture(monkeypatch, tmp_path, *, launch_code=0, launch_err="", 
 
     monkeypatch.setattr(operations.subprocess, "run", run)
     monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/sbin/runuser" if name == "runuser" else None)
+    # The agent runs as root and verifies the browser as the worker user; do not depend on the host's accounts.
+    monkeypatch.setattr(operations.os, "geteuid", lambda: 0)
     monkeypatch.setattr(operations, "PLAYWRIGHT_BROWSERS_DIR", str(browsers))
     monkeypatch.setattr(operations, "_TOOL_HOME", tmp_path / "home")
     monkeypatch.setattr(operations, "_NPM_CACHE", tmp_path / "npm-cache")
@@ -439,7 +441,6 @@ def test_playwright_toolchain_links_command_into_a_path_directory(monkeypatch, t
 
 def test_playwright_browser_installs_chromium_with_deps_into_shared_folder_and_launches(monkeypatch, tmp_path, caplog):
     calls, links, browsers, _ = _playwright_fixture(monkeypatch, tmp_path)
-    monkeypatch.setattr(operations.os, "geteuid", lambda: 0)  # exercise the root agent -> worker verification path
     with caplog.at_level("INFO", logger="aiflow4.node"):
         operations._install_playwright_browser("1.56.1")
     install = next((c, e) for c, e in calls if c[:2] == ["playwright", "install"])

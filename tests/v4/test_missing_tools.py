@@ -54,6 +54,13 @@ class _API:
 
     def call(self, method, path, body=None, params=None):
         self.calls.append((method, path, body))
+        if path == "/v1/escalations/raise":
+            missing = "MISSING-TOOL" in body["question"]
+            return {"class": "missing_tool_or_environment" if missing else "new_business_decision",
+                    "label": "Missing tool or environment" if missing else "New business decision",
+                    "reason": "reported missing tool" if missing else "requirements conflict",
+                    "resolved": missing, "outcome": "tool_missing" if missing else "blocked",
+                    "answer": "", "citation": "", "missing_tools": []}
         return {"token": "github-token", "url": "https://github.com/x/y/pull/1", "number": 1}
 
 
@@ -100,6 +107,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason):
 def test_missing_tool_is_not_a_question_for_the_owner(monkeypatch, tmp_path):
     result, api = _run_dev(monkeypatch, tmp_path, "BLOCKED", "MISSING-TOOL: php, composer - phpunit cannot run")
     assert result["outcome"] == "tool_missing" and result["details"]["missing_tools"] == ["php", "composer"]
+    assert result["details"]["escalation_class"] == "missing_tool_or_environment"
+    assert any(c[1] == "/v1/escalations/raise" and "MISSING-TOOL" in c[2]["question"] for c in api.calls)
     transitions = [c[2]["to"] for c in api.calls if c[1].endswith("/transition")]
     assert transitions[-1] == "To Do" and "Needs owner" not in transitions
     assert not any("question for the owner" in str(c[2].get("body", "")) for c in api.calls)

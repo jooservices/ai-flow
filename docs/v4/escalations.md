@@ -50,16 +50,18 @@ was raised: it rejects an `ANSWER` for either person-facing class and rejects `E
 Triage output cannot relabel a question to bypass that boundary. The control plane then:
 
 1. applies a **decided** register entry that matches (nothing is asked);
-2. otherwise, if the same question is already **asked**, adds the ticket to that wait (no second alert);
+2. otherwise, if the same normalized question is already **asked**, adds the ticket to that wait (no second alert;
+   the match does not depend on triage-generated keywords);
 3. otherwise stores a pending entry (`status asked`, options, recommended default), comments with the options on the
    ticket, labels it `owner-escalated` and alerts the owner once.
 
 The owner picks an option (or the recommended default) on screen. The entry becomes **decided**, and every waiting
 ticket loses the label and returns to To Do with the decision cited. If the owner answers in a Jira comment and moves
-the ticket back instead, the next developer claim reads the human comment posted after the ask, stores that actual
-answer in the register, and passes the question and answer to the developer prompt. The recommended default is never
-substituted for a missing comment; the ask stays pending until an answer is available. Other waiting tickets resume
-with the captured answer.
+the ticket back instead, the next developer claim reads a comment posted after the ask only when its stable Jira
+`accountId` matches the account connected in Integrations (the authorized owner identity). Display names are not used
+for authorization. The actual answer is stored in the register and passed with the question to the developer prompt.
+The recommended default is never substituted for a missing or unauthorized comment; the ask stays pending until an
+authorized answer is available. Other waiting tickets resume with the captured answer.
 
 ## Unreachable criteria are amended (AC4)
 

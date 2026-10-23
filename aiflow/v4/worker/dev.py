@@ -292,8 +292,13 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
         if missing:
+            # Record the class through the same fenced path as every other developer stop. The run result below
+            # still carries all missing requirements so the normal tool-wait path is preserved.
+            raised = api.call("POST", "/v1/escalations/raise", {
+                "run_id": c.run_id, "fence": c.fence, "question": res.verdict_reason})
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
+            result["details"]["escalation_class"] = raised.get("class", "")
             jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
                                       why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
                                       result="No question goes to the owner; the machine and the tool are recorded",

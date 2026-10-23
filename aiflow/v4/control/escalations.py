@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -100,11 +101,13 @@ NEED_RE = re.compile(r"\bneed|\brequire|\bmissing|\bnot (?:installed|available|f
                      r"\bdo(?:es)? not have|\bdon't have|\bwithout|\bunavailable|\black|\bask|\bprovide|\bgrant|\bplease",
                      re.I)
 IRREVERSIBLE_RE = re.compile(
-    r"\b(?:to|in|on|into) (?:production|prod)\b|\bproduction (?:server|database|data|environment|deploy\w*|release|site|"
-    r"cluster|secrets?|credentials?)\b|\bforce[- ]?push\b|\bdrop (?:the )?(?:table|database|schema)\b|"
-    r"\bdelete\b.{0,40}\b(?:data|database|records|repository|repo|branch|bucket)\b|"
-    r"\brotate\b.{0,30}\b(?:secret|key|token|credential)s?\b|\birreversible\b|\bcannot be undone\b|"
-    r"\b(?:deploy|publish|roll ?out|ship)\b", re.I | re.S)
+    r"\bforce[- ]?push\b|\bdrop (?:the )?(?:table|database|schema)\b|"
+    r"\b(?:delete|destroy|wipe|truncate)\b.{0,60}\b(?:data|database|records|repository|repo|branch|bucket)\b|"
+    r"\b(?:rotate|revoke)\b.{0,30}\b(?:secret|key|token|credential)s?\b|\birreversible\b|\bcannot be undone\b|"
+    r"\b(?:deploy|publish|roll ?out|ship)\b.{0,60}\b(?:to|into|on) (?:the )?(?:production|prod)\b|"
+    r"\b(?:production|prod)\b.{0,60}\b(?:deploy|publish|roll ?out|ship)\b|"
+    r"\b(?:create|cut|make|publish|push|tag)\b.{0,40}\b(?:release|version tag|tag)\b|"
+    r"\brelease\b.{0,40}\b(?:to production|to prod|public|live)\b", re.I | re.S)
 AMBIGUITY_RE = re.compile(
     r"\b(?:which|what) (?:file|files|folder|directory|module|class|function|library|framework|package|existing|naming|"
     r"convention|pattern|helper|test|command|script|config|setting)s?\b|"
@@ -115,7 +118,10 @@ REPOSITORY_FACT_RE = re.compile(
     r"\b(?:which|what)\s+(?:http\s+)?(?:request\s+)?method\b.{0,120}"
     r"(?:/\w[\w./{}:-]*|\b(?:endpoint|route|url)\b)|"
     r"\b(?:which|what)\s+(?:status code|response|parameter|header)\b.{0,100}"
-    r"\b(?:endpoint|route|api|function|handler)\b", re.I | re.S)
+    r"\b(?:endpoint|route|api|function|handler)\b|"
+    r"\bwhat\s+(?:value|setting)\b.{0,80}\b(?:existing|current|configured)\b.{0,80}\b(?:use|set|configured)\b",
+    re.I | re.S)
+MISSING_MARKER_RE = re.compile(r"\bMISSING-(?:TOOL|SERVICE)\s*:\s*([A-Za-z0-9_.+-]+)", re.I)
 
 
 def _search(pattern: str, text: str) -> bool:
@@ -157,16 +163,21 @@ def classify(db, text: str, project: str = "") -> Classification:
         ac = re.search(r"\bAC\s?(\d+)\b", text, re.I)
         return Classification(UNREACHABLE, "an acceptance criterion that cannot be met in this environment",
                               environment=environment, criterion=f"AC{ac.group(1)}" if ac else "")
+    missing_marker = MISSING_MARKER_RE.search(text)
+    if missing_marker:
+        requirement = missing_marker.group(1).lower().replace("-", "_")
+        return Classification(MISSING, f"the run explicitly reported missing tool or service {requirement.replace('_', ' ')}",
+                              environment=requirement)
     if environment and NEED_RE.search(text):
         return Classification(MISSING, f"the machine lacks or cannot reach {environment.replace('_', ' ')}",
                               environment=environment)
     pending = match_decision(db, text, project, "asked")
     if pending:
         return Classification(BUSINESS, f"already asked ({pending['title']}); waiting for the owner", pending=pending)
-    if IRREVERSIBLE_RE.search(text):
-        return Classification(IRREVERSIBLE, "an irreversible or production action")
     if AMBIGUITY_RE.search(text) or REPOSITORY_FACT_RE.search(text):
         return Classification(AMBIGUITY, "the repository (ticket, spec or code) can answer this")
+    if IRREVERSIBLE_RE.search(text):
+        return Classification(IRREVERSIBLE, "an irreversible or production action")
     return Classification(BUSINESS, "a business decision no source answers")
 
 
@@ -192,6 +203,12 @@ def keyword_patterns(keywords: list[str], topic: str = "") -> list[str]:
     if len(words) < 2:
         return []
     return ["".join(f"(?=.*{re.escape(w)})" for w in words)]
+
+
+def normalize_question(text: str) -> str:
+    """Create a stable key for the actual question, independent of generated triage keywords and punctuation."""
+    normalized = unicodedata.normalize("NFKC", (text or "")).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", normalized, flags=re.UNICODE).split())[:3000]
 
 
 def unique_topic(db, base: str) -> str:
@@ -223,16 +240,20 @@ def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str],
     Matching and insertion share a transaction lock so concurrent triage runs cannot create duplicate asks."""
     db = ctx.db
     full = f"{text}\n{why}"
+    question_key = normalize_question(text)
     with db.pool.connection() as connection:
         with connection.transaction():
-            # A single short critical section is preferable to relying on model-generated topics or keywords
-            # being identical for equivalent questions. All matching and creation uses this same connection.
+            # A single short critical section protects the normalized-question lookup and insert across control
+            # workers. Generated topics and keyword patterns can change between triage runs.
             connection.execute("SELECT pg_advisory_xact_lock(255, 255)")
             locked_db = _ConnectionQueries(connection)
             decided = match_decision(locked_db, full, project)
             if decided:
                 return {"action": "applied", "decision": decided, "citation": cite(locked_db, decided)}
-            pending = match_decision(locked_db, full, project, "asked") or locked_db.one(
+            pending = (locked_db.one("SELECT * FROM owner_decisions WHERE kind='decision' AND status='asked' "
+                                     "AND question_key=%s AND (project='' OR project=%s) ORDER BY id LIMIT 1",
+                                     (question_key, project)) if question_key else None)
+            pending = pending or match_decision(locked_db, full, project, "asked") or locked_db.one(
                 "SELECT * FROM owner_decisions WHERE status='asked' AND %s = ANY(waiting_tickets)", (ticket,))
             if pending:
                 locked_db.run("UPDATE owner_decisions SET waiting_tickets=CASE WHEN %s = ANY(waiting_tickets) THEN waiting_tickets"
@@ -244,9 +265,10 @@ def ask(ctx, ticket: str, project: str, text: str, why: str, options: list[str],
                 cleaned_options.append(recommended)
             row = locked_db.one(
                 "INSERT INTO owner_decisions (topic,title,question,options,recommended,patterns,project,status,source,"
-                "ticket_key,waiting_tickets) VALUES (%s,%s,%s,%s,%s,%s,%s,'asked','ask',%s,%s) RETURNING *",
+                "ticket_key,waiting_tickets,question_key) VALUES (%s,%s,%s,%s,%s,%s,%s,'asked','ask',%s,%s,%s) RETURNING *",
                 (unique_topic(locked_db, topic or why[:60]), (topic or why)[:200], f"{text}\n{why}".strip()[:3000],
-                 J(cleaned_options), recommended[:500], J(keyword_patterns(keywords, topic or why)), "", ticket, [ticket]))
+                 J(cleaned_options), recommended[:500], J(keyword_patterns(keywords, topic or why)), "", ticket, [ticket],
+                 question_key))
             return {"action": "asked", "decision": row, "citation": f"Question D{row['id']} \"{row['title']}\""}
 
 
@@ -325,16 +347,20 @@ def owner_answered_on_ticket(ctx, ticket: str) -> dict | None:
         return None
     try:
         comments = ctx.jira.recent_comments(ticket, limit=30)
+        authorized_account_id = str(ctx.jira.current_account_id() or "").strip()
     except Exception as exc:  # noqa: BLE001 - a Jira read failure must not fabricate an owner decision
         log.warning("comments of %s for owner decision failed: %s", ticket, type(exc).__name__)
+        return None
+    if not authorized_account_id:
+        log.warning("Jira did not provide an authorized owner account id for %s", ticket)
         return None
     eligible = []
     for comment in comments:
         body = str(comment.get("body") or "").strip()
-        author = str(comment.get("author") or "").strip().lower()
+        author_account_id = str(comment.get("account_id") or "").strip()
         created = _comment_time(comment)
-        if (not body or not created or body.lower().startswith(("ai flow", "aiflow"))
-                or "automation for jira" in author or "ai flow" in author):
+        if (not body or not created or author_account_id != authorized_account_id
+                or body.lower().startswith(("ai flow", "aiflow"))):
             continue
         eligible.append((created, body))
     for row in rows:

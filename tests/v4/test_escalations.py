@@ -17,6 +17,7 @@ from aiflow.v4.control import escalations as esc
 from aiflow.v4.control.api import notify
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.github import GitHubApp
+from aiflow.v4.control.jira import Jira
 from aiflow.v4.control.policy import decide, decide_read_only
 from aiflow.v4.worker import dev, triage
 from aiflow.v4.worker.dev import Claimed, build_prompt, fetch_ci_log
@@ -79,6 +80,31 @@ def test_repository_answerable_http_method_question_does_not_reach_a_person(ctx)
     assert answered == {"action": "answered", "class": esc.AMBIGUITY}
     row = ctx.db.one("SELECT class,resolution,reached_person FROM escalations WHERE ticket_key='TESTWP-401'")
     assert row == {"class": esc.AMBIGUITY, "resolution": "triage", "reached_person": False}
+
+
+@pytest.mark.parametrize("question", [
+    "Where is the deploy config defined?",
+    "What value does the existing session timeout use?",
+])
+def test_repository_supported_deploy_and_existing_setting_questions_are_not_person_facing(ctx, question):
+    key = "TESTWP-402"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: document the existing configuration")
+    classified = esc.classify(ctx.db, question, "TESTWP")
+    assert classified.cls == esc.AMBIGUITY
+    raised = esc.dev_question(ctx, run_of(key), question)
+    assert raised["class"] == esc.AMBIGUITY and not raised["resolved"]
+    answered = esc.triage_decision(ctx, run_of(key), {"decision": "ANSWER", "answer": "Found in the repository.",
+                                                      "why": "The existing code answers this."}, question)
+    assert answered == {"action": "answered", "class": esc.AMBIGUITY}
+
+
+def test_explicit_production_deploy_is_still_person_facing(ctx):
+    assert esc.classify(ctx.db, "Deploy this change to production?", "TESTWP").cls == esc.IRREVERSIBLE
+
+
+def test_standard_missing_tool_marker_is_classified_as_machine_environment(ctx):
+    classified = esc.classify(ctx.db, "MISSING-TOOL: php, composer - phpunit cannot run", "TESTWP")
+    assert classified.cls == esc.MISSING and classified.environment == "php"
 
 
 # --- AC8: replay of 2026-10-22 and 23 ---------------------------------------------------------------------------
@@ -257,8 +283,10 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     pending = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert pending["status"] == "asked" and pending["options"] == NEW["options"] and pending["decision"] == ""
     # another ticket asks the same thing: it joins the wait, nobody is asked again
-    esc.dev_question(ctx, run_of("JOOWP-323"), "Failed payment: send the email now or later?")
-    second = esc.triage_decision(ctx, run_of("JOOWP-323"), NEW, "Failed payment: send the email now or later?")
+    esc.dev_question(ctx, run_of("JOOWP-323"), question)
+    alternate = {**NEW, "why": "The email timing needs a product choice.", "topic": "Payment follow-up",
+                 "keywords": ["outbound", "message", "schedule"]}
+    second = esc.triage_decision(ctx, run_of("JOOWP-323"), alternate, question)
     assert second["action"] == "waiting" and second["decision_id"] == first["decision_id"]
     waiting = ctx.db.one("SELECT resolution,reached_person,resolved_at FROM escalations WHERE ticket_key='JOOWP-323'")
     assert waiting == {"resolution": "waiting", "reached_person": False, "resolved_at": None}
@@ -327,7 +355,8 @@ def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(c
     ctx.jira.recent_comment_data[key] = [
         {"author": "AI Flow", "created": future.isoformat(),
          "body": "AI Flow · owner decision required\nOptions: 14 days; 30 days. Recommended default: 30 days."},
-        {"author": "Owner", "created": (future + timedelta(seconds=1)).isoformat(),
+        {"author": "Owner", "account_id": ctx.jira.jira_account_id,
+         "created": (future + timedelta(seconds=1)).isoformat(),
          "body": "Use 14 days, not the recommended 30 days."},
     ]
     headers = node_headers(client, "cc")
@@ -341,6 +370,44 @@ def test_jira_comment_answer_is_persisted_and_passed_to_the_next_developer_run(c
     escalation = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key=%s", (key,))
     assert escalation == {"resolution": "person", "reached_person": True,
                           "answer": "Use 14 days, not the recommended 30 days."}
+
+
+def test_non_owner_jira_comment_does_not_answer_an_owner_only_question(ctx):
+    key = "TESTWP-328"
+    question = "Should refunds be available for 14 days or 30 days?"
+    put_ticket(ctx, key, "Acceptance criteria:\n- AC1: refund window", status="To Do")
+    asked = esc.ask(ctx, key, "TESTWP", question, "Refund policy choice", ["14 days", "30 days"], "30 days",
+                    "Refund period", ["refund", "period"])
+    esc.record(ctx.db, key, "TESTWP", "triage", "triage-run", esc.BUSINESS, question, "policy choice", "person",
+               asked["decision"]["id"], reached_person=True)
+    future = datetime.now(timezone.utc) + timedelta(minutes=1)
+    ctx.jira.recent_comment_data[key] = [{
+        "author": "Collaborator", "account_id": "jira-collaborator-account", "created": future.isoformat(),
+        "body": "Use 14 days.",
+    }]
+
+    assert esc.owner_answered_on_ticket(ctx, key) is None
+    pending = ctx.db.one("SELECT status,decision,decided_by FROM owner_decisions WHERE id=%s",
+                         (asked["decision"]["id"],))
+    assert pending == {"status": "asked", "decision": "", "decided_by": ""}
+
+
+def test_jira_comment_reader_preserves_stable_account_ids_for_owner_checks():
+    def respond(request):
+        if request.url.path.endswith("/myself"):
+            return httpx.Response(200, json={"accountId": "jira-owner-account"})
+        return httpx.Response(200, json={"comments": [{
+            "author": {"displayName": "Owner", "accountId": "jira-owner-account"},
+            "created": "2026-10-23T12:00:00.000+0000",
+            "body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [
+                {"type": "text", "text": "Use 14 days."}]}]},
+        }]})
+
+    client = httpx.Client(base_url="https://jira.example.test", transport=httpx.MockTransport(respond))
+    jira = Jira("https://jira.example.test", client=client)
+    assert jira.current_account_id() == "jira-owner-account"
+    assert jira.recent_comments("TESTWP-1")[0]["account_id"] == "jira-owner-account"
+    client.close()
 
 
 def test_the_triage_worker_asks_once_with_options_and_does_not_alert_a_second_time(client, ctx, tmp_path, monkeypatch):

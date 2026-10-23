@@ -8,7 +8,7 @@ import pytest
 
 from aiflow.v4.control import version_release
 from aiflow.v4.control.db import J
-from aiflow.v4.core.controlrepo import Project
+from aiflow.v4.core.controlrepo import Account, Project
 from aiflow.v4.worker import version_release as release_worker
 from aiflow.v4.worker.dev import Claimed
 from conftest import add_ticket, join_node
@@ -145,6 +145,39 @@ def test_candidate_claim_rechecks_live_gate_before_any_release_step(client, ctx)
     assert getattr(ctx.github, "merges", []) == []
     assert getattr(ctx.github, "tags", {}) == {}
     assert getattr(ctx.github, "releases", {}) == {}
+
+
+def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_project(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-21")
+    repo = ctx.repo()
+    repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other", checks=["composer install"],
+                                     version_release={"enabled": True, "versions": ["Other 1.0"]})
+    ctx.jira.version_data["OTHER"] = [{"id": "201", "name": "Other 1.0", "released": False}]
+    ctx.jira.version_issue_data[("OTHER", "201")] = [issue("OTHER-1")]
+    add_ticket(ctx.db, "OTHER-1", status="Done", labels=())
+    now = datetime.now(timezone.utc)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at)"
+               " VALUES (%s,'OTHER-1','OTHER','dev','codex-01','codex','node1',1,'finished','done',%s)",
+               (str(uuid.uuid4()), now - timedelta(minutes=2)))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,details)"
+               " VALUES (%s,'OTHER-1','OTHER','verify','claude-01','claude','cc',1,'finished','merged',%s,%s)",
+               (str(uuid.uuid4()), now - timedelta(minutes=1), J({"verdict": "PASS", "qc_passed": True})))
+    repo.accounts.append(Account(id="claude-02", provider="claude", node="node-other",
+                                 roles=["master", "release"]))
+    ctx.db.run("INSERT INTO accounts (id,provider,node,roles,status)"
+               " VALUES ('claude-02','claude','node-other',%s,'idle')", (["master", "release"],))
+    ctx.db.run("INSERT INTO nodes (name,status,projects,dynamic)"
+               " VALUES ('node-other','online',%s,true)", (["OTHER"],))
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+    headers = node_headers(client)
+
+    assert [item["project"] for item in version_release.candidates(ctx, "claude-02", "node-other")] == ["OTHER"]
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+    assert claim.status_code == 200, claim.text
 
 
 def test_release_claim_is_fenced_and_stale_completion_cannot_publish(client, ctx):

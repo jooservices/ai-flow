@@ -965,6 +965,19 @@ def create_app(ctx: Ctx) -> FastAPI:
             return False
         return bool(quota_peer_accounts(account_id, roles))
 
+    def quota_peer_release_candidates(account_id: str) -> set[tuple[str, str, str]]:
+        """Release work a ready peer can actually claim for this quota-risky account."""
+        if not quota_forecast_at_risk(account_id):
+            return set()
+        available: set[tuple[str, str, str]] = set()
+        for peer in quota_peer_accounts(account_id, {"master", "release"}):
+            if not rollout.node_compatible(ctx, peer["node"], RELEASES)["compatible"]:
+                continue
+            for candidate in version_release.candidates(ctx, peer["id"], peer["node"]):
+                available.add((candidate["project"], str(candidate["version_id"]),
+                               str(candidate.get("repository") or "")))
+        return available
+
     def master_snapshot() -> dict:
         now = utcnow()
         repo = ctx.repo()
@@ -2736,9 +2749,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
-        if ctx.leases.cooling(account) or account_quota_at_risk(account, {"master", "release"}):
+        if ctx.leases.cooling(account):
             return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
-        return {"versions": version_release.candidates(ctx, account, node)}
+        versions = version_release.candidates(ctx, account, node)
+        peer_candidates = quota_peer_release_candidates(account)
+        available = [candidate for candidate in versions
+                     if (candidate["project"], str(candidate["version_id"]),
+                         str(candidate.get("repository") or "")) not in peer_candidates]
+        if versions and not available:
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
+        return {"versions": available}
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
@@ -2750,7 +2770,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(body.account)
         if account_master_paused(body.account):
             raise HTTPException(409, "account is paused by master monitoring")
-        if ctx.leases.cooling(body.account) or account_quota_at_risk(body.account, {"master", "release"}):
+        if ctx.leases.cooling(body.account):
             raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
@@ -2770,6 +2790,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = version_release.project_for_version(ctx, project, version)
         if not version_release.enabled(project) or project.repo.lower().rstrip("/") == "jooservices/ai-flow":
             raise HTTPException(403, "version release is not enabled for the selected repository")
+        candidate_key = (project.key, str(version["id"]), project.repo)
+        if candidate_key in quota_peer_release_candidates(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
                            (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):

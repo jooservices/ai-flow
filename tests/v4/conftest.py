@@ -56,9 +56,15 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
+    # The node agent's test-database sweeper must see this per-session database as in use even between
+    # function-scoped DB connections, or a long pytest run can sweep its own database after the crowding limit.
+    session_guard = None
     try:
+        session_guard = psycopg.connect(own, autocommit=True)
         yield own
     finally:
+        if session_guard is not None:
+            session_guard.close()
         try:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:

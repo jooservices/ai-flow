@@ -329,6 +329,32 @@ def test_agent_prepares_stack_tools_and_returns_the_post_install_preflight(monke
     assert result["tools"] == after and result["gaps"] == {"WEB": []}
 
 
+def test_preflight_combines_node_requirements_with_requested_tool_repairs(monkeypatch):
+    state = {"git": "git version 2.43.0", "gitleaks": "missing"}
+    probes = []
+    installs = []
+
+    def probe(names=None):
+        probes.append(list(names or []))
+        return {name: state.get(name, "missing") for name in names or state}
+
+    def install(name, version, packages):
+        installs.append((name, version))
+        state[name] = "gitleaks version: 8.25.1"
+
+    monkeypatch.setattr(agent, "tool_versions", probe)
+    monkeypatch.setattr(operations, "_install_component", install)
+
+    result = operations.prepare_project_toolchains(
+        {}, {}, ["git"], requested_tools=[{"name": "gitleaks", "version": ""}])
+
+    assert probes == [["git", "gitleaks"], ["git", "gitleaks"]]
+    assert installs == [("gitleaks", "")]
+    assert result["tools"] == state
+    assert result["installed"] == ["gitleaks"]
+    assert result["request_gaps"] == []
+
+
 def test_post_install_preflight_keeps_failed_tool_as_project_gap(monkeypatch):
     required = ["git", "uv", "php", "composer", "wp"]
     snapshots = iter([dict.fromkeys(required, "missing"), {
@@ -348,6 +374,7 @@ def test_post_install_preflight_keeps_failed_tool_as_project_gap(monkeypatch):
 
     assert "composer" in installs
     assert result["gaps"] == {"WEB": ["composer"]}
+    assert "composer" not in result["installed"]
 
 
 def test_composer_uses_the_official_verified_installer(monkeypatch):
@@ -717,11 +744,18 @@ def test_agent_retries_stack_preflight_after_release_and_versions_lock_changes(m
     condition = threading.Condition()
     prepared = []
     desired_states = [
-        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
-        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
-        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}}},
-        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3", "composer": "2.8"}}},
-        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3", "composer": "2.8"}}},
+        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}},
+         "tools": ["git"], "tool_repairs": [{"name": "gitleaks", "version": ""}]},
+        {"release": "v4.1.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}},
+         "tools": ["git"], "tool_repairs": [{"name": "gitleaks", "version": ""}]},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"}, "versions": {"tools": {"php": "8.3"}},
+         "tools": ["git"], "tool_repairs": [{"name": "gitleaks", "version": ""}]},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"},
+         "versions": {"tools": {"php": "8.3", "composer": "2.8"}},
+         "tools": ["git"], "tool_repairs": [{"name": "gitleaks", "version": ""}]},
+        {"release": "v4.2.0", "project_stacks": {"WEB": "php-8.3"},
+         "versions": {"tools": {"php": "8.3", "composer": "2.8"}},
+         "tools": ["git"], "tool_repairs": [{"name": "gitleaks", "version": ""}]},
     ]
 
     class FakeApi:
@@ -742,9 +776,9 @@ def test_agent_retries_stack_preflight_after_release_and_versions_lock_changes(m
                 return {"desired": {**desired, "workers": [], "accounts": []}}
             return {"operation": None}
 
-    def prepare(stacks, versions):
+    def prepare(stacks, versions, required_tools=None, *, requested_tools=None):
         with condition:
-            prepared.append((stacks, versions))
+            prepared.append((stacks, versions, required_tools, requested_tools))
             condition.notify_all()
         return {"tools": {}}
 
@@ -767,6 +801,8 @@ def test_agent_retries_stack_preflight_after_release_and_versions_lock_changes(m
     assert prepared[0][0] == prepared[1][0] == prepared[2][0]
     assert prepared[0][1] == prepared[1][1]
     assert prepared[2][1]["tools"]["composer"] == "2.8"
+    assert prepared[0][2] == prepared[1][2] == prepared[2][2] == ["git"]
+    assert prepared[0][3] == prepared[1][3] == prepared[2][3] == [{"name": "gitleaks", "version": ""}]
 
 
 def test_agent_applies_the_preflight_probe_once_and_keeps_refreshing_tool_versions(monkeypatch):

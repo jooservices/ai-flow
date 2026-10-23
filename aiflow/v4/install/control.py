@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 from contextlib import contextmanager
 
-from ..node.operations import SERVER_INSTALLER_VERSION
+from ..node.operations import COSIGN, COSIGN_VERSION, SERVER_INSTALLER_VERSION
 from . import secrets as sec
 
 RELEASE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -70,9 +70,6 @@ _TRUSTED_PROXY_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
 OS_MODULES = ("packages", "timesync", "swap", "ulimits", "docker", "docker_group")
 VPN_MODULES = ("tailscale", "wireguard")
 HOST_PACKAGES = ("ca-certificates", "curl", "git", "tar")
-COSIGN_VERSION = "v3.1.4"  # same pin and digests as deploy/v4/bin/aiflow4-bootstrap
-COSIGN = {"x86_64": ("amd64", "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"),
-          "aarch64": ("arm64", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2")}
 APP_SERVICES = ("control-api-a", "control-api-b", "control-loops")
 HEALTH_COMPONENTS = ("postgres", "redis", "traefik", "openobserve", "gatus",
                      "control-api-a", "control-api-b", "control-loops", "command-center")

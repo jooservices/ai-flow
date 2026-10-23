@@ -285,6 +285,7 @@ def watchdog(ctx: Ctx) -> None:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
     tooling.sweep(ctx)
+    tooling.check_stalled_waits(ctx)
     # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
@@ -334,6 +335,8 @@ def watchdog(ctx: Ctx) -> None:
                           f"Last error ({last['account_id'] if last else '?'}): {(last['summary'] if last else '')[:300]}."
                           " Retries wait up to 30 minutes; fix the cause or put the ticket on hold.")
     for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='ticket_stuck' AND closed_at IS NULL"):
+        if i["subject"].startswith("tool_wait:"):
+            continue  # tooling.check_stalled_waits owns the two-hour missing-requirement warning lifecycle
         if stuck.get(i["subject"], 0) < 3:
             close_incident(ctx, "ticket_stuck", i["subject"], "a run produced work again")
     # a flow that stands still and a configuration that keeps a project from getting work

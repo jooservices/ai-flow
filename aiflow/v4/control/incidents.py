@@ -229,22 +229,96 @@ def workable_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     return out
 
 
-def idle_reasons(ctx, projects: set[str]) -> list[str]:
+def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
+    """Old queue items that still need work, including items gated by a wait, backoff or project pause."""
+    held = set(ctx.leases.held_keys())
+    done = {r["key"] for r in ctx.db.all("SELECT key FROM tickets WHERE status='Done'")}
+    out = []
+    for ticket in ctx.db.all(
+            "SELECT key,project,status,blocked_by FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))"
+            " AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')"
+            " AND coalesce(jira_updated,synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
+        if ticket["key"] in held:
+            continue
+        if ticket["status"] == "To Do" and any(blocker not in done for blocker in ticket["blocked_by"]):
+            continue
+        out.append(ticket)
+    return out
+
+
+def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -> list[str]:
     """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
     repo = ctx.repo()
     reasons: list[str] = []
     nodes = ctx.db.all("SELECT name, status, tools, metrics, projects, dynamic FROM nodes")
     online = [n for n in nodes if n["status"] == "online"]
+    ticket_keys = ticket_keys or set()
     if not online:
-        return ["no node is online"]
+        reasons.append("no node is online")
+
+    # A tool wait is a queue state with an actionable requirement; it must never collapse to "no cause found".
+    parked: dict[str, list[str]] = {}
+    from .tooling import requirement_is_accepted, system_action
+    for wait in ctx.db.all("SELECT ticket_key,project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
+        if (not requirement_is_accepted(ctx, wait["project"], wait["requirement"])
+                or (ticket_keys and wait["ticket_key"] not in ticket_keys)):
+            continue
+        parked.setdefault(wait["requirement"], []).append(wait["ticket_key"])
+    for requirement, keys in sorted(parked.items()):
+        shown = ", ".join(sorted(set(keys))[:6])
+        extra = f" and {len(set(keys)) - 6} more" if len(set(keys)) > 6 else ""
+        reasons.append(f"parked tickets {shown}{extra} waiting for {requirement}; {system_action(requirement)}")
+
+    # Backoff is a deliberate pause, but it still names the tickets that have no run available now.
+    from .api import BACKOFF_SQL
+    cooling_tickets = {r["ticket_key"] for step in ("dev", "verify")
+                       for r in ctx.db.all(BACKOFF_SQL, {"step": step})}
+    cooling_tickets.intersection_update(ticket_keys)
+    if cooling_tickets:
+        reasons.append("retry backoff for " + ", ".join(sorted(cooling_tickets)[:8]))
+
+    # Project pause and licence limits are enforced before a lease is created.
     for key in sorted(projects):
         project = repo.projects.get(key)
+        if project and project.paused:
+            reasons.append(f"{key} is paused in project settings")
+    try:
+        from . import licensing
+        license_state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        if license_state["read_only"]:
+            reasons.append(f"licence is read-only ({license_state['reason'] or 'write access is disabled'})")
+        for key in sorted(projects):
+            try:
+                licensing.enforce_project_entitlement(ctx, key, public_key=ctx.settings.license_public_key,
+                                                       state=license_state)
+            except licensing.LicenseError as exc:
+                reasons.append(f"licence blocks project {key}: {exc}")
+    except Exception as exc:  # a broken licence read still needs an understandable cause
+        reasons.append(f"licence status could not be checked ({type(exc).__name__})")
+
+    for key in sorted(projects):
+        project = repo.projects.get(key)
+        if not project or project.paused:
+            continue
         serving = [n for n in online if key in repo.projects_for_node(n["name"], n["projects"] or [], n["dynamic"])]
-        if not project or not serving:
+        if not serving:
             reasons.append(f"no online node serves {key}")
             continue
+        from . import api as control_api, rollout
+        compatible = []
+        skewed = []
+        for node in serving:
+            verdict = rollout.node_compatible(ctx, node["name"], control_api.RELEASES)
+            if verdict["compatible"]:
+                compatible.append(node)
+            else:
+                skewed.append(f"{node['name']} ({verdict['reason']})")
+        if skewed:
+            reasons.append(f"version skew blocks {key} on " + "; ".join(skewed))
+        if not compatible:
+            continue
         blocked = []
-        for n in serving:
+        for n in compatible:
             gaps = toolchain_gaps(n["tools"], project.tools, repo.versions, project.stacks,
                                   require_pins=bool(project.stacks))
             if gaps:
@@ -258,9 +332,11 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
                 if svc:
                     blocked.append(f"{n['name']} (test services unhealthy: "
                                    + ", ".join(f"{k}: {v}" for k, v in svc.items()) + ")")
-        if len(blocked) == len(serving):
+        if blocked and len(blocked) == len(compatible):
             reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
-    accounts = ctx.db.all("SELECT a.id, a.status, a.node FROM accounts a")
+
+    # Surface account and plan gates that the candidates endpoint enforces before work starts.
+    accounts = ctx.db.all("SELECT a.id, a.status, a.node, a.quota_at_risk FROM accounts a")
     online_names = {n["name"] for n in online}
     # a shared account is enabled per machine (its own `node` may be empty): count every signed-in assignment
     signed_in: dict[str, set[str]] = {}
@@ -273,9 +349,31 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
     ready = [a for a in accounts if a["status"] in ("idle", "working", "probing")
              and ((a["node"] in online_names and (a["id"], a["node"]) not in pending)
                   or signed_in.get(a["id"], set()) & online_names) and not ctx.leases.cooling(a["id"])]
+    cooling = [a["id"] for a in accounts if a["status"] == "cooldown" or ctx.leases.cooling(a["id"])]
+    quota_risk = [a["id"] for a in accounts if a.get("quota_at_risk")]
+    if cooling:
+        reasons.append("quota cooldown/backoff affects " + ", ".join(sorted(cooling)))
+    if quota_risk:
+        reasons.append("quota forecast is deferring new work for " + ", ".join(sorted(quota_risk)))
+    try:
+        from . import licensing
+        for account in accounts:
+            machine = account["node"] or next(iter(signed_in.get(account["id"], set())), "")
+            if not machine:
+                continue
+            try:
+                licensing.enforce_work_entitlement(ctx, account["id"], machine,
+                                                   public_key=ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                reasons.append(f"licence blocks account {account['id']}: {exc}")
+    except Exception as exc:  # preserve other known causes if a plan check cannot run
+        reasons.append(f"licence work entitlement could not be checked ({type(exc).__name__})")
     if not ready:
         states = ", ".join(f"{a['id']}={a['status']}" for a in accounts) or "no accounts"
-        reasons.append(f"no AI account is ready ({states})")
+        if not cooling:
+            reasons.append(f"no AI account is ready ({states})")
+        elif not any("quota cooldown/backoff" in reason for reason in reasons):
+            reasons.append(f"AI account quota cooldown/backoff leaves no account ready ({states})")
     return reasons or ["no cause found: check the candidates endpoint and the master cycle"]
 
 
@@ -283,14 +381,14 @@ def check_idle_flow(ctx) -> None:
     """Critical incident `flow_idle` when tickets have been ready for longer than `idle_alert_minutes` and no
     non-master run is running or has started in that time; it closes by itself when work moves again."""
     minutes = idle_minutes(ctx.repo())
-    waiting = workable_tickets(ctx, minutes)
+    waiting = idle_tickets(ctx, minutes)
     active = ctx.db.one("SELECT 1 AS x FROM runs WHERE step <> 'master' AND (status='running'"
                         " OR started_at > now() - %s * interval '1 minute') LIMIT 1", (minutes,))
     if not waiting or active:
         close_incident(ctx, "flow_idle", "global", "work started again" if waiting else "no ticket is waiting")
         return
     projects = {t["project"] for t in waiting}
-    reasons = idle_reasons(ctx, projects)
+    reasons = idle_reasons(ctx, projects, {t["key"] for t in waiting})
     shown = ", ".join(t["key"] for t in waiting[:8]) + (f" and {len(waiting) - 8} more" if len(waiting) > 8 else "")
     open_incident(ctx, "flow_idle", "global", "critical",
                   f"flow is idle: {len(waiting)} tickets are ready but no run started for {minutes:g} minutes",

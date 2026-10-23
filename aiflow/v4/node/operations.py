@@ -23,7 +23,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..core.toolchains import (PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, locked_version, pinned_version, toolchain_gaps,
+from ..core.toolchains import (CATALOG_TOOLS, NODE_TOOLS, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, locked_version,
+                               pinned_version, toolchain_gaps,
                                tools_for_stacks_in_project, version_matches)
 
 AI_PACKAGES = {
@@ -35,6 +36,10 @@ AI_PACKAGES = {
 # jooservices/server-installer (TESTFLOW-68) is a bash CLI, pinned to a reviewed tag at a fixed root-owned path.
 SERVER_INSTALLER_VERSION = "v1.1.0"
 SERVER_INSTALLER = Path(f"/opt/server-installer/{SERVER_INSTALLER_VERSION}/bin/server-installer")
+# Shared with the control installer so both hosts verify the same pinned cosign artifacts.
+COSIGN_VERSION = "v3.1.4"
+COSIGN = {"x86_64": ("amd64", "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"),
+          "aarch64": ("arm64", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2")}
 # Component -> server-installer module id. `git` and declared package lists use its packages module.
 SERVER_INSTALLER_MODULES = {"packages": "packages", "git": "packages", "docker": "docker", "php": "php"}
 SERVER_INSTALLER_BASE_PACKAGES = ("zip", "unzip")
@@ -47,7 +52,7 @@ _REPORTED_VERSION = re.compile(
 _PYTHON_VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\Z")
 _INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp",
                   "playwright", "playwright-browser", "gh", "claude", "codex", "codex-code-mode-host",
-                  "grok", "opencode")
+                  "grok", "opencode", "gitleaks", "xdebug", "cosign", "podman")
 
 
 class OperationError(RuntimeError):
@@ -226,6 +231,33 @@ def _github_release_asset(repository: str, tag: str, asset_name: str) -> bytes:
     if hashlib.sha256(payload).hexdigest() != digest.removeprefix("sha256:"):
         raise OperationError(f"checksum verification failed for {asset_name}")
     return payload
+
+
+def _github_release_asset_matching(repository: str, tag: str, asset_match: re.Pattern[str]) -> tuple[str, bytes]:
+    """Download one official GitHub release asset whose metadata publishes a SHA-256 digest."""
+    ref = f"tags/{tag}" if tag else "latest"
+    response = _response(f"https://api.github.com/repos/{repository}/releases/{ref}", timeout=45)
+    try:
+        release = response.json()
+    except ValueError as exc:
+        raise OperationError("official release metadata is invalid") from exc
+    matches = [asset for asset in release.get("assets", [])
+               if asset_match.fullmatch(str(asset.get("name") or ""))]
+    if len(matches) != 1:
+        raise OperationError(f"official {repository} release does not have one matching binary")
+    asset = matches[0]
+    name = str(asset.get("name") or "")
+    digest = str(asset.get("digest") or "")
+    url = str(asset.get("browser_download_url") or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise OperationError(f"official release has no SHA-256 digest for {name}")
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        raise OperationError("official release artifact URL is invalid")
+    payload = _response(url, timeout=900).content
+    if hashlib.sha256(payload).hexdigest() != digest.removeprefix("sha256:"):
+        raise OperationError(f"checksum verification failed for {name}")
+    return name, payload
 
 
 def _archive_member(payload: bytes, suffix: str) -> bytes:
@@ -611,6 +643,61 @@ def _install_playwright_browser(version: str) -> None:
     logging.getLogger("aiflow4.node").info("Chromium launch check passed: %s", reported)
 
 
+def _install_gitleaks(version: str) -> None:
+    arch, _ = _linux_arch()
+    asset_arch = {"x86_64": "x64", "aarch64": "arm64"}[arch]
+    tag = ""
+    if version:
+        normalized = _normalized_version(version, "gitleaks")
+        tag = f"v{normalized}"
+    asset = re.compile(rf"gitleaks_[0-9]+(?:\.[0-9]+){{2}}_linux_{asset_arch}\.tar\.gz")
+    _, payload = _github_release_asset_matching("gitleaks/gitleaks", tag, asset)
+    _install_binary("gitleaks", _archive_member(payload, "/gitleaks"))
+
+
+def _install_xdebug(version: str) -> None:
+    """Build the official PECL extension for the active PHP CLI and enable it for command-line checks."""
+    if not shutil.which("pecl"):
+        _run_server_installer("packages", "", ["php-pear", "php-dev", "build-essential"])
+    if not shutil.which("pecl"):
+        raise OperationError("PECL is unavailable after installing its PHP build prerequisites")
+    package = f"xdebug-{_check_version(version)}" if version else "xdebug"
+    try:
+        result = subprocess.run(["pecl", "install", "--force", package], capture_output=True, text=True,
+                               timeout=1800)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"Xdebug installer could not run ({type(exc).__name__})") from exc
+    if result.returncode:
+        raise OperationError(f"Xdebug installer failed (exit {result.returncode})")
+    try:
+        config = subprocess.run(["php", "--ini"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"PHP configuration could not be inspected ({type(exc).__name__})") from exc
+    match = re.search(r"^Scan for additional \.ini files in:\s*(.+?)\s*$", config.stdout, re.MULTILINE)
+    ini_dir = Path(match.group(1)) if match else None
+    if config.returncode or not ini_dir or not ini_dir.is_absolute() or not ini_dir.is_dir():
+        raise OperationError("PHP has no writable additional ini directory for Xdebug")
+    (ini_dir / "99-aiflow-xdebug.ini").write_text("zend_extension=xdebug\n", encoding="utf-8")
+    try:
+        probe = subprocess.run(["php", "-r", "exit(extension_loaded('xdebug') ? 0 : 1);"],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"Xdebug preflight could not run ({type(exc).__name__})") from exc
+    if probe.returncode:
+        raise OperationError("Xdebug was installed but PHP CLI does not load it")
+
+
+def _install_cosign() -> None:
+    arch = COSIGN.get(platform.machine().lower())
+    if not arch:
+        raise OperationError(f"no pinned cosign for {platform.machine()}")
+    payload = _response(f"https://github.com/sigstore/cosign/releases/download/{COSIGN_VERSION}/"
+                        f"cosign-linux-{arch[0]}", timeout=900).content
+    if hashlib.sha256(payload).hexdigest() != arch[1]:
+        raise OperationError("cosign checksum verification failed")
+    _install_binary("cosign", payload)
+
+
 def _install_component(name: str, version: str, packages: list[str]) -> None:
     """Use server-installer for OS modules, fixed npm recipes for AI CLIs and pinned artifact recipes for tools."""
     if name == "packages":
@@ -660,6 +747,18 @@ def _install_component(name: str, version: str, packages: list[str]) -> None:
     if name == "playwright-browser":
         _install_playwright_browser(version)
         return
+    if name == "gitleaks":
+        _install_gitleaks(version)
+        return
+    if name == "xdebug":
+        _install_xdebug(version)
+        return
+    if name == "cosign":
+        _install_cosign()
+        return
+    if name == "podman":
+        _run_server_installer("packages", "", ["podman"])
+        return
 
     raise OperationError(f"component is not in the install whitelist: {name}")
 
@@ -677,7 +776,8 @@ def _tool_version_ok(name: str, actual: str, expected: str) -> bool:
 
 
 def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[str, Any],
-                               required_tools: list[str] | None = None) -> dict[str, Any]:
+                               required_tools: list[str] | None = None,
+                               requested_tools: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """Install and preflight every configured project stack on this host.
 
     The API remains responsible for project admission using the next heartbeat. This routine only installs
@@ -691,8 +791,17 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
         str(project): tools_for_stacks_in_project(stacks)
         for project, stacks in project_stacks.items()
     }
+    # Older callers passed the targeted repair plan as the third argument. Keep that shape working while
+    # heartbeats carry required tools and targeted repairs separately.
+    if required_tools and isinstance(required_tools[0], dict):
+        requested_tools = [*(requested_tools or []), *required_tools]
+        required_tools = []
+    allowed = set(NODE_TOOLS) | set(CATALOG_TOOLS) | {tool for values in STACK_TOOLS.values() for tool in values}
+    requests = {str(item.get("name", "")): str(item.get("version", ""))
+                for item in requested_tools or [] if isinstance(item, dict)
+                and str(item.get("name", "")) in allowed}
     required = list(dict.fromkeys([*(required_tools or []),
-                                   *(tool for values in project_tools.values() for tool in values)]))
+                                   *(tool for values in project_tools.values() for tool in values), *requests]))
     if not required:
         return {"tools": {}, "gaps": {}}
     before = tool_versions(required)
@@ -700,24 +809,35 @@ def prepare_project_toolchains(project_stacks: dict[str, Any], versions: dict[st
     selected = set(toolchain_gaps(before, required_tools or [], versions))
     for project, tools in project_tools.items():
         selected.update(toolchain_gaps(before, tools, versions, per_project_stacks[project], require_pins=True))
+    selected.update(tool for tool, version in requests.items()
+                    if not _tool_version_ok(tool, str(before.get(tool, "missing")), version))
     ordered = sorted(selected, key=lambda tool: (
         _INSTALL_ORDER.index(tool) if tool in _INSTALL_ORDER else len(_INSTALL_ORDER), tool))
+    repaired: list[str] = []
     for tool in ordered:
         stacks = next((per_project_stacks[project] for project, tools in project_tools.items() if tool in tools), [])
         stack_tools = {required for stack in (stacks if isinstance(stacks, list) else [stacks])
                        for required in STACK_TOOLS.get(str(stack), ())}
-        if tool in stack_tools and not locked_version(versions, tool):
+        requested = tool in requests
+        request_version = requests.get(tool, "")
+        if tool in stack_tools and not (request_version or locked_version(versions, tool)):
             continue
-        version = pinned_version(versions, tool, stacks)
+        version = request_version if requested else pinned_version(versions, tool, stacks)
         try:
             _install_component(tool, version, [])
+            repaired.append(tool)
         except Exception as exc:  # noqa: BLE001 - keep preparing unrelated tools/projects after one installer fails
             import logging
             logging.getLogger("aiflow4.node").warning("toolchain install failed for %s: %s", tool, type(exc).__name__)
     after = tool_versions(required)
     gaps = {project: toolchain_gaps(after, tools, versions, per_project_stacks[project], require_pins=True)
             for project, tools in project_tools.items()}
-    return {"tools": after, "gaps": gaps, "installed": [tool for tool in ordered if tool in required]}
+    request_gaps = [tool for tool, version in requests.items()
+                    if not _tool_version_ok(tool, str(after.get(tool, "missing")), version)]
+    system_gaps = set(toolchain_gaps(after, required_tools or [], versions))
+    installed = [tool for tool in repaired if tool not in system_gaps and tool not in request_gaps
+                 and not any(tool in project_gaps for project_gaps in gaps.values())]
+    return {"tools": after, "gaps": gaps, "installed": installed, "request_gaps": request_gaps}
 
 
 def _service_health(service: dict[str, Any]) -> dict[str, Any]:

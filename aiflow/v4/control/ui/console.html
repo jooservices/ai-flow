@@ -3942,7 +3942,7 @@ function addMachineAccount(name) {
   var sessions = Number($('[name="sessions"]', form).value || 0), provider = $('[name="provider"]', form).value;
   machineRequest('/v1/machines/' + encodeURIComponent(name) + '/accounts', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({provider: provider, sessions: sessions, jobs: jobs})
+    body: JSON.stringify({provider: provider, name: ($('[name="name"]', form).value || '').trim(), sessions: sessions, jobs: jobs})
   }).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
@@ -4034,6 +4034,7 @@ function renderMachines() {
     h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
     if (state.addAccount === n.name && consoleCan('nodes.manage')) {
       h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<label>Name<input name="name" type="text" maxlength="40" placeholder="Optional, e.g. Team plan" aria-label="Account name"></label>';
       h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
       h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
       h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
@@ -4076,7 +4077,7 @@ function renderMachines() {
       var machineUsage = (a.machines || []).find(function (m) { return m.node === n.name; }) || {};
       var sharedAssignment = !!(a.shared || a.shared_managed || machineUsage.shared_assignment);
       var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
-      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.name || a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + (sharedAssignment
           ? ' · total limit ' + esc(a.session_limit || a.parallel) + ' sessions'
           : ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +

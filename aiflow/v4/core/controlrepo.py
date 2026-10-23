@@ -208,6 +208,9 @@ class ControlRepo:
     policy_projects: dict[str, dict[str, Any]] = field(default_factory=dict)
     policy_archived: bool = False
     ref: str = ""
+    # True once machines and accounts were imported into the control database (docs/v4/inventory-in-database.md):
+    # `accounts` then comes from the database and nodes are assigned to projects by their join, not by `nodes/*.yaml`.
+    inventory_in_db: bool = False
 
     @classmethod
     def load(cls, root: str | Path) -> "ControlRepo":
@@ -276,8 +279,9 @@ class ControlRepo:
         return out
 
     def projects_for_node(self, node: str, bound_projects: list[str], dynamic: bool = False) -> list[str]:
-        """Return the projects this node serves, using YAML as authority for configured nodes."""
-        configured = self.nodes.get(node)
+        """Return the projects this node serves: the database once inventory was imported, else YAML for configured nodes."""
+        configured = None if self.inventory_in_db else self.nodes.get(node)
+        dynamic = dynamic or self.inventory_in_db
         if configured:
             assigned = list(configured.projects)
             assigned.extend(key for key, project in self.projects.items() if node in project.nodes)

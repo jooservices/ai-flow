@@ -288,7 +288,7 @@ def watchdog(ctx: Ctx) -> None:
     with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
-            where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
+            where = "" if n["name"] in repo.nodes or repo.inventory_in_db else " and is not described in aiflow-control/nodes/"
             open_incident(ctx, "node_no_ai", n["name"], "warning", f"node {n['name']} has no AI account",
                           f"{n['name']} is online{where}, but no AI account is assigned to it, so it cannot take any ticket."
                           " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")

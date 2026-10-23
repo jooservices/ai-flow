@@ -63,6 +63,7 @@ from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only, explain
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import notify
+from . import inventory
 
 log = logging.getLogger("aiflow4.api")
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
@@ -1130,6 +1131,7 @@ class PlanLimitsBody(BaseModel):
 class ManagedAccountCreateBody(BaseModel):
     model_config = {"extra": "forbid"}
     provider: Literal["claude", "codex", "opencode", "grok"]
+    name: str = Field(default="", max_length=40, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$|^$")
     sessions: int = Field(ge=1, le=8)
     jobs: list[Literal["develop", "verify", "intake", "master"]] = Field(min_length=1, max_length=4)
 
@@ -1165,25 +1167,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def runtime_repo() -> ControlRepo:
         """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
-        base = configured_repo()
-        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
-        removed_ids = {row["id"] for row in ctx.db.all(
-            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
-        managed = [row for row in ctx.db.all(
-            "SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")
-                   if row["node"] not in removed_nodes]
-        if not managed and not removed_nodes and not removed_ids:
-            return base
-        managed_ids = {row["id"] for row in managed}
-        accounts = {account.id: account for account in base.accounts
-                    if account.id not in managed_ids and account.id not in removed_ids
-                    and account.node not in removed_nodes}
-        for row in managed:
-            accounts[row["id"]] = Account(
-                id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
-                roles=list(row["roles"] or []), parallel=int(row["parallel"]),
-                explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
-        return replace(base, accounts=list(accounts.values()))
+        return inventory.apply(configured_repo(), ctx.db)
 
     # The registry is the live source for screen-managed accounts. Configured accounts stay supported,
     # while the console can add and edit account assignments without a control-repo file change.
@@ -1196,7 +1180,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as e:  # noqa: BLE001
             log.warning("licence state initialization failed (%s)", type(e).__name__)
         try:
-            _app.state.sync_accounts()
+            if not _app.state.sync_accounts():  # a licence-skipped repo account is imported on a later start
+                _app.state.import_inventory()
         except Exception as e:  # noqa: BLE001
             log.warning("account sync failed: %s", e)
         yield
@@ -1229,7 +1214,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": errors})
 
     def sync_accounts() -> list[str]:
-        """Sync configured accounts and machines that fit the current licence limits."""
+        """Sync configured accounts and machines that fit the current licence limits (until the one-time import)."""
+        if inventory.is_imported(ctx.db):  # the database owns machines and accounts; the repo files are ignored
+            app.state.license_sync_warnings = []
+            return []
         repo = configured_repo()
         warnings: list[str] = []
         removed = {row["id"] for row in ctx.db.all(
@@ -1276,6 +1264,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         return warnings
 
     app.state.sync_accounts = sync_accounts
+
+    def import_inventory() -> dict:
+        """Move the control repo's machines and accounts into the database, once (docs/v4/inventory-in-database.md)."""
+        result = inventory.import_control_repo(ctx.db, configured_repo())
+        if result["imported"]:
+            log.info("imported %s machines and %s AI accounts from the control repo into the database",
+                     result["machines"], result["accounts"])
+        return result
+
+    app.state.import_inventory = import_inventory
     _identity: list[tuple[str, str, str]] = []
 
     def bot_identity() -> tuple[str, str]:
@@ -3253,7 +3251,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         if project not in repo.projects:
             raise HTTPException(422, "unknown project")
-        dynamic = name not in repo.nodes
+        dynamic = repo.inventory_in_db or name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
         with ctx.db.pool.connection() as conn:
@@ -3655,19 +3653,22 @@ def create_app(ctx: Ctx) -> FastAPI:
             while f"{body.provider}-{name}-{index:02d}" in existing_ids:
                 index += 1
             account_id = f"{body.provider}-{name}-{index:02d}"
-            connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,parallel,paused,"
+            connection.execute("INSERT INTO managed_ai_accounts (id,name,provider,node,tier,roles,parallel,paused,"
                                "sign_in_request_id,sign_in_status,sign_in_started_at)"
-                               " VALUES (%s,%s,%s,'middle',%s,%s,false,%s,'queued',now())",
-                               (account_id, body.provider, name, roles, body.sessions, request_id))
+                               " VALUES (%s,%s,%s,%s,'middle',%s,%s,false,%s,'queued',now())",
+                               (account_id, body.name.strip(), body.provider, name, roles, body.sessions,
+                                request_id))
             connection.execute("INSERT INTO accounts (id,provider,node,tier,roles,status)"
                                " VALUES (%s,%s,%s,'middle',%s,'signed_out')",
                                (account_id, body.provider, name, roles))
             audit_in(connection, "ai-account", "add", account_id, "", None, user.subject, True,
                      "account added; sign-in pending", {"node": name, "provider": body.provider,
+                                                         "name": body.name.strip(),
                                                          "sessions": body.sessions, "jobs": account_jobs(roles)})
         ctx.events.emit("account.added", account=account_id, provider=body.provider, node=name,
                         outcome="sign_in_queued", reason="provider sign-in started on the machine")
-        return {"account": account_id, "node": name, "provider": body.provider, "sessions": body.sessions,
+        return {"account": account_id, "name": body.name.strip(), "node": name, "provider": body.provider,
+                "sessions": body.sessions,
                 "jobs": account_jobs(roles), "status": "queued", "sign_in_url": "", "code": ""}
 
     @app.patch("/v1/accounts/{account_id}")

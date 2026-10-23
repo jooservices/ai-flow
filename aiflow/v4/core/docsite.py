@@ -90,7 +90,6 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "retireDecision": ("cc", "machines"),
     "addDecision": ("cc", "machines"),
     "escalationsPanel": ("cc", "machines"),
-    "pollConsoleSession": ("cc", "machines"),
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
     "roleHealthPanel": ("machines",),

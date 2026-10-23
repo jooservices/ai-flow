@@ -931,7 +931,6 @@ function pollConsoleSession() {
     if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
     if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
-    if (consoleReader() && !S.esc.data && !S.esc.busy) loadEscalations(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();

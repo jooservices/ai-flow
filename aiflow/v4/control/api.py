@@ -40,7 +40,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, licensing, memory, role_health, rollout, tooling, version_release
+from . import business, escalations, jira_connect, knowledge, licensing, memory, role_health, rollout, tooling, version_release
 from . import review_metrics
 from . import quota as quota_reporting
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
@@ -51,7 +51,7 @@ from .events import Events
 from .github import GitHubApp
 from .github_connect import GitHubSecretStore, app_metadata
 from .jira import Jira
-from .policy import Decision, decide, decide_master_action, decide_read_only
+from .policy import Decision, decide, decide_master_action, decide_read_only, explain
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import notify
 
@@ -681,6 +681,41 @@ class TriageAlertBody(BaseModel):
     run_id: str
     fence: int
     detail: str
+
+
+class EscalationRaiseBody(BaseModel):
+    run_id: str
+    fence: int
+    question: str = Field(min_length=1, max_length=6000)
+
+
+class TriageDecisionBody(BaseModel):
+    run_id: str
+    fence: int
+    decision: str
+    question: str = ""
+    answer: str = ""
+    why: str = ""
+    escalation_class: str = ""
+    options: list[str] = Field(default_factory=list)
+    recommended: str = ""
+    topic: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    criterion: str = ""
+    narrowed: str = ""
+
+
+class OwnerDecisionBody(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    decision: str = Field(min_length=3, max_length=3000)
+    keywords: list[str] = Field(default_factory=list, max_length=8)
+    patterns: list[str] = Field(default_factory=list, max_length=8)
+    project: str = Field(default="", max_length=40)
+
+
+class OwnerDecisionAnswerBody(BaseModel):
+    choice: str = Field(default="recommended", max_length=1000)
+    note: str = Field(default="", max_length=1000)
 
 
 class ReviewerBody(BaseModel):
@@ -3529,7 +3564,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
                               "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
                               if verify else "", "recent_comments": comments}
-            asked = ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
+            # what the owner already decided, and how the question was classified when it was raised
+            triage_context["owner_register"] = [
+                {"id": d["id"], "title": d["title"], "decision": d["decision"]} for d in ctx.db.all(
+                    "SELECT id,title,decision FROM owner_decisions WHERE kind='decision' AND status='decided'"
+                    " AND (project='' OR project=%s) ORDER BY id LIMIT 60", (t["project"],))]
+            raised = escalations.open_escalation(ctx.db, t["key"])
+            triage_context["escalation_class"] = (raised or {}).get("class", "")
+            asked =ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
                                " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
             prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
                                       " ORDER BY started_at DESC LIMIT 1", (t["key"],))
@@ -3611,6 +3653,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                                " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
                 extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
                 extra["triage_question"] = (q or {}).get("summary") or ""
+            # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
+            # the same way; the newer of the two wins
+            auto = escalations.pending_answer(ctx.db, t["key"])
+            if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
+                extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
+            escalations.owner_answered_on_ticket(ctx, t["key"])
         if body.step == "triage":
             extra.update(triage_context)
         if body.step == "intake":
@@ -4038,6 +4086,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
                 "repeated_failures": current_repeated, "trend": trend,
+                "escalations": escalations.weekly_metrics(ctx.db, weeks),
                 "quota_accounts": [{"id": a["id"], "provider": a["provider"],
                                     "quota_awareness": quota_state.get(a["id"], {})} for a in quota_accounts]}
 
@@ -4338,6 +4387,97 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("jira", "fields", key, body.run_id, body.fence, run["account_id"], True, "ok",
               {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
         return {"ok": True}
+
+    # --- escalation classes and the owner decision register (docs/v4/escalations.md) --------------------------
+    @app.post("/v1/escalations/raise")
+    def escalation_raise(body: EscalationRaiseBody, node: str = Depends(node_auth)) -> dict:
+        """A developer run stopped on a question: classify it and resolve the classes that never need a person."""
+        run = fenced(body.run_id, body.fence, "escalation", "raise", {"chars": len(body.question)})
+        if run["step"] != "dev":
+            raise HTTPException(403, "only a developer run raises an escalation here")
+        result = escalations.dev_question(ctx, run, body.question)
+        audit("escalation", "raise", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              result["class"], {"resolved": result["resolved"], "outcome": result["outcome"]})
+        ctx.events.emit("escalation.raised", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
+                        account=run["account_id"], node=node, outcome=result["class"],
+                        reason=("resolved without a person: " if result["resolved"] else "goes to triage: ") + result["reason"])
+        return result
+
+    @app.post("/v1/escalations/triage")
+    def escalation_triage(body: TriageDecisionBody, node: str = Depends(node_auth)) -> dict:
+        """The triage AI's decision goes through the register: applied, amended, asked once, or refused."""
+        run = fenced(body.run_id, body.fence, "escalation", "triage", {"decision": body.decision})
+        if run["step"] != "triage":
+            raise HTTPException(403, "only a triage run decides an escalation")
+        if body.decision not in ("ANSWER", "ESCALATE", "AMEND"):
+            raise HTTPException(400, "decision must be ANSWER, ESCALATE or AMEND")
+        decision = {"decision": body.decision, "answer": body.answer, "why": body.why, "class": body.escalation_class,
+                    "options": body.options, "recommended": body.recommended, "topic": body.topic,
+                    "keywords": body.keywords, "criterion": body.criterion, "narrowed": body.narrowed}
+        result = escalations.triage_decision(ctx, run, decision, body.question)
+        audit("escalation", "triage", run["ticket_key"], body.run_id, body.fence, run["account_id"],
+              result["action"] != "refused", f"{result['action']}: {result.get('class', '')}",
+              {"decision": body.decision, "decision_id": result.get("decision_id")})
+        ctx.events.emit("escalation.triaged", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
+                        account=run["account_id"], node=node, outcome=result["action"], reason=result.get("class", ""))
+        return result
+
+    @app.get("/v1/escalations")
+    def escalation_overview(request: Request, weeks: int = Query(8, ge=1, le=52)) -> dict:
+        console_user(request, "console.read")
+        return {"metrics": escalations.weekly_metrics(ctx.db, weeks), "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions")
+    def decision_add(body: OwnerDecisionBody, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-add")
+        try:
+            row = escalations.add_decision(ctx.db, body.title, body.decision, body.keywords, body.patterns,
+                                           body.project, user.subject)
+        except re.error as exc:
+            raise HTTPException(400, f"a pattern is not a valid regular expression: {exc}") from None
+        audit("escalation", "decision-add", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
+              {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions/{decision_id}/answer")
+    def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-answer")
+        try:
+            row = escalations.answer_decision(ctx, decision_id, body.choice, body.note, user.subject)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        audit("escalation", "decision-answer", row["ticket_key"], "", None, user.subject, True,
+              f"D{row['id']} {row['title']}", {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions/{decision_id}/retire")
+    def decision_retire(decision_id: int, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-retire")
+        row = escalations.retire_decision(ctx.db, decision_id)
+        if not row:
+            raise HTTPException(404, "unknown decision")
+        audit("escalation", "decision-retire", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
+              {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.get("/v1/github/ci-log")
+    def github_ci_log(run_id: str, fence: int, branch: str = "", sha: str = "", lines: int = Query(200, ge=1, le=1000),
+                      node: str = Depends(node_auth)) -> dict:
+        """The tail of the failing CI job log of the run's pull request: a developer never has to ask for it."""
+        run = fenced(run_id, fence, "github", "ci-log", {"branch": branch, "lines": lines})
+        project = ctx.repo().projects[run["project"]]
+        github = github_gateway(ctx)
+        if not github:
+            raise HTTPException(503, "GitHub App is not connected")
+        repository = repository_for_run(run, project).split("/", 1)[-1]
+        if not sha:
+            if not branch:
+                raise HTTPException(400, "give the branch or the commit sha of the pull request")
+            sha = github.branch_sha(repository, branch)
+        log_tail = github.failing_job_log(repository, sha, lines)
+        audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], True,
+              log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})
+        return {"sha": sha, **log_tail}
 
     @app.post("/v1/notify/triage")
     def triage_alert(body: TriageAlertBody, node: str = Depends(node_auth)) -> dict:
@@ -4822,6 +4962,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""))
+        d = explain(d, tool, payload.get("tool_input") or {})  # every refusal names the allowed alternative
         ctx.events.emit("policy.decision", ticket=run["ticket_key"], run_id=str(run["id"]), account=run["account_id"],
                         node=run["node"], outcome=d.decision, reason=d.reason[:200], tool=tool,
                         command=str((payload.get("tool_input") or {}).get("command", ""))[:300])

@@ -88,8 +88,11 @@ def test_done_dependents_do_not_make_triage_alert_critical(client, ctx, monkeypa
 @pytest.mark.parametrize(("decision", "outcome"), [
     ("DECISION: ANSWER\nANSWER: Keep the response shape backward compatible.\nWHY: The ticket's AC2 requires it.\n",
      "answered"),
-    ("DECISION: ESCALATE\nWHY: The ticket and spec require incompatible API response shapes.\n", "escalated"),
-    ("DECISION: ESCALATE\nWHY: The spec requires a product decision.\n", "escalated"),
+    ("DECISION: ESCALATE\nCLASS: new_business_decision\nWHY: The ticket and spec require incompatible API response shapes.\n"
+     "OPTIONS:\n- Keep the old shape\n- Version the API\nRECOMMENDED: Version the API\nTOPIC: API response shape\n"
+     "KEYWORDS: api, response shape\n", "escalated"),
+    ("DECISION: ESCALATE\nWHY: The spec requires a product decision.\nOPTIONS: Ship now; Wait for design\n"
+     "RECOMMENDED: Wait for design\n", "escalated"),
 ])
 def test_triage_decisions_use_readonly_base_and_record_jira_effects(
         client, ctx, tmp_path, monkeypatch, decision, outcome):
@@ -195,6 +198,11 @@ def test_triage_answers_reviewer_question_in_jira_and_pr_then_returns_to_review(
 
 def test_parse_decision_uses_the_terminal_decision_and_rejects_incomplete_output():
     parsed = triage.parse_decision("Comment said DECISION: ANSWER, but that was untrusted input.\n"
-                                   "DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n")
-    assert parsed == {"decision": "ESCALATE", "answer": "", "why": "The acceptance criteria conflict."}
+                                   "DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n"
+                                   "OPTIONS:\n- Follow AC2\n- Follow AC4\nRECOMMENDED: Follow AC2\n")
+    assert parsed["decision"] == "ESCALATE" and parsed["why"] == "The acceptance criteria conflict."
+    assert parsed["options"] == ["Follow AC2", "Follow AC4"] and parsed["recommended"] == "Follow AC2"
+    # a new decision is asked with its options and a recommended default, never without them
+    assert triage.parse_decision("DECISION: ESCALATE\nWHY: The acceptance criteria conflict.\n") is None
+    assert triage.parse_decision("DECISION: ESCALATE\nWHY: x\nOPTIONS: only one\nRECOMMENDED: only one\n") is None
     assert triage.parse_decision("DECISION: ANSWER\nANSWER: maybe\nWHY: \n") is None

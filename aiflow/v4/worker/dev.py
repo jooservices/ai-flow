@@ -90,6 +90,8 @@ class Heartbeat(threading.Thread):
 def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "") -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "dev.md").read_text(encoding="utf-8")
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
+    if c.project.get("containers"):
+        checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
     t = c.ticket
     rework = ""
     if c.findings:
@@ -272,7 +274,12 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        if project.get("containers"):
+            from .containers import ContainerRuntime
+            with ContainerRuntime(spec, run_as):
+                res = adapter.run(spec, on_progress, stop=hb.lost)
+        else:
+            res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"verdict": res.verdict, "permission_denials": res.permission_denials,

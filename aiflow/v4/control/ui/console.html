@@ -678,13 +678,14 @@ var S = {
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
   consoleUser: null, consoleSessionLoaded: false,
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
-    loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '' },
+    loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '',
+    addForm: { email: '', name: '', roles: [], projects: [], all: true } },
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
-    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
+    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
@@ -698,7 +699,7 @@ var S = {
   projectQuery: '', projectPickerOpen: false,
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
-  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
+  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '', reviewNoteDrafts: {},
   rh: { window: null, percent: null, busy: false, error: '', sig: '' },
   reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
@@ -1170,10 +1171,11 @@ function renderUsers() {
     if (!(u.users || []).length) h += '<tr><td colspan="6" class="muted">No people have been added.</td></tr>';
     h += '</tbody></table></div>';
   }
+  var addForm = u.addForm;
   h += '</section><div class="users-layout-secondary" data-block="access"><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
-    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required></label>' +
-    '<label>Name<input class="in" data-user-name autocomplete="off"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', []) +
-    '</div></div><div>' + projectChoices([], true) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
+    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required value="' + esc(addForm.email) + '"></label>' +
+    '<label>Name<input class="in" data-user-name autocomplete="off" value="' + esc(addForm.name) + '"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', addForm.roles || []) +
+    '</div></div><div>' + projectChoices(addForm.projects || [], addForm.all !== false) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
   h += '<section class="panel"><div class="panel-h"><h2>Views by role</h2><span class="hint">A person with multiple roles sees the union of their views.</span></div>' +
     '<div class="project-table"><table><thead><tr><th>View</th>' + u.roleOptions.map(function (r) { return '<th>' + esc(r.label) + '</th>'; }).join('') +
     '</tr></thead><tbody>' + Object.keys(ROLE_VIEW_LABELS).map(function (permission) {
@@ -1213,7 +1215,10 @@ function renderUsers() {
     var projects = all ? null : $$('[data-user-projects] option:checked', form).map(function (x) { return x.value; });
     adminRequest('/v1/console/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email, display_name: name, roles: roles, project_keys: projects })
-    }).then(function (d) { u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true); })
+    }).then(function (d) {
+      u.addForm = { email: '', name: '', roles: [], projects: [], all: true };
+      u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true);
+    })
       .catch(function (e) { toast('Person could not be added', String(e.message || e), 'crit'); });
   }; });
 }
@@ -1230,15 +1235,15 @@ function addProjectRepository(name) {
   var ed = S.projectAdmin.repositoryEditor, data = ed && ed.data;
   if (!data || !name || (data.repositories || []).some(function (r) { return r.repo === name; })) return;
   var known = (data.github_repos || []).filter(function (g) { return g.full_name === name; })[0] || {};
-  data.repositories.push({ repo: name, base: '', checks: [], stack: '', connection: known.connection || '', connections: known.connections || [], effective: { base: data.project_defaults.base,
-    checks: data.project_defaults.checks, stack: data.project_defaults.stack } });
+  data.repositories.push({ repo: name, base: '', checks: [], stack: '', containers: null, connection: known.connection || '', connections: known.connections || [], effective: { base: data.project_defaults.base,
+    checks: data.project_defaults.checks, stack: data.project_defaults.stack, containers: data.project_defaults.containers } });
   renderProjects();
 }
 function saveProjectRepositories() {
   var ed = S.projectAdmin.repositoryEditor; if (!ed || !ed.data || ed.saving) return;
   ed.saving = true; ed.error = ''; renderProjects();
   var body = { repositories: ed.data.repositories.map(function (r) { return { repo: r.repo, base: r.base || '',
-    checks: r.checks || [], stack: r.stack || '',
+    checks: r.checks || [], stack: r.stack || '', containers: r.containers,
     connection: (r.connection_picked || r.connection_stale) ? (r.connection || '') : '' }; }), epic_repositories: ed.data.epic_repositories || {} };
   fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/repositories', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1415,6 +1420,7 @@ function renderGitHubIntegrations() {
 function projectRequestBody() {
   var f = S.projectAdmin.form;
   return { site: f.site, project: f.project, repo: f.repo, base: f.base || 'develop', stack: f.stack || '',
+    containers: Boolean(f.containers),
     checks: String(f.checks || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean),
     priority: Number(f.priority), parallel_limit: Number(f.parallel_limit), merge_method: f.merge_method };
 }
@@ -2621,6 +2627,15 @@ function renderDBody() {
 /* ---------- Human review ---------- */
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
+  var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
+  if (typeof root.querySelectorAll === 'function') {
+    root.querySelectorAll('[data-review-note]').forEach(function (field) {
+      var card = field.closest('[data-review-card]');
+      if (card && noteDrafts[card.getAttribute('data-key')] == null) {
+        noteDrafts[card.getAttribute('data-key')] = field.value;
+      }
+    });
+  }
   var rows = S.reviews || [], metrics = S.reviewMetrics || {}, h = '<section class="panel" data-block="queue"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Waiting items and the reasons people are needed · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
   h += '<div class="review-filters"><label>Project <select data-review-project aria-label="Filter human review by project"><option value="">All projects</option>';
   (S.reviewProjects || []).forEach(function (p) { h += '<option value="' + esc(p) + '"' + (S.reviewProject === p ? ' selected' : '') + '>' + esc(p) + '</option>'; });
@@ -2653,7 +2668,7 @@ function renderReviews() {
         h += '</div>';
       }
       if (actionList.length) {
-        h += '<div class="review-actions"><textarea data-review-note aria-label="Reviewer note for ' + esc(t.key) + '" placeholder="Required for reject, rework, answer, or an AI question"></textarea>';
+        h += '<div class="review-actions"><textarea data-review-note aria-label="Reviewer note for ' + esc(t.key) + '" placeholder="Required for reject, rework, answer, or an AI question">' + esc(noteDrafts[t.key] || '') + '</textarea>';
         actionList.forEach(function (action) {
           var names = { approve: 'Approve and merge', reject: 'Reject', rework: 'Send for rework', 'ask-ai': 'Ask AI a question', answer: 'Answer', 'skip-gate': 'Skip gate and merge' };
           h += '<button class="btn' + (action === 'reject' || action === 'rework' ? ' danger' : '') + '" data-act="review-' + esc(action) + '" data-key="' + esc(t.key) + '">' + esc(names[action] || action) + '</button>';
@@ -2711,6 +2726,7 @@ function reviewByRole() { return !!S.consoleUser && consoleCan('review.actions')
 function submitReview(key, action, comment) {
   var tokenField = $('[data-reviewer-token]'), byRole = reviewByRole();
   S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
+  if (!String(comment || '').trim() && S.reviewNoteDrafts[key]) comment = S.reviewNoteDrafts[key];
   if (!byRole && !S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
   if (['rework', 'reject', 'ask-ai', 'answer'].indexOf(action) >= 0 && !String(comment || '').trim()) {
     toast('A note is required', 'Enter the required reason, comment, answer, or question before taking this action.', 'warn'); return;
@@ -2724,6 +2740,12 @@ function submitReview(key, action, comment) {
   }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
   }).then(function (d) {
+    var card = Array.from(document.querySelectorAll('[data-review-card]')).find(function (item) {
+      return item.getAttribute('data-key') === key;
+    });
+    var noteField = card && $('[data-review-note]', card);
+    delete S.reviewNoteDrafts[key];
+    if (noteField) noteField.value = '';
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
     loadReviews();
@@ -4011,7 +4033,7 @@ function renderMachines() {
     h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
     h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
     if (state.addAccount === n.name && consoleCan('nodes.manage')) {
-      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
       h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
       h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
       h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
@@ -4079,8 +4101,8 @@ function renderMachines() {
     var j = state.join, projects = data.projects || [];
     h += '<section class="panel" data-block="add-machine"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
     h += '<form class="project-form" id="machines-join-form" onsubmit="return false"><label>Machine name<input id="machine-name" required maxlength="63" value="' + esc(j.name) + '"></label>';
-    h += '<label>Role<select id="machine-role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
-    h += '<label>Project<select id="machine-project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
+    h += '<label>Role<select id="machine-role" aria-label="Machine role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
+    h += '<label>Project<select id="machine-project" aria-label="Machine project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
     h += '<div><button class="btn primary" data-act="machine-join-create"' + (j.busy || !projects.length ? ' disabled' : '') + '>' + (j.busy ? 'Creating…' : 'Show one-time command') + '</button></div>';
     if (j.error) h += '<div class="err wide" role="alert">' + esc(j.error) + '</div>';
     if (j.command) h += '<label class="wide">Command expires in <span class="mono" data-countdown="' + esc(j.expires_at) + '"></span><textarea rows="2" readonly onclick="this.select()">' + esc(j.command) + '</textarea></label><div><button class="btn" data-act="machine-copy-join">Copy command</button></div>';
@@ -4157,6 +4179,7 @@ function renderProjects() {
       h += '<a class="btn sm" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repository on GitHub</a></div>';
       h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
       h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Checks need Docker containers<select data-project-field="containers"><option value="false"' + (!form.containers ? ' selected' : '') + '>No</option><option value="true"' + (form.containers ? ' selected' : '') + '>Yes · require the safe rootless runtime</option></select></label>';
       h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
       h += '<label>Parallel limit<input type="number" min="1" max="100" data-project-field="parallel_limit" value="' + esc(form.parallel_limit) + '"></label>';
       h += '<label>Merge method<select data-project-field="merge_method">' + ['squash', 'merge', 'rebase'].map(function (method) { return '<option value="' + method + '"' + (form.merge_method === method ? ' selected' : '') + '>' + method + '</option>'; }).join('') + '</select></label>';
@@ -4194,7 +4217,7 @@ function renderProjects() {
       });
       if (!(data.epics || []).length) h += '<tr><td colspan="3" class="muted">No Jira epics found in this project.</td></tr>';
       h += '</tbody></table></div>';
-      h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
+      h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', containers ' + (defaults.containers ? 'enabled' : 'disabled') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
       configured.forEach(function (r) {
         h += '<section class="project-checks"><strong class="mono">' + esc(r.repo) + (r.repo === data.default_repo ? ' · default' : '') + '</strong>';
         var reach = r.connections || [], conns = data.connections || [];
@@ -4207,6 +4230,7 @@ function renderProjects() {
         h += '</select></label>';
         h += '<label>Base branch<input data-repository-config="base" data-repo="' + esc(r.repo) + '" value="' + esc(r.base || '') + '" placeholder="Inherit ' + esc(defaults.base || 'develop') + '"></label>';
         h += '<label>Stack<select data-repository-config="stack" data-repo="' + esc(r.repo) + '"><option value="">Inherit project stack</option>' + (data.stacks || []).map(function (s) { return '<option value="' + esc(s) + '"' + (r.stack === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>';
+        h += '<label>Container runtime<select data-repository-config="containers" data-repo="' + esc(r.repo) + '"><option value="inherit"' + (r.containers === null || r.containers === undefined ? ' selected' : '') + '>Inherit project setting</option><option value="true"' + (r.containers === true ? ' selected' : '') + '>Require safe runtime</option><option value="false"' + (r.containers === false ? ' selected' : '') + '>Not required</option></select></label>';
         h += '<label class="wide">Checks, one command per line<textarea data-repository-config="checks" data-repo="' + esc(r.repo) + '" placeholder="Inherit project checks">' + esc((r.checks || []).join('\n')) + '</textarea></label></div></section>';
       });
       h += '<div class="project-actions"><select data-repository-add><option value="">Add a repository…</option>' + options.filter(function (r) { return !configured.some(function (c) { return c.repo === r.full_name; }); }).map(function (r) { return '<option value="' + esc(r.full_name) + '">' + esc(r.full_name) + '</option>'; }).join('') + '</select><button class="btn sm" data-act="project-repository-add">Add repository</button><span class="spacer"></span><button class="btn primary" data-act="project-repositories-save"' + (editor.saving ? ' disabled' : '') + '>Save repository settings</button></div>';
@@ -5167,6 +5191,8 @@ function downloadBackupKey() {
   }).catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
 }
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-user-email]')) S.userAdmin.addForm.email = e.target.value;
+  if (e.target && e.target.matches('[data-user-name]')) S.userAdmin.addForm.name = e.target.value;
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
@@ -5176,7 +5202,7 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.id === 'dash-project-search') { S.dashboardQuery = e.target.value; renderDashboard(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
-    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.form[field] = field === 'containers' ? e.target.value === 'true' : e.target.value;
     S.projectAdmin.preflight = null;
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
@@ -5187,10 +5213,12 @@ document.addEventListener('input', function (e) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
       if (config && fieldName === 'connection') config.connection_picked = true;
-      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) :
+        fieldName === 'containers' ? (e.target.value === 'inherit' ? null : e.target.value === 'true') : e.target.value;
     }
   }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
+  if (e.target && e.target.matches('[data-review-note]')) S.reviewNoteDrafts[e.target.closest('[data-review-card]').getAttribute('data-key')] = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-search]')) S.knowledge.search = e.target.value;
   if (e.target && e.target.matches('[data-learning-field]') && S.knowledge.itemEditor) {
@@ -5205,6 +5233,11 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && e.target.matches('.new-role')) S.userAdmin.addForm.roles = Array.from(e.target.closest('.project-form').querySelectorAll('.new-role:checked')).map(function (item) { return item.value; });
+  if (e.target && e.target.matches('[data-user-all]') && e.target.closest('.project-form') &&
+      $('[data-user-add]', e.target.closest('.project-form'))) S.userAdmin.addForm.all = e.target.checked;
+  if (e.target && e.target.matches('[data-user-projects]') && e.target.closest('.project-form') &&
+      $('[data-user-add]', e.target.closest('.project-form'))) S.userAdmin.addForm.projects = Array.from(e.target.options).filter(function (option) { return option.selected; }).map(function (option) { return option.value; });
   if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.matches('[data-notify-kind-select]')) {
     S.notifications.form.kind = e.target.value;
@@ -5234,7 +5267,7 @@ document.addEventListener('change', function (e) {
   if (e.target && e.target.matches('[data-review-project]')) { S.reviewProject = e.target.value; loadReviews(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
-    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.form[field] = field === 'containers' ? e.target.value === 'true' : e.target.value;
     S.projectAdmin.preflight = null;
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
@@ -5254,7 +5287,8 @@ document.addEventListener('change', function (e) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
       if (config && fieldName === 'connection') config.connection_picked = true;
-      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) :
+        fieldName === 'containers' ? (e.target.value === 'inherit' ? null : e.target.value === 'true') : e.target.value;
     }
   }
 });
@@ -5306,6 +5340,7 @@ document.addEventListener('input', function (e) {
   if (e.target.id === 'rh-percent') S.rh.percent = e.target.value;
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (JOIN_FIELDS[e.target.id]) S.join[JOIN_FIELDS[e.target.id]] = e.target.value;
+  if (e.target.id === 'machine-name') S.machines.join.name = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key') && e.target.getAttribute('data-sh-field') !== 'screenshot') {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {}; S.sh.forms[key][field] = e.target.value;
@@ -5330,6 +5365,8 @@ document.addEventListener('change', function (e) {
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (e.target.id === 'join-role') S.join.role = e.target.value;
   if (e.target.id === 'join-project') S.join.project = e.target.value;
+  if (e.target.id === 'machine-role') S.machines.join.role = e.target.value;
+  if (e.target.id === 'machine-project') S.machines.join.project = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key')) {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {};

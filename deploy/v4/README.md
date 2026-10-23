@@ -51,6 +51,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
+- [Safe containers for project checks](../../docs/v4/container-runtime.md): projects opt in to a rootless, hard-quota Docker-compatible runtime with pinned worktree paths, per-node image caching and missing-tool gating
 - [Jira project versions](../../docs/v4/jira-versions.md): mirror Jira versions and Fix versions, with per-version ticket progress
 - [Release readiness](../../docs/v4/release-readiness.md): a Jira version is ready only when every ticket now in it is Done, verified, out of rework and free of release-qa Bugs, with reasons in Command Center and Business
 - [Release progress screen](../../docs/v4/release-progress.md): per Jira version Done of total, open and late-added tickets, reasons not ready, release steps with run ID and node, tag and GitHub Release link in Command Center and Business
@@ -66,6 +67,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 - [Command Center V2](../../docs/v4/command-center-v2.md): implementation guide and design prototype for the warm theme, combined Dashboard, role views, Work board picker and Ctrl K search
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
+- [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
@@ -91,6 +93,11 @@ terminal `end` events; see [Grok adapter notes](../../docs/v4/grok-adapter.md).
 
 Supporting tools reported by the node agent are `git`, `gh`, `node`, `uv` and `docker`; install the ones the
 projects and release commands on the node need.
+
+Projects that enable container checks also require the separately reported `safe-container-runtime`: rootless
+Podman plus `podman-compose` on a filesystem with project quotas. This runtime is configured by the node
+operator; a regular host Docker daemon does not satisfy the requirement. See [safe containers for project
+checks](../../docs/v4/container-runtime.md) for limits and the node preflight behavior.
 
 ### Project stacks and missing tools
 

@@ -55,7 +55,7 @@ def cc_headers(client):
 @pytest.fixture
 def alerts(monkeypatch):
     sent = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="", recipient="": sent.append((severity, title)) or [])
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="", recipient="", **_kw: sent.append((severity, title)) or [])
     return sent
 
 

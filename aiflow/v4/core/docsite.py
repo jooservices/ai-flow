@@ -68,6 +68,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderDrawer": None,
     "renderFooter": None,
     "renderBackup": ("backup",),
+    "renderNotifications": ("notifications",),
     "renderProjects": ("projects",),
     "renderUsers": ("users",),
     "renderCommandSearchResults": None,

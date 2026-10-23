@@ -136,7 +136,7 @@ class Worker:
             c = Claimed(run_id=claimed["run_id"], fence=claimed["fence"], run_token=claimed["run_token"],
                         account=self.account, provider=claimed["provider"], model="", effort="",
                         ticket=claimed["ticket"], project=claimed["project"], identity=tuple(claimed["identity"]),
-                        step="version_release")
+                        step="version_release", context_pack=claimed.get("context_pack") or {})
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id,
                          step="version_release", since=time.time())
             result = run_version_release(self.api, c, claimed["version"], claimed["tracker_key"],
@@ -173,6 +173,7 @@ class Worker:
                         verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
                         related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
+                        context_pack=r.get("context_pack") or {},
                         machine_tools=r.get("machine_tools") or {})
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)

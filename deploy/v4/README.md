@@ -12,6 +12,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
+- [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, Chromium and its libraries go into a shared folder, and a headless launch as the AI user proves it
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
@@ -34,6 +35,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): create or import a GitHub App, choose its installation and refresh accessible repositories

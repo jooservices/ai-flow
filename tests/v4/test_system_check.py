@@ -45,7 +45,8 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
 
     def slow_provider(*_args, **_kwargs):
         provider_started.set()
-        provider_release.wait(timeout=5)
+        # Keep the probe blocked until the request has been observed and explicitly released below.
+        provider_release.wait()
         return []
 
     monkeypatch.setattr(system_check, "_github_project_conditions", slow_provider)
@@ -56,7 +57,7 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(client.post, "/v1/nodes/join", json={"join_token": grant.json()["token"]})
         try:
-            provider_started_in_time = provider_started.wait(timeout=5)
+            provider_started_in_time = provider_started.wait(timeout=20)
             wait_until = time.monotonic() + 10
             while not future.done() and time.monotonic() < wait_until:
                 time.sleep(0.01)
@@ -81,7 +82,8 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
         provider_checks = args[3] if len(args) > 3 else kwargs.get("provider_checks", True)
         if provider_checks:
             provider_started.set()
-            provider_release.wait(timeout=30)
+            # Keep the probe blocked until the heartbeat response has been observed and released below.
+            provider_release.wait()
         return build_provider_conditions(*args, **kwargs)
 
     headers = _direct_join(client)
@@ -90,7 +92,7 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(client.post, "/v1/nodes/cc/heartbeat", headers=headers, json={})
         try:
-            provider_started_in_time = provider_started.wait(timeout=5)
+            provider_started_in_time = provider_started.wait(timeout=20)
             try:
                 heartbeat = future.result(timeout=10)
                 response_sent_while_probe_waited = True

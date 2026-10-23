@@ -14,7 +14,7 @@ The rules are deterministic (`aiflow/v4/control/escalations.py`), so classificat
 
 | Class | Example | What happens | Person |
 |---|---|---|---|
-| `missing_tool_or_environment` | a browser, Docker, a Dev VM, a SonarQube, devices, a CI log | the machine's tools are checked: a tool the machine has is answered ("installed, use it"), a CI log is supplied (AC6), anything else is recorded in `tool_waits` and the ticket waits for a capable machine ([missing tools](missing-tools.md)) | no |
+| `missing_tool_or_environment` | a browser, Docker, a CI log, or a reportable catalogue/stack requirement | the machine's tools are checked: a tool the machine has is answered ("installed, use it"), a CI log is supplied (AC6), and a reportable missing requirement is parked ([missing tools](missing-tools.md)); Dev VM, SonarQube and devices have no heartbeat probes yet, so reports naming them fail without creating a wait | no |
 | `policy_message` | `p='src/auth/provider.ts'` refused by the command policy | the run is answered with the reason and the allowed alternative (AC5) | no |
 | `unreachable_criterion` | "AC4 needs a smoke test on the Dev VM; there is no Dev VM" | the ticket is amended (AC4 below) | no |
 | `ambiguity_repository` | "which existing helper formats dates?" | the triage AI answers from the ticket, spec and code | no |

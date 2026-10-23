@@ -30,8 +30,8 @@ SERVICES: dict[str, dict[str, Any]] = {
 }
 ALIASES = {"postgresql": "postgres", "pg": "postgres", "pgvector": "postgres"}
 
-# Named external environments are reportable requirements too, but unlike the local test services they are not
-# provisioned by the node agent. Their availability is supplied by the node's `tools` heartbeat map.
+# These environments occur in escalation text, but nodes have no probes for them yet. They are deliberately not
+# accepted as parked requirements until the heartbeat can report their availability.
 EXTERNAL_REQUIREMENTS = ("dev-vm", "sonarqube", "devices")
 
 

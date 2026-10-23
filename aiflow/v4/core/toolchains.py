@@ -207,10 +207,10 @@ _ABSENT = r"(?:not installed|not found|command not found|is missing|missing|unav
 
 
 def known_requirements() -> list[str]:
-    """Tool and service names AI Flow can tell apart in free text (what a node reports, plus test services)."""
-    from .services import EXTERNAL_REQUIREMENTS, SERVICES
+    """Reportable tool and service names AI Flow can identify in free text."""
+    from .services import SERVICES
     names = (list(NODE_TOOLS) + list(CATALOG_TOOLS) + [t for tools in STACK_TOOLS.values() for t in tools]
-             + list(SERVICES) + list(EXTERNAL_REQUIREMENTS))
+             + list(SERVICES))
     return list(dict.fromkeys(names))
 
 

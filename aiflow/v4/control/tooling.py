@@ -150,14 +150,16 @@ def waiting_summary(ctx) -> list[dict[str, Any]]:
 
 
 def requirement_catalogue() -> set[str]:
-    """Catalogue tools and reportable external services; other stack tools require an explicit pin."""
-    from ..core.services import EXTERNAL_REQUIREMENTS
-    return set(NODE_TOOLS) | set(CATALOG_TOOLS) | set(SERVICES) | set(EXTERNAL_REQUIREMENTS)
+    """Reportable catalogue tools and services; other stack tools require an explicit pin."""
+    return set(NODE_TOOLS) | set(CATALOG_TOOLS) | set(SERVICES)
 
 
 def requirement_is_accepted(ctx, project_key: str, requirement: str) -> bool:
     """Catalogue tools/services are always valid; other stack tools need a project pin."""
     name = normalize(requirement)
+    from ..core.services import EXTERNAL_REQUIREMENTS
+    if name in EXTERNAL_REQUIREMENTS:
+        return False
     if name in requirement_catalogue():
         return True
     repo = ctx.repo()

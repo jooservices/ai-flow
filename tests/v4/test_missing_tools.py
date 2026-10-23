@@ -26,11 +26,12 @@ def heartbeat(client, name, headers, tools):
     return client.post(f"/v1/nodes/{name}/heartbeat", json={"slots_total": 2, "tools": tools}, headers=headers).json()
 
 
-def claim_and_report_missing(client, headers, ticket, account="claude-01", tools=("php",)):
+def claim_and_report_missing(client, headers, ticket, account="claude-01", tools=("php",),
+                             summary="phpunit cannot run"):
     r = client.post("/v1/work/claim", json={"ticket": ticket, "account": account}, headers=headers).json()
     assert r["claimed"], r
     done = client.post(f"/v1/runs/{r['run_id']}/result", json={
-        "fence": r["fence"], "outcome": "tool_missing", "summary": "phpunit cannot run",
+        "fence": r["fence"], "outcome": "tool_missing", "summary": summary,
         "details": {"missing_tools": list(tools)}}, headers=headers)
     assert done.status_code == 200
     client.post(f"/v1/runs/{r['run_id']}/release", json={"fence": r["fence"]}, headers=headers)
@@ -133,6 +134,15 @@ def test_catalogue_includes_incident_tools_and_services_are_known():
     assert {"gitleaks", "xdebug", "cosign", "podman", "postgres", "redis"}.issubset(known_requirements())
 
 
+def test_environments_without_heartbeat_probes_are_not_accepted_requirements(ctx):
+    from aiflow.v4.core.services import EXTERNAL_REQUIREMENTS
+
+    for name in EXTERNAL_REQUIREMENTS:
+        assert name not in known_requirements()
+        assert name not in tooling.requirement_catalogue()
+        assert parse_missing_requirements(f"MISSING-TOOL: {name} - check cannot run") == []
+
+
 def test_missing_tool_marker_applies_a_register_answer_without_recording_a_wait(monkeypatch, tmp_path):
     register_answer = {
         "class": "decision_already_taken", "label": "Decision already taken",
@@ -196,6 +206,24 @@ def test_requirement_reported_present_by_its_machine_is_failed_without_a_wait(cl
     saved = ctx.db.one("SELECT outcome,summary,details FROM runs WHERE id=%s", (run["run_id"],))
     assert saved["outcome"] == "failed" and "phpunit cannot run" in saved["summary"]
     assert saved["details"]["missing_tools"] == []
+
+
+def test_unreportable_environments_are_failed_without_recording_waits(client, ctx):
+    from aiflow.v4.core.services import EXTERNAL_REQUIREMENTS
+
+    cc = join(client, "cc")
+    heartbeat(client, "cc", cc, CC_TOOLS)
+    for index, name in enumerate(EXTERNAL_REQUIREMENTS, start=1):
+        ticket = f"TESTWP-{30 + index}"
+        add_ticket(ctx.db, ticket)
+        report = f"MISSING-TOOL: {name} - the check cannot run"
+        run = claim_and_report_missing(client, cc, ticket, tools=(name,), summary=report)
+
+        saved = ctx.db.one("SELECT outcome,summary,details FROM runs WHERE id=%s", (run["run_id"],))
+        assert saved["outcome"] == "failed"
+        assert saved["summary"] == report
+        assert saved["details"]["missing_tools"] == []
+        assert ctx.db.one("SELECT count(*) AS n FROM tool_waits WHERE ticket_key=%s", (ticket,))["n"] == 0
 
 
 # --- AC2: waiting state, offered again to a capable machine, counted in Command Center -------------------------

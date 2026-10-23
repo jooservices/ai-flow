@@ -60,5 +60,26 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `DELETE /v1/shared-accounts/{id}?confirm=true` | remove from all machines |
 | `POST /v1/accounts/{id}/signin-prompt` | node reports link and code (node token) |
 
+### Other calls that read or enforce the shared account
+
+| Call | What changes with shared accounts |
+|---|---|
+| `POST /v1/shared-accounts/{account_id}/machines/{node}/signin` | Retry sign-in on one machine: starts a new attempt with a fresh link and code (Command Center: **Retry sign-in**). |
+| `POST /v1/work/claim` | Claim checks the account total, the machine share and free worker slots under the account lock. |
+| `POST /v1/version-releases/claim` | A version release claim obeys the same account and machine limits. |
+| `GET /v1/version-releases/candidates` | Candidates go to a signed-in peer machine with free capacity when the source account is at quota risk. |
+| `GET /v1/master/candidate` | An account counts as ready when any assigned, signed-in, online machine has it. |
+| `POST /v1/accounts/{account_id}/probe` | A probe result is recorded per machine: an auth failure returns only that machine to *Sign-in needed*; quota cooldown stays account-wide. |
+| `GET /v1/accounts/{account_id}/spec` | The node reads the account spec for its own assignment. |
+| `POST /v1/nodes/{name}/heartbeat` | The heartbeat marks the machine online for the fair share and returns its assigned accounts. |
+| `POST /v1/runs/{run_id}/result` | A finished run frees its session on the account total and its machine. |
+| `GET /v1/state` | The state shows each account once with its machines and per-machine usage. |
+| `GET /v1/deploy/state` | Deploy state lists accounts by machine membership rather than a single node. |
+
+**Console screens:** `cc`, `machines`
+
+Accounts appear on Command Center (`/cc`) and Machines and AI (`/machines`): one account card with a breakdown per
+machine, **Enable on**, **Total sessions**, **Retry sign-in**, **Remove** and **Remove from all machines**.
+
 Changes need the `nodes.manage` permission (owner, super administrator). The shared account tables are created by
 `011_shared_accounts.sql`; `015_shared_account_machine_detach.sql` records detached control-repo assignments.

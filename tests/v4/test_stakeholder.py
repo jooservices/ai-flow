@@ -61,7 +61,7 @@ def test_stakeholder_urls_normalize_missing_keys_to_empty(ctx, tmp_path):
 
 def test_stakeholder_page_is_routed_by_traefik():
     compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
-    assert "PathPrefix(`/stakeholder`)" in compose.read_text()
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in compose.read_text()
 
 
 def test_stakeholder_change_feed_shows_latest_ticket_epic_and_release_or_commit(ctx, tmp_path):

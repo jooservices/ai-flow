@@ -15,6 +15,7 @@ from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control import console_auth, licensing
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, mount_ui
 from aiflow.v4.control.db import J
 from aiflow.v4.core.settings import Settings
 
@@ -23,10 +24,12 @@ EMAIL = "admin@example.test"
 EXP = 4_102_444_800
 
 
-def make_client(ctx, gate=False):
+def make_client(ctx, gate=False, with_ui=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
     app = create_app(ctx)
+    if with_ui:
+        mount_ui(app, ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
 
@@ -286,11 +289,12 @@ def test_without_the_setting_nothing_is_gated(ctx):
 
 
 def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seeded):
-    client = make_client(ctx, gate=True)
-    r = client.get("/cc")
-    assert r.status_code == 302 and r.headers["location"] == "/login?next=%2Fcc"
+    client = make_client(ctx, gate=True, with_ui=True)
+    for path in (*CONSOLE_PAGE_PATHS, "/help/"):
+        response = client.get(path)
+        assert response.status_code == 302
+        assert response.headers["location"].startswith("/login?next=")
     assert client.get("/delivery?x=1").headers["location"] == "/login?next=%2Fdelivery%3Fx%3D1"
-    assert client.get("/machines").headers["location"] == "/login?next=%2Fmachines"
     assert client.get("/v1/state").status_code == 401
     assert client.get("/v1/state", headers={"Authorization": "Bearer not-a-token-route"}).status_code == 401
     client.cookies.set(COOKIE_NAME, "forged.cookie.value")
@@ -300,7 +304,16 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
         assert client.get(open_path).status_code == 200
     assert client.get("/v1/auth/me").status_code == 401
     assert sign_in(client, seeded).status_code == 200
-    assert client.get("/v1/state").status_code == 200 and client.get("/cc").status_code not in (302, 401)
+    assert client.get("/v1/state").status_code == 200
+    for path in CONSOLE_PAGE_PATHS:
+        response = client.get(path)
+        assert response.status_code != 404, f"{path} returned 404 for a signed-in user"
+        if path == "/":
+            assert response.status_code == 307 and response.headers["location"] == "/dashboard"
+        elif path == "/help":
+            assert response.status_code == 307 and response.headers["location"] == "/help/"
+        else:
+            assert response.status_code == 200, f"{path} did not load for a signed-in user"
 
 
 def test_gate_lets_node_tokens_through_on_token_routes(ctx):

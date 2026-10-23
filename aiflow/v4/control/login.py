@@ -45,6 +45,7 @@ from starlette.routing import Match
 
 from .console_auth import COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission, issue_session, verify_session
 from .db import J
+from .ui import CONSOLE_PAGE_PATHS
 
 log = logging.getLogger(__name__)
 
@@ -59,8 +60,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = {"/", "/cc", "/delivery", "/sa", "/lead", "/business", "/review", "/stakeholder", "/knowledge",
-         "/integrations", "/projects", "/licensing", "/backup", "/machines", "/users", "/notifications"}
+PAGES = frozenset(CONSOLE_PAGE_PATHS)
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -475,7 +475,7 @@ def install_login(app: FastAPI, ctx) -> None:
             return await call_next(request)
         if verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret):
             return await call_next(request)
-        if path in PAGES:
+        if path in PAGES or path.startswith("/help/"):
             target = safe_next(path + (f"?{request.url.query}" if request.url.query else ""))
             return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=302)
         return JSONResponse({"detail": "sign in required"}, status_code=401)

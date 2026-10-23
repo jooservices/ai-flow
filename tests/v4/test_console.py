@@ -10,9 +10,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aiflow.v4 import VERSION
-from aiflow.v4.control.console_auth import ROLE_PERMISSIONS
+from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -343,19 +345,27 @@ def test_console_page_and_state_feed_the_footer(ctx):
     from fastapi.testclient import TestClient
     from aiflow.v4.control.api import create_app
     from aiflow.v4.control.ui import mount_ui
+
+    ctx.settings.console_login = True
+    ctx.settings.console_session_secret = "console-page-test-secret-at-least-32-bytes"
     app = create_app(ctx)
     mount_ui(app, ctx)  # as the control-api CLI does
     app.state.sync_accounts()
-    client = TestClient(app)
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set(COOKIE_NAME, issue_session("console@example.test", "owner", 2_000_000_000,
+                                                   ctx.settings.console_session_secret))
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
-    assert client.get("/dashboard").status_code == 200
-    assert client.get("/work").status_code == 200
-    assert client.get("/machines").status_code == 200
-    assert client.get("/users").status_code == 200
-    assert client.get("/sa").status_code == 200
-    for path in ("/delivery", "/business", "/review", "/stakeholder", "/knowledge", "/integrations", "/projects"):
-        assert client.get(path).status_code == 200
+    for path in CONSOLE_PAGE_PATHS:
+        response = client.get(path)
+        assert response.status_code != 404, f"{path} returned 404"
+        if path == "/":
+            assert response.status_code == 307 and response.headers["location"] == "/dashboard"
+        elif path == "/help":
+            assert response.status_code == 307 and response.headers["location"] == "/help/"
+        else:
+            assert response.status_code == 200, f"{path} did not load the console"
+    assert client.get("/help", follow_redirects=True).status_code == 200
     assert 'id="view-sa"' in page.text and 'data-view="sa"' in page.text
     lead = client.get("/lead")
     assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
@@ -363,6 +373,49 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["version"] == VERSION
     assert s["env"] and "control_repo" in s and "versions" in s
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
+
+
+def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring_and_logs():
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
+    rule = compose["services"]["control-api-a"]["labels"]["traefik.http.routers.api.rule"]
+    assert rule == "PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)"
+    assert "PathPrefix(`/v1`)" not in rule  # the broad rule also carries the control API
+    for path in CONSOLE_PAGE_PATHS:
+        if path not in {"/", "/help", "/notifications"}:
+            assert f"PathPrefix(`{path}`)" not in rule and f"Path(`{path}`)" not in rule
+
+
+def test_console_reload_selects_the_view_from_each_existing_address():
+    views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications")
+    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
+    for path in page_paths:
+        expected_view = "cc" if path in {"/cc", "/dashboard"} else path.removeprefix("/")
+        prelude = STUBS.replace("pathname: '/cc'", f"pathname: {json.dumps(path)}") + f"""
+var viewNames = {json.dumps(views)};
+var tabs = viewNames.map(function (view) {{
+  var attrs = {{'data-view': view}};
+  return {{setAttribute: function (key, value) {{ attrs[key] = value; }},
+           getAttribute: function (key) {{ return attrs[key]; }}}};
+}});
+var panels = {{}};
+viewNames.forEach(function (view) {{ panels[view] = {{hidden: true}}; }});
+document.querySelectorAll = function (selector) {{ return selector === '.tab' ? tabs : []; }};
+document.querySelector = function (selector) {{
+  var match = /^#view-(.+)$/.exec(selector);
+  return match ? panels[match[1]] : null;
+}};
+"""
+        state = json.loads(run_script(
+            "showView(); console.log(JSON.stringify({path: location.pathname, view: S.view, "
+            "selected: tabs.filter(function (tab) { return tab.getAttribute('aria-selected') === 'true'; })[0] "
+            "&& tabs.filter(function (tab) { return tab.getAttribute('aria-selected') === 'true'; })[0]"
+            ".getAttribute('data-view'), visible: Object.keys(panels).filter(function (view) { return !panels[view].hidden; })}));",
+            prelude=prelude,
+        ))
+        assert state == {"path": path, "view": expected_view, "selected": expected_view,
+                         "visible": [expected_view]}, f"{path} did not select its view after a page reload"
 
 
 def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve_link():
@@ -630,6 +683,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
 
     from aiflow.v4.control import login
     from aiflow.v4.control.api import create_app
+    from aiflow.v4.control.ui import mount_ui
 
     try:
         playwright = sync_playwright().start()
@@ -647,6 +701,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
         app = create_app(ctx)
+        mount_ui(app, ctx)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(("127.0.0.1", 0))
@@ -675,6 +730,21 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
 
             page.get_by_role("tab", name="Projects").click()
             page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+
+            # Direct navigation and reload must leave each existing view selected at the same address.
+            for path in (p for p in CONSOLE_PAGE_PATHS if p not in {"/", "/help"}):
+                view = "cc" if path in {"/cc", "/dashboard"} else path.removeprefix("/")
+                page.goto(base_url + path, wait_until="domcontentloaded")
+                for action in ("load", "reload"):
+                    assert page.url == base_url + path
+                    selected = page.evaluate("""view => {
+                      const tab = document.querySelector('#tab-' + view);
+                      const panel = document.querySelector('#view-' + view);
+                      return !!tab && tab.getAttribute('aria-selected') === 'true' && !!panel && !panel.hidden;
+                    }""", view)
+                    assert selected, f"{path} did not keep the {view} view selected after {action}"
+                    if action == "load":
+                        page.reload(wait_until="domcontentloaded")
         finally:
             browser.close()
             server.should_exit = True

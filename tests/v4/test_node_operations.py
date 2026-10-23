@@ -396,14 +396,93 @@ def test_supporting_tool_installer_routes_are_whitelisted(monkeypatch):
                        "playwright-browser")]
 
 
-def test_playwright_stack_installs_node_playwright_and_chromium_with_system_libraries(monkeypatch):
+def _playwright_fixture(monkeypatch, tmp_path, *, launch_code=0, launch_err="", home=None):
+    """Fake npm prefix, link dir and browsers dir; record every subprocess call as (command, env)."""
+    prefix = tmp_path / "node" / "global"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "playwright").write_text("#!/usr/bin/env node\n")
+    links = tmp_path / "usr-local-bin"
+    links.mkdir()
+    browsers = tmp_path / "browsers"
+    chrome = browsers / "chromium-1/chrome-linux64/chrome"
+    chrome.parent.mkdir(parents=True)
+    chrome.write_text("")
     calls = []
+
+    def run(command, **kwargs):
+        calls.append((list(command), kwargs.get("env") or {}))
+        if command[:2] == ["npm", "prefix"]:
+            return SimpleNamespace(returncode=0, stdout=f"{prefix}\n", stderr="")
+        if command[-1] == "about:blank":
+            return SimpleNamespace(returncode=launch_code, stdout="", stderr=launch_err)
+        if command[-1] == "--version":
+            return SimpleNamespace(returncode=0, stdout="Chromium 141.0.1 \n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(operations.subprocess, "run", run)
     monkeypatch.setattr(operations.shutil, "which", lambda name: None)
-    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kwargs: (
-        calls.append(command) or SimpleNamespace(returncode=0, stdout="", stderr="")))
-    operations._install_playwright_browser("1.56.1")
-    assert calls[0][-1] == "playwright@1.56.1"
-    assert calls[1] == ["playwright", "install", "--with-deps", "chromium"]
+    monkeypatch.setattr(operations, "PLAYWRIGHT_BROWSERS_DIR", str(browsers))
+    monkeypatch.setattr(operations, "_TOOL_HOME", tmp_path / "home")
+    monkeypatch.setattr(operations, "_NPM_CACHE", tmp_path / "npm-cache")
+    real_link = operations._link_playwright
+    monkeypatch.setattr(operations, "_link_playwright", lambda env, link_dir=links: real_link(env, link_dir))
+    return calls, links, browsers, prefix
+
+
+def test_playwright_toolchain_links_command_into_a_path_directory(monkeypatch, tmp_path):
+    calls, links, _, prefix = _playwright_fixture(monkeypatch, tmp_path)
+    operations._install_playwright("1.56.1")
+    assert calls[0][0][-1] == "playwright@1.56.1"
+    assert calls[1][0] == ["npm", "prefix", "--global"]
+    assert (links / "playwright").resolve() == (prefix / "bin" / "playwright").resolve()
+
+
+def test_playwright_browser_installs_chromium_with_deps_into_shared_folder_and_launches(monkeypatch, tmp_path, caplog):
+    calls, links, browsers, _ = _playwright_fixture(monkeypatch, tmp_path)
+    with caplog.at_level("INFO", logger="aiflow4.node"):
+        operations._install_playwright_browser("1.56.1")
+    install = next((c, e) for c, e in calls if c[:2] == ["playwright", "install"])
+    assert install[0] == ["playwright", "install", "--with-deps", "chromium"]
+    assert install[1]["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
+    launch = next(e for c, e in calls if c[-1] == "about:blank")
+    assert "--headless" in next(c for c, _ in calls if c[-1] == "about:blank")
+    assert launch["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
+    assert "Chromium 141.0.1" in caplog.text
+    assert any(c[0] == "chmod" for c, _ in calls)
+
+
+def test_playwright_launch_failure_names_the_missing_library_in_plain_words(monkeypatch, tmp_path, caplog):
+    _playwright_fixture(monkeypatch, tmp_path, launch_code=127,
+                        launch_err="chrome: error while loading shared libraries: libnspr4.so: cannot open")
+    with pytest.raises(operations.OperationError, match="system library libnspr4.so is missing"):
+        operations._install_playwright_browser("1.56.1")
+    assert "libnspr4.so" in caplog.text
+
+
+def test_playwright_installer_failure_reports_the_installer_message(monkeypatch, tmp_path, caplog):
+    _playwright_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(operations.subprocess, "run", lambda command, **kw: SimpleNamespace(
+        returncode=1, stdout="", stderr="E: Unable to locate package libnspr4"))
+    with pytest.raises(operations.OperationError, match="Unable to locate package libnspr4"):
+        operations._install_playwright("1.56.1")
+    assert "Unable to locate package libnspr4" in caplog.text
+
+
+def test_playwright_installer_works_without_home_or_npm_cache(monkeypatch, tmp_path):
+    for name in ("HOME", "npm_config_cache", "NPM_CONFIG_CACHE"):
+        monkeypatch.delenv(name, raising=False)
+    calls, _, _, _ = _playwright_fixture(monkeypatch, tmp_path)
+    operations._install_playwright("1.56.1")
+    env = calls[0][1]
+    assert env["HOME"] == str(tmp_path / "home") and env["npm_config_cache"] == str(tmp_path / "npm-cache")
+    assert (tmp_path / "npm-cache").is_dir()
+
+
+def test_project_env_carries_the_shared_browsers_path(monkeypatch):
+    from aiflow.v4.core.toolchains import PLAYWRIGHT_BROWSERS_DIR
+    from aiflow.v4.worker import notes
+    monkeypatch.setattr("aiflow.v4.core.settings.read_env_file", lambda path: {})
+    assert notes.project_env("JAIF")["PLAYWRIGHT_BROWSERS_PATH"] == PLAYWRIGHT_BROWSERS_DIR
 
 
 def test_prepare_playwright_stack_installs_pinned_tools_and_reports_them(monkeypatch):

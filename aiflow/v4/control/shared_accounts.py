@@ -247,11 +247,15 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
     recent = {r["node"]: int(r["n"]) for r in db.all(
         "SELECT node, count(*) AS n FROM runs WHERE account_id=%s AND started_at > now() - interval '24 hours'"
         " GROUP BY node", (acc.id,))}
+    usage_today = {r["node"]: r for r in db.all(
+        "SELECT node, coalesce(sum(tokens_in + tokens_out),0) AS tokens, coalesce(sum(cost_usd),0) AS cost"
+        " FROM runs WHERE account_id=%s AND started_at >= date_trunc('day',now()) GROUP BY node", (acc.id,))}
     now = datetime.now(timezone.utc)
     out = []
     for n in acc.machines:
         row = rows.get(n)
         pending = bool(row and row["status"] == "pending")
+        usage = usage_today.get(n, {})
         prompt = None
         if (include_signin and pending and row["signin_link"] and row["signin_expires_at"]
                 and row["signin_expires_at"] > now):
@@ -260,6 +264,7 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
         out.append({"node": n, "node_status": node_status.get(n, "offline"), "signed_in": not pending,
                     "removable": not machine_managed and (n == acc.node or bool(row)),
                     "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
+                    "tokens_today": int(usage.get("tokens", 0)), "cost_today": float(usage.get("cost", 0)),
                     "state": ((row or {}).get("worker_state") or {}).get("state", ""), "signin": prompt,
                     "credential_expires_at": (row["credential_expires_at"].isoformat()
                                               if row and row["credential_expires_at"] else None)})
@@ -433,13 +438,18 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
                              " detached_at=now()", (acc.id, node, actor))
 
     def delete_account(acc: Account) -> bool:
-        row = ctx.db.one("SELECT managed FROM shared_accounts WHERE id=%s", (acc.id,))
-        if not row or not row["managed"]:
-            return False
-        ctx.db.run("DELETE FROM shared_accounts WHERE id=%s", (acc.id,))
-        ctx.db.run("DELETE FROM account_machines WHERE account_id=%s", (acc.id,))
-        ctx.db.run("DELETE FROM account_machine_exclusions WHERE account_id=%s", (acc.id,))
-        ctx.db.run("DELETE FROM accounts WHERE id=%s", (acc.id,))
+        # Match claim_run's lock: once deletion returns, no stale account snapshot can insert a new run.
+        with ctx.db.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+                row = conn.execute("SELECT managed FROM shared_accounts WHERE id=%s FOR UPDATE",
+                                   (acc.id,)).fetchone()
+                if not row or not row["managed"]:
+                    return False
+                conn.execute("DELETE FROM account_machines WHERE account_id=%s", (acc.id,))
+                conn.execute("DELETE FROM account_machine_exclusions WHERE account_id=%s", (acc.id,))
+                conn.execute("DELETE FROM shared_accounts WHERE id=%s", (acc.id,))
+                conn.execute("DELETE FROM accounts WHERE id=%s", (acc.id,))
         return True
 
     @app.delete("/v1/shared-accounts/{account_id}")

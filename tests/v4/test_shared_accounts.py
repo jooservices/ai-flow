@@ -169,11 +169,18 @@ def test_two_machines_share_one_session_limit_and_work_is_spread(client, ctx):
     assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
 
     # usage is counted once per account, with a breakdown per machine below it
+    ctx.db.run("UPDATE runs SET tokens_in=100,tokens_out=50,cost_usd=0.25"
+               " WHERE account_id='shared-01' AND node='cc'")
+    ctx.db.run("UPDATE runs SET tokens_in=200,tokens_out=75,cost_usd=0.50"
+               " WHERE account_id='shared-01' AND node='node1'")
     accounts = [a for a in snapshot(ctx)["accounts"] if a["id"] == "shared-01"]
     assert len(accounts) == 1
     shared = accounts[0]
     assert shared["runs_active"] == 2 and shared["session_limit"] == 2 and shared["shared"]
     assert {m["node"]: m["runs_active"] for m in shared["machines"]} == {"cc": 1, "node1": 1}
+    assert shared["tokens_today"] == 425 and shared["cost_today"] == 0.75
+    assert {m["node"]: (m["tokens_today"], m["cost_today"]) for m in shared["machines"]} == {
+        "cc": (150, 0.25), "node1": (275, 0.5)}
 
     # a finished session frees capacity for either machine
     run = first.json()
@@ -273,6 +280,41 @@ def test_removing_the_last_machine_with_confirmation_removes_the_account(client,
     assert client.delete("/v1/shared-accounts/shared-01/machines/cc").status_code == 409
     done = client.delete("/v1/shared-accounts/shared-01/machines/cc", params={"confirm": "true"})
     assert done.status_code == 200 and done.json()["account_removed"] is True
+
+
+def test_confirmed_account_removal_waits_for_the_claim_lock(client, ctx):
+    from aiflow.v4.control import shared_accounts
+
+    two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    started = Event()
+
+    def remove_account():
+        started.set()
+        return client.delete("/v1/shared-accounts/shared-01", params={"confirm": "true"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with ctx.db.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:shared-01",))
+                future = pool.submit(remove_account)
+                assert started.wait(timeout=5)
+                deadline = time.monotonic() + 5
+                blocked = False
+                while time.monotonic() < deadline and not future.done():
+                    blocked = bool(ctx.db.one("SELECT 1 AS waiting FROM pg_locks"
+                                              " WHERE locktype='advisory' AND NOT granted"))
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                assert blocked, "account removal did not wait for the claim lock"
+        removed = future.result(timeout=5)
+
+    assert removed.status_code == 200 and removed.json()["removed"] is True
+    assert not ctx.db.one("SELECT 1 AS x FROM shared_accounts WHERE id='shared-01'")
+    assert not ctx.db.one("SELECT 1 AS x FROM account_machines WHERE account_id='shared-01'")
+    assert shared_accounts.claim_run(ctx.db, acc, ("00000000-0000-0000-0000-000000000099", "TESTWP-99", "TESTWP",
+                                                   "dev", "shared-01", "claude", "", "cc", 99, "x")) is False
 
 
 def test_account_from_the_control_repo_can_be_shared_with_another_machine(client, ctx):
@@ -494,6 +536,37 @@ def test_quota_routing_finds_shared_peer_enabled_only_on_a_secondary_machine(cli
     assert ctx.db.one("SELECT node FROM accounts WHERE id='secondary-peer'")["node"] == ""
     assert candidates(client, cc, "claude-01") == []
     assert candidates(client, node1, "secondary-peer") == ["TESTWP-QUOTA-SECONDARY"]
+
+
+def test_quota_routing_does_not_defer_to_a_pending_shared_peer(client, ctx):
+    sign_in(client, ctx)
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    beat(client, "cc", cc)
+    beat(client, "node1", node1)
+    assert client.post("/v1/shared-accounts", json={"id": "pending-peer", "provider": "claude",
+                                                    "roles": ["dev"], "session_limit": 1}).status_code == 201
+    assert client.post("/v1/shared-accounts/pending-peer/machines", json={"node": "node1"}).status_code == 201
+    add_ticket(ctx.db, "TESTWP-QUOTA-PENDING")
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+
+    assert candidates(client, cc, "claude-01") == ["TESTWP-QUOTA-PENDING"]
+
+
+def test_quota_routing_does_not_defer_to_a_full_shared_peer(client, ctx):
+    sign_in(client, ctx)
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    beat(client, "cc", cc)
+    beat(client, "node1", node1)
+    assert client.post("/v1/shared-accounts", json={"id": "full-peer", "provider": "claude",
+                                                    "roles": ["dev"], "session_limit": 1}).status_code == 201
+    assert client.post("/v1/shared-accounts/full-peer/machines", json={"node": "node1"}).status_code == 201
+    assert client.post("/v1/accounts/full-peer/probe", json={"ok": True}, headers=node1).status_code == 200
+    add_ticket(ctx.db, "TESTWP-PEER-FILL")
+    assert claim(client, node1, "TESTWP-PEER-FILL", "full-peer").json()["claimed"]
+    add_ticket(ctx.db, "TESTWP-QUOTA-FULL")
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+
+    assert candidates(client, cc, "claude-01") == ["TESTWP-QUOTA-FULL"]
 
 
 def test_session_limit_cannot_drop_below_active_sessions(client, ctx):

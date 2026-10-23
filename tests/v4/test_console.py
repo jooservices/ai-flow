@@ -1148,6 +1148,38 @@ def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     assert "Save repository settings" in rendered and "data-epic-repository" in rendered
 
 
+def test_projects_editor_submits_the_displayed_connection_for_a_stale_assignment():
+    repo = {"repo": "person/tool", "base": "develop", "checks": [], "stack": "",
+            "connection": "personal", "assigned_connection": "default", "connection_stale": True,
+            "connections": ["personal"]}
+    editor = {"key": "TESTWP", "busy": False, "saving": False, "error": "", "data": {
+        "default_repo": "person/tool", "project_defaults": {"base": "develop", "checks": [], "stack": ""},
+        "repositories": [repo], "epic_repositories": {}, "epics": [], "github_repos": [], "stacks": [],
+        "connections": [{"id": "default", "label": "App", "account": "jooservices", "kind": "app"},
+                        {"id": "personal", "label": "Personal", "account": "person", "kind": "token"}],
+    }}
+    rendered = render_projects([], {}, repository_editor=editor)
+    assert "Previously assigned to <span class=\"mono\">default</span>" in rendered
+    assert '<option value="personal" selected>Personal · person · access token</option>' in rendered
+
+    driver = f"""
+render = function () {{}};
+toast = function () {{}};
+loadProjectList = function () {{}};
+poll = function () {{}};
+var sent = null;
+fetch = function (url, options) {{
+  sent = JSON.parse(options.body);
+  return Promise.resolve({{ok: true, json: function () {{ return Promise.resolve({{saved: true, commit: 'commit-1'}}); }}}});
+}};
+S.projectAdmin.repositoryEditor = {json.dumps(editor)};
+saveProjectRepositories();
+setTimeout(function () {{ console.log(JSON.stringify(sent)); }}, 0);
+"""
+    submitted = json.loads(run_script(driver))
+    assert submitted["repositories"][0]["connection"] == "personal"
+
+
 def test_ticket_cards_business_change_requests_and_drawer_show_selected_repository():
     node_js = shutil.which("node")
     if not node_js:
@@ -1254,7 +1286,9 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
                    "has_agent": True, "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
                    "metrics": {"mem_used": 0, "mem_total": 8589934592, "cpus": 8}}],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
-                      "machines": [{"node": "worker-1"}, {"node": "worker-2"}], "parallel": 4,
+                      "machines": [{"node": "worker-1", "tokens_today": 120, "cost_today": .03},
+                                   {"node": "worker-2", "tokens_today": 30, "cost_today": .01}], "parallel": 4,
+                      "tokens_today": 999, "cost_today": .99,
                       "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
                       "quota_awareness": awareness}],
         "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
@@ -1286,14 +1320,30 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     assert "codex-alpha" in second_card
 
     machines = render_machines(state)
-    assert "codex-alpha" in machines and "quota-history" in machines and "comfortable" in machines
-    assert "used 40% quota" in machines and "left 60%" in machines
-    assert "Largest context run" in machines and "Burn tokens/hour: 1h 1k, 24h 800, window 700" in machines
+    assert "codex-alpha" in machines and "quota-history" not in machines and "comfortable" not in machines
+    assert "used 40% quota" not in machines and "left 60%" not in machines
     second_machine_start = machines.index('<article class="machine-card"><div class="machine-head"><h3>worker-2')
     second_machine = machines[second_machine_start:machines.index("</article>", second_machine_start)]
     assert "codex-alpha" in second_machine and "Configured AI sessions <strong>4 / 8</strong>" in second_machine
+    assert "Tokens today <strong>30</strong>" in second_machine and "Cost today <strong>$0.010</strong>" in second_machine
     drawer = render_drawer(state["nodes"][1], console_session("owner"), accounts=state["accounts"])
     assert "aiflow4-worker@codex-alpha" in drawer
+
+    account = {**state["accounts"][0], "tier": "middle", "roles": ["dev"], "runs_active": 2,
+               "session_limit": 4, "shared": True,
+               "machines": [{"node": "worker-1", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 4,
+                             "tokens_today": 120, "cost_today": .03},
+                            {"node": "worker-2", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 2,
+                             "tokens_today": 30, "cost_today": .01}]}
+    account_detail = run_script(f"S.data = {json.dumps({'accounts': [account], 'nodes': state['nodes'], 'recent_runs': []})};"
+                                "S.consoleUser = " + json.dumps(console_session_user()) + ";"
+                                "console.log(drawerAcc('codex-alpha'));")
+    assert account_detail.count('class="quota-history"') == 1
+    assert "Tokens · today" in account_detail and "Cost · today" in account_detail
+    assert "<td>120</td><td>$0.030</td>" in account_detail
+    assert "<td>30</td><td>$0.010</td>" in account_detail
 
 
 def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():

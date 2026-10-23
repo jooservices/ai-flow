@@ -33,6 +33,8 @@ def test_review_queue_shows_summary_pr_diff_verify_and_gated_preview(client, ctx
     ctx.repo().projects["TESTFLOW"] = Project(
         key="TESTFLOW", repo="jooservices/testflow", environments={"preview": {"url": "https://preview.testflow.test"}}
     )
+    ctx.github.repositories.append({"full_name": "jooservices/testflow", "name": "testflow",
+                                    "default_branch": "develop"})
     add_ticket(ctx.db, "TESTFLOW-5", status="To Do", labels=())
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTFLOW-5'")
     add_ticket(ctx.db, "TESTFLOW-28", status="Human review", labels=("require-human",))

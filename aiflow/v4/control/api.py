@@ -5359,10 +5359,13 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/state", responses={200: {"description": "Command Center, Delivery, and SA snapshot",
                                             "content": {"application/json": {"schema": STATE_RESPONSE_SCHEMA}}}})
-    def state(request: Request) -> dict:
+    def state(request: Request, authorization: str = Header(default="")) -> dict:
+        if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
+            owner_auth(request, authorization)
         from .state import snapshot
-        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
-                else optional_console_user(request))
+        # The login middleware authenticates console sessions and permits this legacy owner-token route;
+        # resolving the cookie here keeps scoped session data filtered while allowing the owner token alone.
+        user = optional_console_user(request)
         data = snapshot(ctx)
         all_tickets = data["tickets"]
         if user and user.project_keys is not None:

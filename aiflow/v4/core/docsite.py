@@ -93,6 +93,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
     "accountAssignedTo": ("cc", "machines"),
+    "accountPendingOnMachine": ("cc", "machines"),
     "sharedAccountRequest": ("cc", "machines"),
     "createSharedAccount": ("cc", "machines"),
     "enableAccountMachine": ("cc", "machines"),

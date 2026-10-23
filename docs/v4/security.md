@@ -94,9 +94,9 @@ the repository (secrets, misconfiguration) and the control-api container image. 
 fails the job and blocks the merge when the check is required. The level is the repository variable
 `SECURITY_SEVERITY_THRESHOLD` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `HIGH`), not a constant in the code.
 
-There is no blanket suppression. The one exception is the container image scan, which uses `--ignore-unfixed`:
-operating-system findings for which the Debian base has no fixed package cannot be acted on, and the image upgrades its
-packages on every build. Dependency and repository findings, and every image finding that has a fix, still block.
+There is no suppression: a finding at or above the level blocks and appears in the report even when no fixed version
+exists yet (`--ignore-unfixed` is not used). The control image removes the base image's pip, setuptools and wheel after
+the locked install, because the runtime only uses `/app/.venv`.
 `pyproject.toml` overrides fastembed's `pillow<13` cap so that pillow 13 (which fixes HIGH findings) is locked; fastembed
 uses pillow only for image embeddings, which AI Flow does not use. The production
 control image runs as the non-root user `aiflow` (`USER` in `deploy/v4/control/Dockerfile`, `user:` in the compose file).

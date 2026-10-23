@@ -566,7 +566,7 @@ def install_login(app: FastAPI, ctx) -> None:
     def me(request: Request) -> JSONResponse:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret,
                                 allow_pending=True)
-        user = resolve_session_user(ctx.db, claims) if claims else None
+        user = resolve_session_user(ctx.db, claims, True) if claims else None
         if not user:
             return JSONResponse({"detail": "not signed in"}, status_code=401)
         row = ctx.db.one("SELECT display_name FROM console_users WHERE email=%s", (user.subject,))
@@ -630,6 +630,8 @@ def install_login(app: FastAPI, ctx) -> None:
         if password is None:
             return JSONResponse({"detail": "A console user with this email already exists."}, status_code=409)
         audit("create_user", email, True, "created")
+        audit_log.record(ctx.db, user.subject, "people", "person_added", email, {"roles": [data["role"]]},
+                         client_ip(request, settings.trusted_proxies))
         return JSONResponse({"email": email, "name": display_name.strip(), "role": data["role"],
                              "initial_password": password,
                              "message": "Account created. Copy the initial password and share it securely."},
@@ -699,7 +701,7 @@ def install_login(app: FastAPI, ctx) -> None:
         # verify_session also refuses an ended session (forced sign-out) and a pre-hardening cookie
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret, None,
                                 allow_pending)
-        return resolve_session_user(ctx.db, claims) if claims else None
+        return resolve_session_user(ctx.db, claims, allow_pending) if claims else None
 
     def forbidden_page() -> HTMLResponse:
         return HTMLResponse("<!doctype html><html lang='en'><meta charset='utf-8'><title>View unavailable</title>"

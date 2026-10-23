@@ -655,3 +655,58 @@ def test_the_audit_log_is_read_only_in_the_console_and_in_the_database(ctx, admi
     with pytest.raises(psycopg.Error):
         ctx.db.run("TRUNCATE audit_log")
     assert ctx.db.one("SELECT count(*) AS n FROM audit_log")["n"] > 0
+
+
+# --- rework: promotion, legacy secret files at startup, people and role audit entries --------------------------------
+def test_promoting_a_signed_in_person_to_administrator_requires_two_factor_setup(ctx):
+    lead_pw = login.seed_user(ctx.db, OTHER, "team_lead")
+    client = make_client(ctx, gate=True)
+    assert sign_in(client, lead_pw, OTHER).status_code == 200
+    assert authenticated(client)
+    ctx.db.run("UPDATE console_users SET role='administrator', roles=ARRAY['administrator'] WHERE email=%s", (OTHER,))
+    # the old session cannot use the new role: it is limited to two-factor setup, whatever it was issued as
+    refused = client.get("/v1/state")
+    assert refused.status_code == 403 and refused.json()["mfa_setup_required"] is True
+    assert client.get("/v1/security/settings").status_code == 403
+    assert client.get("/v1/auth/me").json()["mfa_setup_required"] is True
+    assert client.post("/v1/security/mfa/setup").status_code == 200  # the setup route stays reachable
+
+
+def test_legacy_jira_and_github_files_fail_startup_without_a_key_and_are_encrypted_with_one(ctx, tmp_path, monkeypatch):
+    jira, github = tmp_path / "jira", tmp_path / "gh"
+    jira.mkdir()
+    github.mkdir()
+    (jira / "credential.json").write_text(json.dumps({"access_token": "legacy-JIRA-SECRET"}), encoding="utf-8")
+    (github / "app.json").write_text(json.dumps({"id": "1", "installation_id": 2}), encoding="utf-8")
+    (github / "app.pem").write_text("LEGACY-PEM-SECRET", encoding="utf-8")
+    ctx.settings.jira_secret_dir, ctx.settings.github_app_dir = str(jira), str(github)
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)
+    monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+    with pytest.raises(secretbox.SecretBoxError):
+        make_client(ctx)
+    # the refusal leaves the files as they were; nothing was served
+    assert "legacy-JIRA-SECRET" in (jira / "credential.json").read_text(encoding="utf-8")
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
+    make_client(ctx)  # the migration runs before the API serves, without any file being read first
+    for path, secret in ((jira / "credential.json", "legacy-JIRA-SECRET"), (github / "app.pem", "LEGACY-PEM-SECRET")):
+        raw = path.read_text(encoding="utf-8")
+        assert secretbox.is_encrypted(raw) and secret not in raw
+
+
+def test_console_role_and_people_changes_are_audited_with_the_person_as_target(ctx, key, admin):
+    client = make_client(ctx)
+    enrol(client, admin)
+    created = client.post("/v1/console/users", json={"email": OTHER, "display_name": "Lee", "roles": ["team_lead"]})
+    assert created.status_code == 200, created.text
+    assert client.put(f"/v1/console/users/{OTHER}", json={"roles": ["team_lead", "reviewer"], "project_keys": None}
+                      ).status_code == 200
+    assert client.patch(f"/v1/console/users/{OTHER}/disabled", json={"disabled": True}).status_code == 200
+    entries = client.get("/v1/security/audit").json()["entries"]  # through the read-only view
+    by_action = {e["action"]: e for e in entries if e["target"] == OTHER}
+    assert by_action["person_added"]["category"] == "people"
+    changed = by_action["roles_changed"]
+    assert changed["category"] == "roles" and changed["actor"] == ADMIN
+    assert changed["detail"]["roles_before"] == ["team_lead"] and changed["detail"]["roles"] == ["team_lead", "reviewer"]
+    assert by_action["person_disabled"]["category"] == "people"
+    assert not [e for e in entries if e["action"].startswith(("PUT /v1/console/users", "POST /v1/console/users"))]
+    assert "temporary_password" not in json.dumps(entries)

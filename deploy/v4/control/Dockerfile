@@ -19,6 +19,13 @@ COPY aiflow aiflow
 COPY prompts prompts
 COPY deploy/v4/bin/aiflow4-bootstrap /app/deploy/v4/bin/aiflow4-bootstrap
 RUN uv sync --frozen --no-dev
+# The runtime uses only the locked environment in /app/.venv. The base image's pip and setuptools (and what they vendor)
+# are build tools that carry their own vulnerability findings, so they are removed once the install is done
+# (docs/v4/security.md: the image scan blocks every finding at or above the set level, fixed or not).
+RUN pip uninstall -y pip setuptools wheel \
+ && rm -rf /usr/local/lib/python3.12/site-packages/pip* /usr/local/lib/python3.12/site-packages/setuptools* \
+    /usr/local/lib/python3.12/site-packages/wheel* /usr/local/lib/python3.12/site-packages/pkg_resources \
+    /usr/local/lib/python3.12/site-packages/_distutils_hack /usr/local/lib/python3.12/site-packages/distutils-precedence.pth
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 AIFLOW4_VERSION=$AIFLOW4_VERSION HOME=/home/aiflow
 # the documentation site that /help serves and the console Help links open
 COPY docs/guide docs/guide

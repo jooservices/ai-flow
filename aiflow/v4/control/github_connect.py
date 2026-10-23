@@ -65,6 +65,22 @@ class GitHubSecretStore:
             raise ValueError("invalid GitHub setup state")
         return self.pending / key
 
+    def migrate_plaintext(self) -> int:
+        """Encrypt every legacy plaintext private key (active, pending and per-connection) and check the rest decrypt.
+
+        Raises (fail closed) without a usable external key, so the API never serves with a plaintext key on disk."""
+        changed = 0
+        if not self.root.is_dir():
+            return 0
+        for path in sorted(self.root.rglob("app.pem")):
+            raw = path.read_text(encoding="utf-8")
+            if secretbox.is_encrypted(raw):
+                secretbox.decrypt(raw, context="app.pem")
+                continue
+            self._write_file(path, raw)
+            changed += 1
+        return changed
+
     def _write_file(self, path: Path, contents: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(path.parent, 0o700)

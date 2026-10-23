@@ -261,8 +261,18 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
         if len(blocked) == len(serving):
             reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
     accounts = ctx.db.all("SELECT a.id, a.status, a.node FROM accounts a")
+    online_names = {n["name"] for n in online}
+    # a shared account is enabled per machine (its own `node` may be empty): count every signed-in assignment
+    signed_in: dict[str, set[str]] = {}
+    pending: set[tuple[str, str]] = set()
+    for m in ctx.db.all("SELECT account_id, node, status FROM account_machines"):
+        if m["status"] == "signed_in":
+            signed_in.setdefault(m["account_id"], set()).add(m["node"])
+        else:
+            pending.add((m["account_id"], m["node"]))
     ready = [a for a in accounts if a["status"] in ("idle", "working", "probing")
-             and any(n["name"] == a["node"] for n in online) and not ctx.leases.cooling(a["id"])]
+             and ((a["node"] in online_names and (a["id"], a["node"]) not in pending)
+                  or signed_in.get(a["id"], set()) & online_names) and not ctx.leases.cooling(a["id"])]
     if not ready:
         states = ", ".join(f"{a['id']}={a['status']}" for a in accounts) or "no accounts"
         reasons.append(f"no AI account is ready ({states})")

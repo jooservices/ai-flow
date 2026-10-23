@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
 - [Security hardening](../../docs/v4/security.md): two-factor sign-in and recovery codes, session length and forced sign-out, encrypted secrets, rate limits, CSRF, audit log, PR security scans, release security report and the disclosure policy
+- [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role

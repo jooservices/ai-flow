@@ -59,11 +59,16 @@ def install_security(app: FastAPI, ctx) -> None:
     mfa.migrate_plaintext_secrets(ctx.db, settings.console_session_secret)
     # The API must not serve while a notification credential remains plaintext or cannot be decrypted.
     notify.migrate_plaintext_credentials(ctx.db)
+    # Same for the Jira and GitHub secret files: legacy plaintext is encrypted now, or startup fails without the key.
+    from .github_connect import GitHubSecretStore
+    from .jira_connect import SecretStore as JiraSecretStore
+    JiraSecretStore(settings.jira_secret_dir).migrate_plaintext()
+    GitHubSecretStore(settings.github_app_dir).migrate_plaintext()
     secret = lambda: settings.console_session_secret  # noqa: E731 - read late: tests and the CLI set it after startup
 
     def session(request: Request, allow_pending: bool = False) -> ConsoleUser | None:
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), secret(), None, allow_pending)
-        return resolve_session_user(ctx.db, claims) if claims else None
+        return resolve_session_user(ctx.db, claims, allow_pending) if claims else None
 
     def require(request: Request, permission: str = "", allow_pending: bool = False) -> ConsoleUser:
         if len(secret().encode()) < 32:
@@ -99,7 +104,9 @@ def install_security(app: FastAPI, ctx) -> None:
         if not actor:
             return await call_next(request)
         with ctx.db.transaction():
+            # people and role changes are recorded by their handlers with the person as target and the roles as detail
             explicit_audit = (request.url.path.startswith("/v1/security/")
+                              or request.url.path.startswith("/v1/console/users")
                               or request.url.path.startswith("/v1/auth/") or request.url.path == "/logout")
             if not explicit_audit:
                 template = request.url.path

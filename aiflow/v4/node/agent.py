@@ -260,27 +260,44 @@ def _post_sign_in_status(api: ControlClient, node: str, account: str, request_id
               "code": code, "error": error[:300]}, retries=1)
 
 
+def _post_shared_sign_in_prompt(api: ControlClient, account: str, sign_in_url: str, code: str) -> None:
+    """Relay only the provider's short-lived device handoff; the machine keeps the resulting credentials."""
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-prompt",
+             {"link": sign_in_url, "code": code, "expires_in_s": 900}, retries=1)
+
+
+def _post_shared_sign_in_complete(api: ControlClient, account: str, request_id: str) -> None:
+    """Report the provider CLI's successful login so the node can start its normal credential probe."""
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-complete",
+             {"request_id": request_id}, retries=1)
+
+
 def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: threading.Event,
                          accounts_root: str = "/srv/aiflow/accounts") -> None:
     """Run a provider login inside its private account home and relay its device handoff to the console."""
     account = str(request.get("account") or "")
     request_id = str(request.get("request_id") or "")
     provider = str(request.get("provider") or "")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or not request_id:
+    shared_account = bool(request.get("shared_account"))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or (not request_id and not shared_account):
         return
     command = provider_sign_in_command(provider)
     if not command:
         try:
+            if shared_account:
+                return
             _post_sign_in_status(api, node, account, request_id, "failed", error="Provider sign-in is unsupported.")
         except Exception:  # noqa: BLE001 - do not log provider output or auth details
             pass
         return
 
     try:
-        _post_sign_in_status(api, node, account, request_id, "starting")
+        if not shared_account:
+            _post_sign_in_status(api, node, account, request_id, "starting")
         if not ensure_account_home(account, accounts_root):
-            _post_sign_in_status(api, node, account, request_id, "failed",
-                                 error="Could not prepare the private account home on this machine.")
+            if not shared_account:
+                _post_sign_in_status(api, node, account, request_id, "failed",
+                                     error="Could not prepare the private account home on this machine.")
             return
         home = str(Path(accounts_root) / account)
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
@@ -326,20 +343,28 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
                     os.write(master_fd, b"c")
                     copied_auth_url = True
                 details = provider_sign_in_details(clean_output)
-                if details[0] and details != last_details:
-                    _post_sign_in_status(api, node, account, request_id, "waiting",
-                                         sign_in_url=details[0], code=details[1])
+                if details[0] and details != last_details and (not shared_account or details[1]):
+                    if shared_account:
+                        _post_shared_sign_in_prompt(api, account, details[0], details[1])
+                    else:
+                        _post_sign_in_status(api, node, account, request_id, "waiting",
+                                             sign_in_url=details[0], code=details[1])
                     last_details = details
             return_code = process.wait(timeout=10)
             if cancel.is_set():
                 return
-            if return_code == 0:
-                _post_sign_in_status(api, node, account, request_id, "completed",
-                                     sign_in_url=last_details[0], code=last_details[1])
-            else:
-                _post_sign_in_status(api, node, account, request_id, "failed",
-                                     sign_in_url=last_details[0], code=last_details[1],
-                                     error=f"Provider sign-in exited with status {return_code}.")
+            if not shared_account:
+                if return_code == 0:
+                    _post_sign_in_status(api, node, account, request_id, "completed",
+                                         sign_in_url=last_details[0], code=last_details[1])
+                else:
+                    _post_sign_in_status(api, node, account, request_id, "failed",
+                                         sign_in_url=last_details[0], code=last_details[1],
+                                         error=f"Provider sign-in exited with status {return_code}.")
+            elif return_code == 0:
+                # The next heartbeat starts the worker, whose first action is the usual credential probe. This
+                # completion report breaks the pending-assignment/worker-probe cycle without moving credentials.
+                _post_shared_sign_in_complete(api, account, request_id)
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)
@@ -348,8 +373,9 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
         if cancel.is_set():
             return
         try:
-            _post_sign_in_status(api, node, account, request_id, "failed",
-                                 error=f"Provider sign-in could not start ({type(exc).__name__}).")
+            if not shared_account:
+                _post_sign_in_status(api, node, account, request_id, "failed",
+                                     error=f"Provider sign-in could not start ({type(exc).__name__}).")
         except Exception:  # noqa: BLE001
             pass
         log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
@@ -358,17 +384,19 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
 def sync_provider_sign_ins(api: ControlClient, node: str, requests: list[dict],
                            active: dict[str, tuple[str, threading.Event, threading.Thread]]) -> None:
     """Keep one provider login process per account and cancel replaced or removed handoffs."""
-    desired = {str(item.get("account") or ""): item for item in requests if item.get("account")}
+    desired = {str(item.get("account") or ""): item for item in requests
+               if isinstance(item, dict) and item.get("account")}
     for account, (request_id, cancel, thread) in list(active.items()):
         current = desired.get(account)
-        if not thread.is_alive():
-            del active[account]
-        elif not current or current.get("request_id") != request_id:
-            cancel.set()
+        if not current or current.get("request_id") != request_id:
+            if thread.is_alive():
+                cancel.set()
+            else:
+                del active[account]
     for account, item in desired.items():
         request_id = str(item.get("request_id") or "")
         current = active.get(account)
-        if current and current[0] == request_id and current[2].is_alive():
+        if current and current[0] == request_id:
             continue
         if current and current[2].is_alive():
             continue
@@ -741,7 +769,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
-            sync_provider_sign_ins(api, name, desired.get("sign_ins") or [], sign_in_processes)
+            sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
+            sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),
                              "project_stacks": desired.get("project_stacks", {}),
                              "versions": desired.get("versions", {})}

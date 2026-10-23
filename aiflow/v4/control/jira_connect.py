@@ -112,6 +112,23 @@ class SecretStore:
             return None
         return data if isinstance(data, dict) else None
 
+    def migrate_plaintext(self) -> int:
+        """Encrypt legacy plaintext files and check the rest decrypt; raises (fail closed) without a usable key.
+
+        Runs at control startup, so the API never serves while a Jira secret is plaintext on disk."""
+        changed = 0
+        for name in (self.APP, self.CREDENTIAL, self.DISCONNECTED):
+            try:
+                raw = (self.dir / name).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            if secretbox.is_encrypted(raw):
+                secretbox.decrypt(raw, context=name)
+                continue
+            self._write(name, json.loads(raw))  # seal() refuses when the external key is missing
+            changed += 1
+        return changed
+
     def _write(self, name: str, data: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(OSError):

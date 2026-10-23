@@ -11,6 +11,7 @@ from ..core.toolchains import missing_tools, toolchain_gaps
 from . import role_health
 from . import tooling
 from .sa import dashboard_data, thresholds
+from .shared_accounts import machines_view
 from .quota import assessments as quota_assessments
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
@@ -24,7 +25,7 @@ def _iso(ts: datetime | None) -> str | None:
     return None if ts is None else ts.isoformat()
 
 
-def snapshot(ctx) -> dict[str, Any]:
+def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     from . import api as control_api, release_progress, release_readiness, rollout
     db = ctx.db
     repo = ctx.repo()
@@ -33,7 +34,8 @@ def snapshot(ctx) -> dict[str, Any]:
     nodes = []
     assigned: dict[str, int] = {}
     for a in repo.accounts:
-        assigned[a.node] = assigned.get(a.node, 0) + 1
+        for machine in a.machines:
+            assigned[machine] = assigned.get(machine, 0) + 1
     active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
         "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
     for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
@@ -98,6 +100,7 @@ def snapshot(ctx) -> dict[str, Any]:
         "GROUP BY account_id")}
     sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
@@ -109,7 +112,7 @@ def snapshot(ctx) -> dict[str, Any]:
         expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
             days=sa_thresholds["credential_expiry_days"]))
         status = "stopped" if acc.paused else ("signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
-            "node_offline" if node_status.get(a["node"], "offline") != "online"
+            "node_offline" if not any(node_status.get(machine, "offline") == "online" for machine in acc.machines)
             and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
         probe = (a["worker_state"] or {}).get("probe") or {}
         windows = (a["quota"] or {}).get("windows") or {}
@@ -118,7 +121,11 @@ def snapshot(ctx) -> dict[str, Any]:
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
         usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": a["node"], "tier": a["tier"], "roles": acc.roles,
+            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
+            "tier": a["tier"], "roles": acc.roles,
+            "machines": machines_view(db, acc, node_status, include_signin=include_signin),
+            "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
+            "shared_managed": a["id"] in shared_managed,
             "explicit_only": bool(acc and acc.explicit_only),
             "paused": bool(acc.paused), "jobs": [job for job, role in
                 (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))
@@ -137,7 +144,7 @@ def snapshot(ctx) -> dict[str, Any]:
             "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
             "cost_today": float(usage.get("cost_usd", 0)), "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
-            "runs_active": runs_per_account.get(a["id"], 0), "parallel": int(getattr(acc, "parallel", 1) or 1),
+            "runs_active": runs_per_account.get(a["id"], 0), "parallel": acc.sessions if acc else 1,
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
                                         "step": r["step"], "elapsed_s": _age(r["started_at"]), "fence": r["fence"],
                                         "progress": r["progress"]},

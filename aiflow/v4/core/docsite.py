@@ -99,6 +99,16 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "safeHref": ("security",),  # output-escaping helper shared by every screen; documented in docs/v4/security.md
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
+    "accountAssignedTo": ("cc", "machines"),
+    "accountPendingOnMachine": ("cc", "machines"),
+    "sharedAccountRequest": ("cc", "machines"),
+    "createSharedAccount": ("cc", "machines"),
+    "enableAccountMachine": ("cc", "machines"),
+    "saveAccountLimit": ("cc", "machines"),
+    "removeAccountMachine": ("cc", "machines"),
+    "retryAccountSignin": ("cc", "machines"),
+    "removeAccountEverywhere": ("cc", "machines"),
+    "accountMachinesSection": ("cc", "machines"),
     "escCall": ("cc", "machines"),
     "loadEscalations": ("cc", "machines"),
     "answerDecision": ("cc", "machines"),
@@ -143,6 +153,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin"), "projects"),
+    (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
+    (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
 )
 
 SCREEN_SHARED_UI_PATTERNS = (

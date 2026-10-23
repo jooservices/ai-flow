@@ -180,9 +180,10 @@ def has_permission(role: str | Iterable[str], permission: str) -> bool:
     return role_satisfies(role, {permission})
 
 
-def resolve_session_user(db, claims: "ConsoleUser") -> "ConsoleUser | None":
+def resolve_session_user(db, claims: "ConsoleUser", allow_pending: bool = False) -> "ConsoleUser | None":
     """Refresh mutable account state from PostgreSQL while keeping support for pre-DB signed sessions."""
-    row = db.one("SELECT role, roles, project_keys, disabled FROM console_users WHERE email=%s", (claims.subject,))
+    row = db.one("SELECT role, roles, project_keys, disabled, totp_enabled FROM console_users WHERE email=%s",
+                 (claims.subject,))
     if row is None:
         return claims
     if row["disabled"]:
@@ -193,9 +194,20 @@ def resolve_session_user(db, claims: "ConsoleUser") -> "ConsoleUser | None":
         return None
     view_as = claims.view_as if claims.view_as and "administrator" in assigned else None
     projects = row.get("project_keys")
+    pending = claims.mfa_pending or _needs_two_factor(row, assigned, claims)
+    if pending and not allow_pending:
+        return None
     return ConsoleUser(claims.subject, assigned[0], roles=assigned,
                        project_keys=tuple(projects) if projects is not None else None, view_as=view_as,
-                       sid=claims.sid, mfa_pending=claims.mfa_pending)
+                       sid=claims.sid, mfa_pending=pending)
+
+
+def _needs_two_factor(row: dict, assigned: tuple[str, ...], claims: "ConsoleUser") -> bool:
+    """A session opened before the person became an administrator is limited to two-factor setup until they enrol.
+
+    Such a session carries no pending flag, so the roles it was issued with are compared with the current ones."""
+    promoted = "administrator" in assigned and "administrator" not in claims.assigned_roles
+    return promoted and not row.get("totp_enabled")
 
 
 def checks_bearer(endpoint):

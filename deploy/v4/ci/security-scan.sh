@@ -37,10 +37,9 @@ trivy -w /src "$TRIVY_IMAGE" fs --scanners secret,misconfig --severity "$SEVERIT
 
 if [ -n "$IMAGE" ]; then
   echo "== container image $IMAGE =="
-  # --ignore-unfixed only here: operating-system findings the Debian base has no fixed package for cannot be acted on
-  # (the image already upgrades its packages). Dependency findings with a fix still block above.
+  # No --ignore-unfixed: a finding at or above the level blocks even when no fix exists yet, and it stays in the report.
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$OUT:/out" -v "$CACHE:/root/.cache/trivy" \
-    "$TRIVY_IMAGE" image --scanners vuln --severity "$SEVERITIES" --ignore-unfixed --exit-code 1 \
+    "$TRIVY_IMAGE" image --scanners vuln --severity "$SEVERITIES" --exit-code 1 \
     --format json --output /out/image.json "$IMAGE" || status=1
 fi
 

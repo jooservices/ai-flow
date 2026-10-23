@@ -98,6 +98,9 @@ def build_ctx(s: Settings):
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
               events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
+    from .control import shared_accounts
+    ctx.repo = lambda: shared_accounts.overlay(repo_cache(), db)  # accounts managed in Command Center
+    ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
     return ctx

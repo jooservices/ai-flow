@@ -31,6 +31,8 @@ from .incidents import check_idle_flow, check_stack_pins, close_incident, open_i
 from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
+from .quota import assessments as quota_assessments
+from ..core.quota import as_utc
 
 log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
@@ -418,7 +420,8 @@ def watchdog(ctx: Ctx) -> None:
                 continue
             u = float(u)
             reset = w.get("resets_at")
-            reset_txt = datetime.fromtimestamp(float(reset), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if reset else "unknown"
+            reset_at = as_utc(reset)
+            reset_txt = reset_at.strftime("%Y-%m-%d %H:%M UTC") if reset_at else "unknown"
             label = {"five_hour": "5-hour", "seven_day": "weekly"}.get(wname, wname)
             subject = f"{a['id']}:{wname}"
             if u >= 0.9:
@@ -430,6 +433,23 @@ def watchdog(ctx: Ctx) -> None:
                               f" its tickets.{tip}")
             elif u < 0.85:
                 close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
+
+    account_rows = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+    account_providers = {str(row["id"]): str(row["provider"]) for row in account_rows}
+    for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
+        at_risk = [w for w in awareness["windows"]
+                   if w["prediction"]["status"] == "will run out before reset"]
+        ctx.db.run("UPDATE accounts SET quota_at_risk=%s WHERE id=%s", (bool(at_risk), account_id))
+        if at_risk:
+            soonest = min((w["prediction"].get("exhaustion_at") or "") for w in at_risk)
+            windows = ", ".join(w["label"] for w in at_risk)
+            open_incident(ctx, "quota_prediction", account_id, "warning",
+                          f"{account_id} may run out before reset",
+                          f"Predicted exhaustion: {soonest or 'before reset'} UTC ({windows}). "
+                          f"Confidence: {awareness['confidence']}. New work is routed to other "
+                          f"{account_providers.get(account_id, 'AI')} accounts first.")
+        else:
+            close_incident(ctx, "quota_prediction", account_id, "quota forecast is no longer before reset")
 
 
 def fleet_rollout(ctx: Ctx) -> dict | None:

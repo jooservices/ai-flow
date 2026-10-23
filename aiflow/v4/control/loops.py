@@ -443,7 +443,8 @@ def watchdog(ctx: Ctx) -> None:
     for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
         at_risk = [w for w in awareness["windows"]
                    if w["prediction"]["status"] == "will run out before reset"]
-        ctx.db.run("UPDATE accounts SET quota_at_risk=%s WHERE id=%s", (bool(at_risk), account_id))
+        ctx.db.run("UPDATE accounts SET quota_at_risk=%s,quota_forecast=%s WHERE id=%s",
+                   (bool(at_risk), J(awareness), account_id))
         if at_risk:
             soonest = min((w["prediction"].get("exhaustion_at") or "") for w in at_risk)
             windows = ", ".join(w["label"] for w in at_risk)

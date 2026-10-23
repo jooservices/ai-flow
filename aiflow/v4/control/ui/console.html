@@ -471,7 +471,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .command-dialog{position:relative;width:min(620px,100%);max-height:80vh;overflow:hidden;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
 .command-dialog header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line)}.command-dialog h2{margin:0;flex:1;color:var(--fg);font-size:16px;letter-spacing:0;text-transform:none}.command-dialog input{border:0;border-radius:0;border-bottom:1px solid var(--line);background:var(--surface);font-size:16px;min-height:52px;padding:12px 16px}
 .command-results{overflow:auto;padding:6px;display:grid;gap:3px}.command-result{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border:0;border-radius:9px;background:transparent;text-align:left;cursor:pointer}.command-result:hover,.command-result:focus-visible{background:var(--surface-2)}.command-result strong{font-family:var(--f-mono);font-size:12px}.command-result .kind{margin-left:auto;color:var(--muted);font-size:11px}.command-hint{padding:8px 14px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px}
-.provider-name{font-weight:700;color:var(--provider-color)}.quota-table td{vertical-align:top}.quota-table .qcell{min-width:200px}
+.provider-name{font-weight:700;color:var(--provider-color)}.quota-table td{vertical-align:top}.quota-table .qcell{min-width:200px}.quota-aware{min-width:310px;margin-top:7px;border-top:1px solid var(--line);padding-top:6px;font-size:11px;line-height:1.5}.quota-history-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.quota-history{width:68px;height:26px;flex:none}.quota-forecast{display:grid;gap:1px;margin-top:5px}.quota-forecast b{font-weight:700}
 svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--provider-codex)}svg .provider-grok{fill:var(--provider-grok)}svg .provider-opencode{fill:var(--provider-opencode)}
 @media (max-width:900px){.dash-grid{grid-template-columns:minmax(0,1fr)}.dash-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){.dash-kpis{grid-template-columns:minmax(0,1fr)}.roadmap-row{grid-template-columns:minmax(0,1fr) 52px}.roadmap-track{grid-column:1/-1;grid-row:2}.command-search{padding-top:4vh}.tabs{max-width:100%;width:100%}.project-picker{min-width:100%}}
@@ -598,6 +598,14 @@ function tone(p) { return p >= 90 ? 'crit' : p >= 75 ? 'warn' : 'ok'; }
 function hhmm(iso) { if (!iso) return '—'; var d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
 function when(iso) { if (!iso) return '—'; var d = new Date(iso); var today = new Date(); var same = d.toDateString() === today.toDateString(); return (same ? '' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
 function epochWhen(sec) { return sec ? when(new Date(sec * 1000).toISOString()) : '—'; }
+function quotaWhen(value) {
+  if (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value || ''))) return epochWhen(Number(value));
+  return when(value);
+}
+function quotaDateMs(value) {
+  return (typeof value === 'number' || /^\d+(?:\.\d+)?$/.test(String(value || '')))
+    ? Number(value) * 1000 : new Date(value).getTime();
+}
 
 var ICON = {
   close: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>',
@@ -660,7 +668,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
   { view: 'cc', label: 'Dashboard' },
@@ -1146,22 +1154,53 @@ function nodeMetrics(n) {
 function qwin(a) {
   var w = (a.quota && a.quota.windows) || null;
   if (!w || !Object.keys(w).length) {
-    var note = a.provider === 'codex' ? 'Codex does not report usage; a limit shows as a cooldown' : a.provider === 'grok' ? 'Grok reports only an empty balance' : a.provider === 'opencode' ? 'free model, no usage reported' : 'not reported yet';
-    return '<div class="qcell"><span class="qnote">' + note + '</span></div>';
+    var note = (a.quota_awareness && a.quota_awareness.is_estimate) ? 'Provider quota not reported; usage estimate below' : a.provider === 'codex' ? 'Codex quota not reported' : a.provider === 'grok' ? 'Grok reports only an empty balance' : a.provider === 'opencode' ? 'free model, no usage reported' : 'not reported yet';
+    return '<div class="qcell"><span class="qnote">' + note + '</span>' + quotaAwareness(a) + '</div>';
   }
   var h = '<div class="qcell">';
   [['five_hour', '5 hours'], ['seven_day', 'Weekly'], ['seven_day_opus', 'Weekly opus'], ['seven_day_sonnet', 'Weekly sonnet']].forEach(function (x) {
     var v = w[x[0]]; if (!v || v.utilization == null) return;
-    var p = 100 * v.utilization;
-    h += '<div class="qrow" title="resets ' + esc(epochWhen(v.resets_at)) + '"><span class="ql">' + x[1] + '</span><span class="track"><i style="width:' + Math.min(100, p).toFixed(1) + '%" data-tone="' + tone(p) + '"></i></span><span class="qv">' + Math.round(p) + '%</span></div>';
+    var p = 100 * (v.utilization > 1 ? v.utilization / 100 : v.utilization);
+    h += '<div class="qrow" title="resets ' + esc(quotaWhen(v.resets_at)) + '"><span class="ql">' + x[1] + '</span><span class="track"><i style="width:' + Math.min(100, p).toFixed(1) + '%" data-tone="' + tone(p) + '"></i></span><span class="qv">' + Math.round(p) + '%</span></div>';
   });
   var r5 = w.five_hour && w.five_hour.resets_at, r7 = w.seven_day && w.seven_day.resets_at;
-  h += '<span class="qnote">resets ' + (r5 ? epochWhen(r5) : '—') + (r7 ? ' · weekly ' + epochWhen(r7) : '') + '</span></div>';
+  h += '<span class="qnote">resets ' + (r5 ? quotaWhen(r5) : '—') + (r7 ? ' · weekly ' + quotaWhen(r7) : '') + '</span>' + quotaAwareness(a) + '</div>';
   return h;
+}
+function quotaHistoryChart(history, account) {
+  history = history || [];
+  var max = 1;
+  history.forEach(function (day) { max = Math.max(max, Number(day.tokens || 0)); });
+  var bars = history.map(function (day, index) {
+    var height = Math.max(1, Math.round(22 * Number(day.tokens || 0) / max));
+    var x = 2 + index * 9;
+    return '<rect x="' + x + '" y="' + (24 - height) + '" width="5" height="' + height + '" rx="1" fill="var(--accent)" opacity=".8"><title>' + esc(day.day) + ': ' + tok(day.tokens || 0) + ' tokens · ' + usd(day.cost_usd || 0) + '</title></rect>';
+  }).join('');
+  return '<svg class="quota-history" viewBox="0 0 68 26" role="img" aria-label="Seven day token history for ' + esc(account) + '">' + bars + '</svg>';
+}
+function quotaAwareness(account) {
+  var awareness = account && account.quota_awareness;
+  if (!awareness || !awareness.windows || !awareness.windows.length) return '';
+  var history = awareness.history || [], usage = awareness.usage_7d || {};
+  var h = '<div class="quota-aware"><div class="quota-history-row"><strong>' + (awareness.is_estimate ? 'Usage estimate' : 'Quota forecast') + '</strong>' + quotaHistoryChart(history, account.id || 'account') + '<span class="qnote">7 days · ' + tok(usage.tokens || 0) + ' tokens · ' + usd(usage.cost_usd || 0) + '</span></div>';
+  awareness.windows.forEach(function (window) {
+    var prediction = window.prediction || {}, rates = window.burn_rates || {};
+    var left = window.left_pct == null ? 'unknown' : window.left_pct + '%';
+    if (window.left_tokens != null) left += ' · ' + tok(window.left_tokens) + ' tokens';
+    var used = window.used_pct == null ? tok(window.used_tokens || 0) + ' tokens' : window.used_pct + '% quota';
+    if (window.used_tokens != null) used += ' · ' + tok(window.used_tokens) + ' tokens';
+    var reset = window.reset_at ? when(window.reset_at) : 'unknown';
+    h += '<div class="quota-forecast"><span><b>' + esc(window.label) + (window.source === 'estimate' ? ' · estimate' : '') + '</b> used ' + esc(used) + ' · left ' + esc(left) + ' · reset ' + esc(reset) + (window.reset_source && window.reset_source !== 'reported' ? ' (' + esc(window.reset_source) + ')' : '') + '</span>';
+    h += '<span class="qnote">Tokens ' + tok(window.tokens || 0) + ' · Cost ' + usd(window.cost_usd || 0) + ' · Burn tokens/hour: 1h ' + tok((rates.last_hour || {}).tokens_per_hour || 0) + ', 24h ' + tok((rates.last_day || {}).tokens_per_hour || 0) + ', window ' + tok((rates.whole_window || {}).tokens_per_hour || 0) + '</span>';
+    h += '<span class="qnote">Cost/hour: 1h ' + usd((rates.last_hour || {}).cost_usd_per_hour || 0) + ', 24h ' + usd((rates.last_day || {}).cost_usd_per_hour || 0) + ', window ' + usd((rates.whole_window || {}).cost_usd_per_hour || 0) + '</span>';
+    h += '<span class="qnote">' + esc(prediction.status || 'unknown') + ' · ' + esc(prediction.confidence || awareness.confidence || 'low') + ' confidence · ' + awareness.runs_24h + ' runs / 24h' + (prediction.exhaustion_at ? ' · run out ' + esc(when(prediction.exhaustion_at)) : '') + '</span></div>';
+  });
+  if (awareness.largest_run) h += '<span class="qnote">Largest context run: ' + esc(awareness.largest_run.ticket || 'unknown ticket') + ' · ' + tok(awareness.largest_run.context_tokens == null ? awareness.largest_run.tokens : awareness.largest_run.context_tokens) + ' input tokens · ' + tok(awareness.largest_run.tokens) + ' total · ' + usd(awareness.largest_run.cost_usd) + '</span>';
+  return h + '</div>';
 }
 function maxUtil(a) {
   var w = (a.quota && a.quota.windows) || {}, m = null;
-  Object.keys(w).forEach(function (k) { if (w[k] && w[k].utilization != null) m = Math.max(m || 0, w[k].utilization); });
+  Object.keys(w).forEach(function (k) { if (w[k] && w[k].utilization != null) m = Math.max(m || 0, w[k].utilization > 1 ? w[k].utilization / 100 : w[k].utilization); });
   return m;
 }
 
@@ -1279,11 +1318,11 @@ function renderDashboard() {
   h += providerUsageChart(S.analytics);
   h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + key + '"></i><span class="provider-name">' + esc(PROVIDER[key]) + '</span></span>'; }).join('') + '</div></section>';
   h += '<section class="panel"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Control plane records run usage</span></div><div class="facts"><div class="fact"><span class="fl">Tokens · 24 h</span><span class="fv mono">' + tok((totals.tokens_in_24h || 0) + (totals.tokens_out_24h || 0)) + '</span></div><div class="fact"><span class="fl">Cost · 24 h</span><span class="fv mono">' + usd(totals.cost_24h) + '</span></div><div class="fact"><span class="fl">Tokens · 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section></div>';
-  h += '<section class="panel"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Every configured account, its provider, current status, usage, and next reported reset</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
+  h += '<section class="panel"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Quota used and left, reset, burn rate, forecast, and seven-day history per account</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
   if (!d.accounts.length) h += '<tr><td colspan="4" class="empty">No AI accounts are configured.</td></tr>';
   d.accounts.forEach(function (a) {
     var reset = quotaResetText(a);
-    h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next reported reset: ' + esc(reset) + '</span></td></tr>';
+    h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next quota reset: ' + esc(reset) + '</span></td></tr>';
   });
   h += '</tbody></table></div></section></section>';
   h += toolWaitsPanel(d);
@@ -1293,9 +1332,12 @@ function renderDashboard() {
 }
 function projTicketsFor(projectKey) { return D().tickets.filter(function (t) { return t.project === projectKey; }); }
 function quotaResetText(account) {
+  var assessed = account.quota_awareness && account.quota_awareness.windows || [], known = [];
+  assessed.forEach(function (window) { if (window.reset_at) known.push(window.reset_at); });
+  if (known.length) return when(known.sort()[0]);
   var windows = account.quota && account.quota.windows || {}, resets = [];
-  Object.keys(windows).forEach(function (key) { if (windows[key] && windows[key].resets_at) resets.push(Number(windows[key].resets_at)); });
-  if (resets.length) return epochWhen(Math.min.apply(null, resets));
+  Object.keys(windows).forEach(function (key) { if (windows[key] && windows[key].resets_at) resets.push(windows[key].resets_at); });
+  if (resets.length) return quotaWhen(resets.sort(function (a, b) { return quotaDateMs(a) - quotaDateMs(b); })[0]);
   if (account.cooldown_until) return when(account.cooldown_until);
   return 'Not reported';
 }
@@ -1324,7 +1366,12 @@ function masterAutonomyPanel() {
   h += '</div></div><div><h3>Repeated flow failures</h3>';
   if (!(report.repeated_failures || []).length) h += '<div class="muted">No repeated failure Bugs updated this week.</div>';
   else (report.repeated_failures || []).forEach(function (item) { h += '<div class="review-fact"><b class="mono">' + esc(item.ticket_key) + '</b> · ' + esc(item.summary || item.signature) + ' · ' + esc(item.repeat_count) + ' additional runs</div>'; });
-  return h + '</div></section>';
+  h += '</div><section class="panel" style="margin-top:18px"><div class="panel-h"><h3>Weekly quota and usage</h3><span class="hint">Current account values · seven-day history</span></div>';
+  if (!(report.quota_accounts || []).length) h += '<div class="muted">No AI accounts are configured.</div>';
+  (report.quota_accounts || []).forEach(function (account) {
+    h += '<div class="review-fact"><div class="label mono">' + esc(account.id) + ' · ' + esc(PROVIDER[account.provider] || account.provider) + '</div>' + quotaAwareness(account) + '</div>';
+  });
+  return h + '</section></section>';
 }
 function renderCC() {
   var d = D();
@@ -2999,6 +3046,7 @@ function drawerInc(id) {
     node_down: 'Runs on the node keep their lease for 90 s; then the watchdog marks them lost and moves their tickets back to To Do with a comment. The incident closes on the next heartbeat.',
     account_quota: 'The account takes no ticket until it passes its next check; its tickets go to the other accounts.',
     quota_high: 'Informational until 100%; then the account pauses until the reset time.',
+    quota_prediction: 'New work is routed to other accounts of this provider because the current burn rate predicts exhaustion before reset.',
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
     role_health: 'This AI account failed too many of its latest runs in this role, so the role is switched off for it; its other roles keep working. AI Flow gives the role one easy probation ticket a day and switches it back on after two in a row succeed. Thresholds are on the Command Center, under AI quality by role.',
@@ -3278,7 +3326,7 @@ function renderMachines() {
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Quota used <strong>' + quota + '</strong></span><span>Limit resets <strong>' + esc(a.quota_resets_at ? when(typeof a.quota_resets_at === 'number' ? new Date(a.quota_resets_at * 1000).toISOString() : a.quota_resets_at) : '—') + '</strong></span>';
-      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
+      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>' + quotaAwareness(a);
       if (state.accountEditor === a.id) {
         h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';

@@ -98,7 +98,8 @@ class Worker:
                 "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
                 "credential_expires_at": res.credential_expires_at.isoformat() if res.credential_expires_at else None,
                 "quota": res.quota, "summary": summary, "duration_ms": int(res.duration_s * 1000),
-                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd})
+                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd,
+                "model": spec.model})
         except Exception as e:  # noqa: BLE001
             log.warning("probe result not recorded: %s", e)
         now = time.time()

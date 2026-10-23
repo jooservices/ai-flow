@@ -3,7 +3,7 @@ so the AI cannot commit; network is opened by config for package installs). Acco
 """
 from __future__ import annotations
 
-from .base import Adapter, RunResult, RunSpec, scratch_root
+from .base import Adapter, RunResult, RunSpec, quota_from_event, scratch_root
 
 
 class CodexAdapter(Adapter):
@@ -26,6 +26,9 @@ class CodexAdapter(Adapter):
         return {"CODEX_HOME": f"{spec.account_home}/.codex"}
 
     def parse_event(self, ev: dict, res: RunResult) -> None:
+        quota = quota_from_event(ev, self.provider)
+        if quota:
+            res.quota = quota
         t = ev.get("type")
         if t == "item.completed":
             item = ev.get("item") or {}

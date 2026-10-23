@@ -83,9 +83,9 @@ WITH last AS (
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
-  WHERE l.outcome IN ('failed', 'timeout', 'lost')
+  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
     AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
-                    AND g.outcome NOT IN ('failed', 'timeout', 'lost'))
+                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
   GROUP BY l.ticket_key
 )
 SELECT ticket_key, fails FROM streak
@@ -4164,7 +4164,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
-        # a role switched off for this account (docs/v4/role-health.md) takes only its daily probation ticket
+        # a role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket
         modes = role_health.modes(ctx.db, acc.id, sorted(roles))
 
         def allowed(role: str, t: dict) -> bool:
@@ -4446,10 +4446,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
         run_id = str(uuid.uuid4())
         probation_id = None
-        if t.get("probation"):  # the one easy ticket a day of a switched-off role
+        if t.get("probation"):  # one easy ticket at a time for a switched-off role
             probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
             if probation_id is None:
-                return JSONResponse({"claimed": False, "reason": "today's probation ticket is already assigned"},
+                return JSONResponse({"claimed": False, "reason": "a probation ticket is already running"},
                                     status_code=409)
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:
@@ -4481,9 +4481,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
             # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
-            # uses this row to bind branch and SHA requests to this ticket's pull request.
-            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s WHERE id=%s",
-                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "", run_id))
+            # uses this row to bind branch and SHA requests to this ticket's pull request. Preserve provenance so
+            # role health does not treat a later failed run as the run that produced the PR.
+            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s, details=details || %s WHERE id=%s",
+                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "",
+                        J({"pr_url_source": "inherited"}), run_id))
         if probation_id is not None:
             role_health.attach_probation_run(ctx.db, probation_id, run_id)
             ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -4831,6 +4833,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "run belongs to another node")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
         details = dict(body.details)
+        details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
+        if body.pr_url:
+            details["pr_url_source"] = "current"
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:
@@ -5185,7 +5190,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if body.action == "retry":
                 latest = ctx.db.one("SELECT outcome FROM runs WHERE ticket_key=%s AND status<>'running'"
                                     " ORDER BY started_at DESC LIMIT 1", (ticket,))
-                if not latest or latest["outcome"] not in ("failed", "timeout", "lost", "quota", "blocked"):
+                if not latest or latest["outcome"] not in ("failed", "timeout", "lost", "quota", "blocked", "no_changes"):
                     refuse_master_action("retry requires a recent failed, blocked, quota or lost run")
             try:
                 status = ctx.jira.transition_to(ticket, "To Do")

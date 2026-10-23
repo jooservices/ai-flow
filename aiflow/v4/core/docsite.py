@@ -90,6 +90,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderStakeholderBody": ("stakeholder",),
     "renderStakeholder": ("stakeholder",),
     "renderDrawer": None,
+    "drawerInc": ("cc", "machines"),
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
@@ -172,6 +173,9 @@ SCREEN_LINE_VIEWS = (
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
+    (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
+    (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
+    (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )
 
 SCREEN_SHARED_UI_PATTERNS = (

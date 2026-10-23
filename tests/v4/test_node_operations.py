@@ -420,13 +420,16 @@ def test_supporting_tool_installer_routes_are_whitelisted(monkeypatch):
     routed = []
     for tool, helper in (("uv", "_install_uv"), ("python3", "_install_python"), ("node", "_install_node"),
                          ("gh", "_install_gh"), ("composer", "_install_composer"), ("wp", "_install_wp"),
-                         ("codex-code-mode-host", "_install_codex_host"), ("playwright", "_install_playwright"),
-                         ("playwright-browser", "_install_playwright_browser")):
+                         ("codex-code-mode-host", "_install_codex_host"), ("playwright", "_install_playwright")):
         monkeypatch.setattr(operations, helper, lambda version, tool=tool: routed.append((tool, version)))
         operations._install_component(tool, "1.2.3", [])
+    for browser in ("chromium", "firefox", "webkit"):
+        monkeypatch.setattr(operations, "_install_playwright_browser",
+                            lambda version, name: routed.append((name, version)))
+        operations._install_component(browser, "1.2.3", [])
     assert routed == [(tool, "1.2.3") for tool in
                       ("uv", "python3", "node", "gh", "composer", "wp", "codex-code-mode-host", "playwright",
-                       "playwright-browser")]
+                       "chromium", "firefox", "webkit")]
 
 
 def _playwright_fixture(monkeypatch, tmp_path, *, launch_code=0, launch_err="", home=None):
@@ -446,14 +449,14 @@ def _playwright_fixture(monkeypatch, tmp_path, *, launch_code=0, launch_err="", 
         calls.append((list(command), kwargs.get("env") or {}))
         if command[:2] == ["npm", "prefix"]:
             return SimpleNamespace(returncode=0, stdout=f"{prefix}\n", stderr="")
-        if command[-1] == "about:blank":
+        if command and command[0].endswith("node") and "-e" in command:
             return SimpleNamespace(returncode=launch_code, stdout="", stderr=launch_err)
-        if command[-1] == "--version":
-            return SimpleNamespace(returncode=0, stdout="Chromium 141.0.1 \n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(operations.subprocess, "run", run)
-    monkeypatch.setattr(operations.shutil, "which", lambda name: None)
+    monkeypatch.setattr(operations.shutil, "which", lambda name: {
+        "playwright": str(prefix / "bin" / "playwright"), "node": "/usr/bin/node"}.get(name))
+    monkeypatch.setattr(operations.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(operations, "PLAYWRIGHT_BROWSERS_DIR", str(browsers))
     monkeypatch.setattr(operations, "_TOOL_HOME", tmp_path / "home")
     monkeypatch.setattr(operations, "_NPM_CACHE", tmp_path / "npm-cache")
@@ -470,26 +473,24 @@ def test_playwright_toolchain_links_command_into_a_path_directory(monkeypatch, t
     assert (links / "playwright").resolve() == (prefix / "bin" / "playwright").resolve()
 
 
-def test_playwright_browser_installs_chromium_with_deps_into_shared_folder_and_launches(monkeypatch, tmp_path, caplog):
+def test_playwright_browser_installs_named_browser_with_deps_into_folder_and_launches(monkeypatch, tmp_path, caplog):
     calls, links, browsers, _ = _playwright_fixture(monkeypatch, tmp_path)
     with caplog.at_level("INFO", logger="aiflow4.node"):
-        operations._install_playwright_browser("1.56.1")
+        operations._install_playwright_browser("1.56.1", "firefox")
     install = next((c, e) for c, e in calls if c[:2] == ["playwright", "install"])
-    assert install[0] == ["playwright", "install", "--with-deps", "chromium"]
+    assert install[0] == ["playwright", "install", "--with-deps", "firefox"]
     assert install[1]["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
-    launch = next(e for c, e in calls if c[-1] == "about:blank")
-    assert "--headless" in next(c for c, _ in calls if c[-1] == "about:blank")
+    launch = next(e for c, e in calls if c and c[0].endswith("node") and "-e" in c)
     assert launch["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
-    assert "Chromium 141.0.1" in caplog.text
+    assert "Firefox launch check passed" in caplog.text
     assert any(c[0] == "chmod" for c, _ in calls)
 
 
-def test_playwright_launch_failure_names_the_missing_library_in_plain_words(monkeypatch, tmp_path, caplog):
+def test_playwright_launch_failure_names_browser_and_missing_library(monkeypatch, tmp_path):
     _playwright_fixture(monkeypatch, tmp_path, launch_code=127,
-                        launch_err="chrome: error while loading shared libraries: libnspr4.so: cannot open")
-    with pytest.raises(operations.OperationError, match="system library libnspr4.so is missing"):
-        operations._install_playwright_browser("1.56.1")
-    assert "libnspr4.so" in caplog.text
+                        launch_err="Firefox error while loading shared libraries: libnspr4.so: cannot open")
+    with pytest.raises(operations.OperationError, match="Firefox cannot start: system library libnspr4.so is missing"):
+        operations._install_playwright_browser("1.56.1", "firefox")
 
 
 def test_playwright_installer_failure_reports_the_installer_message(monkeypatch, tmp_path, caplog):
@@ -521,7 +522,7 @@ def test_project_env_carries_the_shared_browsers_path(monkeypatch):
 def test_prepare_playwright_stack_installs_pinned_tools_and_reports_them(monkeypatch):
     installed = []
     state = {"git": "git version 2.45.0", "uv": "uv 0.9.0", "node": "missing", "playwright": "missing",
-             "playwright-browser": "missing"}
+             "chromium": "missing", "firefox": "missing", "webkit": "missing"}
 
     def probe(names=None):
         return {name: state.get(name, "missing") for name in names or state}
@@ -529,28 +530,32 @@ def test_prepare_playwright_stack_installs_pinned_tools_and_reports_them(monkeyp
     def install(tool, version, packages):
         installed.append((tool, version))
         state[tool] = {"node": "v24.8.0", "playwright": "Version 1.56.1",
-                       "playwright-browser": "Playwright Chromium 1.56.1"}[tool]
+                       "chromium": "Chromium Playwright 1.56.1", "firefox": "Firefox Playwright 1.56.1",
+                       "webkit": "WebKit Playwright 1.56.1"}[tool]
 
     monkeypatch.setattr(agent, "tool_versions", probe)
     monkeypatch.setattr(operations, "_install_component", install)
     versions = {"tools": {"node": "24.x", "playwright": "1.56"}}
     result = operations.prepare_project_toolchains({"JAIF": ["playwright"]}, versions)
-    assert [tool for tool, _ in installed if tool in ("node", "playwright", "playwright-browser")] == [
-        "node", "playwright", "playwright-browser"]
+    assert [tool for tool, _ in installed if tool in ("node", "playwright", "chromium", "firefox", "webkit")] == [
+        "node", "playwright", "chromium", "firefox", "webkit"]
     assert dict(installed)["node"] == "24.x" and dict(installed)["playwright"] == "1.56"
     assert result["tools"]["node"] == "v24.8.0"
-    assert result["tools"]["playwright-browser"] == "Playwright Chromium 1.56.1"
+    assert result["tools"]["chromium"] == "Chromium Playwright 1.56.1"
+    assert result["tools"]["firefox"] == "Firefox Playwright 1.56.1"
+    assert result["tools"]["webkit"] == "WebKit Playwright 1.56.1"
     assert result["gaps"]["JAIF"] == []
 
 
 def test_prepare_reports_a_browser_that_cannot_launch_as_a_tool_gap(monkeypatch):
     state = {"git": "git version 2.45.0", "uv": "uv 0.9.0", "node": "v24.8.0", "playwright": "Version 1.56.1",
-             "playwright-browser": "broken: missing system library libnss3.so"}
+             "chromium": "Chromium Playwright 1.56.1", "firefox": "broken: Firefox cannot start: libnss3.so",
+             "webkit": "WebKit Playwright 1.56.1"}
     monkeypatch.setattr(agent, "tool_versions", lambda names=None: {n: state.get(n, "missing") for n in names or state})
     monkeypatch.setattr(operations, "_install_component", lambda *a: None)
     result = operations.prepare_project_toolchains({"JAIF": ["playwright"]},
                                                    {"tools": {"node": "24.x", "playwright": "1.56"}})
-    assert result["gaps"]["JAIF"] == ["playwright-browser"]
+    assert result["gaps"]["JAIF"] == ["firefox"]
 
 
 def test_node_24_major_line_resolves_to_latest_matching_official_release(monkeypatch):

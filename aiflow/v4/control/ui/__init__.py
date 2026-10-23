@@ -1,13 +1,14 @@
-"""Dashboards: Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
+"""Console views for Dashboard, Work board, Delivery, SA, Machines and AI, Users and roles,
+Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, Licensing and Backup.
+
+Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge),
-Integrations (/integrations, control/jira_connect.py), Backup (/backup), Notifications (/notifications) and
-Support (/support), fed by /v1/state and relevant view APIs.
-
+Integrations (/integrations, control/jira_connect.py), Projects (/projects), Licensing (/licensing),
+Backup (/backup), Notifications (/notifications) and Support (/support), fed by /v1/state and relevant view APIs.
 All views are fed by the live registry; the Business view adds
-/v1/business/<project>/change-requests (see control/business.py).
-The console renders the live registry; extra read-only endpoints give its drawers ticket details, runs, events,
-audited writes and time segments.
+/v1/business/<project>/change-requests (see control/business.py). The console renders the live registry; extra
+read-only endpoints give its drawers ticket details, runs, events, audited writes and time segments.
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/knowledge", include_in_schema=False)
     @app.get("/integrations", include_in_schema=False)
     @app.get("/projects", include_in_schema=False)
+    @app.get("/licensing", include_in_schema=False)
     @app.get("/backup", include_in_schema=False)
     @app.get("/support", include_in_schema=False)
     def console() -> FileResponse:

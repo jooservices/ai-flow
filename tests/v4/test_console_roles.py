@@ -1,6 +1,7 @@
 """Role-based console views, project scopes, administration and legacy role migration."""
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -151,6 +152,7 @@ def test_project_restriction_filters_dashboard_and_refuses_other_project_apis(ct
     assert [project["key"] for project in snapshot.json()["projects"]] == ["TESTWP"]
     assert {ticket["key"] for ticket in snapshot.json()["tickets"]} == {"TESTWP-1"}
     assert snapshot.json()["nodes"] == [] and snapshot.json()["accounts"] == []
+    assert snapshot.json()["role_health"]["roles"] == []
     assert client.get("/v1/analytics/daily?project=TESTWP").status_code == 200
     for path in ("/v1/business/OTHER/release-readiness", "/v1/tickets/OTHER-1/timeline",
                  "/v1/analytics/daily?project=OTHER"):
@@ -162,6 +164,76 @@ def test_project_restriction_filters_dashboard_and_refuses_other_project_apis(ct
                         ("limited@example.test",))
     assert {row["payload"]["path"] for row in denied} >= {
         "/v1/business/OTHER/release-readiness", "/v1/tickets/OTHER-1/timeline", "/v1/analytics/daily"}
+
+
+def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    for ticket, project, account, node, cost in (
+            ("TESTWP-901", "TESTWP", "alpha-account", "cc", .01),
+            ("OTHER-901", "OTHER", "outside-account", "node-other", .02)):
+        add_ticket(ctx.db, ticket)
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+                    "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+                    " VALUES (%s,%s,%s,'dev',%s,'claude','model',%s,1,'finished','done',now()-interval '1 minute',"
+                    "now(),100,20,%s)", (str(uuid.uuid4()), ticket, project, account, node, cost))
+
+    login.seed_user(ctx.db, "usage-limited@example.test", "business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s",
+               (["TESTWP"], "usage-limited@example.test"))
+    limited = role_client(ctx, "business", "usage-limited@example.test")
+
+    by_project = limited.get("/v1/analytics/usage?group_by=project")
+    assert by_project.status_code == 200
+    assert {row["key"] for row in by_project.json()["rows"]} == {"TESTWP"}
+    by_account_filter = limited.get("/v1/analytics/usage?group_by=project&account=outside-account")
+    assert by_account_filter.status_code == 200 and by_account_filter.json()["rows"] == []
+    for path in ("/v1/analytics/usage?group_by=project&project=OTHER",
+                 "/v1/analytics/usage?group_by=ticket&ticket=OTHER-901"):
+        refused = limited.get(path)
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == "not available for your role"
+
+    # Account and machine dimensions reveal shared infrastructure and need the Machines and AI permission.
+    for dimension in ("account", "machine"):
+        refused = limited.get(f"/v1/analytics/usage?group_by={dimension}")
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == "not available for your role"
+    denied_paths = {row["payload"]["path"] for row in ctx.db.all(
+        "SELECT payload FROM write_audit WHERE action='access_denied' AND actor=%s", ("usage-limited@example.test",))}
+    assert "/v1/analytics/usage" in denied_paths
+
+    login.seed_user(ctx.db, "usage-sa@example.test", "sa")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], "usage-sa@example.test"))
+    sa = role_client(ctx, "sa", "usage-sa@example.test")
+    scoped_accounts = sa.get("/v1/analytics/usage?group_by=account")
+    assert scoped_accounts.status_code == 200
+    assert {row["key"] for row in scoped_accounts.json()["rows"]} == {"alpha-account"}
+
+
+def test_usage_and_infrastructure_apis_follow_role_permissions_for_every_role(ctx):
+    client = role_client(ctx)
+    for role in CANONICAL_ROLES:
+        subject = f"usage-{role}@example.test"
+        client.cookies.set("aiflow4_session", issue_session(subject, role, SESSION_EXPIRY, SESSION_SECRET))
+
+        # Project/ticket aggregates belong to the common Dashboard; account and machine aggregates do not.
+        assert client.get("/v1/analytics/usage?group_by=project").status_code == 200, role
+        can_view_machines = has_permission(role, "view.machines_ai")
+        for dimension in ("account", "machine"):
+            response = client.get(f"/v1/analytics/usage?group_by={dimension}")
+            assert response.status_code == (200 if can_view_machines else 403), (role, dimension, response.text)
+            if not can_view_machines:
+                assert response.json()["detail"] == "not available for your role"
+
+        for path in ("/v1/role-health", "/v1/master/autonomy", "/v1/master/report"):
+            response = client.get(path)
+            assert response.status_code == (200 if can_view_machines else 403), (role, path, response.text)
+            if not can_view_machines:
+                assert response.json()["detail"] == "not available for your role"
+                refusal = ctx.db.one("SELECT actor,accepted,result,payload FROM write_audit WHERE target='console'"
+                                     " AND action='access_denied' AND actor=%s ORDER BY id DESC LIMIT 1", (subject,))
+                assert refusal and not refusal["accepted"] and refusal["result"] == "not available for your role"
+                assert refusal["payload"]["path"] == path
 
 
 def test_project_restriction_scopes_human_review_queue_metrics_and_export(ctx):
@@ -299,12 +371,12 @@ def test_master_autonomy_and_report_only_cover_the_projects_of_a_limited_person(
                    (f"obs-{key}", key, f"{key} needs a decision", str(uuid.uuid4())))
         ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, repeat_count) VALUES (%s,%s,2)",
                    (f"sig-{key}", key))
-    login.seed_user(ctx.db, "scoped@example.test", "business")
+    login.seed_user(ctx.db, "scoped@example.test", "sa")
     ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], "scoped@example.test"))
-    login.seed_user(ctx.db, "everything@example.test", "business")
+    login.seed_user(ctx.db, "everything@example.test", "sa")
 
-    limited = role_client(ctx, "business", "scoped@example.test")
-    unrestricted = role_client(ctx, "business", "everything@example.test")
+    limited = role_client(ctx, "sa", "scoped@example.test")
+    unrestricted = role_client(ctx, "sa", "everything@example.test")
     for path in ("/v1/master/autonomy", "/v1/master/report"):
         everyone = unrestricted.get(path)
         assert everyone.status_code == 200

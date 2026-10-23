@@ -5402,6 +5402,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             data["nodes"] = []
             data["accounts"] = []
             data["sa"] = {}
+            data["role_health"] = {"roles": [], "settings": {}}
             data["version_policy"] = {}
             data["incidents"] = []
             data["incidents_recent"] = []
@@ -5491,13 +5492,41 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"days": days, "project": project, "rows": rows}
 
     @app.get("/v1/analytics/usage")
-    def analytics_usage(days: int = Query(7, ge=1, le=90),
+    def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),
                         group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
                         project: str = "", ticket: str = "", account: str = "") -> dict:
         from .analytics import usage
+        user = (console_user(request, None) if ctx.settings.console_login
+                else optional_console_user(request))
+
+        def refuse() -> None:
+            if user:
+                audit("console", "access_denied", "", "", None, user.subject, False,
+                      "not available for your role", {"path": request.url.path, "method": request.method,
+                                                       "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+
+        needs_machine_access = group_by in {"account", "machine"}
+        if user and needs_machine_access and not has_permission(user.effective_roles, "view.machines_ai"):
+            refuse()
+
+        project_keys = None
+        if user and user.project_keys is not None:
+            project_keys = user.project_keys
+            if project and project not in project_keys:
+                refuse()
+            if ticket:
+                ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,))
+                projects = ({ticket_row["project"]} if ticket_row else set())
+                if not projects:
+                    projects = {row["project"] for row in ctx.db.all(
+                        "SELECT DISTINCT project FROM runs WHERE ticket_key=%s AND project<>''", (ticket,))}
+                if projects and not projects.issubset(set(project_keys)):
+                    refuse()
+
         return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
                                                                      "account": account},
-                "rows": usage(ctx.db, days, group_by, project, ticket, account)}
+                "rows": usage(ctx.db, days, group_by, project, ticket, account, project_keys=project_keys)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")

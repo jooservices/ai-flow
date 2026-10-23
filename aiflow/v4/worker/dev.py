@@ -20,7 +20,8 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
-from ..core.toolchains import has_missing_marker, parse_missing_requirements
+from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
+                               parse_missing_requirements)
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
@@ -312,6 +313,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
+        command_missing = (parse_command_not_found_requirements(getattr(res, "command_results", []))
+                           if res.verdict == "BLOCKED" else [])
+        missing = list(dict.fromkeys(missing + command_missing))
         machine = c.machine_tools or {}
         available_tools = set(machine.get("available") or {})
         available_services = set(machine.get("services") or [])
@@ -330,8 +334,13 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         if missing:
             # Record the class through the same fenced path as every other developer stop. The run result below
             # still carries all missing requirements so the normal tool-wait path is preserved.
+            escalation_question = res.verdict_reason
+            if command_missing and not has_missing_marker(res.verdict_reason or ""):
+                # The escalation classifier receives question text, not adapter events. Pass a concise normalized
+                # marker only after the adapter recorded a failed command execution.
+                escalation_question = f"MISSING-TOOL: {', '.join(command_missing)} - executed command returned command not found"
             raised = api.call("POST", "/v1/escalations/raise", {
-                "run_id": c.run_id, "fence": c.fence, "question": res.verdict_reason})
+                "run_id": c.run_id, "fence": c.fence, "question": escalation_question})
             if raised.get("resolved") and raised.get("outcome") == "auto_answered":
                 result["outcome"] = "auto_answered"
                 result["details"]["escalation_class"] = raised.get("class", "")
@@ -348,6 +357,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 return result
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
+            if command_missing:
+                result["details"]["command_not_found_tools"] = command_missing
+            result["details"]["tool_missing_evidence"] = (
+                "explicit_marker" if parse_missing_requirements(res.verdict_reason or "") else "command_not_found")
             result["details"]["escalation_class"] = raised.get("class", "")
             jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
                                       why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
@@ -386,13 +399,21 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         result.setdefault("details", {})["changed_files"] = changed[:100]
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
-        if res.error_kind or not changed:
-            reason = res.error_kind or ("no changes" if not changed else "")
-            result["outcome"] = "failed"
+        failure_verdict = res.verdict == "FAIL"
+        if res.error_kind or failure_verdict or not changed:
+            clean_no_changes = not failure_verdict and not res.error_kind and not changed
+            reason = res.error_kind
+            if not reason:
+                reason = (res.verdict_reason or "AI reported RESULT: FAIL") if failure_verdict else "no changes"
+            result["outcome"] = "no_changes" if clean_no_changes else "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),
-                                      next_="Back to To Do; the next run retries after a short wait", t0=t0, node=api_node(api)))
+                                      next_=("Back to To Do; a clean no-change result does not count against the account's "
+                                             "role score, but the ticket waits a short backoff before the next run"
+                                             if clean_no_changes else
+                                             "Back to To Do; the next run retries after a short wait"),
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}

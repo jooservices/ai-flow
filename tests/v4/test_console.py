@@ -165,7 +165,8 @@ ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_busin
 
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
                      weekly_report: dict | None = None, dashboard_tab: str = "work",
-                     dashboard_waiting_keys: list[str] | None = None) -> str:
+                     dashboard_waiting_keys: list[str] | None = None,
+                     console_user: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
@@ -183,7 +184,7 @@ S.dashboardUsage = {json.dumps(analytics or [])}; S.dashboardUsageError = '';
 S.dashboardTab = {json.dumps(dashboard_tab)};
 S.dashboardWaiting.keys = {json.dumps(dashboard_waiting_keys)};
 S.project = {json.dumps(project_key)};
-S.consoleUser = {json.dumps(console_session('owner'))};
+S.consoleUser = {json.dumps(console_user or console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
 S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
@@ -1622,15 +1623,45 @@ def test_dashboard_waiting_endpoint_matches_human_review_for_project_scoped_snap
     board_keys = json.loads(run_script(f"""
 S.data = {{tickets: {json.dumps(snapshot['tickets'])}}};
 S.dashboardWaiting.keys = {json.dumps(dashboard_queue.json()['ticket_keys'])};
+S.consoleUser = {json.dumps(console_session('reviewer'))};
 S.project = 'all';
-console.log(JSON.stringify(projTickets().filter(function (ticket) {{
+console.log(JSON.stringify(projTickets().filter(function (ticket) {{ return ticket.type !== 'Epic'; }}).filter(function (ticket) {{
   return dashboardWorkStatusMatches(ticket, 'waiting');
 }}).map(function (ticket) {{ return ticket.key; }})));
 """))
-    assert board_keys == expected
+    assert board_keys == ["TESTWP-124"]
     dashboard = render_dashboard(snapshot, dashboard_waiting_keys=dashboard_queue.json()["ticket_keys"])
     waiting_card = re.search(r'data-card="waiting">(.*?)</button>', dashboard).group(1)
     assert '<span class="value">2</span>' in waiting_card
+
+
+def test_non_reviewer_waiting_card_matches_work_board_when_queue_contains_epic():
+    user = console_session_user("business")
+    assert "view.human_review" not in user["permissions"]
+    state = {"projects": [{"key": "ALPHA", "repo": "jooservices/alpha"}], "tickets": [
+        {"key": "ALPHA-EPIC", "project": "ALPHA", "type": "Epic", "status": "Needs owner"},
+        {"key": "ALPHA-1", "project": "ALPHA", "type": "Story", "status": "Needs owner"},
+    ], "active_runs": [], "recent_runs": [], "accounts": [], "events": [], "totals": {}}
+    queue_keys = ["ALPHA-EPIC", "ALPHA-1"]
+    dashboard = render_dashboard(state, dashboard_waiting_keys=queue_keys, console_user=user)
+    waiting_card = re.search(r'data-card="waiting">(.*?)</button>', dashboard).group(1)
+    card_count = int(re.search(r'class="value">(\d+)</span>', waiting_card).group(1))
+
+    result = json.loads(run_script(f"""
+S.data = {json.dumps(state)};
+S.dashboardWaiting.keys = {json.dumps(queue_keys)};
+S.consoleUser = {json.dumps(user)};
+S.project = 'all';
+var selected = '';
+setView = function (view) {{ selected = view; S.view = view; }};
+openDashboardCard('waiting');
+var boardKeys = projTickets().filter(function (ticket) {{ return ticket.type !== 'Epic'; }}).filter(function (ticket) {{
+  return dashboardWorkStatusMatches(ticket, 'waiting');
+}}).map(function (ticket) {{ return ticket.key; }});
+console.log(JSON.stringify({{view: selected, boardKeys: boardKeys}}));
+"""))
+    assert result == {"view": "work", "boardKeys": ["ALPHA-1"]}
+    assert card_count == len(result["boardKeys"]) == 1
 
 
 def test_dashboard_ticket_counts_match_state_work_board_filters_and_human_review_api(client, ctx):

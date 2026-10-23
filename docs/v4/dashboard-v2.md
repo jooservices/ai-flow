@@ -11,8 +11,9 @@ recorded input and output tokens and cost for the current UTC date. Each card in
 explanatory line.
 
 Done and In flight open the Work board with the matching status filter. Waiting for you opens Human review when the
-person has that permission; otherwise it opens the Work board filtered to waiting tickets. AI usage today opens the
-AI and machines tab. The Work tab's Flow at a glance steps open the Work board with the selected Jira status.
+person has that permission; otherwise it opens the Work board filtered to waiting tickets. In that fallback, the
+count includes only non-epic tickets visible on the Work board. AI usage today opens the AI and machines tab. The
+Work tab's Flow at a glance steps open the Work board with the selected Jira status.
 
 The AI and machines tab charts recorded tokens by AI provider and UTC day over the last 14 days, shows each AI's
 share of those tokens, and shows the existing per-account quota and reset details to people with Machines and AI

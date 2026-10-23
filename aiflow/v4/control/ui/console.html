@@ -1743,7 +1743,7 @@ function dashboardProjectCounts(projectKey) {
   var rows = allRows.filter(function (t) { return t.type !== 'Epic'; });
   return { total: rows.length, open: rows.filter(function (t) { return t.status !== 'Done'; }).length,
     building: rows.filter(function (t) { return ['In Progress', 'In Verify', 'Human review'].indexOf(t.status) >= 0; }).length,
-    waiting: dashboardWaitingTickets(allTickets, S.dashboardWaiting.keys).filter(function (t) { return t.project === projectKey; }).length,
+    waiting: dashboardVisibleWaitingTickets(allTickets, S.dashboardWaiting.keys).filter(function (t) { return t.project === projectKey; }).length,
     done: rows.filter(function (t) { return t.status === 'Done'; }).length };
 }
 function providerUsageChart(rows) {
@@ -1819,6 +1819,10 @@ function dashboardWaitingTickets(tickets, queueKeys) {
     });
   });
 }
+function dashboardVisibleWaitingTickets(tickets, queueKeys) {
+  var waiting = dashboardWaitingTickets(tickets, queueKeys);
+  return consoleCan('view.human_review') ? waiting : waiting.filter(function (ticket) { return ticket.type !== 'Epic'; });
+}
 function setDashboardTab(tab) {
   S.dashboardTab = tab === 'ai' ? 'ai' : 'work';
   if (S.view === 'cc') {
@@ -1845,8 +1849,8 @@ function renderDashboard() {
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
   var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
   var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
-  var waiting = dashboardWaitingTickets(d.tickets, S.dashboardWaiting.keys);
-  var waitingCount = S.dashboardWaiting.keys === null ? waiting.length : S.dashboardWaiting.keys.length;
+  var waiting = dashboardVisibleWaitingTickets(d.tickets, S.dashboardWaiting.keys);
+  var waitingCount = waiting.length;
   var done = tickets.filter(function (t) { return t.status === 'Done'; }), days = utcDays(7), usage = dashboardUsageTotals(S.dashboardUsage);
   var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
   var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};
@@ -2390,7 +2394,7 @@ function dashboardWorkStatusMatches(ticket, filter) {
   if (!filter || filter === 'all') return true;
   if (filter === 'done') return ticket.status === 'Done';
   if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review'].indexOf(ticket.status) >= 0;
-  if (filter === 'waiting') return dashboardWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
+  if (filter === 'waiting') return dashboardVisibleWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
   return ticket.status === filter;
 }
 function projectCloseControl(project) {

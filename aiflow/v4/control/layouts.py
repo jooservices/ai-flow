@@ -91,7 +91,7 @@ PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     },
     "business": {
         "dashboard": {"order": ["kpis", "flow", "projects", "building", "waiting"],
-                      "hidden": ["quota", "tool-waits", "autonomy"]},
+                      "hidden": ["tool-waits", "autonomy"]},
         "delivery": {"order": ["kpis", "epics", "board", "attention"], "hidden": ["runs", "analytics"]},
     },
     # Health of machines, accounts and quota first.
@@ -103,7 +103,7 @@ PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     # The reviews waiting for a person first.
     "reviewer": {
         "dashboard": {"order": ["waiting", "kpis", "building", "flow"],
-                      "hidden": ["quota", "tool-waits", "autonomy"],
+                      "hidden": ["tool-waits", "autonomy"],
                       "sizes": {"waiting": "large"}},
         "review": {"order": ["items", "queue", "threads", "metrics"], "hidden": ["metrics"]},
     },

@@ -86,6 +86,25 @@ def test_role_defaults_differ_by_role_and_cover_the_roles_of_the_ticket():
     assert layouts.default_layout("dashboard", "unknown-role") == layouts.default_layout("dashboard", "nobody")
 
 
+@pytest.mark.parametrize("role", ["business", "reviewer"])
+def test_dashboard_quota_is_visible_by_default_and_showable_without_machines_access(role):
+    default = layouts.default_layout("dashboard", role)
+    quota = next(block for block in default if block["id"] == "quota")
+    assert quota["hidden"] is False
+
+    # Even if this person hides the safe quota summary later, layout mode must offer it in Show.
+    hidden_quota = [dict(block, hidden=block["id"] == "quota") for block in default]
+    out = run_js(f"""
+S.consoleUser = {json.dumps({"role": role, "permissions": sorted(ROLE_PERMISSIONS[role])})};
+var hidden = layoutHidden({json.dumps(hidden_quota)}, 'cc');
+console.log(JSON.stringify({{
+  hidden: hidden.map(function (block) {{ return block.id; }}),
+  show: layoutBarHtml(true, hidden, 'dashboard').indexOf('data-id=\"quota\"') >= 0
+}}));""")
+    assert out["show"] is True
+    assert "quota" in out["hidden"]
+
+
 def test_dashboard_has_one_page_wide_layout_grid_for_both_sections():
     html = PAGE.read_text()
     assert "data-layout-section=" not in html

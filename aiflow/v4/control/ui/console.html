@@ -4677,7 +4677,7 @@ function layoutBlocksIn(container) {
 function layoutHidden(blocks, view) {
   var hidden = (blocks || []).filter(function (b) { return b.hidden; });
   if (view === 'cc' && S.consoleUser && !consoleCan('view.machines_ai')) {
-    var restricted = ['quota', 'tool-waits', 'autonomy'];
+    var restricted = ['tool-waits', 'autonomy'];
     hidden = hidden.filter(function (b) { return restricted.indexOf(b.id) < 0; });
   }
   return hidden;

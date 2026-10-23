@@ -39,6 +39,19 @@ def test_claude_records_only_failed_bash_tool_results_as_executed_commands():
     assert result.command_results == [{"command": "php -v", "output": "bash: php: command not found", "failed": True}]
 
 
+def test_claude_preserves_shell_exit_code_as_command_evidence():
+    adapter, result = ClaudeAdapter(), RunResult()
+    adapter.parse_event({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "php -v"}},
+    ]}}, result)
+    adapter.parse_event({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tool-1", "content": "bash: php: command not found",
+         "is_error": True, "exit_code": 127},
+    ]}}, result)
+    assert result.command_results == [{"command": "php -v", "output": "bash: php: command not found",
+                                       "failed": True, "exit_code": 127}]
+
+
 def test_codex_argv_disables_chatgpt_apps_and_keeps_options(tmp_path):
     a = CodexAdapter()
     cmd = a.argv(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path), model="gpt-6-luna", effort="high"))

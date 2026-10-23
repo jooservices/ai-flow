@@ -278,7 +278,9 @@ def parse_command_not_found_requirements(command_results: Iterable[dict]) -> lis
     """Return catalogue tools whose *executed command result* failed with a shell not-found error.
 
     The normalized records are produced by adapters from completed command-execution events. We also check that the
-    failed command actually invoked the missing executable, so quoted or illustrative output from `echo`/`printf`
+    adapter recorded the shell's command-not-found exit status (127), that the failed command actually invoked the
+    missing executable, and that the output contains the matching diagnostic. A generic nonzero status is not enough:
+    an installed program may print the same words itself. Quoted or illustrative output from `echo`/`printf` also
     cannot masquerade as a missing tool.
     """
     command_tools = {name.casefold(): name for name in NODE_TOOLS + CATALOG_TOOLS}
@@ -290,10 +292,12 @@ def parse_command_not_found_requirements(command_results: Iterable[dict]) -> lis
         if not isinstance(result, dict):
             continue
         try:
-            failed = result.get("failed") is True or int(result.get("exit_code")) != 0
+            exit_code = int(result.get("exit_code"))
         except (TypeError, ValueError):
-            failed = result.get("failed") is True
-        if not failed:
+            continue
+        # Adapter events expose 127 when the shell cannot launch its requested executable. Other failures may be
+        # produced by a program that is installed and must not become tool_missing based on its output text.
+        if exit_code != 127:
             continue
         command = result.get("command")
         if isinstance(command, (list, tuple)):

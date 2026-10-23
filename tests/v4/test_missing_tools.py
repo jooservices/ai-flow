@@ -48,11 +48,15 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
     assert parse_missing_requirements("bash: line 1: docker: command not found") == []
     assert parse_command_not_found_requirements([
         {"command": "php -v", "output": "bash: php: command not found", "exit_code": 127},
-        {"command": "bash -lc 'docker version'", "output": "bash: line 1: docker: command not found", "failed": True},
+        {"command": "bash -lc 'docker version'", "output": "bash: line 1: docker: command not found", "exit_code": 127},
     ]) == ["php", "docker"]
     assert parse_command_not_found_requirements([
         {"command": "echo 'bash: php: command not found'", "output": "bash: php: command not found", "exit_code": 1},
         {"command": "php -v", "output": "bash: php: command not found", "exit_code": 0},
+    ]) == []
+    assert parse_command_not_found_requirements([
+        {"command": """php -r 'echo "bash: php: command not found"; exit(1);'""",
+         "output": "bash: php: command not found", "exit_code": 1},
     ]) == []
     assert parse_command_not_found_requirements([
         {"command": "echo 'bash: php: command not found'; php --bad 2>/dev/null",
@@ -152,6 +156,16 @@ def test_command_not_found_for_executed_catalogue_command_is_a_missing_tool(monk
     assert result["details"]["missing_tools"] == ["php"]
     assert result["details"]["tool_missing_evidence"] == "command_not_found"
     assert result["details"]["command_not_found_tools"] == ["php"]
+
+
+def test_single_php_command_printing_command_not_found_and_exiting_nonzero_is_not_a_missing_tool(monkeypatch, tmp_path):
+    result, _ = _run_dev(
+        monkeypatch, tmp_path, "BLOCKED", "the command failed",
+        command_results=[{"command": """php -r 'echo "bash: php: command not found"; exit(1);'""",
+                          "output": "bash: php: command not found", "exit_code": 1}],
+    )
+    assert result["outcome"] == "blocked"
+    assert result["details"].get("missing_tools", []) == []
 
 
 def test_quoted_command_error_in_blocked_explanation_is_not_execution_evidence(monkeypatch, tmp_path):

@@ -80,7 +80,13 @@ class ClaudeAdapter(Adapter):
                 if isinstance(content, list):
                     content = "\n".join(str(part.get("text") or "") if isinstance(part, dict) else str(part)
                                           for part in content)
-                res.command_results.append({"command": command, "output": str(content), "failed": True})
+                result = {"command": command, "output": str(content), "failed": True}
+                # Preserve the shell's structured launch-failure status when this CLI version provides it. The
+                # classifier requires exit 127; an is_error flag alone also covers ordinary program failures.
+                exit_code = block.get("exit_code")
+                if exit_code is not None:
+                    result["exit_code"] = exit_code
+                res.command_results.append(result)
         elif t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
             windows = info.get("unifiedWindows") or {}

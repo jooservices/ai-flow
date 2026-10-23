@@ -43,7 +43,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, licensing, memory, role_health, rollout, tooling, version_release
+from . import business, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout, tooling, version_release
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
@@ -2004,6 +2004,34 @@ def create_app(ctx: Ctx) -> FastAPI:
                             secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
                             samesite="strict", path="/")
         return response
+
+    # --- per-person console layouts (layouts.py, docs/v4/console-layouts.md) ---------------------------------
+    def layout_page(page: str) -> str:
+        if page not in layouts.PAGES:
+            raise HTTPException(404, "unknown console page")
+        return page
+
+    @app.get("/v1/console/layouts")
+    def console_layouts(request: Request) -> dict:
+        user = console_user(request, None)
+        return layouts.overview(ctx.db, user.subject, user.role)
+
+    @app.put("/v1/console/layouts/{page}")
+    def console_layout_save(page: str, body: layouts.LayoutBody, request: Request) -> dict:
+        # Layouts are personal preferences, like reads, and remain available if the licence expires.
+        user = console_user(request, None)
+        try:
+            blocks = layouts.normalise(layout_page(page), [b.model_dump() for b in body.blocks])
+        except layouts.LayoutError as exc:
+            raise HTTPException(400, str(exc)) from None
+        layouts.save(ctx.db, user.subject, page, blocks)
+        return layouts.page_view(page, user.role, blocks)
+
+    @app.delete("/v1/console/layouts/{page}")
+    def console_layout_reset(page: str, request: Request) -> dict:
+        user = console_user(request, None)
+        layouts.reset(ctx.db, user.subject, layout_page(page))
+        return layouts.page_view(page, user.role, None)
 
     def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
         return console_user(request, {"notifications.manage"}, target="notifications", action=action)

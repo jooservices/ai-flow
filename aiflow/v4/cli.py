@@ -16,6 +16,8 @@
   aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)
   aiflow4 install control --rollback    return the control plane to the previous release (root)
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
+  aiflow4 backup restore --from FILE --key-file FILE [--s3-endpoint URL]
+                                        rebuild a new control plane from an encrypted backup
   aiflow4 version
 """
 from __future__ import annotations
@@ -209,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
     ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
+    pb = sub.add_parser("backup", help="encrypted Command Center backup operations")
+    backup_sub = pb.add_subparsers(dest="backup_action", required=True)
+    pbr = backup_sub.add_parser("restore", help="restore a backup onto a new control machine")
+    pbr.add_argument("--from", dest="source", required=True, help="local encrypted backup or s3://bucket/key")
+    pbr.add_argument("--key-file", required=True, help="the one-time backup key downloaded from Command Center")
+    pbr.add_argument("--s3-endpoint", default="", help="S3-compatible endpoint for an s3:// source")
+    pbr.add_argument("--s3-region", default="us-east-1")
     pu2 = sub.add_parser("console-user", help="create or reset a Command Center user (docs/v4/console-login.md)")
     pu2.add_argument("action", choices=["seed", "reset-password", "list"])
     pu2.add_argument("--email")
@@ -247,6 +256,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result["ok"] else 9
     if a.cmd == "console-user":
         return _console_user(a, s)
+    if a.cmd == "backup" and a.backup_action == "restore":
+        from .core import backups
+        try:
+            key = backups.read_key(a.key_file)
+            result = backups.restore_archive(a.source, key, s.database_url, s,
+                                             s3_endpoint=a.s3_endpoint, s3_region=a.s3_region)
+        except backups.BackupError as exc:
+            print(f"restore failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Backup: {result.get('backup', a.source)}")
+        for name in ("database", "stored_secrets", "control_repository", "knowledge"):
+            component = result["components"].get(name, {"status": "failed", "detail": "no outcome was recorded"})
+            label = {"database": "Database", "stored_secrets": "Stored secrets",
+                     "control_repository": "Control repository settings", "knowledge": "Knowledge"}[name]
+            print(f"{label}: {component['status']} — {component['detail']}")
+        return 0 if result.get("ok") else 1
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)

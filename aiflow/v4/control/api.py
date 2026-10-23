@@ -774,9 +774,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(423, str(exc)) from None
         return user
 
-    def require_capacity(resource: str, count: int | None = None) -> dict:
+    def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
         try:
-            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key)
+            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key,
+                                              connection=connection)
         except licensing.LicenseError as exc:
             raise HTTPException(409, str(exc)) from None
 
@@ -2039,23 +2040,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         dynamic = name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
-        existing = ctx.db.one("SELECT name,status FROM nodes WHERE name=%s", (name,))
-        if existing and dynamic and existing["status"] == "online":
-            raise HTTPException(409, "an online node already uses this name")
-        if not existing:
-            require_capacity("machines", int(ctx.db.one("SELECT count(*) AS count FROM nodes")["count"]))
-        token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
-            issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
-                                  " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
-                                  " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
-                                  " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
-                                  " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
-                                  " RETURNING expires_at",
-                                  (h(token), name, role, project, dynamic)).fetchone()
-            # Register a pending dynamic node so Command Center can show it before its first heartbeat.
-            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic) VALUES (%s,%s,'joined',%s,%s)"
-                         " ON CONFLICT (name) DO NOTHING", (name, role, [project], dynamic))
+            with conn.transaction():
+                # The count, join grant, and pending node insert share the lock and transaction. A second request
+                # waits here, then sees the first request's node before checking the last available slot.
+                licensing.lock_resource_admission(conn)
+                existing = conn.execute("SELECT name,status FROM nodes WHERE name=%s FOR UPDATE", (name,)).fetchone()
+                if existing and dynamic and existing["status"] == "online":
+                    raise HTTPException(409, "an online node already uses this name")
+                if not existing:
+                    count = int(conn.execute("SELECT count(*) AS count FROM nodes").fetchone()["count"])
+                    require_capacity("machines", count, connection=conn)
+                token = secrets.token_urlsafe(32)
+                issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
+                                      " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
+                                      " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
+                                      " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
+                                      " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
+                                      " RETURNING expires_at",
+                                      (h(token), name, role, project, dynamic)).fetchone()
+                # Register a pending dynamic node so Command Center can show it before its first heartbeat.
+                conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic) VALUES (%s,%s,'joined',%s,%s)"
+                             " ON CONFLICT (name) DO NOTHING", (name, role, [project], dynamic))
         return token, issued["expires_at"]
 
     @app.post("/v1/nodes/join-tokens")
@@ -2687,20 +2693,45 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
+    def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
+        """Filter offers by account, machine, and project plan limits without affecting active runs."""
+        state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                    public_key=ctx.settings.license_public_key)
+        candidates = eligible(account, node)
+        allowed: list[dict] = []
+        refused: list[str] = []
+        for ticket in candidates:
+            try:
+                licensing.enforce_project_entitlement(ctx, ticket["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(ticket)
+        reason = refused[0] if candidates and not allowed and refused else ""
+        return allowed, reason
+
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            licensing.enforce_account_entitlement(ctx, account, public_key=ctx.settings.license_public_key)
+            tickets, reason = entitled_candidates(account, node)
         except licensing.LicenseError as exc:
             return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
-        return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
-                             "step": t["step"]} for t in eligible(account, node)[:20]]}
+        result = {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"],
+                                "labels": t["labels"], "step": t["step"]} for t in tickets[:20]]}
+        if reason:
+            result["reason"] = reason
+        return result
 
     @app.get("/v1/master/candidate")
     def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
 
     def related_hits(t: dict) -> list[dict]:
@@ -2714,14 +2745,26 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
         try:
-            licensing.enforce_account_entitlement(ctx, body.account, public_key=ctx.settings.license_public_key)
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
-        candidates = [master_candidate(body.account, node)] if body.step == "master" else eligible(body.account, node)
+        if body.step == "master":
+            candidates = [master_candidate(body.account, node)]
+        else:
+            candidates = eligible(body.account, node)
+            offered = next((candidate for candidate in candidates
+                            if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
+            if offered:
+                try:
+                    licensing.enforce_project_entitlement(ctx, offered["project"],
+                                                          public_key=ctx.settings.license_public_key, state=state)
+                except licensing.LicenseError as exc:
+                    return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))
         if not t:
@@ -2863,7 +2906,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
         try:
-            licensing.enforce_account_entitlement(ctx, account, public_key=ctx.settings.license_public_key)
+            state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             return {"versions": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
@@ -2871,12 +2915,26 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
-        return {"versions": version_release.candidates(ctx, account, node)}
+        versions = version_release.candidates(ctx, account, node)
+        allowed, refused = [], []
+        for candidate in versions:
+            try:
+                licensing.enforce_project_entitlement(ctx, candidate["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(candidate)
+        result = {"versions": allowed}
+        if refused and not allowed:
+            result["reason"] = refused[0]
+        return result
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
         try:
-            licensing.enforce_account_entitlement(ctx, body.account, public_key=ctx.settings.license_public_key)
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(409, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)
@@ -2890,6 +2948,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
+        try:
+            licensing.enforce_project_entitlement(ctx, project.key,
+                                                  public_key=ctx.settings.license_public_key, state=state)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
         if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
         node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}

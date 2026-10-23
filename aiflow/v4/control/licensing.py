@@ -19,6 +19,8 @@ import jwt
 from .db import J
 
 GRACE_PERIOD = timedelta(days=14)
+# Shared by resource admission and limit updates so they observe one another atomically.
+RESOURCE_ADMISSION_LOCK = (1095320132, 233)
 PLAN_DEFAULTS: dict[str, dict[str, int]] = {
     "free": {"machines": 1, "ai_accounts": 2, "projects": 3, "users": 3},
     "team": {"machines": 5, "ai_accounts": 12, "projects": 25, "users": 25},
@@ -29,6 +31,11 @@ LIMIT_LABELS = {"machines": "Machine", "ai_accounts": "AI account", "projects": 
 
 class LicenseError(ValueError):
     """An activation or plan-limit operation was refused with a safe message for the console."""
+
+
+def lock_resource_admission(connection) -> None:
+    """Serialize a resource admission with other admissions and changes to plan limits."""
+    connection.execute("SELECT pg_advisory_xact_lock(%s,%s)", RESOURCE_ADMISSION_LOCK)
 
 
 def initialize(db) -> None:
@@ -46,6 +53,15 @@ def _row(db) -> dict[str, Any]:
     initialize(db)
     row = db.one("SELECT * FROM licensing_state WHERE id=1")
     if not row:  # defensive against a concurrent schema restore
+        raise LicenseError("Licence state is unavailable. Please retry.")
+    return row
+
+
+def _row_in_connection(connection) -> dict[str, Any]:
+    connection.execute("INSERT INTO licensing_state (id, installation_id) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",
+                       (str(uuid.uuid4()),))
+    row = connection.execute("SELECT * FROM licensing_state WHERE id=1").fetchone()
+    if not row:
         raise LicenseError("Licence state is unavailable. Please retry.")
     return row
 
@@ -130,10 +146,10 @@ def activate_online(db, key: str, service_url: str, public_key: str, now: dateti
     return activate(db, token, public_key, "online", now)
 
 
-def snapshot(db, public_key: str, now: datetime | None = None) -> dict[str, Any]:
+def snapshot(db, public_key: str, now: datetime | None = None, *, connection=None) -> dict[str, Any]:
     """Return licence status and record the first time a stored signed licence is found invalid."""
     now = _now(now)
-    row = _row(db)
+    row = _row(db) if connection is None else _row_in_connection(connection)
     limits_by_plan = _key_map(row.get("plan_limits"))
     token = str(row.get("license_token") or "")
     invalid_since = row.get("invalid_since")
@@ -150,13 +166,20 @@ def snapshot(db, public_key: str, now: datetime | None = None) -> dict[str, Any]
                 raise ValueError("stored claims do not match")
             plan = claims["plan"]
             expiry = claims["expires_at"]
-        except (jwt.InvalidTokenError, KeyError, TypeError, ValueError, OverflowError):
+        except (LicenseError, jwt.InvalidTokenError, KeyError, TypeError, ValueError, OverflowError):
             reason = "invalid"
             if not invalid_since:
-                invalid_since = now
-                db.run("UPDATE licensing_state SET invalid_since=%s, updated_at=now() WHERE id=1 AND invalid_since IS NULL",
-                       (invalid_since,))
-                invalid_since = db.one("SELECT invalid_since FROM licensing_state WHERE id=1")["invalid_since"]
+                if connection is None:
+                    invalid_since = now
+                    db.run("UPDATE licensing_state SET invalid_since=%s, updated_at=now() WHERE id=1 AND invalid_since IS NULL",
+                           (invalid_since,))
+                    invalid_since = db.one("SELECT invalid_since FROM licensing_state WHERE id=1")["invalid_since"]
+                else:
+                    recorded = connection.execute(
+                        "UPDATE licensing_state SET invalid_since=%s, updated_at=now()"
+                        " WHERE id=1 AND invalid_since IS NULL RETURNING invalid_since", (now,)).fetchone()
+                    invalid_since = (recorded or connection.execute(
+                        "SELECT invalid_since FROM licensing_state WHERE id=1").fetchone())["invalid_since"]
             plan = plan if plan in PLAN_DEFAULTS else "free"
 
     deadline = None
@@ -187,11 +210,15 @@ def save_limits(db, plan: str, limits: dict[str, Any], public_key: str) -> dict[
     if set(limits) != set(PLAN_DEFAULTS[plan]):
         raise LicenseError("Provide machine, AI account, project and user limits.")
     cleaned = {key: _bounded_limit(limits[key]) for key in PLAN_DEFAULTS[plan]}
-    require_writable(db, public_key)
-    row = _row(db)
-    all_limits = _key_map(row.get("plan_limits"))
-    all_limits[plan] = cleaned
-    db.run("UPDATE licensing_state SET plan_limits=%s, updated_at=now() WHERE id=1", (J(all_limits),))
+    with db.pool.connection() as connection:
+        with connection.transaction():
+            lock_resource_admission(connection)
+            require_writable(db, public_key, connection=connection)
+            row = connection.execute("SELECT plan_limits FROM licensing_state WHERE id=1 FOR UPDATE").fetchone()
+            all_limits = _key_map((row or {}).get("plan_limits"))
+            all_limits[plan] = cleaned
+            connection.execute("UPDATE licensing_state SET plan_limits=%s, updated_at=now() WHERE id=1",
+                               (J(all_limits),))
     return snapshot(db, public_key)
 
 
@@ -206,37 +233,40 @@ def resource_counts(ctx) -> dict[str, int]:
     }
 
 
-def require_writable(db, public_key: str) -> dict[str, Any]:
-    state = snapshot(db, public_key)
+def require_writable(db, public_key: str, *, connection=None) -> dict[str, Any]:
+    state = snapshot(db, public_key, connection=connection)
     if state["read_only"]:
         raise LicenseError("This installation is read-only because its licence is invalid or expired. Activate or renew a licence to continue.")
     return state
 
 
-def require_capacity(ctx, resource: str, count: int | None = None, *, public_key: str) -> dict[str, Any]:
+def require_capacity(ctx, resource: str, count: int | None = None, *, public_key: str,
+                     connection=None) -> dict[str, Any]:
     if resource not in LIMIT_LABELS:
         raise LicenseError("Unknown licence limit.")
     current = resource_counts(ctx)[resource] if count is None else int(count)
-    return require_count_capacity(ctx.db, resource, current, public_key=public_key)
+    return require_count_capacity(ctx.db, resource, current, public_key=public_key, connection=connection)
 
 
-def require_count_capacity(db, resource: str, current: int, *, public_key: str) -> dict[str, Any]:
+def require_count_capacity(db, resource: str, current: int, *, public_key: str, connection=None) -> dict[str, Any]:
     """Check a known count, for resources whose creator has only a DB handle (console users)."""
-    state = require_writable(db, public_key)
+    state = require_writable(db, public_key, connection=connection)
     if resource not in LIMIT_LABELS:
         raise LicenseError("Unknown licence limit.")
     limit = state["limits"][resource]
     if current >= limit:
         label = LIMIT_LABELS[resource]
+        if resource == "users":
+            raise LicenseError(f"Users limit of {limit} reached ({current}/{limit}). Raise the user limit in the Licence screen before creating another account.")
         plural = label + "s"
-        location = " in the Licence screen" if resource != "users" else " with the console-user command"
-        raise LicenseError(f"{plural} limit of {limit} reached ({current}/{limit}). Remove an unused {label.lower()} or raise the limit{location}.")
+        raise LicenseError(f"{plural} limit of {limit} reached ({current}/{limit}). Remove an unused {label.lower()} or raise the limit in the Licence screen.")
     return state
 
 
-def enforce_account_entitlement(ctx, account_id: str, *, public_key: str) -> None:
+def enforce_account_entitlement(ctx, account_id: str, *, public_key: str,
+                                state: dict[str, Any] | None = None) -> None:
     """Keep excess configured accounts from starting new runs while leaving their running work alone."""
-    state = require_writable(ctx.db, public_key)
+    state = state or require_writable(ctx.db, public_key)
     limit = state["limits"]["ai_accounts"]
     # A configured account can be intentionally absent from the database when startup sync skipped it at
     # capacity. Count the union so that this resource still cannot claim work through the node API.
@@ -246,14 +276,53 @@ def enforce_account_entitlement(ctx, account_id: str, *, public_key: str) -> Non
         raise LicenseError(f"AI accounts limit of {limit} reached ({len(account_ids)}/{limit}). Disable or remove extra AI accounts or raise the limit in the Licence screen.")
 
 
+def enforce_machine_entitlement(ctx, node: str, *, public_key: str,
+                                state: dict[str, Any] | None = None) -> None:
+    """Keep machines beyond the current plan from starting new work; active runs remain unaffected."""
+    state = state or require_writable(ctx.db, public_key)
+    node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes ORDER BY name")]
+    limit = state["limits"]["machines"]
+    if node in node_names and node_names.index(node) >= limit:
+        raise LicenseError(f"Machines limit of {limit} reached ({len(node_names)}/{limit}). Disable or remove extra machines or raise the limit in the Licence screen.")
+
+
+def enforce_project_entitlement(ctx, project: str, *, public_key: str,
+                                state: dict[str, Any] | None = None) -> None:
+    """Keep projects beyond the current plan from receiving new work."""
+    state = state or require_writable(ctx.db, public_key)
+    project_keys = sorted(ctx.repo().projects)
+    limit = state["limits"]["projects"]
+    if project in project_keys and project_keys.index(project) >= limit:
+        raise LicenseError(f"Projects limit of {limit} reached ({len(project_keys)}/{limit}). Disable or remove extra projects or raise the limit in the Licence screen.")
+
+
+def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str) -> dict[str, Any]:
+    """Return the active plan state after checking the machine and account that would start new work."""
+    state = require_writable(ctx.db, public_key)
+    enforce_account_entitlement(ctx, account_id, public_key=public_key, state=state)
+    enforce_machine_entitlement(ctx, node, public_key=public_key, state=state)
+    return state
+
+
 def usage_report(db) -> list[dict[str, Any]]:
-    """Aggregate ticket completions and AI usage by project and UTC calendar month of run start."""
+    """Count tickets by their final Done time and report AI usage by run start month."""
     rows = db.all(
-        "SELECT project, to_char(date_trunc('month', started_at AT TIME ZONE 'UTC'), 'YYYY-MM') AS month,"
-        " count(DISTINCT ticket_key) FILTER (WHERE status='finished' AND outcome='done') AS tickets_finished,"
+        "WITH run_usage AS ("
+        " SELECT project, date_trunc('month', started_at AT TIME ZONE 'UTC') AS month_at,"
         " coalesce(sum(tokens_in),0) AS tokens_in, coalesce(sum(tokens_out),0) AS tokens_out,"
         " coalesce(sum(cost_usd),0)::numeric(12,6) AS cost_usd"
         " FROM runs GROUP BY project, date_trunc('month', started_at AT TIME ZONE 'UTC')"
+        "), finished AS ("
+        " SELECT project, date_trunc('month', done_at AT TIME ZONE 'UTC') AS month_at,"
+        " count(*)::int AS tickets_finished FROM tickets"
+        " WHERE status='Done' AND done_at IS NOT NULL"
+        " GROUP BY project, date_trunc('month', done_at AT TIME ZONE 'UTC')"
+        ") SELECT coalesce(r.project,f.project) AS project,"
+        " to_char(coalesce(r.month_at,f.month_at),'YYYY-MM') AS month,"
+        " coalesce(f.tickets_finished,0)::int AS tickets_finished,"
+        " coalesce(r.tokens_in,0) AS tokens_in, coalesce(r.tokens_out,0) AS tokens_out,"
+        " coalesce(r.cost_usd,0)::numeric(12,6) AS cost_usd"
+        " FROM run_usage r FULL OUTER JOIN finished f USING (project,month_at)"
         " ORDER BY month DESC, project")
     return [{"project": row["project"], "month": row["month"],
              "tickets_finished": int(row["tickets_finished"]), "tokens_in": int(row["tokens_in"]),

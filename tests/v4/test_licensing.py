@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -291,6 +292,95 @@ def test_expired_and_first_detected_invalid_licences_use_their_correct_grace_clo
     assert ctx.db.one("SELECT count(*) AS count FROM tickets")["count"] == before_tickets
 
 
+def test_missing_verification_key_records_invalid_grace_without_refusing_writes(client, ctx):
+    private, public = issuer_key()
+    installation_id, license_token = signed_in_license(client, ctx, private, public)
+    activated = client.post("/v1/licensing/offline", json={"license_file": license_token})
+    assert activated.status_code == 200
+
+    ctx.settings.license_public_key = ""
+    response = client.get("/v1/licensing")
+    assert response.status_code == 200
+    state = response.json()
+    assert state["status"] == "grace" and state["reason"] == "invalid" and not state["read_only"]
+    assert state["installation_id"] == installation_id
+    saved = ctx.db.one("SELECT invalid_since FROM licensing_state WHERE id=1")
+    assert saved["invalid_since"] is not None
+    assert licensing.require_writable(ctx.db, "")["status"] == "grace"
+
+
+def test_excess_machines_and_projects_cannot_start_work_but_existing_runs_can_finish(client, ctx):
+    sign_in(client, ctx)
+    cc = join_node(client, "cc").json()["node_token"]
+    node1 = join_node(client, "node1").json()["node_token"]
+    repo = ctx.repo()
+    from aiflow.v4.core.controlrepo import Project
+    repo.projects["ZZZ"] = Project(key="ZZZ", repo="jooservices/another-project")
+    repo.nodes["cc"].projects.append("ZZZ")
+    ctx.db.run("UPDATE nodes SET projects=%s WHERE name='cc'", (["TESTWP", "ZZZ"],))
+    add_ticket(ctx.db, "TESTWP-201")
+    add_ticket(ctx.db, "ZZZ-1")
+
+    machine_run = str(uuid.uuid4())
+    machine_lease = ctx.leases.claim("TESTWP-200", machine_run, ctx.settings.lease_ms)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'TESTWP-200','TESTWP','dev','codex-01','codex','node1',%s,'running','')",
+               (machine_run, machine_lease.fence))
+    project_run = str(uuid.uuid4())
+    project_lease = ctx.leases.claim("ZZZ-2", project_run, ctx.settings.lease_ms)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
+               " VALUES (%s,'ZZZ-2','ZZZ','dev','claude-01','claude','cc',%s,'running','')",
+               (project_run, project_lease.fence))
+
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"].update(machines=1, projects=1)
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+
+    machine_offer = client.get("/v1/work/candidates", params={"account": "codex-01"},
+                               headers={"Authorization": f"Bearer {node1}"})
+    assert machine_offer.json()["tickets"] == []
+    assert "Machines limit of 1" in machine_offer.json()["reason"]
+    machine_claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-201", "account": "codex-01"},
+                                headers={"Authorization": f"Bearer {node1}"})
+    assert machine_claim.status_code == 409 and "Machines limit of 1" in machine_claim.json()["reason"]
+
+    ctx.db.run("DELETE FROM tickets WHERE key='TESTWP-201'")
+    project_offer = client.get("/v1/work/candidates", params={"account": "claude-01"},
+                               headers={"Authorization": f"Bearer {cc}"})
+    assert project_offer.json()["tickets"] == []
+    assert "Projects limit of 1" in project_offer.json()["reason"]
+    project_claim = client.post("/v1/work/claim", json={"ticket": "ZZZ-1", "account": "claude-01"},
+                                headers={"Authorization": f"Bearer {cc}"})
+    assert project_claim.status_code == 409 and "Projects limit of 1" in project_claim.json()["reason"]
+
+    for run_id, node_token, fence in ((machine_run, node1, machine_lease.fence),
+                                      (project_run, cc, project_lease.fence)):
+        heartbeat = client.post(f"/v1/runs/{run_id}/heartbeat", json={"fence": fence, "progress": {"phase": "work"}},
+                                headers={"Authorization": f"Bearer {node_token}"})
+        assert heartbeat.status_code == 200
+        assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "running"
+
+
+def test_concurrent_machine_admissions_cannot_take_the_same_last_slot(client, ctx):
+    sign_in(client, ctx)
+    ctx.db.run("DELETE FROM node_join_tokens")
+    ctx.db.run("DELETE FROM nodes")
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["machines"] = 1
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+
+    def request(name):
+        return client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
+                                                           "role": "worker", "project": "TESTWP"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(request, ("node-a", "node-b")))
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    refused = next(response for response in responses if response.status_code == 409)
+    assert "Machines limit of 1" in refused.json()["detail"]
+    assert ctx.db.one("SELECT count(*) AS count FROM nodes")["count"] == 1
+
+
 def test_usage_totals_per_project_month_and_csv_export(client, ctx):
     sign_in(client, ctx)
     jan = datetime(2026, 1, 10, tzinfo=timezone.utc)
@@ -307,13 +397,21 @@ def test_usage_totals_per_project_month_and_csv_export(client, ctx):
                    " VALUES (%s,%s,%s,'dev','claude-01','claude','cc',1,'finished',%s,%s,%s,%s,%s,%s)",
                    (str(uuid.uuid4()), ticket, project, outcome, started, started + timedelta(minutes=5),
                     tokens_in, tokens_out, cost))
+    ctx.db.run("INSERT INTO tickets (key,project,status,done_at) VALUES"
+               " ('TESTWP-1','TESTWP','In Progress',%s),('TESTWP-2','TESTWP','Done',%s),"
+               " ('OTHER-1','OTHER','To Do',NULL),('OTHER-2','OTHER','Done',%s)",
+               (jan + timedelta(days=5), feb + timedelta(days=2), datetime(2026, 3, 3, tzinfo=timezone.utc)))
     report = client.get("/v1/licensing/usage")
     assert report.status_code == 200
     rows = {(row["project"], row["month"]): row for row in report.json()["rows"]}
-    assert rows[("TESTWP", "2026-01")] == {"project": "TESTWP", "month": "2026-01", "tickets_finished": 1,
+    assert rows[("TESTWP", "2026-01")] == {"project": "TESTWP", "month": "2026-01", "tickets_finished": 0,
                                               "tokens_in": 600, "tokens_out": 90, "cost_usd": 0.85}
-    assert rows[("OTHER", "2026-02")]["tickets_finished"] == 1
+    assert rows[("TESTWP", "2026-02")] == {"project": "TESTWP", "month": "2026-02", "tickets_finished": 1,
+                                              "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+    assert rows[("OTHER", "2026-02")]["tickets_finished"] == 0
+    assert rows[("OTHER", "2026-03")] == {"project": "OTHER", "month": "2026-03", "tickets_finished": 1,
+                                             "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
     exported = client.get("/v1/licensing/usage.csv")
     assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
     assert "attachment; filename=ai-flow-usage.csv" in exported.headers["content-disposition"]
-    assert "TESTWP,2026-01,1,600,90,0.850000" in exported.text
+    assert "TESTWP,2026-01,0,600,90,0.850000" in exported.text

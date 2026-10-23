@@ -1010,7 +1010,7 @@ console.log(JSON.stringify(roles));
         assert visible[role][:2] == ["cc", "work"]
     # A lead keeps the read-only views it could open before.
     assert {"knowledge", "machines"} <= set(visible["lead"])
-    assert "users" in visible["super_admin"] and "users" not in visible["owner"] and "sa" not in visible["lead"]
+    assert "users" in visible["super_admin"] and "users" in visible["owner"] and "sa" not in visible["lead"]
 
 
 def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():

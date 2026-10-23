@@ -112,7 +112,11 @@ def test_bundle_builder_assembles_locked_tools_runtime_image_wheels_and_checksum
     target = {"distribution": "ubuntu", "version": "24.04", "architecture": "amd64"}
     monkeypatch.setattr(offline, "target_platform", lambda: target)
     monkeypatch.setattr(offline.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(offline.shutil, "which", lambda command: "/usr/local/bin/uv" if command == "uv" else None)
+    builder_uv = tmp_path / "builder-tools/uv"
+    builder_uv.parent.mkdir()
+    builder_uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    builder_uv.chmod(0o755)
+    monkeypatch.setattr(offline.shutil, "which", lambda command: str(builder_uv) if command == "uv" else None)
 
     node_root = "node-v24.4.0-linux-x64"
     node_archive_buffer = io.BytesIO()
@@ -223,6 +227,7 @@ def test_bundle_builder_assembles_locked_tools_runtime_image_wheels_and_checksum
     assert "image/control-api.tar" in manifest["files"]
     assert "wheels/fastapi-0.115.0-py3-none-any.whl" in manifest["files"]
     assert "wheels/ai_flow-4.1.0-py3-none-any.whl" in manifest["files"]
+    assert (extracted / "python/uv").read_bytes() == builder_uv.read_bytes()
     # apt resolves against an empty dpkg status (no builder-installed package is skipped), never --reinstall
     assert len(apt_calls) == 1 and "--reinstall" not in apt_calls[0]
     assert any(a.startswith("Dir::State::status=") for a in apt_calls[0])

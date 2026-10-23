@@ -17,13 +17,16 @@ The fenced `GET /v1/master/context` snapshot contains:
 - Offline nodes and accounts out of quota, failing their check, or temporarily paused by the master.
 - Repeated TESTFLOW failure reports from the fenced scan described in [Repeated flow failures](flow-bugs.md).
 
-The master reviews the snapshot for tickets beyond the applicable project hard limit. Quota, authentication,
-offline-node and missing-tool symptoms stay incidents. They are not converted into TESTFLOW Bugs.
+The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to
+`POST /v1/master/actions`. The control API checks the active run and fence, applies the owner escalation policy,
+records accepted and refused requests in the audit log, and performs only the safe actions listed below. Tool calls
+are denied for master runs, so all effects go through the control API. The master reviews the snapshot for tickets
+beyond the applicable project hard limit. Quota, authentication, offline-node and missing-tool symptoms stay
+incidents; they are not converted into TESTFLOW Bugs.
 
 ## Safe actions, escalation and audit
 
-The worker returns a JSON plan and submits every action to `POST /v1/master/actions`. Tool calls are denied for
-master runs, so all effects go through the fenced control API. Allowed actions are:
+Allowed actions are:
 
 - `retry` a ticket after a failed, blocked, quota or lost run, by returning it to To Do.
 - `move_to_todo` when a ticket has no active run and is not Done.

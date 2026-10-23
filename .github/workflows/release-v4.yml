@@ -177,6 +177,9 @@ jobs:
           mkdir -p dist
           git archive --format=tar.gz --output="dist/aiflow4-$VERSION.tar.gz" "$VERSION" \
             aiflow pyproject.toml uv.lock prompts deploy
+          # the tarball also carries the documentation site (docs-site/) built from docs/guide and the API code
+          pip install uv==0.13.4 && uv sync --frozen
+          PYTHON="uv run --frozen python" bash deploy/v4/ci/add-docs-site.sh "$VERSION" "dist/aiflow4-$VERSION.tar.gz"
           python3 -m aiflow.v4.core.release_notes "$VERSION" --previous "$PREVIOUS" > dist/CHANGELOG.md
           (cd dist && sha256sum "aiflow4-$VERSION.tar.gz" > SHA256SUMS)
 
@@ -200,15 +203,6 @@ jobs:
             "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" dist/SHA256SUMS \
             2>&1 | tee "$RUNNER_TEMP/aiflow-candidate-logs/candidate-clean-install.log"
 
-      - name: Upload candidate install logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: clean-install-candidate-release
-          path: ${{ runner.temp }}/aiflow-candidate-logs/
-          if-no-files-found: ignore
-          retention-days: 14
-
       # The documented clean install above is the acceptance gate. This focused smoke additionally exercises the
       # canary wave and failed-node rollback paths with the same signed candidate.
       - name: Fleet rollout and rollback smoke using signed candidate artifacts
@@ -216,17 +210,30 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           PREVIOUS: ${{ steps.release.outputs.previous }}
         run: |
-          if [ -n "$PREVIOUS" ] \
-            && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" ] \
-            && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json" ]; then
-            bash deploy/v4/ci/install-smoke.sh "$VERSION" \
-              "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
-              "$PREVIOUS" "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" \
-              "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json"
-          else
-            bash deploy/v4/ci/install-smoke.sh "$VERSION" \
-              "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json"
-          fi
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/aiflow-candidate-logs"
+          {
+            if [ -n "$PREVIOUS" ] \
+              && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" ] \
+              && [ -f "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json" ]; then
+              bash deploy/v4/ci/install-smoke.sh "$VERSION" \
+                "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+                "$PREVIOUS" "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz" \
+                "$RUNNER_TEMP/aiflow4-previous/aiflow4-$PREVIOUS.tar.gz.sigstore.json"
+            else
+              bash deploy/v4/ci/install-smoke.sh "$VERSION" \
+                "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json"
+            fi
+          } 2>&1 | tee "$RUNNER_TEMP/aiflow-candidate-logs/fleet-rollout-smoke.log"
+
+      - name: Upload candidate install and fleet smoke logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-install-candidate-release
+          path: ${{ runner.temp }}/aiflow-candidate-logs/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Build and push control-api image to GHCR
         env:

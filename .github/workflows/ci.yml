@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}  # a push never cancels the nightly run
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read
@@ -33,6 +33,29 @@ jobs:
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install
+        run: pip install uv==0.13.4 && uv sync --frozen
+
+      - name: Documentation site builds
+        run: uv run --frozen python -m aiflow.v4.core.docsite build --out build/docs-site
+
+      - name: A screen or API change needs a documentation change
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: uv run --frozen python -m aiflow.v4.core.docsite check --base "$BASE"
 
   v4:
     name: Test (v4)

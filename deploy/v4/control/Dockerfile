@@ -5,7 +5,11 @@ ARG AIFLOW4_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/jooservices/ai-flow" \
       org.opencontainers.image.version="$AIFLOW4_VERSION" \
       org.opencontainers.image.revision="$AIFLOW4_REVISION"
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
+ && mkdir -p /usr/share/keyrings \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update && apt-get install -y --no-install-recommends postgresql-client-16 \
  && rm -rf /var/lib/apt/lists/* && pip install --no-cache-dir uv==0.13.4
 WORKDIR /app
 COPY pyproject.toml uv.lock ./

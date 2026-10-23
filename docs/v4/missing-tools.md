@@ -25,6 +25,14 @@ or summary are not sufficient either (for example, "composer is not installed").
 one open row per ticket and requirement in `tool_waits` (requirement, machine, project, run). A genuine requirement
 conflict still goes to Needs owner.
 
+Limit for Claude runs: command evidence needs the exit status of the command. The Claude adapter passes it on only
+when the CLI's `tool_result` block carries `exit_code`; the stream-json output normally does not (it only sets
+`is_error`). Without an exit code the command is never accepted as evidence, so a Claude run is classified
+`tool_missing` through the explicit `MISSING-TOOL` marker alone. This errs on the side of not parking tickets.
+
+A dev run that ends cleanly with no file changes is stored with outcome `no_changes`. It does not count against the
+role score, but the ticket still waits the usual retry backoff (2, 4, 8, 16, then 30 minutes) before it is offered again.
+
 ## Waiting and offering again
 
 A ticket with an open wait is not offered to a machine that does not report the tool (a version other than

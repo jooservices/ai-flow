@@ -82,9 +82,9 @@ WITH last AS (
 ), streak AS (
   SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
   FROM last l
-  WHERE l.outcome IN ('failed', 'timeout', 'lost')
+  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
     AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
-                    AND g.outcome NOT IN ('failed', 'timeout', 'lost'))
+                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
   GROUP BY l.ticket_key
 )
 SELECT ticket_key, fails FROM streak
@@ -5133,7 +5133,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if body.action == "retry":
                 latest = ctx.db.one("SELECT outcome FROM runs WHERE ticket_key=%s AND status<>'running'"
                                     " ORDER BY started_at DESC LIMIT 1", (ticket,))
-                if not latest or latest["outcome"] not in ("failed", "timeout", "lost", "quota", "blocked"):
+                if not latest or latest["outcome"] not in ("failed", "timeout", "lost", "quota", "blocked", "no_changes"):
                     refuse_master_action("retry requires a recent failed, blocked, quota or lost run")
             try:
                 status = ctx.jira.transition_to(ticket, "To Do")

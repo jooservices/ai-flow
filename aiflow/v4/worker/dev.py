@@ -390,7 +390,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),
-                                      next_="Back to To Do; the next run retries after a short wait", t0=t0, node=api_node(api)))
+                                      next_=("Back to To Do; a clean no-change result does not count against the account's "
+                                             "role score, but the ticket waits a short backoff before the next run"
+                                             if clean_no_changes else
+                                             "Back to To Do; the next run retries after a short wait"),
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}

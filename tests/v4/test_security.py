@@ -46,6 +46,12 @@ def admin(ctx):
     return password
 
 
+def authenticated(client) -> bool:
+    """Whether the console session endpoint accepts this client's cookie (open console mode answers 200 either way)."""
+    r = client.get("/v1/console/session")
+    return r.status_code == 200 and r.json()["authenticated"] is True
+
+
 def enrol(client, admin_password, email=ADMIN, step_offset=-30):
     """Turn on two-factor for ADMIN on a signed-in client; returns (totp secret, recovery codes)."""
     assert sign_in(client, admin_password, email).status_code == 200
@@ -110,7 +116,7 @@ def test_administrator_mfa_is_required_by_default(ctx, admin):
     client = make_client(ctx, require_mfa=True)
     started = sign_in(client, admin)
     assert started.status_code == 200 and started.json()["mfa_setup_required"] is True
-    assert client.get("/v1/console/session").status_code == 401
+    assert not authenticated(client)
     assert client.post("/v1/security/mfa/setup").status_code == 200
 
 
@@ -179,15 +185,15 @@ def test_forced_sign_out_ends_the_session_and_the_next_request_is_rejected(ctx, 
     target, boss = make_client(ctx), make_client(ctx)  # the login gate is off: the check must not rely on it
     secret, _ = enrol(target, admin)
     assert sign_in(boss, admin, code=mfa.totp_code(secret)).status_code == 200
-    assert target.get("/v1/console/session").status_code == 200
+    assert authenticated(target)
     sessions = boss.get("/v1/security/sessions").json()["sessions"]
     assert len(sessions) == 2 and sum(s["current"] for s in sessions) == 1
     victim = next(s for s in sessions if not s["current"])
     assert boss.post(f"/v1/security/sessions/{victim['sid']}/revoke").json() == {"revoked": 1}
-    assert target.get("/v1/console/session").status_code == 401
+    assert not authenticated(target)
     assert target.get("/v1/auth/me").status_code == 401
     assert target.get("/v1/security/mfa").status_code == 401
-    assert boss.get("/v1/console/session").status_code == 200  # the other session is untouched
+    assert authenticated(boss)  # the other session is untouched
     assert ctx.db.one("SELECT action FROM audit_log WHERE action='forced_sign_out'")
 
 
@@ -210,24 +216,21 @@ def test_logout_and_password_reset_end_the_session(ctx, admin):
     assert a.post("/logout").status_code == 303
     thief = make_client(ctx)
     thief.cookies.set(COOKIE_NAME, stolen)
-    assert thief.get("/v1/console/session").status_code == 401  # a copied cookie dies with the logout
+    assert not authenticated(thief)  # a copied cookie dies with the logout
     b = make_client(ctx)
     assert sign_in(b, admin, code=mfa.totp_code(secret)).status_code == 200
     assert b.post("/v1/auth/logout").status_code == 200
     assert sign_in(b, admin, code=mfa.totp_code(secret, time.time() + 30)).status_code == 200
     login.reset_password(ctx.db, ADMIN)
-    assert b.get("/v1/console/session").status_code == 401
+    assert not authenticated(b)
 
 
 def test_only_authorised_people_manage_security(ctx):
-    lead_pw = login.seed_user(ctx.db, OTHER, "lead")
-    owner_pw = login.seed_user(ctx.db, "owner@example.test", "owner")
-    for email, password in ((OTHER, lead_pw), ("owner@example.test", owner_pw)):
+    lead_pw = login.seed_user(ctx.db, OTHER, "team_lead")
+    sa_pw = login.seed_user(ctx.db, "sa@example.test", "sa")
+    for email, password in ((OTHER, lead_pw), ("sa@example.test", sa_pw)):
         c = make_client(ctx)
-        if email == "owner@example.test":
-            enrol(c, password, email=email)
-        else:
-            assert sign_in(c, password, email).status_code == 200
+        assert sign_in(c, password, email).status_code == 200
         assert c.get("/v1/security/settings").status_code == 403
         assert c.put("/v1/security/settings", json={"session_ttl_s": 600}).status_code == 403
         assert c.get("/v1/security/sessions").status_code == 403
@@ -403,7 +406,7 @@ def test_a_cookie_from_before_the_hardening_is_rejected(ctx, admin):
     for gate in (False, True):
         client = make_client(ctx, gate=gate)
         client.cookies.set(COOKIE_NAME, legacy)
-        assert client.get("/v1/console/session").status_code == 401
+        assert not authenticated(client)
         assert client.get("/v1/security/sessions").status_code == 401
     assert client.get("/v1/state").status_code == 401
 

@@ -62,11 +62,12 @@ def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
     users = (GUIDE / "screens" / "users.md").read_text()
     sa = (GUIDE / "screens" / "sa.md").read_text()
     console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
-    assert "Super Administrator" in users and "Owners and Leads cannot open" in users
-    assert "does not add, edit, or disable users" in users
-    hint = re.search(r"users: '([^']+)'", console).group(1)
+    assert "Administrator" in users and "Other roles cannot open this screen" in users
+    assert "last administrator cannot be removed or disabled" in users and "View as" in users
+    hints = re.search(r"var HINTS = \{(.*?)\n\};", console, re.S).group(1)
+    hint = re.search(r"users: '([^']+)'", hints).group(1)
     assert "See the role and screen permissions" in hint
-    assert "Owner or Super Administrator" in sa and "console.write" in sa
+    assert "Administrator or SA" in sa
 
 
 def test_help_route_serves_the_screen_pages(monkeypatch, site):
@@ -352,8 +353,7 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
 def test_traefik_routes_console_help_and_backups_to_control_api():
     compose = (ROOT / "deploy/v4/control/compose.yaml").read_text()
     api_rule = next(line for line in compose.splitlines() if "traefik.http.routers.api.rule:" in line)
-    assert "PathPrefix(`/help`)" in api_rule
-    assert "PathPrefix(`/backup`)" in api_rule
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in api_rule
 
 
 def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsys):

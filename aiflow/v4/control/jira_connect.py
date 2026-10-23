@@ -41,7 +41,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from ..core import secretbox
-from .console_auth import COOKIE_NAME, checks_bearer, role_satisfies, verify_session
+from .console_auth import COOKIE_NAME, checks_bearer, resolve_session_user, role_satisfies, verify_session
 from .db import J
 from . import licensing
 from .incidents import close_incident, open_incident
@@ -533,15 +533,16 @@ def mount(app: FastAPI, ctx) -> None:
             if action != "read":
                 writable()
             return "owner"
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and role_satisfies(user.role, {"integrations.manage"}):
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user and role_satisfies(user.effective_roles, {"integrations.manage"}):
             if action != "read":
                 writable()
             return user.subject
         if action != "read":
-            write_audit(ctx, action, user.subject if user else "", False, "owner role required")
+            write_audit(ctx, action, user.subject if user else "", False, "not available for your role")
         if user:
-            raise HTTPException(403, "owner role required")
+            raise HTTPException(403, "not available for your role")
         raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     async def body_of(request: Request) -> dict:

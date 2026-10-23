@@ -72,6 +72,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjects": ("projects",),
     "renderUsers": ("users",),
     "renderSecurity": ("security",),
+    "secApi": ("security",),
+    "secFail": ("security",),
+    "secDo": ("security",),
+    "loadSecurity": ("security",),
+    "loadAuditLog": ("security",),
+    "safeHref": ("security",),  # output-escaping helper shared by every screen; documented in docs/v4/security.md
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
     "renderCommandSearchResults": None,
@@ -82,6 +88,19 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "hintSeen": None,
     "renderHelp": None,
     "showView": None,
+    "setView": None,
+    "viewOf": None,
+    "viewAllowed": None,
+    "syncMenuVisibility": None,
+    "applyRoleNavigation": None,
+    "pollConsoleSession": None,
+    "adminRequest": ("users",),
+    "projectChoices": ("users", "projects"),
+    "pollServices": ("machines", "cc"),
+    "loadUsers": ("users",),
+    "roleChecks": ("users",),
+    "reviewByRole": ("review",),
+    "submitReview": ("review",),
 }
 
 # These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
@@ -91,6 +110,13 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"^\s*\.firstuse\{"),
     re.compile(r'\bid="(?:help-link|firstuse)"'),
     re.compile(r"\bhint-dismiss\b"),
+    # The role-based menu: which view each permission opens, the tabs and the "view as" switch. It shows or hides
+    # every screen, so each screen page says which roles can open it.
+    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|consoleUser|userAdmin:|autonomy: \{ data"),
+    re.compile(r"\b(?:VIEW_PERMISSION|VIEW_PATH|VIEW_GROUPS)\b|^\s+(?:lead|review|machines|projects|backup): '"),
+    re.compile(r"^\s+\{ view: '[a-z]+', label: '"),
+    re.compile(r"editing: '', temporaryPassword|^\s+\['machines', 'users'|// Visibility reads the effective"),
+    re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -132,8 +158,8 @@ def console_views(page: Path = UI) -> list[str]:
 
 
 def role_names() -> list[str]:
-    from ..control.console_auth import ROLE_PERMISSIONS
-    return sorted(ROLE_PERMISSIONS)
+    from ..control.console_auth import CANONICAL_ROLES
+    return sorted(CANONICAL_ROLES)
 
 
 def _mounted_control_app():
@@ -764,6 +790,30 @@ def _literal_route_contract_spans(source: str) -> dict[str, list[tuple[int, int]
     return found
 
 
+_ESCAPE_TOKENS = re.compile(r"\b(?:esc|safeHref|safeUrl|String)\(|[()]")
+
+
+def _escape_only_lines(diff: str) -> set[int]:
+    """New-file line numbers whose only change is wrapping text in an escaping helper (`esc(...)`, `safeHref(...)`).
+
+    Output escaping is one cross-cutting hardening (docs/v4/security.md), not a change to what a screen shows, so
+    such a line is documented once on the Security page instead of on every screen it appears on."""
+    found: set[int] = set()
+    for hunk in re.split(r"^(?=@@ )", diff, flags=re.M):
+        head = re.match(r"@@ -\S+ \+(\d+)", hunk)
+        if not head:
+            continue
+        old = [line[1:] for line in hunk.splitlines()[1:] if line.startswith("-")]
+        new = [line[1:] for line in hunk.splitlines()[1:] if line.startswith("+")]
+        if old and len(new) >= len(old):  # a line added after the last entry of a list only gains a comma
+            for index, (before, after) in enumerate(zip(old, new)):
+                wrapped = "safeHref(" in after and "safeHref(" not in before
+                plain = _ESCAPE_TOKENS.sub("", before).rstrip(",") == _ESCAPE_TOKENS.sub("", after).rstrip(",")
+                if before != after and (wrapped or plain):
+                    found.add(int(head.group(1)) + index)
+    return found
+
+
 def _diff_hunks(diff: str) -> list[tuple[int, int, int, int]]:
     """Return (old start, old count, new start, new count) line ranges from a unified diff."""
     return [(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
@@ -823,6 +873,8 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     gaps = []
     if any(f.startswith(SCREEN_PATHS) for f in files):
         pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
+        if "docs/v4/security.md" in docs:  # the Security screen's page ships from the v4 feature docs
+            pages.add("docs/guide/screens/security.md")
         wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
         if not (wanted <= pages if wanted else pages):
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
@@ -886,6 +938,17 @@ def changed_views(base: str) -> set[str]:
     functions = _function_spans(lines)
     help_start = next((i for i, line in enumerate(lines) if line.startswith("/* Help: every screen")), None)
     help_end = functions.get("renderHelp", (0, 0))[1] - 1
+    # The security hardening spans the whole console: the cross-site request token wrapper, the Security screen's
+    # script block (up to the boot section) and escaping of user text. All of it is documented in docs/v4/security.md.
+    security_lines: set[int] = _escape_only_lines(diff)
+    csrf_start = next((i for i, line in enumerate(lines) if line.startswith("/* Cross-site request protection")), None)
+    if csrf_start is not None:
+        csrf_end = next((j for j in range(csrf_start, len(lines)) if lines[j] == "})();"), csrf_start)
+        security_lines |= set(range(csrf_start + 1, csrf_end + 2))
+    sec_start = next((i for i, line in enumerate(lines) if line.startswith("/* ---------- security:")), None)
+    if sec_start is not None:
+        sec_end = next((j for j in range(sec_start + 1, len(lines)) if lines[j].startswith("/* ---------- ")), len(lines))
+        security_lines |= set(range(sec_start + 1, sec_end + 1))
     touched: set[str] = set()
     unmapped: set[int] = set()
     for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
@@ -915,6 +978,15 @@ def changed_views(base: str) -> set[str]:
                 line_views |= all_views
             if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
                 line_views |= all_views
+            if "rh-form" in changed_line:
+                line_views.add("machines")
+            if "A signed-in person whose roles grant review.actions" in changed_line:
+                line_views.add("review")
+            if not changed_line.strip():
+                continue
+            # Registering the Security screen in the shared menu maps edits those lines; they belong to its own page.
+            if line_no in security_lines or "security" in changed_line.lower():
+                line_views = {"security"}
             if line_views:
                 touched |= line_views
             else:

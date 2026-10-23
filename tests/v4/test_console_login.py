@@ -15,6 +15,7 @@ from aiflow.v4.control import login, mfa
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control import console_auth, licensing
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS, mount_ui
 from aiflow.v4.control.db import J
 from aiflow.v4.core.settings import Settings
 
@@ -23,11 +24,13 @@ EMAIL = "admin@example.test"
 EXP = 4_102_444_800
 
 
-def make_client(ctx, gate=False):
+def make_client(ctx, gate=False, with_ui=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
     ctx.settings.console_require_mfa = False  # a legacy false setting must not bypass administrator MFA
     app = create_app(ctx)
+    if with_ui:
+        mount_ui(app, ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
 
@@ -61,7 +64,7 @@ def test_seed_user_is_created_once_and_stores_only_a_hash(ctx):
     password = login.seed_user(ctx.db, "Admin@Example.Test", "super_admin")
     assert password and login.seed_user(ctx.db, EMAIL, "super_admin") is None
     row = ctx.db.one("SELECT email, role, password_hash FROM console_users")
-    assert row["email"] == EMAIL and row["role"] == "super_admin" and password not in row["password_hash"]
+    assert row["email"] == EMAIL and row["role"] == "administrator" and password not in row["password_hash"]
     with pytest.raises(ValueError):
         login.seed_user(ctx.db, "not-an-email", "super_admin")
     with pytest.raises(ValueError):
@@ -94,9 +97,12 @@ def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, 
     assert "Raise the user limit in the Licence screen" in refused.json()["detail"]
 
     console = (Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html").read_text()
-    assert 'id="users-create-form"' in console and "fetch('/v1/auth/users'" in console
-    assert "S.users.error" in console and "S.users.initialPassword" in console
+    assert "adminRequest('/v1/console/users'" in console and "temporaryPassword" in console
     assert has_permission("owner", "users.manage")
+
+    # The Users and roles screen adds people through /v1/console/users and meets the same licence limit.
+    screen_refused = client.post("/v1/console/users", json={"email": "fourth@example.test", "roles": ["reviewer"]})
+    assert screen_refused.status_code == 409 and "Users limit of 2 reached" in screen_refused.json()["detail"]
 
 
 # --- AC1: endpoints --------------------------------------------------------------------------------------------------
@@ -104,7 +110,8 @@ def test_sign_in_sets_a_signed_strict_http_only_cookie_and_me_logout_work(ctx, s
     client = make_client(ctx)
     assert "Sign in" in client.get("/login").text
     r = sign_in(client, seeded)
-    assert r.status_code == 200 and r.json()["role"] == "super_admin" and r.json()["role_label"] == "Super Administrator"
+    assert r.status_code == 200 and r.json()["role"] == "administrator" and r.json()["role_label"] == "Administrator"
+    assert r.json()["roles"] == ["administrator"] and r.json()["landing_page"] == "/cc"
     assert r.json()["email"] == EMAIL
     cookie = r.headers["set-cookie"].lower()
     assert COOKIE_NAME in cookie and "httponly" in cookie and "samesite=strict" in cookie and "path=/" in cookie
@@ -244,15 +251,13 @@ def test_super_administrator_passes_every_role_check_and_lead_does_not():
     assert not has_permission("lead", "nodes.manage")
 
 
-def test_non_owner_role_gets_endpoint_access_from_its_mapped_permissions(ctx, monkeypatch):
-    monkeypatch.setitem(console_auth.ROLE_PERMISSIONS, "integration_admin", frozenset({"integrations.manage"}))
-    monkeypatch.setattr(console_auth, "ALLOWED_ROLES", console_auth.ALLOWED_ROLES | {"integration_admin"})
+def test_sa_session_gets_endpoint_access_from_the_shared_permission_table(ctx):
     client = make_client(ctx)
-    client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "integration_admin", EXP, SECRET))
+    client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "sa", EXP, SECRET))
     assert client.get("/v1/integrations/github").status_code == 200
     assert client.get("/v1/projects/catalog").status_code == 403
     session = client.get("/v1/console/session")
-    assert session.status_code == 200 and session.json()["permissions"] == ["integrations.manage"]
+    assert session.status_code == 200 and session.json()["permissions"] == sorted(console_auth.ROLE_PERMISSIONS["sa"])
 
 
 def test_console_ui_uses_session_permission_identifiers_for_controls():
@@ -278,7 +283,7 @@ def test_owner_only_endpoints_accept_super_admin(ctx):
     assert get("lead", "/v1/integrations/jira") == 403 and get("super_admin", "/v1/integrations/jira") != 403
     client.cookies.set(COOKIE_NAME, issue_session("a@example.test", "super_admin", EXP, SECRET))
     session = client.get("/v1/console/session").json()
-    assert session["role"] == "super_admin" and session["permissions"] == ["*"]
+    assert session["role"] == "administrator" and session["permissions"] == ["*"]
 
 
 # --- AC6: the gate -----------------------------------------------------------------------------------------------------
@@ -299,11 +304,12 @@ def test_state_accepts_only_the_owner_token_when_sign_in_is_on(ctx):
 
 
 def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seeded):
-    client = make_client(ctx, gate=True)
-    r = client.get("/cc")
-    assert r.status_code == 302 and r.headers["location"] == "/login?next=%2Fcc"
+    client = make_client(ctx, gate=True, with_ui=True)
+    for path in (*CONSOLE_PAGE_PATHS, "/help/"):
+        response = client.get(path)
+        assert response.status_code == 302
+        assert response.headers["location"].startswith("/login?next=")
     assert client.get("/delivery?x=1").headers["location"] == "/login?next=%2Fdelivery%3Fx%3D1"
-    assert client.get("/machines").headers["location"] == "/login?next=%2Fmachines"
     assert client.get("/v1/state").status_code == 401
     assert client.get("/v1/state", headers={"Authorization": "Bearer not-a-token-route"}).status_code == 401
     client.cookies.set(COOKIE_NAME, "forged.cookie.value")
@@ -316,7 +322,18 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
     secret = client.post("/v1/security/mfa/setup").json()["secret"]
     enabled = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)})
     assert enabled.status_code == 200
-    assert client.get("/v1/state").status_code == 200 and client.get("/cc").status_code not in (302, 401)
+    assert client.get("/v1/state").status_code == 200
+    for path in CONSOLE_PAGE_PATHS:
+        response = client.get(path)
+        assert response.status_code != 404, f"{path} returned 404 for a signed-in user"
+        if path == "/":
+            assert (response.status_code, response.headers["location"]) in {
+                (302, "/cc"), (307, "/dashboard")
+            }
+        elif path == "/help":
+            assert response.status_code == 307 and response.headers["location"] == "/help/"
+        else:
+            assert response.status_code == 200, f"{path} did not load for a signed-in user"
 
 
 def test_gate_lets_node_tokens_through_on_token_routes(ctx):

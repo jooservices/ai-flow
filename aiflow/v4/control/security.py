@@ -30,8 +30,9 @@ from starlette.concurrency import run_in_threadpool
 from ..core import secretbox
 from . import audit as audit_log
 from . import mfa, notify
-from .console_auth import COOKIE_NAME, ConsoleUser, csrf_token, has_permission, issue_session, verify_session
-from .login import (CSRF_COOKIE, MFA_ROLES, OPEN_PATHS, OPEN_PREFIXES, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S, client_ip,
+from .console_auth import (COOKIE_NAME, ConsoleUser, csrf_token, has_permission, issue_session, resolve_session_user,
+                           verify_session)
+from .login import (CSRF_COOKIE, MFA_ROLES, OPEN_PATHS, OPEN_PREFIXES, SESSION_TTL_MAX_S, SESSION_TTL_MIN_S, client_ip, mfa_role,
                     get_setting, require_mfa, session_ttl_s, set_setting)
 
 log = logging.getLogger(__name__)
@@ -61,7 +62,8 @@ def install_security(app: FastAPI, ctx) -> None:
     secret = lambda: settings.console_session_secret  # noqa: E731 - read late: tests and the CLI set it after startup
 
     def session(request: Request, allow_pending: bool = False) -> ConsoleUser | None:
-        return verify_session(request.cookies.get(COOKIE_NAME, ""), secret(), None, allow_pending)
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), secret(), None, allow_pending)
+        return resolve_session_user(ctx.db, claims) if claims else None
 
     def require(request: Request, permission: str = "", allow_pending: bool = False) -> ConsoleUser:
         if len(secret().encode()) < 32:
@@ -69,7 +71,7 @@ def install_security(app: FastAPI, ctx) -> None:
         user = session(request, allow_pending)
         if not user:
             raise HTTPException(401, "sign in required")
-        if permission and not has_permission(user.role, permission):
+        if permission and not has_permission(user.effective_roles, permission):
             raise HTTPException(403, f"your role cannot do this ({permission} is required)")
         return user
 
@@ -283,7 +285,7 @@ def install_security(app: FastAPI, ctx) -> None:
 
     # --- two-factor setup (any signed-in person, for their own account) ---------------------------------------------
     def own_row(user: ConsoleUser) -> dict:
-        row = ctx.db.one("SELECT email, role, totp_secret, totp_enabled FROM console_users WHERE email=%s", (user.subject,))
+        row = ctx.db.one("SELECT email, role, roles, totp_secret, totp_enabled FROM console_users WHERE email=%s", (user.subject,))
         if not row:
             raise HTTPException(404, "unknown person")
         return row
@@ -299,8 +301,8 @@ def install_security(app: FastAPI, ctx) -> None:
         user = require(request, allow_pending=True)
         row = own_row(user)
         return {"enabled": bool(row["totp_enabled"]), "recovery_codes_left": mfa.recovery_codes_left(ctx.db, user.subject),
-                "required": require_mfa(ctx) and row["role"] in MFA_ROLES, "setup_required": user.mfa_pending,
-                "can_manage_security": has_permission(user.role, "security.manage")}
+                "required": require_mfa(ctx) and mfa_role(row.get("roles") or row["role"]), "setup_required": user.mfa_pending,
+                "can_manage_security": has_permission(user.effective_roles, "security.manage")}
 
     @app.post("/v1/security/mfa/setup")
     def mfa_setup(request: Request) -> dict:
@@ -329,7 +331,7 @@ def install_security(app: FastAPI, ctx) -> None:
         response = JSONResponse({"enabled": True, "recovery_codes": codes}, headers={"Cache-Control": "no-store"})
         if user.mfa_pending:  # the limited session becomes a full one on the same session row
             ttl = session_ttl_s(ctx)
-            token = issue_session(user.subject, user.role, int(time.time()) + ttl, secret(), user.sid)
+            token = issue_session(user.subject, user.assigned_roles, int(time.time()) + ttl, secret(), sid=user.sid)
             app.state.set_session_cookies(response, token, ttl)
         return response
 
@@ -350,7 +352,7 @@ def install_security(app: FastAPI, ctx) -> None:
         row = own_row(user)
         if not row["totp_enabled"]:
             raise HTTPException(409, "two-factor sign-in is not on")
-        if require_mfa(ctx) and row["role"] in MFA_ROLES:
+        if require_mfa(ctx) and mfa_role(row.get("roles") or row["role"]):
             raise HTTPException(403, "administrators must keep two-factor sign-in on")
         verified(user, row, body.code)
         mfa.clear(ctx.db, user.subject)

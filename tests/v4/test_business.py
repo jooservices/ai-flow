@@ -64,7 +64,7 @@ def test_business_page_is_the_console_with_the_same_access(web):
 def test_business_route_is_routed_by_traefik():
     from pathlib import Path
     compose = (Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml").read_text()
-    assert "PathPrefix(`/business`)" in compose
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in compose
 
 
 # --- AC2 and AC3: one project, epic progress as in Delivery, Needs owner ------------------------------------

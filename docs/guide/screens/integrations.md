@@ -1,6 +1,6 @@
 # Integrations
 
-**Assumes:** you are signed in with the `integrations.manage` permission (Owner or Super Administrator), you are an
+**Assumes:** you are signed in as an Administrator or SA (the roles that can open Integrations), you are an
 administrator of your Jira site and of your GitHub organization.
 
 Integrations (`/integrations`) connects AI Flow to Jira and GitHub. Secrets are stored on the control machine and

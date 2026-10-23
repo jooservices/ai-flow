@@ -1,6 +1,6 @@
 # Human review
 
-**Assumes:** you are signed in with any console role and you have the reviewer access token from your administrator.
+**Assumes:** you are signed in as an Administrator, Product owner, Delivery, Team Lead or Reviewer, and you have the reviewer access token from your administrator.
 The token is never shown in the documentation.
 
 Human review (`/review`) lists the tickets that wait for a person before merge. It refreshes every 15 seconds.

@@ -1,6 +1,6 @@
 # Stakeholder
 
-**Assumes:** you are signed in with any console role and the project lists its environment links in its configuration.
+**Assumes:** you are signed in as an Administrator, Product owner or Stakeholder, and the project lists its environment links in its configuration.
 
 Stakeholder (`/stakeholder`) opens the configured environments of a project and records whether you accept the result.
 

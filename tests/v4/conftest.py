@@ -42,7 +42,7 @@ def console_csrf_header(request, monkeypatch):
                 and not any(k.lower() in {"origin", "referer"} for k in headers)):
             headers = {**headers, "Origin": str(self.base_url).rstrip("/")}
             kwargs["headers"] = headers
-        cookie = self.cookies.get(COOKIE_NAME)
+        cookie = ([c.value for c in self.cookies.jar if c.name == COOKIE_NAME] or [None])[-1]
         if (not raw_csrf and cookie and method.upper() not in ("GET", "HEAD", "OPTIONS")
                 and not any(k.lower() == "x-csrf-token" for k in headers)):
             ctx = getattr(self.app, "state", None) and getattr(self.app.state, "ctx", None)

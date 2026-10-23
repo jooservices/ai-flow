@@ -1,6 +1,6 @@
 # Security hardening (JAIF-231)
 
-**Assumes:** you are signed in to the installed v4 release. Settings and the user list need the Super Administrator role;
+**Assumes:** you are signed in to the installed v4 release. Settings and the user list need the Administrator role;
 everyone can manage their own two-factor sign-in.
 
 AI Flow holds code access and AI credentials. This page lists what protects them, where to set it, and how it is tested
@@ -10,8 +10,8 @@ The coordinated disclosure policy is published in [`.github/SECURITY.md`](https:
 ## Where people manage it: the Security screen
 
 Console > **Security** (`/security`). Everybody who is signed in sees their own two-factor panel. People with the
-`security.manage` permission (Super Administrator) also see session settings, signed-in sessions and people; the audit log
-needs `security.audit` (also Super Administrator). All of it is also available as API under `/v1/security/*`.
+`security.manage` permission (Administrator) also see session settings, signed-in sessions and people; the audit log
+needs `security.audit` (also Administrator). All of it is also available as API under `/v1/security/*`.
 
 ### Security screen quick guide
 
@@ -27,9 +27,9 @@ needs `security.audit` (also Super Administrator). All of it is also available a
   The sign-in page has a field for the code. A code works once.
 - **Recovery codes.** Turning two-factor on shows ten single-use codes once (stored only as keyed hashes). A recovery code
   is typed in the same field as the authenticator code. "Issue new recovery codes" replaces the set.
-- **Lost both?** A Super Administrator uses *Reset two-factor* on the people table; the person is signed out and sets it up
+- **Lost both?** An Administrator uses *Reset two-factor* on the people table; the person is signed out and sets it up
   again.
-- **Require for administrators.** Two-factor sign-in is mandatory for roles `super_admin` and `owner`, regardless of
+- **Require for administrators.** Two-factor sign-in is mandatory for the `administrator` role (the earlier `super_admin` and `owner` roles are now Administrator), regardless of
   the legacy `require_mfa` setting. A sign-in without two-factor is a limited session that can only open the Security
   screen to set it up. Administrators cannot turn it off; the Security screen displays this policy as always on.
 - **Session length.** Setting *Session length* (5 minutes to 30 days, default 12 hours) applies to the next sign-in.
@@ -67,7 +67,7 @@ key is configured. The key is **not** in the database:
   only a valid password plus fresh authenticator or recovery code is allowed through. The lock never shuts the real owner
   out: someone who also gives a valid
   authenticator code or an unused recovery code is still checked and signed in, which clears the lock. A guesser does not
-  have the second factor. An account without two-factor stays locked until the lock ends, or a Super Administrator uses
+  have the second factor. An account without two-factor stays locked until the lock ends, or an Administrator uses
   *Unlock* on the Security screen. All refusals look the same.
 
 ## AC4 Cross-site requests and escaped text
@@ -91,8 +91,8 @@ fails the job and blocks the merge when the check is required. The level is the 
 There is no blanket suppression: findings without a fix still block (no `--ignore-unfixed`), and the production
 control image runs as the non-root user `aiflow` (`USER` in `deploy/v4/control/Dockerfile`, `user:` in the compose file).
 Two narrow, reviewed exceptions exist: `deploy/v4/ci/trivy-secret.yaml` allows fake keys only in the named test fixture
-files (any other file under `tests/` is scanned), and the repository scan skips `deploy/v4/ci/systemd.Dockerfile`, a
-throw-away CI test machine that needs PID 1 as root and is never deployed.
+files (any other file under `tests/` is scanned), and the repository scan skips `deploy/v4/ci/systemd.Dockerfile` and
+`deploy/v4/ci/offline-target.Dockerfile`, throw-away CI test machines that need PID 1 as root and are never deployed.
 
 ## AC6 Release security report and disclosure policy
 
@@ -111,3 +111,74 @@ forced sign-outs, sign-in and sign-out, owner-token Jira writes, OAuth callbacks
 (by route, for example Jira and GitHub credential changes under `credentials`). The Security screen shows it read-only
 with an area filter. There
 is no route that writes, edits or deletes it, and database triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the table.
+
+## API routes
+
+Sign-in, session and Security screen routes. Administrator-only ones are enforced on the server, not only hidden in
+the console:
+
+- `GET /v1/auth/me`
+- `POST /v1/auth/login`
+- `POST /v1/auth/logout`
+- `POST /v1/auth/users`
+- `GET /v1/security/audit`
+- `GET /v1/security/mfa`
+- `GET /v1/security/sessions`
+- `GET /v1/security/settings`
+- `GET /v1/security/users`
+- `POST /v1/security/mfa/disable`
+- `POST /v1/security/mfa/enable`
+- `POST /v1/security/mfa/recovery-codes`
+- `POST /v1/security/mfa/setup`
+- `POST /v1/security/sessions/{sid}/revoke`
+- `POST /v1/security/users/{email}/mfa/reset`
+- `POST /v1/security/users/{email}/sign-out`
+- `POST /v1/security/users/{email}/unlock`
+- `PUT /v1/security/settings`
+
+The control API's own audit record (`write_audit`) is written in the request's database transaction, so the record and
+the change it describes commit or roll back together. The state-changing routes that use it:
+
+- `DELETE /v1/accounts/{account_id}`
+- `DELETE /v1/nodes/{name}`
+- `GET /v1/analytics/usage`
+- `GET /v1/integrations/github/imports/{pending_id}/install`
+- `GET /v1/integrations/github/installation-settings`
+- `GET /v1/integrations/github/manifest/callback`
+- `GET /v1/integrations/github/manifest/start`
+- `GET /v1/integrations/github/setup`
+- `GET /v1/reviews`
+- `GET /v1/reviews/export.csv`
+- `POST /v1/backups/key`
+- `POST /v1/backups/run`
+- `POST /v1/business/{key}/change-requests`
+- `POST /v1/console/view-as`
+- `POST /v1/console/view-as/stop`
+- `POST /v1/github/comment`
+- `POST /v1/github/pr`
+- `POST /v1/github/token`
+- `POST /v1/github/update-branch`
+- `POST /v1/integrations/github/imports`
+- `POST /v1/integrations/github/imports/{pending_id}/connect`
+- `POST /v1/jira/{key}/comment`
+- `POST /v1/jira/{key}/description`
+- `POST /v1/jira/{key}/fields`
+- `POST /v1/jira/{key}/transition`
+- `POST /v1/knowledge/proposals/{proposal_id}/approve`
+- `POST /v1/master/actions`
+- `POST /v1/nodes/{name}/check-probes/token`
+- `POST /v1/nodes/{name}/join-command`
+- `POST /v1/nodes/{name}/operations`
+- `POST /v1/notify/triage`
+- `POST /v1/reviews/{key}/answer`
+- `POST /v1/reviews/{key}/approve`
+- `POST /v1/reviews/{key}/ask-ai`
+- `POST /v1/reviews/{key}/reject`
+- `POST /v1/reviews/{key}/rework`
+- `POST /v1/reviews/{key}/skip-gate`
+- `POST /v1/stakeholder/{key}/verdict`
+- `PUT /v1/backups/config`
+- `PUT /v1/master/autonomy/budget`
+- `PUT /v1/nodes/{name}/work-acceptance`
+- `PUT /v1/notifications/channels`
+- `PUT /v1/role-health/settings`

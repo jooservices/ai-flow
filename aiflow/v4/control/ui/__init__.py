@@ -1,7 +1,7 @@
 """Console views for Dashboard, Work board, Delivery, SA, Machines and AI, Users and roles,
 Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, Licensing and Backup.
 
-Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
+Dashboard (/dashboard, /cc), Work board (/work, /board), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge) and
 Integrations (/integrations, control/jira_connect.py), Projects (/projects), Licensing (/licensing),
@@ -17,9 +17,16 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from ..console_auth import COOKIE_NAME, role_satisfies, verify_session
+from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
 
 HERE = Path(__file__).parent
+
+# Keep the address inventory shared with the login gate and route tests; `/cc` and `/board` are view aliases.
+CONSOLE_PAGE_PATHS = (
+    "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
+    "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing",
+    "/notifications", "/lead", "/projects", "/cc", "/security",
+)
 
 
 def mount_ui(app: FastAPI, ctx) -> None:
@@ -29,25 +36,12 @@ def mount_ui(app: FastAPI, ctx) -> None:
     def root() -> RedirectResponse:
         return RedirectResponse("/dashboard")
 
-    @app.get("/cc", include_in_schema=False)
-    @app.get("/dashboard", include_in_schema=False)
-    @app.get("/work", include_in_schema=False)
-    @app.get("/delivery", include_in_schema=False)
-    @app.get("/machines", include_in_schema=False)
-    @app.get("/users", include_in_schema=False)
-    @app.get("/security", include_in_schema=False)
-    @app.get("/sa", include_in_schema=False)
-    @app.get("/lead", include_in_schema=False)
-    @app.get("/business", include_in_schema=False)
-    @app.get("/review", include_in_schema=False)
-    @app.get("/stakeholder", include_in_schema=False)
-    @app.get("/knowledge", include_in_schema=False)
-    @app.get("/integrations", include_in_schema=False)
-    @app.get("/projects", include_in_schema=False)
-    @app.get("/licensing", include_in_schema=False)
-    @app.get("/backup", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+    for path in CONSOLE_PAGE_PATHS:
+        if path not in {"/", "/help", "/notifications"}:
+            app.add_api_route(path, console, methods=["GET"], include_in_schema=False)
 
     @app.get("/help", include_in_schema=False)
     def help_root() -> RedirectResponse:
@@ -71,11 +65,12 @@ def mount_ui(app: FastAPI, ctx) -> None:
 
     @app.get("/notifications", include_in_schema=False)
     def notifications(request: Request) -> FileResponse:
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:
             raise HTTPException(401, "authenticated console session required")
-        if not role_satisfies(user.role, {"notifications.manage"}):
-            raise HTTPException(403, "administrator role required")
+        if not role_satisfies(user.effective_roles, {"notifications.manage"}):
+            raise HTTPException(403, "not available for your role")
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     @app.get("/v1/tickets/{key}")

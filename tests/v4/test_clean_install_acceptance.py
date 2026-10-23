@@ -117,7 +117,8 @@ class Fresh:
             self.mfa_last_step = mfa.match_step(secret, code)
             self.recovery_codes = enabled.json()["recovery_codes"]
             assert len(self.recovery_codes) == 10
-        assert self.client.get("/v1/auth/me").json()["role"] == "super_admin"
+        user = self.client.get("/v1/auth/me").json()
+        assert user["role"] == "administrator" and user["role_label"] == "Administrator"
 
     def join(self, name):
         """Join a machine with the one-use token Command Center issues; the machine itself never signs in."""

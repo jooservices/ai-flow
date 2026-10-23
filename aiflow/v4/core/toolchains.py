@@ -12,6 +12,12 @@ from collections.abc import Iterable
 # Tools every node reports, whatever its projects use (reporting only; requirements are below).
 NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker", "git", "node", "uv", "gh")
 
+# Supported catalogue tools the control plane can recognize and arrange on a node when a developer run needs one.
+# Stack membership and pins remain explicit in STACK_TOOLS; a tool absent from this catalogue must be pinned by its
+# project's stack before a missing-tool report can create a wait.
+CATALOG_TOOLS = ("php", "composer", "wp", "python3", "playwright", "playwright-browser",
+                 "gitleaks", "xdebug", "cosign", "podman")
+
 # Shared folder for Playwright's browsers: installed by root, readable by the AI user, handed to runs through
 # PLAYWRIGHT_BROWSERS_PATH (see worker/notes.py project_env).
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/aiflow4/playwright-browsers"
@@ -51,6 +57,10 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "python3": ("python3", "python"),
     "playwright": ("playwright",),
     "playwright-browser": ("playwright_browser", "playwright-browser", "playwright"),
+    "gitleaks": ("gitleaks",),
+    "xdebug": ("xdebug",),
+    "cosign": ("cosign",),
+    "podman": ("podman",),
 }
 
 # A tool that is installed but cannot work on this machine (e.g. Chromium without a system library) is reported
@@ -129,7 +139,7 @@ def tools_for_stacks_in_project(stacks: str | Iterable[str] | None,
 
 def tools_for_stacks(stacks: Iterable[str]) -> list[str]:
     """The union of the reported node tools and the tools of every stack, in stable order (what a node reports)."""
-    out = list(NODE_TOOLS)
+    out = list(NODE_TOOLS) + list(CATALOG_TOOLS)
     for stack in stacks:
         for tool in STACK_TOOLS.get(stack, ()):
             if tool not in out:
@@ -194,10 +204,16 @@ def toolchain_gaps(tools: dict[str, object] | None, required: Iterable[str],
 MISSING_MARKER = re.compile(
     r"MISSING[-_ ](?:TOOL|SERVICE)S?\s*[:=]?\s*([A-Za-z0-9][\w.+-]*(?:\s*(?:,|\band\b)\s*[A-Za-z0-9][\w.+-]*)*)", re.I)
 def known_requirements() -> list[str]:
-    """Tool and service names AI Flow can tell apart in free text (what a node reports, plus test services)."""
+    """Reportable tool and service names AI Flow can identify in free text."""
     from .services import SERVICES
-    names = list(NODE_TOOLS) + [t for tools in STACK_TOOLS.values() for t in tools] + list(SERVICES)
+    names = (list(NODE_TOOLS) + list(CATALOG_TOOLS) + [t for tools in STACK_TOOLS.values() for t in tools]
+             + list(SERVICES))
     return list(dict.fromkeys(names))
+
+
+def has_missing_marker(text: str) -> bool:
+    """Whether the AI explicitly used the machine-requirement marker, even if its name is unknown."""
+    return bool(MISSING_MARKER.search(text or ""))
 
 
 def parse_missing_requirements(text: str) -> list[str]:
@@ -211,13 +227,15 @@ def parse_missing_requirements(text: str) -> list[str]:
     known = {name.casefold(): name for name in known_requirements()}
     marker = MISSING_MARKER.search(text)
     if marker:
+        from .services import ALIASES
         requested = [name.casefold() for name in re.split(r"\s*(?:,|\band\b)\s*", marker.group(1).strip(), flags=re.I)
                      if name]
-        return list(dict.fromkeys(known[name] for name in requested if name in known))
+        return list(dict.fromkeys(known[ALIASES.get(name, name)] for name in requested
+                                  if ALIASES.get(name, name) in known))
 
     # Shells commonly emit `bash: php: command not found` or `bash: line 1: php: command not found`.
     # Keep this limited to catalogue tools; a service name is not a shell command.
-    command_tools = {name.casefold(): name for name in NODE_TOOLS}
+    command_tools = {name.casefold(): name for name in NODE_TOOLS + CATALOG_TOOLS}
     command_tools.update({tool.casefold(): tool for stack_tools in STACK_TOOLS.values() for tool in stack_tools})
     found = []
     for match in re.finditer(r"(?<![\w.+-])([A-Za-z0-9_.+-]+):\s*command not found\b", text, re.I):
@@ -233,4 +251,5 @@ def parse_missing_requirements(text: str) -> list[str]:
 
 def tool_present(tools: dict[str, object] | None, name: str) -> bool:
     """True when a node reported the tool with a real version (not absent, `missing` or `timeout`)."""
-    return str((tools or {}).get(name, "missing")) not in {"", "missing", "timeout"}
+    value = str((tools or {}).get(name, "missing"))
+    return value not in {"", "missing", "timeout"} and not value.startswith(BROKEN_PREFIX)

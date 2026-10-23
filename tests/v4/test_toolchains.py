@@ -1,5 +1,5 @@
 from aiflow.v4.core.controlrepo import ControlRepo, Project
-from aiflow.v4.core.toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
+from aiflow.v4.core.toolchains import (BASE_TOOLS, CATALOG_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers,
                                        pinned_version, toolchain_gaps, tools_for_stack, tools_for_stacks,
                                        version_matches)
 from conftest import join_node
@@ -17,7 +17,7 @@ def test_stack_values_map_to_node_and_project_tools():
     assert tools_for_stack("php-8.3") == list(BASE_TOOLS) + ["php", "composer", "wp"]
     assert "python3" in tools_for_stack("python-3.12")
     assert tools_for_stack("unknown") == list(BASE_TOOLS)
-    assert tools_for_stacks(["php-8.3", "python-3.12"]) == list(NODE_TOOLS) + ["php", "composer", "wp", "python3"]
+    assert tools_for_stacks(["php-8.3", "python-3.12"]) == list(NODE_TOOLS) + list(CATALOG_TOOLS)
     assert tools_for_stack("node-24") == list(BASE_TOOLS) + ["node"]
     assert tools_for_stack("playwright") == list(BASE_TOOLS) + ["node", "playwright", "playwright-browser"]
     # AI CLIs are required by the providers of a node's accounts, not by project stacks

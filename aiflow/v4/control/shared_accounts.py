@@ -140,21 +140,22 @@ def capacity_shares(session_limit: int, capacities: dict[str, int]) -> dict[str,
     return shares
 
 
-def may_take(db, acc: Account, node: str) -> tuple[bool, str]:
+def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[bool, str]:
     """Whether `node` has free worker capacity and may start its capacity-weighted account share."""
     pending = pending_nodes(db, acc.id)
     if node in pending:
         return False, "this machine has not signed in to the account yet"
     if not acc.runs_on(node):
         return False, "this account is not enabled on this machine"
-    capacities = {}
-    if acc.session_limit:
-        candidates = [n for n in acc.machines if n not in pending]
-        capacities = machine_capacities(db, candidates, acc.id)
-        if capacities.get(node, {}).get("free", 0) <= 0:
-            return False, "this machine has no free worker slots; its capacity is full"
+    candidates = [n for n in acc.machines if n not in pending]
+    capacities = machine_capacities(db, candidates, acc.id)
+    # A configured account without a shared limit is bounded by its `sessions` and machine slots only when it is
+    # judged as a quota-routing peer; its own claims keep the worker-level limits they always had.
+    bounded = bool(acc.session_limit or as_peer)
+    if bounded and capacities.get(node, {}).get("free", 0) <= 0:
+        return False, "this machine has no free worker slots; its capacity is full"
     running = running_by_node(db, acc.id)
-    if acc.session_limit and sum(running.values()) >= acc.sessions:
+    if bounded and sum(running.values()) >= acc.sessions:
         return False, f"account is at its limit of {acc.sessions} concurrent sessions"
     if acc.session_limit:
         eligible_capacities = {machine: values["account"] for machine, values in capacities.items()

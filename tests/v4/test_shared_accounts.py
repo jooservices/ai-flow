@@ -569,6 +569,38 @@ def test_quota_routing_does_not_defer_to_a_full_shared_peer(client, ctx):
     assert candidates(client, cc, "claude-01") == ["TESTWP-QUOTA-FULL"]
 
 
+def test_quota_routing_does_not_defer_to_a_full_configured_peer(client, ctx):
+    """A peer from accounts.yaml has no stored session limit; its parallel sessions still bound it."""
+    sign_in(client, ctx)
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    beat(client, "cc", cc)
+    beat(client, "node1", node1)
+    assert client.post("/v1/shared-accounts", json={"id": "src-01", "provider": "claude",
+                                                    "roles": ["dev"], "session_limit": 1}).status_code == 201
+    assert client.post("/v1/shared-accounts/src-01/machines", json={"node": "node1"}).status_code == 201
+    assert client.post("/v1/accounts/src-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    add_ticket(ctx.db, "TESTWP-CFG-FILL")
+    assert claim(client, cc, "TESTWP-CFG-FILL", "claude-01").json()["claimed"]
+    add_ticket(ctx.db, "TESTWP-CFG-QUOTA")
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='src-01'")
+
+    assert candidates(client, node1, "src-01") == ["TESTWP-CFG-QUOTA"]
+
+
+def test_pending_shared_assignment_gets_no_worker_until_signed_in(client, ctx):
+    sign_in(client, ctx)
+    node1 = join(client, "node1")
+    assert client.post("/v1/shared-accounts", json={"id": "wait-01", "provider": "claude",
+                                                    "session_limit": 1}).status_code == 201
+    assert client.post("/v1/shared-accounts/wait-01/machines", json={"node": "node1"}).status_code == 201
+    desired = beat(client, "node1", node1)
+    assert "wait-01" not in desired["accounts"] and "wait-01" not in desired["workers"]
+    assert [s["account"] for s in desired["signin"]] == ["wait-01"]
+    assert client.post("/v1/accounts/wait-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    desired = beat(client, "node1", node1)
+    assert "wait-01" in desired["accounts"] and "wait-01" in desired["workers"]
+
+
 def test_session_limit_cannot_drop_below_active_sessions(client, ctx):
     cc, node1 = two_machines(client, ctx, limit=2)
     assert claim(client, cc, "TESTWP-1").json()["claimed"]

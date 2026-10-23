@@ -151,7 +151,9 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
         for t in manifest["tables"]:
             if f"db/{t}.copy" not in members:
                 raise BackupError(f"the backup lacks the data of table {t}")
-        with psycopg.connect(database_url) as conn:
+        # Restore is a product operation. Mark its connection as internal so the direct-SQL audit trigger
+        # does not mistake the restore's COPY statements for human intervention.
+        with psycopg.connect(database_url, application_name="aiflow4-control-restore") as conn:
             existing = set(_tables(conn))
             missing = [t for t in manifest["tables"] if t not in existing]
             if missing:

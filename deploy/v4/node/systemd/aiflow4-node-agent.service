@@ -1,7 +1,7 @@
 [Unit]
 Description=AI Flow v4 node agent (heartbeat, metrics, workers)
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service auditd.service
+Wants=network-online.target docker.service auditd.service
 
 [Service]
 EnvironmentFile=/etc/aiflow/node.env

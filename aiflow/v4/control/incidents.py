@@ -374,7 +374,9 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
             reasons.append(f"no AI account is ready ({states})")
         elif not any("quota cooldown/backoff" in reason for reason in reasons):
             reasons.append(f"AI account quota cooldown/backoff leaves no account ready ({states})")
-    return reasons or ["no cause found: check the candidates endpoint and the master cycle"]
+    return reasons or ["No specific cause was observed. Checked: parked tickets and tool waits, retry backoff, "
+                       "project pause, licence entitlement, node availability, version skew, toolchains, test "
+                       "services, account status, quota, role health, machine assignment and active leases."]
 
 
 def check_idle_flow(ctx) -> None:

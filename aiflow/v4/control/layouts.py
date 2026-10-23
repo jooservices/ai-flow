@@ -39,6 +39,8 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("tokens", "Tokens and cost", "small"),
         ("quota", "AI account quota", "full"),
         ("tool-waits", "Tickets waiting for a tool", "full"),
+        ("flow-doctor", "Flow doctor", "full"),
+        ("operator-interventions", "Operator interventions", "full"),
         ("autonomy", "Master autonomy", "full"),
     ]),
     "review": ("Human review", [

@@ -15,8 +15,9 @@ MIGRATIONS = Path(__file__).with_name("migrations")
 
 class DB:
     def __init__(self, url: str, min_size: int = 1, max_size: int = 10) -> None:
-        self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size, kwargs={"row_factory": dict_row},
-                                   open=True)
+        self.url = url
+        self.pool = ConnectionPool(url, min_size=min_size, max_size=max_size,
+                                   kwargs={"row_factory": dict_row, "application_name": "aiflow4-control"}, open=True)
 
     def close(self) -> None:
         self.pool.close()

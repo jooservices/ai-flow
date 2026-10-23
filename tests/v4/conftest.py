@@ -100,6 +100,7 @@ def control_repo(tmp_path: Path) -> Path:
 
 class FakeJira:
     normalize = staticmethod(Jira.normalize)
+    operator_changes = staticmethod(Jira.operator_changes)
 
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
@@ -214,6 +215,17 @@ class FakeJira:
 
     def link_issues(self, blocker, blocked, link_type="Blocks"):
         self.issue_links.append((blocker, blocked, link_type))
+
+    def issue_links_for(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def get_issue_links(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def delete_issue_link(self, link_id):
+        self.deleted_issue_links = getattr(self, "deleted_issue_links", []) + [str(link_id)]
+        for key in list(getattr(self, "links_by_ticket", {})):
+            self.links_by_ticket[key] = [link for link in self.links_by_ticket[key] if link.get("id") != str(link_id)]
 
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))

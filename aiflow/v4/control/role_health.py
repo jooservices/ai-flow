@@ -173,16 +173,37 @@ def _day_start() -> datetime:
 
 
 def probation_slot_open(db, account_id: str, role: str) -> bool:
-    return not db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND (result='' OR assigned_at >= %s)",
+    if db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND result='' LIMIT 1",
+              (account_id, role)):
+        return False
+    state = db.one("SELECT probation_unlimited FROM role_health WHERE account_id=%s AND role=%s", (account_id, role))
+    if state and state.get("probation_unlimited"):
+        return True
+    return not db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND assigned_at >= %s",
                       (account_id, role, _day_start()))
 
 
 def assign_probation(db, account_id: str, role: str, ticket_key: str) -> int | None:
     """Take today's probation slot; None when another claim already took it."""
-    row = db.one("INSERT INTO role_probation (account_id, role, ticket_key) SELECT %s,%s,%s WHERE NOT EXISTS ("
-                 " SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND (result='' OR assigned_at >= %s))"
-                 " RETURNING id", (account_id, role, ticket_key, account_id, role, _day_start()))
+    row = db.one("INSERT INTO role_probation (account_id, role, ticket_key) SELECT %s,%s,%s"
+                 " WHERE NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
+                 " AND (coalesce((SELECT probation_unlimited FROM role_health WHERE account_id=%s AND role=%s),false)"
+                 " OR NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND assigned_at >= %s))"
+                 " RETURNING id", (account_id, role, ticket_key, account_id, role, account_id, role,
+                                   account_id, role, _day_start()))
+    if row:
+        db.run("UPDATE role_health SET probation_unlimited=false WHERE account_id=%s AND role=%s",
+               (account_id, role))
     return row["id"] if row else None
+
+
+def expedite_probation(db, account_id: str, role: str) -> bool:
+    """Open an additional probation slot after an account or machine fault is repaired."""
+    row = db.one("UPDATE role_health SET probation_unlimited=true,updated_at=now()"
+                 " WHERE account_id=%s AND role=%s AND NOT enabled AND NOT probation_unlimited"
+                 " AND NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
+                 " RETURNING account_id", (account_id, role, account_id, role))
+    return bool(row)
 
 
 def attach_probation_run(db, probation_id: int, run_id: str) -> None:
@@ -248,7 +269,8 @@ def switch_off(ctx, account_id: str, role: str, score: float, window: int, histo
             f"scored runs ({failed} failed, {sent_back} sent back) is above {percent}%. Its other roles stay on. "
             f"One easy probation ticket a day; two in a row that succeed bring the role back.")
     ctx.db.run("INSERT INTO role_health (account_id, role, enabled, note, score, disabled_at) VALUES (%s,%s,false,%s,%s,now())"
-               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false, note=EXCLUDED.note, score=EXCLUDED.score,"
+               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false, probation_unlimited=false,"
+               " note=EXCLUDED.note, score=EXCLUDED.score,"
                " disabled_at=now(), updated_at=now()", (account_id, role, note, round(score, 4)))
     ctx.events.emit("role.disabled", account=account_id, step=role, outcome="disabled", reason=note,
                     score=round(score, 4))
@@ -257,7 +279,7 @@ def switch_off(ctx, account_id: str, role: str, score: float, window: int, histo
 
 
 def switch_on(ctx, account_id: str, role: str) -> None:
-    ctx.db.run("UPDATE role_health SET enabled=true, note='', score=NULL, disabled_at=NULL, scoring_from=now(),"
+    ctx.db.run("UPDATE role_health SET enabled=true, note='', score=NULL, disabled_at=NULL, probation_unlimited=false, scoring_from=now(),"
                " updated_at=now() WHERE account_id=%s AND role=%s", (account_id, role))
     ctx.events.emit("role.enabled", account=account_id, step=role, outcome="enabled",
                     reason=f"role {role} is back on for {account_id} after {RECOVERY_STREAK} successful probation tickets")

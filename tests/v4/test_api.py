@@ -918,7 +918,7 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
-    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account(s) from 1 provider(s)"
 
 
 def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):

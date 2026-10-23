@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pty
+import pwd
 import re
 import shutil
 import signal
@@ -21,6 +22,7 @@ import time
 import select
 from urllib.parse import quote
 from pathlib import Path
+from datetime import datetime, timezone
 
 from .. import VERSION
 from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
@@ -59,6 +61,91 @@ _SIGN_IN_RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", 
 
 
 _MISSING_LIBRARY = re.compile(r"error while loading shared libraries:\s*([^\s:]+)", re.IGNORECASE)
+_AUDIT_EVENT_ID = re.compile(rb"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
+_AUDIT_TYPE = re.compile(rb"type=([A-Z_]+)")
+_AUDIT_AUID = re.compile(rb"\bauid=(\d+)\b")
+_AUDIT_EXE = re.compile(rb'\bexe="((?:\\.|[^"\\])*)"')
+_AUDIT_PATH = re.compile(rb'\bname="((?:\\.|[^"\\])*)"')
+
+
+def _audit_interventions(raw: bytes) -> list[dict]:
+    """Extract human shell/config changes without retaining command arguments or file contents."""
+    groups: dict[bytes, list[bytes]] = {}
+    current = None
+    for line in raw.splitlines():
+        match = _AUDIT_EVENT_ID.search(line)
+        if not match:
+            continue
+        event_id = match.group(0)
+        if current is not None and event_id != current:
+            groups.setdefault(current, []).append(b"")
+        groups.setdefault(event_id, []).append(line)
+        current = event_id
+    results = []
+    for event_id, lines in groups.items():
+        text = b"\n".join(lines)
+        auid = _AUDIT_AUID.search(text)
+        if not auid:
+            continue
+        uid = int(auid.group(1))
+        if uid >= 4_294_967_295:
+            continue  # unset loginuid: systemd services are not operator sessions
+        try:
+            actor = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            actor = str(uid)
+        stamp = _AUDIT_EVENT_ID.search(event_id)
+        if not stamp:
+            continue
+        timestamp, serial = stamp.group(1).decode(), stamp.group(2).decode()
+        try:
+            happened_at = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            continue
+        types = {m.group(1) for line in lines if (m := _AUDIT_TYPE.search(line))}
+        exe = _AUDIT_EXE.search(text)
+        if b"EXECVE" in types and exe:
+            command = os.path.basename(exe.group(1).decode("utf-8", "replace").replace(r"\x22", '"'))[:120]
+            results.append({"source_key": f"{timestamp}:{serial}:shell", "source": "shell", "actor": actor,
+                            "action": "execute", "target": command, "happened_at": happened_at,
+                            "reason": "Interactive host command captured by audit; no reason was supplied"})
+        if b"PATH" in types and b"SYSCALL" in types:
+            paths = [m.group(1).decode("utf-8", "replace") for line in lines if _AUDIT_TYPE.search(line)
+                     and _AUDIT_TYPE.search(line).group(1) == b"PATH" for m in _AUDIT_PATH.finditer(line)]
+            for filename in sorted(set(os.path.basename(path) for path in paths if path)):
+                results.append({"source_key": f"{timestamp}:{serial}:config:{filename}", "source": "configuration",
+                                "actor": actor, "action": "write", "target": filename[:120],
+                                "happened_at": happened_at,
+                                "reason": "Interactive host file change captured by audit; no reason was supplied"})
+    return results
+
+
+def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/var/log/audit/audit.log",
+                           cursor_path: str = "/var/lib/aiflow4/operator-audit.cursor") -> int:
+    """Forward auditd records created by human login sessions, keeping only an inode and byte cursor."""
+    path, cursor = Path(audit_path), Path(cursor_path)
+    if not path.is_file():
+        return 0
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        state = json.loads(cursor.read_text(encoding="utf-8")) if cursor.exists() else {}
+    except (OSError, ValueError):
+        state = {}
+    stat = path.stat()
+    offset = int(state.get("offset", 0)) if int(state.get("inode", -1)) == stat.st_ino else 0
+    with path.open("rb") as stream:
+        stream.seek(min(offset, stat.st_size))
+        data = stream.read()
+        end = stream.tell()
+    complete_length = data.rfind(b"\n") + 1
+    complete = data[:complete_length]
+    events = _audit_interventions(complete)
+    for event in events:
+        api.call("POST", f"/v1/nodes/{quote(node, safe='')}/operator-interventions", event, retries=1)
+    tmp = cursor.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"inode": stat.st_ino, "offset": offset + complete_length}), encoding="utf-8")
+    os.replace(tmp, cursor)
+    return len(events)
 
 
 def _headless_launch_problem(binary: Path) -> str:
@@ -678,7 +765,7 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
 
 
 def process_node_operation(api: ControlClient, node: str) -> None:
-    """Claim and run at most one owner-approved, server-created whitelist operation."""
+    """Claim and run at most one server-created whitelist operation."""
     operation = api.call("GET", f"/v1/nodes/{node}/operations/next", retries=1).get("operation")
     if not operation:
         return
@@ -772,6 +859,10 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            try:
+                forward_operator_audit(api, name)
+            except Exception as e:  # noqa: BLE001 - retain the cursor so the next heartbeat retries delivery
+                log.warning("host audit forwarding failed (%s)", type(e).__name__)
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),

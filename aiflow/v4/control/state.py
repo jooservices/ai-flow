@@ -8,7 +8,7 @@ from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
-from . import role_health
+from . import flow_doctor, role_health
 from . import tooling
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_view
@@ -215,6 +215,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
+        "flow_doctor": flow_doctor.dashboard(ctx),
+        "operator_interventions": flow_doctor.operator_intervention_summary(ctx),
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,

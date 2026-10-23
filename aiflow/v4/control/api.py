@@ -44,7 +44,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
+from . import (business, escalations, flow_doctor, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
                shared_accounts, support_bundle, tooling, version_release)
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -214,11 +214,33 @@ _STATE_RELEASE_STEP = _state_object({"step": _STATE_STRING, "state": _STATE_STRI
     "node": _STATE_STRING, "detail": _STATE_STRING, "at": _state_nullable(_STATE_DATETIME), "url": _STATE_STRING},
     ("step", "state", "run_id", "node", "detail", "at"))
 
+_STATE_DOCTOR_FINDING = _state_object({"id": _STATE_INTEGER, "subject": _STATE_STRING, "cause": _STATE_STRING,
+    "detail": _STATE_STRING, "next_step": _STATE_STRING, "first_seen": _STATE_DATETIME,
+    "last_seen": _STATE_DATETIME}, ("id", "subject", "cause", "detail", "next_step", "first_seen", "last_seen"))
+_STATE_DOCTOR_ACTION = _state_object({"id": _STATE_INTEGER, "ticket_key": _STATE_STRING, "node": _STATE_STRING,
+    "account_id": _STATE_STRING, "action": _STATE_STRING, "outcome": _STATE_STRING,
+    "detail": _STATE_STRING, "created_at": _STATE_DATETIME},
+    ("id", "ticket_key", "node", "account_id", "action", "outcome", "detail", "created_at"))
+_STATE_ROLE_COVERAGE = _state_object({"role": _STATE_STRING, "ready_accounts": _STATE_STRING_ARRAY,
+    "providers": _STATE_STRING_ARRAY, "ready_count": _STATE_INTEGER, "provider_count": _STATE_INTEGER,
+    "healthy": _STATE_BOOLEAN, "reason": _STATE_STRING, "next_step": _STATE_STRING},
+    ("role", "ready_accounts", "providers", "ready_count", "provider_count", "healthy", "reason", "next_step"))
+_STATE_OPERATOR_INTERVENTION = _state_object({"id": _STATE_INTEGER, "happened_at": _STATE_DATETIME,
+    "source": _STATE_STRING, "actor": _STATE_STRING, "action": _STATE_STRING, "target": _STATE_STRING,
+    "reason": _STATE_STRING, "bug_ticket_key": _STATE_STRING},
+    ("id", "happened_at", "source", "actor", "action", "target", "reason", "bug_ticket_key"))
+
 STATE_RESPONSE_SCHEMA = _state_object({
     "generated_at": _STATE_DATETIME, "env": _STATE_STRING, "control_repo": _STATE_STRING,
     "versions": {"type": "object", "additionalProperties": _STATE_STRING}, "version": _STATE_STRING,
     "links": _state_object({"o2": _STATE_STRING, "mail": _STATE_STRING, "gatus": _STATE_STRING},
                             ("o2", "mail", "gatus")),
+    "flow_doctor": _state_object({"checked": _STATE_STRING_ARRAY,
+        "findings": _state_array(_STATE_DOCTOR_FINDING), "actions": _state_array(_STATE_DOCTOR_ACTION),
+        "role_coverage": _state_array(_STATE_ROLE_COVERAGE)},
+        ("checked", "findings", "actions", "role_coverage")),
+    "operator_interventions": _state_object({"last_24h": _STATE_INTEGER, "last_7d": _STATE_INTEGER,
+        "recent": _state_array(_STATE_OPERATOR_INTERVENTION)}, ("last_24h", "last_7d", "recent")),
     "tool_waits": _state_array(_state_object({
         "requirement": _STATE_STRING,
         "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
@@ -358,7 +380,8 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
         "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
         ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
-}, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
+}, ("generated_at", "env", "control_repo", "versions", "version", "links", "flow_doctor",
+    "operator_interventions", "tool_waits", "nodes", "accounts",
     "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
     "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
 
@@ -1089,6 +1112,17 @@ class ReleaseFailureBody(BaseModel):
     detail: str = ""
 
 
+class OperatorInterventionBody(BaseModel):
+    source_key: str = Field(min_length=1, max_length=240)
+    source: Literal["shell", "configuration", "database", "jira", "system"]
+    actor: str = Field(min_length=1, max_length=200)
+    action: str = Field(min_length=1, max_length=120)
+    target: str = Field(default="", max_length=300)
+    reason: str = Field(default="", max_length=1000)
+    happened_at: datetime | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]
@@ -1374,6 +1408,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500],
              J(with_connection(target, payload))))
+        automated = actor in {"control", "node-agent", "flow-doctor", "aiflow4-autodeploy", "deploy"}
+        if actor and accepted and not automated:
+            automated = bool(connection.execute("SELECT 1 FROM accounts WHERE id=%s", (actor,)).fetchone())
+        if actor and accepted and not automated:
+            source = "configuration" if target in {"aiflow-control", "project", "knowledge", "node",
+                                                         "ai-account", "console"} else target[:40]
+            connection.execute(
+                "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
+                (f"api:{uuid.uuid4()}", source, actor[:200], action[:120], (ticket or target)[:300],
+                 (result or "Manual API action; reason not supplied")[:1000],
+                 J({"target": target[:80], "action": action[:100]})))
 
     def with_connection(target: str, payload: dict | None) -> dict:
         """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
@@ -3834,6 +3880,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit_in(connection, "node", "remove", name, "", None, user.subject, True, "machine removed", {})
         ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
         return {"node": name, "removed": True}
+
+    @app.post("/v1/nodes/{name}/operator-interventions", status_code=202)
+    def report_operator_intervention(name: str, body: OperatorInterventionBody,
+                                     node: str = Depends(node_auth)) -> dict:
+        """Accept host-audit records from the root-owned node agent; the bearer is scoped to that node."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        intervention_id = flow_doctor.record_operator_intervention(
+            ctx, source_key=f"host:{node}:{body.source_key}", source=body.source, actor=body.actor,
+            action=body.action, target=body.target, reason=body.reason,
+            happened_at=body.happened_at, details={"node": node, **body.details})
+        return {"recorded": bool(intervention_id), "id": intervention_id}
 
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:

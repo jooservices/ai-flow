@@ -95,6 +95,38 @@ def test_reported_token_capacity_is_not_replaced_by_usage_derived_capacity():
     assert window["prediction"]["status"] == "comfortable"
 
 
+def test_provider_utilization_rate_predicts_exhaustion_without_recorded_run_tokens():
+    samples = [
+        {"sampled_at": NOW - timedelta(hours=1),
+         "quota": {"windows": {"five_hour": {"utilization": .4}}}},
+        {"sampled_at": NOW,
+         "quota": {"windows": {"five_hour": {"utilization": .6}}}},
+    ]
+    quota = {"windows": {"five_hour": {"utilization": .6, "quota_tokens": 100000,
+                                         "resets_at": (NOW + timedelta(hours=3)).isoformat()}}}
+
+    window = account_awareness("codex", quota, [], samples, NOW)["windows"][0]
+    prediction = window["prediction"]
+
+    assert window["left_tokens"] == 40000
+    assert prediction["status"] == "will run out before reset"
+    assert prediction["before_reset"] is True
+    assert prediction["exhaustion_at"] == (NOW + timedelta(hours=2)).isoformat()
+    assert prediction["remaining_at_reset_pct"] == 0
+
+
+def test_already_exhausted_reported_window_is_classified_as_run_out_before_reset():
+    quota = {"windows": {"five_hour": {"utilization": 1.0, "quota_tokens": 100000,
+                                         "resets_at": (NOW + timedelta(hours=1)).isoformat()}}}
+
+    prediction = account_awareness("codex", quota, [], [], NOW)["windows"][0]["prediction"]
+
+    assert prediction["status"] == "will run out before reset"
+    assert prediction["before_reset"] is True
+    assert prediction["exhaustion_at"] == NOW.isoformat()
+    assert prediction["remaining_now_pct"] == 0
+
+
 def test_confidence_thresholds_and_uneven_rates():
     assert account_awareness("codex", {}, recorded_runs(7), [], NOW)["confidence"] == "low"
     assert account_awareness("codex", {}, recorded_runs(8), [], NOW)["confidence"] == "medium"

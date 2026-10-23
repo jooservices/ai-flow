@@ -206,9 +206,15 @@ def _prediction(used_fraction: float | None, capacity: float | None, tokens_used
     remaining_fraction = None if used_fraction is None else max(0.0, 1 - used_fraction)
     remaining_units = (max(0.0, capacity * remaining_fraction) if capacity is not None and remaining_fraction is not None
                        else max(0.0, capacity - tokens_used) if capacity is not None else None)
+    exhausted = (remaining_fraction is not None and remaining_fraction <= 0) or (
+        capacity is not None and tokens_used >= capacity)
     unit_rate = tokens_per_hour if capacity is not None else None
     rate_fraction = fraction_per_hour
-    if rate_fraction is None and unit_rate and capacity:
+    if rate_fraction is not None and capacity is not None:
+        # Provider samples report quota consumption directly and include usage that may not be
+        # represented in AI Flow's run registry. Prefer that rate when the provider exposes it.
+        unit_rate = max(0.0, rate_fraction) * capacity
+    elif unit_rate and capacity:
         rate_fraction = unit_rate / capacity
     if capacity is None and used_fraction is not None and tokens_used > 0 and used_fraction > 0:
         token_capacity = tokens_used / used_fraction
@@ -218,7 +224,13 @@ def _prediction(used_fraction: float | None, capacity: float | None, tokens_used
     exhaustion_at = None
     state = "unknown"
     before_reset = False
-    if reset and reset > now:
+    if exhausted:
+        exhaustion_at = now
+        state = "will run out before reset"
+        if reset and reset > now:
+            remaining_at_reset = 0.0
+            before_reset = True
+    elif reset and reset > now:
         hours_left = (reset - now).total_seconds() / 3600
         if capacity is not None and unit_rate is not None:
             remaining_at_reset = (remaining_units - unit_rate * hours_left) / capacity
@@ -312,7 +324,8 @@ def account_awareness(provider: str, quota: dict | None, runs: list[dict], sampl
             except (TypeError, ValueError):
                 capacity = 0
             capacity = capacity or None
-            fraction_rate = _sample_rate(samples, name)
+            sampled_fraction_rate = _sample_rate(samples, name)
+            fraction_rate = sampled_fraction_rate
             if fraction_rate is None and utilization is not None and reset and reset > now:
                 elapsed_h = max(.01, period_h - (reset - now).total_seconds() / 3600)
                 if elapsed_h >= .25:
@@ -320,8 +333,10 @@ def account_awareness(provider: str, quota: dict | None, runs: list[dict], sampl
             effective_capacity = capacity
             if effective_capacity is None and utilization and used_tokens:
                 effective_capacity = used_tokens / utilization
+            prediction_fraction_rate = sampled_fraction_rate if capacity is not None else fraction_rate
             pred = _prediction(utilization, effective_capacity, used_tokens,
-                               rates["whole_window"]["tokens_per_hour"], fraction_rate, reset, now, confidence)
+                               rates["whole_window"]["tokens_per_hour"], prediction_fraction_rate, reset, now,
+                               confidence)
             left_pct = None if utilization is None else round(max(0, 1-utilization) * 100, 1)
             left_tokens = None if effective_capacity is None or utilization is None else max(
                 0, int(effective_capacity * (1-utilization)))

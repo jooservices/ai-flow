@@ -143,13 +143,16 @@ console.log(projectsView.innerHTML);
     return result.stdout
 
 
-def render_dashboard(state: dict, analytics: list[dict] | None = None) -> str:
+def render_dashboard(state: dict, analytics: list[dict] | None = None,
+                     weekly_report: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
     script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
     script = script[:script.index(BOOT)]
     project_key = (state.get("projects") or [{}])[0].get("key")
+    report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
+                               "needed_person": [], "repeated_failures": []}
     driver = f"""
 var dashboard = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-cc' ? dashboard : null; }};
@@ -157,7 +160,7 @@ S.data = {json.dumps(state)};
 S.analytics = {json.dumps(analytics or [])};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
-S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {{week_start: '2026-10-19', trend: [], finished_without_person: [], needed_person: [], repeated_failures: []}}}};
+S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
 renderDashboard();
 console.log(dashboard.innerHTML);
 """
@@ -167,7 +170,7 @@ console.log(dashboard.innerHTML);
     return result.stdout
 
 
-def render_machines(state: dict, weekly_report: dict) -> str:
+def render_machines(state: dict) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Machines and AI view")
@@ -180,8 +183,7 @@ S.data = {json.dumps(state)};
 S.services = [];
 S.view = 'machines';
 S.consoleUser = {json.dumps(console_session('owner'))};
-S.autonomy = {{data: {{budget: {{used_minutes: 0, daily_budget_minutes: 60, remaining_minutes: 60}}, report: {json.dumps(weekly_report)}}}, error: '', busy: false}};
-renderCC();
+renderMachines();
 console.log(machines.innerHTML);
 """
     result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
@@ -1065,7 +1067,9 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
             {"key": "ALPHA-5", "project": "ALPHA", "type": "Story", "summary": "Review this",
              "status": "Human review", "labels": [], "parent_key": "ALPHA-2", "run": None},
         ],
-        "nodes": [],
+        "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
+                   "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}}],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
                       "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
                       "quota_awareness": awareness}],
@@ -1077,24 +1081,26 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     }
     analytics = [{"day": day, "account": "codex-alpha", "runs": 3, "done": 2, "merged": 0,
                   "rework": 0, "failed": 1, "tokens_in": 1200, "tokens_out": 800, "cost_usd": 0.12}]
-    rendered = render_dashboard(state, analytics)
+    weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
+              "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
+                                                               "quota_awareness": awareness}]}
+    rendered = render_dashboard(state, analytics, weekly)
     assert rendered.count('class="dash-kpi"') == 4
     for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
                  "AI and machines", "AI usage", "codex-alpha", "Codex", "Next quota reset:",
                  "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
                  "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
-                 "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget"):
+                 "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
+                 "Weekly quota and usage", "Largest context run"):
         assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
 
-    weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
-              "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
-                                                             "quota_awareness": awareness}]}
-    machines = render_machines(state, weekly)
-    assert "quota-history" in machines and "comfortable" in machines
-    assert "Weekly quota and usage" in machines and "Largest context run" in machines
+    machines = render_machines(state)
+    assert "codex-alpha" in machines and "quota-history" in machines and "comfortable" in machines
+    assert "used 40% quota" in machines and "left 60%" in machines
+    assert "Largest context run" in machines and "Burn tokens/hour: 1h 1k, 24h 800, window 700" in machines
 
 
 def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():

@@ -3303,7 +3303,7 @@ function renderMachines() {
       if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Quota used <strong>' + quota + '</strong></span><span>Limit resets <strong>' + esc(a.quota_resets_at ? when(typeof a.quota_resets_at === 'number' ? new Date(a.quota_resets_at * 1000).toISOString() : a.quota_resets_at) : '—') + '</strong></span>';
-      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
+      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>' + quotaAwareness(a);
       if (state.accountEditor === a.id) {
         h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';

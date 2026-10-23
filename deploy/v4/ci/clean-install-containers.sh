@@ -249,7 +249,8 @@ for i in 0 1; do
   docker exec "$CONTROL" cat "$tokenfile" \
     | docker exec -i "$node" bash -c 'umask 077; cat > /root/join-token' || fail "$machine token delivery"
   docker exec "$CONTROL" rm -f "$tokenfile"
-  # The systemd container already has server-installer prerequisites, so only host preparation is skipped.
+  # Run the documented bootstrap without the prepared flag so the pinned server-installer installs and verifies
+  # packages, time sync, Docker and Docker permissions on this clean machine.
   docker exec -i "$node" bash -se <<'JOIN' || fail "$machine join bootstrap"
 set -euo pipefail
 mapfile -t join_fields < /root/join-token
@@ -258,7 +259,7 @@ rm -f /root/join-token
 install_url=${join_fields[0]}
 token=${join_fields[1]}
 curl -fsSL "$install_url" \
-  | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token "$token"
+  | sh -s -- --token "$token"
 JOIN
   [[ $(docker exec "$node" cat /srv/aiflow/current/RELEASE) == "$VERSION" ]] || fail "$machine does not run $VERSION"
   docker exec "$node" systemctl is-active --quiet aiflow4-node-agent || fail "$machine node agent is not running"

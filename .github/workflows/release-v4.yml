@@ -77,10 +77,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json isDraft,isPrerelease,tagName \
-            --jq '[.[] | select(.isDraft == false and .isPrerelease == false) | .tagName] | .[:2] | reverse | .[]' || true)
-          echo "previous=$(echo "$TAGS" | sed -n 1p)" >> "$GITHUB_OUTPUT"
-          echo "target=$(echo "$TAGS" | sed -n 2p)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # A successful empty query means no published release exists. Query/auth failures must fail this job.
+          TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json isDraft,isPrerelease,publishedAt,tagName \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | sort_by(.publishedAt) | reverse | .[:2] | .[].tagName')
+          echo "target=$(printf '%s\n' "$TAGS" | sed -n 1p)" >> "$GITHUB_OUTPUT"
+          echo "previous=$(printf '%s\n' "$TAGS" | sed -n 2p)" >> "$GITHUB_OUTPUT"
       - name: Acceptance test (full)
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5

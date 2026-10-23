@@ -35,13 +35,18 @@ Further cases in the same file:
 | `test_a_failed_state_health_check_rolls_the_deploy_back` | the same scripts with a refused `/v1/state` call the release unhealthy and deploy the previous release again |
 | `test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working` | CI-only backup/restore: after restoring freshly migrated tables, the Super Administrator signs in, a machine's old node token works, Jira refreshes its OAuth token, the GitHub App issues an installation token, and the restored event sequence generates a new id |
 | `test_upgrade_keeps_sign_in_and_data_and_rollback_returns_to_the_previous_release` | upgrade keeps secrets and the sign-in setting, rollback returns to the previous release, an unhealthy upgrade undoes itself (exit 5) |
-| `test_adding_a_machine_and_an_ai_account_while_sign_in_is_on` | a third machine joins and its new AI account is assigned by the next heartbeat |
+| `test_adding_a_machine_and_an_ai_account_while_sign_in_is_on` | an owner adds a third machine and an AI account through the signed-in Machines actions; the machine receives its sign-in request, reports a successful provider check, and receives that account in its heartbeat |
 | `test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug` | the CI wiring below |
 
 The pytest tier runs the real installer against a fake host, the real control API with sign-in on, and Jira and
 GitHub fakes (the test accounts), so it needs only the shared Redis and PostgreSQL. The deploy scripts run for real
 with stubs for `docker`, `sleep` and the deploy helpers; `AIFLOW4_CONTROL_URL` and `AIFLOW4_CONTROL_ENV` point them
 at the mock control endpoint (the defaults are the production values).
+
+The machine/account regression signs in to Command Center, uses the join-command and Add AI account actions, then
+checks that the node-token heartbeat carries the pending provider sign-in and later includes the account after a
+successful sign-in probe. The real-machine join test runs the documented bootstrap without the prepared flag, so the
+pinned `server-installer` prepares packages, time sync, Docker and Docker permissions on each clean node.
 
 The real-machine tier needs Docker and a signed release. Nightly runs use a published release; before publication the
 release workflow supplies its signed candidate tarball, Sigstore bundle and checksum manifest:
@@ -86,6 +91,10 @@ data directories; Redis leases and caches are rebuilt.
 | fast | every pull request that changes `aiflow/v4/install`, `aiflow/v4/control`, `aiflow/v4/node`, `deploy/v4` or the workflows (`acceptance-fast` in `ci.yml`) | syntax check of every deploy script and the acceptance cases |
 | full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast and the whole `tests/v4` suite; when a published release exists, the sign-in-enabled clean control and two-machine container run against it; when two exist, systemd control install, upgrade and rollback between them as well |
 | full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; when a published release exists, the sign-in-enabled clean install runs against it; upgrade and rollback run when two exist. The signed candidate's own install log is uploaded by the release job and attached to the bug ticket |
+
+The release jobs sort successful `gh release list` results by publication time, install the newest published release when
+one exists, and use the preceding release for upgrade and rollback when available. A successful empty query means no
+published release exists; an API or authentication failure fails the job and cannot skip the machine install.
 
 After signing the candidate tarball, the release job passes that exact tarball, Sigstore bundle and checksum manifest
 to `clean-install-containers.sh` before it pushes the control image or creates the GitHub Release. The test stages the

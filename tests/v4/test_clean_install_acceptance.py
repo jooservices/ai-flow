@@ -586,22 +586,49 @@ def test_upgrade_keeps_sign_in_and_data_and_rollback_returns_to_the_previous_rel
 # --- AC3: adding a machine and an AI account --------------------------------------------------------------------------
 def test_adding_a_machine_and_an_ai_account_while_sign_in_is_on(fresh):
     ctx, client = fresh.ctx, fresh.client
+    machine_api = fresh.machine_client()
+    assert machine_api.post("/v1/machines/node3/accounts", json={
+        "provider": "codex", "sessions": 1, "jobs": ["develop", "verify"],
+    }).status_code == 401
     fresh.sign_in()
-    fresh.join("cc")
-    repo = fresh.control_repo
-    (repo / "nodes" / "node3.yaml").write_text("name: node3\nip: 10.44.0.13\nslots: 1\nprojects: [TESTWP]\n")
-    accounts = repo / "accounts.yaml"
-    accounts.write_text(accounts.read_text() + "  - {id: codex-03, provider: codex, node: node3, tier: middle,"
-                                               " roles: [dev, verify]}\n")
-    snap = ControlRepo.load(repo)
-    ctx.repo = lambda: snap
-    fresh.app.state.sync_accounts()
-    headers, beat = fresh.join("node3")
-    assert beat["desired"]["accounts"] == ["codex-03"]
-    assert ctx.db.one("SELECT node FROM accounts WHERE id='codex-03'")["node"] == "node3"
+    headers, _ = fresh.join("node3")  # signed-in Command Center join-command action
     assert any(n["name"] == "node3" for n in client.get("/v1/state").json()["nodes"])
-    # the new machine's own call passes the gate with its token only
-    assert fresh.machine_client().get("/v1/work/candidates", params={"account": "codex-03"}, headers=headers).status_code == 200
+
+    # This is the Add AI account action used by the Machines screen, with its owner session cookie.
+    created = client.post("/v1/machines/node3/accounts", json={
+        "provider": "codex", "sessions": 1, "jobs": ["develop", "verify"],
+    })
+    assert created.status_code == 200, created.text
+    account_id = created.json()["account"]
+    assert created.json()["node"] == "node3" and created.json()["status"] == "queued"
+    assert ctx.db.one("SELECT node FROM accounts WHERE id=%s", (account_id,))["node"] == "node3"
+
+    # The machine retrieves the queued sign-in from its heartbeat, reports provider authorization and a successful
+    # account probe, and then receives the account as work it can serve.
+    beat = machine_api.post("/v1/nodes/node3/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
+    assert beat.status_code == 200, beat.text
+    handoff = next(item for item in beat.json()["desired"]["sign_ins"] if item["account"] == account_id)
+    assert handoff["provider"] == "codex" and handoff["request_id"]
+    assert account_id not in beat.json()["desired"]["accounts"]
+    for status, details in (
+        ("starting", {}),
+        ("waiting", {"sign_in_url": "https://auth.openai.com/codex/device", "code": "ABCD-EFGH"}),
+        ("completed", {}),
+    ):
+        reported = machine_api.post(f"/v1/accounts/{account_id}/sign-in/status",
+                                    json={"request_id": handoff["request_id"], "status": status, **details},
+                                    headers=headers)
+        assert reported.status_code == 200, reported.text
+    probed = machine_api.post(f"/v1/accounts/{account_id}/probe", json={"ok": True}, headers=headers)
+    assert probed.status_code == 200, probed.text
+    beat = machine_api.post("/v1/nodes/node3/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
+    assert beat.status_code == 200 and account_id in beat.json()["desired"]["accounts"]
+    details = client.get(f"/v1/accounts/{account_id}/sign-in")
+    assert details.status_code == 200 and details.json()["code"] == "ABCD-EFGH"
+    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
+    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    # A machine's own work request is authorized by its node token without a console cookie.
+    assert machine_api.get("/v1/work/candidates", params={"account": account_id}, headers=headers).status_code == 200
 
 
 # --- AC4: CI wiring ---------------------------------------------------------------------------------------------------
@@ -635,6 +662,16 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     assert "does not automatically open a bug issue" in DOC.read_text()
 
     release = _workflow("release-v4.yml")
+    for workflow, job_name in ((ci, "acceptance-full"), (release, "acceptance")):
+        steps = workflow["jobs"][job_name]["steps"]
+        release_list = next(s for s in steps if "Two newest published releases" in s.get("name", ""))
+        command = release_list["run"]
+        assert "set -euo pipefail" in command
+        assert "gh release list" in command and "|| true" not in command
+        assert "sort_by(.publishedAt)" in command
+        assert 'target=$(printf' in command and 'sed -n 1p' in command
+        assert 'previous=$(printf' in command and 'sed -n 2p' in command
+
     gate = release["jobs"]["acceptance"]
     full_step = next(s for s in gate["steps"] if "clean-install-acceptance.sh full" in s.get("run", ""))
     assert "ACCEPTANCE_PREVIOUS" in full_step["env"] and "ACCEPTANCE_TARGET" in full_step["env"]
@@ -681,7 +718,9 @@ def test_real_machine_run_uses_command_center_project_and_machine_setup():
         assert step in script, step
     assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
     assert "aiflow4-acceptance-provider" in script and "acceptance-providers.py" in script
-    assert "/v1/install.sh" in script and "AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token" in script
+    assert "/v1/install.sh" in script and "| sh -s -- --token \"$token\"" in script
+    assert "AIFLOW4_SERVER_INSTALLER_PREPARED=1" not in script
+    assert "pinned server-installer installs and verifies" in script
     assert "aiflow4-node-agent" in script and "/srv/aiflow/current/RELEASE" in script and ":online" in script
     assert "aiflow4-acceptance-cookie.jar" in script
     assert "/v1/nodes/join-tokens" not in script and "AIFLOW4_JOIN_TOKEN" not in script
@@ -777,6 +816,12 @@ REGRESSIONS = {
     "the bug ticket was not opened for a long log (broken pipe)": "test_the_bug_ticket_survives_a_log_longer_than_the_size_limit",
     "published clean installs used the checkout's installer instead of the target release":
         "test_release_install_helper_matches_the_release_or_candidate_under_test",
+    "release-list API or authentication failures looked like an empty release list":
+        "test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug",
+    "fresh node bootstrap skipped pinned server-installer preparation":
+        "test_real_machine_run_uses_command_center_project_and_machine_setup",
+    "machine and AI account acceptance bypassed the Command Center actions":
+        "test_adding_a_machine_and_an_ai_account_while_sign_in_is_on",
 }
 
 

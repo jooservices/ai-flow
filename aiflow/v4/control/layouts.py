@@ -42,6 +42,7 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("flow-doctor", "Flow doctor", "full"),
         ("operator-interventions", "Operator interventions", "full"),
         ("autonomy", "Master autonomy", "full"),
+        ("escalations", "Escalations and owner decisions", "full"),
     ]),
     "review": ("Human review", [
         ("queue", "Human review queue", "full"),
@@ -85,14 +86,14 @@ PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     },
     # The board and the people who are blocked first.
     "lead": {
-        "dashboard": {"order": ["kpis", "flow", "waiting", "building", "projects"], "hidden": ["tokens", "autonomy"],
+        "dashboard": {"order": ["kpis", "flow", "waiting", "building", "projects"], "hidden": ["autonomy"],
                       "sizes": {"waiting": "medium", "building": "large"}},
         "delivery": {"order": ["board", "attention", "kpis", "epics", "runs"], "hidden": ["analytics"]},
         "review": {"order": ["queue", "items", "metrics", "threads"]},
     },
     "business": {
         "dashboard": {"order": ["kpis", "flow", "projects", "building", "waiting"],
-                      "hidden": ["usage", "tokens", "quota", "tool-waits", "autonomy"]},
+                      "hidden": ["tool-waits", "autonomy"]},
         "delivery": {"order": ["kpis", "epics", "board", "attention"], "hidden": ["runs", "analytics"]},
     },
     # Health of machines, accounts and quota first.
@@ -104,7 +105,7 @@ PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     # The reviews waiting for a person first.
     "reviewer": {
         "dashboard": {"order": ["waiting", "kpis", "building", "flow"],
-                      "hidden": ["usage", "tokens", "quota", "tool-waits", "autonomy"],
+                      "hidden": ["tool-waits", "autonomy"],
                       "sizes": {"waiting": "large"}},
         "review": {"order": ["items", "queue", "threads", "metrics"], "hidden": ["metrics"]},
     },

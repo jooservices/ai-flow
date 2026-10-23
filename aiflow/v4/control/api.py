@@ -290,9 +290,10 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "key": _STATE_STRING, "project": _STATE_STRING, "status": _STATE_STRING, "type": _STATE_STRING,
         "priority": _STATE_STRING, "labels": _STATE_STRING_ARRAY, "summary": _STATE_STRING,
         "parent_key": _state_nullable(_STATE_STRING), "blocked_by": _STATE_STRING_ARRAY,
+        "done_at": _state_nullable(_STATE_DATETIME),
         "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
         "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
-    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "epic",
+    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
         "repository", "run", "last_run", "updated_age_s"))),
     "release_readiness": _state_array(_state_object({
         "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
@@ -2191,6 +2192,26 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, None)
         layouts.reset(ctx.db, user.subject, layout_page(page))
         return layouts.page_view(page, user.role, None)
+
+    @app.get("/v1/console/preferences")
+    def console_preferences(request: Request) -> dict:
+        user = console_user(request, None)
+        row = ctx.db.one("SELECT theme FROM console_preferences WHERE email=%s", (user.subject,))
+        return {"theme": row["theme"] if row else "dark"}
+
+    @app.put("/v1/console/preferences")
+    async def console_preferences_save(request: Request) -> dict:
+        user = console_user(request, None)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "invalid console preferences") from None
+        if not isinstance(body, dict) or body.get("theme") not in {"dark", "light"}:
+            raise HTTPException(400, "theme must be dark or light")
+        ctx.db.run("INSERT INTO console_preferences (email, theme) VALUES (%s, %s)"
+                   " ON CONFLICT (email) DO UPDATE SET theme=EXCLUDED.theme, updated_at=now()",
+                   (user.subject, body["theme"]))
+        return {"theme": body["theme"]}
 
     def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
         return console_user(request, {"notifications.manage"}, target="notifications", action=action)
@@ -5640,6 +5661,101 @@ def create_app(ctx: Ctx) -> FastAPI:
         metrics = review_metrics.calculate_review_metrics(metrics_tickets, events, runs, audits)
         return {"metrics": metrics, "projects": configured}
 
+    def review_queue_keys(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> list[str]:
+        """Return the keys selected for Human review, resolving blockers against the full ticket registry."""
+        if project_filter:
+            where, params = " AND project=%s", (project_filter,)
+        elif project_scope is not None:
+            where, params = " AND project=ANY(%s)", (list(project_scope),)
+        else:
+            where, params = "", ()
+        candidates = ctx.db.all(
+            "SELECT key, status, blocked_by FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
+            " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where + " ORDER BY project,key",
+            params)
+        all_statuses = {row["key"]: row["status"] for row in ctx.db.all("SELECT key,status FROM tickets")}
+        keys = []
+        for ticket in candidates:
+            if ticket["status"] in ("Human review", "Needs owner"):
+                keys.append(ticket["key"])
+            elif any(str(blocker) not in all_statuses or all_statuses[str(blocker)] not in ("Done", "Closed")
+                     for blocker in (ticket.get("blocked_by") or [])):
+                keys.append(ticket["key"])
+        return keys
+
+    @app.get("/v1/dashboard/waiting")
+    def dashboard_waiting(request: Request) -> dict:
+        """Return dashboard-visible Human review ticket keys without exposing queue details."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = user.project_keys if user and user.project_keys is not None else None
+        return {"ticket_keys": review_queue_keys(project_scope=scope)}
+
+    @app.get("/v1/dashboard/quota")
+    def dashboard_quota(request: Request) -> dict:
+        """Return a dashboard-safe quota summary for accounts serving the caller's visible projects."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = set(user.project_keys) if user and user.project_keys is not None else None
+        repo = ctx.repo()
+        nodes = {node["name"]: node for node in ctx.db.all(
+            "SELECT name,projects,dynamic FROM nodes WHERE removed_at IS NULL")}
+        account_rows = ctx.db.all("SELECT id,provider,quota FROM accounts ORDER BY node,provider,id")
+        quota_by_account = quota_reporting.assessments(ctx.db, account_rows)
+
+        labels = {"five_hour": "5 hours", "seven_day": "Weekly", "seven_day_opus": "Weekly Opus",
+                  "seven_day_sonnet": "Weekly Sonnet", "estimated_week": "Estimated weekly"}
+
+        def percent(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if number != number:
+                return None
+            if 0 <= number <= 1:
+                number *= 100
+            return round(max(0, min(100, number)), 1)
+
+        accounts = []
+        for account in account_rows:
+            configured = repo.account(account["id"])
+            if configured is None:
+                continue
+            if scope is not None and not any(
+                    machine in nodes and scope.intersection(repo.projects_for_node(
+                        machine, nodes[machine].get("projects") or [], bool(nodes[machine].get("dynamic"))))
+                    for machine in configured.machines):
+                continue
+
+            awareness_windows = (quota_by_account.get(account["id"]) or {}).get("windows") or []
+            windows = [{
+                "label": str(window.get("label") or labels.get(str(window.get("name")), "Quota window")),
+                "used_pct": percent(window.get("used_pct")),
+                "reset_at": window.get("reset_at"),
+                "estimated": window.get("source") == "estimate",
+            } for window in awareness_windows if isinstance(window, dict)]
+            if not windows:
+                raw_windows = (account.get("quota") or {}).get("windows") or {}
+                windows = [{
+                    "label": labels.get(name, "Quota window"),
+                    "used_pct": percent(window.get("utilization", window.get("used_percent"))),
+                    "reset_at": window.get("resets_at") or window.get("reset_at"),
+                    "estimated": False,
+                } for name, window in raw_windows.items() if isinstance(window, dict)]
+            accounts.append({"provider": str(account.get("provider") or "unknown"), "windows": windows})
+
+        provider_counts: dict[str, int] = {}
+        rows = []
+        for account in accounts:
+            provider = account["provider"]
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            rows.append({"provider": provider, "label": f"Account {provider_counts[provider]}",
+                         "windows": account["windows"]})
+        return {"rows": rows}
+
     @app.get("/v1/reviews")
     def human_reviews(request: Request, project: str = Query(default="")) -> dict:
         """Queue waiting items with their action set and project-filtered human-review metrics."""
@@ -5653,25 +5769,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                     "roles": list(user.effective_roles)})
             raise HTTPException(403, "not available for your role")
         metrics_data = review_data(project, scope)
-        if project:
-            where, params = " AND project=%s", (project,)
-        elif scope is not None:
-            where, params = " AND project=ANY(%s)", (list(scope),)
-        else:
-            where, params = "", ()
+        selected_keys = review_queue_keys(project, scope)
         tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
-                             " FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
-                             " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where
-                             + " ORDER BY project, key", params)
+                             " FROM tickets WHERE key=ANY(%s) ORDER BY project,key", (selected_keys,))
         all_statuses = {row["key"]: row["status"] for row in ctx.db.all("SELECT key,status FROM tickets")}
         epics = {r["key"]: r["status"] for r in ctx.db.all(
             "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
         out = []
         for ticket in tickets:
-            if ticket["status"] not in ("Human review", "Needs owner") and not any(
-                    str(blocker) not in all_statuses or all_statuses[str(blocker)] not in ("Done", "Closed")
-                    for blocker in (ticket.get("blocked_by") or [])):
-                continue
             dev = ctx.db.one("SELECT pr_url, summary, details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                              " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
             latest = ctx.db.one("SELECT step,outcome,summary,details,started_at FROM runs"
@@ -6493,6 +6598,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             rows = daily(ctx.db, days, project)
         return {"days": days, "project": project, "rows": rows}
+
+    @app.get("/v1/analytics/usage/daily")
+    def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:
+        from .analytics import daily_usage
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        project_keys = user.project_keys if user and user.project_keys is not None else None
+        return {"days": days, "group_by": "ai", "rows": daily_usage(ctx.db, days, project_keys)}
 
     @app.get("/v1/analytics/usage")
     def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),

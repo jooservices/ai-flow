@@ -321,3 +321,47 @@ def test_console_read_can_see_shared_account_usage_but_not_sign_in_prompts(clien
     readonly_shared = next(a for a in readonly_state.json()["accounts"] if a["id"] == "shared-01")
     assert next(m for m in readonly_shared["machines"] if m["node"] == "node1")["signin"] is None
     assert "ABCD-2345" not in readonly_accounts.text + readonly_state.text
+
+
+def test_auth_failure_on_one_machine_only_marks_that_machine_pending(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    failed = client.post("/v1/accounts/shared-01/probe", json={"ok": False, "error_kind": "auth", "summary": "401"},
+                         headers=node1)
+    assert failed.status_code == 200
+    shared = next(a for a in client.get("/v1/shared-accounts").json()["accounts"] if a["id"] == "shared-01")
+    assert {m["node"]: m["signed_in"] for m in shared["machines"]} == {"cc": True, "node1": False}
+    # no account-wide cooldown: the healthy machine keeps taking work, and the failed one takes none
+    assert ctx.db.one("SELECT cooldown_until FROM accounts WHERE id='shared-01'")["cooldown_until"] is None
+    assert "TESTWP-1" in candidates(client, cc)
+    assert claim(client, cc, "TESTWP-1").json()["claimed"]
+    assert claim(client, cc, "TESTWP-2").json()["claimed"]  # node1 left the fair share: cc may use both slots
+    assert claim(client, node1, "TESTWP-3").status_code == 409
+    # the failed machine is asked to sign in again
+    assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
+
+
+def test_quota_exhaustion_stays_an_account_wide_cooldown(client, ctx):
+    cc, _node1 = two_machines(client, ctx, limit=2)
+    client.post("/v1/accounts/shared-01/probe", json={"ok": False, "error_kind": "quota", "summary": "q"}, headers=cc)
+    assert ctx.db.one("SELECT cooldown_until FROM accounts WHERE id='shared-01'")["cooldown_until"] is not None
+
+
+def test_session_limit_cannot_drop_below_active_sessions(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    assert claim(client, cc, "TESTWP-1").json()["claimed"]
+    assert claim(client, node1, "TESTWP-2").json()["claimed"]
+    low = client.put("/v1/shared-accounts/shared-01/session-limit", json={"session_limit": 1})
+    assert low.status_code == 409
+    assert next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
+                if a["id"] == "shared-01")["session_limit"] == 2
+    assert client.put("/v1/shared-accounts/shared-01/session-limit", json={"session_limit": 3}).status_code == 200
+
+
+def test_claim_uses_the_current_limit_not_a_stale_one(client, ctx):
+    from aiflow.v4.control import shared_accounts
+    two_machines(client, ctx, limit=3)
+    stale = ctx.repo().account("shared-01")  # read while the limit was 3
+    assert client.put("/v1/shared-accounts/shared-01/session-limit", json={"session_limit": 1}).status_code == 200
+    ok = [shared_accounts.claim_run(ctx.db, stale, (f"00000000-0000-0000-0000-0000000000{i}0", f"TESTWP-{i}", "TESTWP",
+                                                    "dev", "shared-01", "claude", "", "cc", i, "x")) for i in (1, 2)]
+    assert ok == [True, False]

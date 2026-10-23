@@ -102,6 +102,10 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
     with db.pool.connection() as conn:
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+            # the limit is read under the lock, so a concurrent change is never missed
+            stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
+            if stored:
+                acc = replace(acc, session_limit=int(stored["session_limit"]))
             if acc.session_limit:
                 pending = {row["node"] for row in conn.execute(
                     "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
@@ -122,6 +126,16 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
                          " token_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
     return True
+
+
+def mark_pending(db, acc: Account, node: str) -> bool:
+    """A machine lost its sign-in: only that machine goes back to pending (and gets a new sign-in request).
+    Returns True when another machine of the account is still signed in."""
+    db.run("INSERT INTO account_machines (account_id, node, status) VALUES (%s,%s,'pending')"
+           " ON CONFLICT (account_id, node) DO UPDATE SET status='pending', signed_in_at=NULL,"
+           " signin_link='', signin_code='', signin_expires_at=NULL", (acc.id, node))
+    pending = pending_nodes(db, acc.id)
+    return any(m not in pending for m in acc.machines)
 
 
 def mark_signed_in(db, account_id: str, node: str) -> None:
@@ -151,7 +165,7 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
             prompt = {"link": row["signin_link"], "code": row["signin_code"],
                       "expires_at": row["signin_expires_at"].isoformat()}
         out.append({"node": n, "node_status": node_status.get(n, "offline"), "signed_in": not pending,
-                    "removable": bool(row), "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
+                    "removable": bool(row) and n != acc.node, "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
                     "state": ((row or {}).get("worker_state") or {}).get("state", ""), "signin": prompt,
                     "credential_expires_at": (row["credential_expires_at"].isoformat()
                                               if row and row["credential_expires_at"] else None)})
@@ -234,10 +248,22 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
     def set_limit(account_id: str, body: LimitBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="account", action="session_limit", node=account_id)
         acc = account_or_404(account_id)
-        ctx.db.run("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit, managed,"
-                   " created_by) VALUES (%s,%s,%s,%s,%s,%s,false,%s)"
-                   " ON CONFLICT (id) DO UPDATE SET session_limit=EXCLUDED.session_limit",
-                   (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, body.session_limit, user.subject))
+        # same lock as claim_run: a claim sees either the old or the new limit, never a half-applied change
+        with ctx.db.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
+                active = int(conn.execute("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'",
+                                          (acc.id,)).fetchone()["n"])
+                if body.session_limit < active:
+                    raise HTTPException(409, {"error": "limit_below_active_sessions",
+                                              "message": f"{acc.id} has {active} running sessions; wait for "
+                                                         f"{active - body.session_limit} to finish before lowering "
+                                                         f"the limit to {body.session_limit}."})
+                conn.execute("INSERT INTO shared_accounts (id, provider, tier, roles, explicit_only, session_limit,"
+                             " managed, created_by) VALUES (%s,%s,%s,%s,%s,%s,false,%s)"
+                             " ON CONFLICT (id) DO UPDATE SET session_limit=EXCLUDED.session_limit",
+                             (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, body.session_limit,
+                              user.subject))
         audit("account", "session_limit", acc.id, "", None, user.subject, True, str(body.session_limit))
         return view(account_or_404(account_id), include_signin=True)
 
@@ -266,7 +292,8 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         acc = account_or_404(account_id)
         if not acc.runs_on(node):
             raise HTTPException(404, f"{acc.id} is not enabled on {node}")
-        if not ctx.db.one("SELECT 1 AS x FROM account_machines WHERE account_id=%s AND node=%s", (acc.id, node)):
+        if node == acc.node or not ctx.db.one("SELECT 1 AS x FROM account_machines WHERE account_id=%s AND node=%s",
+                                              (acc.id, node)):
             raise HTTPException(409, f"{acc.id} is assigned to {node} in aiflow-control/accounts.yaml")
         last = len(acc.machines) == 1
         if last and not confirm:

@@ -4894,7 +4894,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         if "credential_expires_at" in body.model_fields_set:
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
                        (body.credential_expires_at, account_id))
-        if body.error_kind in ("quota", "auth"):
+        if body.error_kind == "auth" and len(acc.machines) > 1:
+            # one machine lost its sign-in: only that machine goes back to pending; the others keep working
+            if not shared_accounts.mark_pending(ctx.db, acc, node):
+                ctx.db.run("UPDATE accounts SET status='signed_out', last_error=%s, cooldown_since=NULL,"
+                           " idle_since=NULL WHERE id=%s AND status<>'working'", (body.summary[:300], account_id))
+        elif body.error_kind in ("quota", "auth"):
+            if body.error_kind == "auth":
+                shared_accounts.mark_pending(ctx.db, acc, node)
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
             ctx.leases.cooldown(account_id, seconds, body.error_kind)

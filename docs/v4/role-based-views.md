@@ -49,3 +49,79 @@ with that name. Existing `owner` assignments migrate to Administrator and `lead`
 The API accepts `super_admin`, `owner` and `lead` as legacy role names for one release, normalizing them to their
 new roles.
 
+
+## Route permissions
+
+Each route below is guarded by the permission in the second column; a role without it is refused with
+"not available for your role" and the refusal is audited. A person limited to projects only receives the
+rows of those projects.
+
+| Route | Permission |
+|---|---|
+| POST `/v1/accounts/{account_id}/sign-in/complete` | `view.machines_ai` |
+| GET `/v1/accounts/{account_id}/sign-in` | `view.machines_ai` |
+| POST `/v1/accounts/{account_id}/sign-in` | `view.machines_ai` |
+| DELETE `/v1/accounts/{account_id}` | `view.machines_ai` |
+| PATCH `/v1/accounts/{account_id}` | `view.machines_ai` |
+| GET `/v1/analytics/daily` | `view.dashboard` |
+| GET `/v1/analytics/usage` | `view.dashboard` |
+| GET `/v1/auth/users` | `console.manage` |
+| POST `/v1/auth/users` | `console.manage` |
+| PUT `/v1/backups/config` | `backup.read` |
+| POST `/v1/backups/key` | `backup.read` |
+| POST `/v1/backups/run` | `backup.read` |
+| GET `/v1/backups` | `backup.read` |
+| PATCH `/v1/console/users/{email}/disabled` | `console.manage` |
+| PUT `/v1/console/users/{email}` | `console.manage` |
+| GET `/v1/console/users` | `console.manage` |
+| POST `/v1/console/users` | `console.manage` |
+| POST `/v1/console/view-as/stop` | `console.manage` |
+| POST `/v1/console/view-as` | `console.manage` |
+| POST `/v1/integrations/github/imports/{pending_id}/connect` | `view.integrations` |
+| GET `/v1/integrations/github/imports/{pending_id}/install` | `view.integrations` |
+| GET `/v1/integrations/github/imports/{pending_id}/installations` | `view.integrations` |
+| POST `/v1/integrations/github/imports` | `view.integrations` |
+| GET `/v1/integrations/github/installation-settings` | `view.integrations` |
+| GET `/v1/integrations/github/manifest/start` | `view.integrations` |
+| GET `/v1/integrations/github` | `view.integrations` |
+| POST `/v1/integrations/jira/api-token` | `view.integrations` |
+| POST `/v1/integrations/jira/disconnect` | `view.integrations` |
+| POST `/v1/integrations/jira/oauth/start` | `view.integrations` |
+| GET `/v1/integrations/jira` | `view.integrations` |
+| POST `/v1/knowledge/items/{item_id}/{action}` | `view.knowledge` |
+| GET `/v1/knowledge/items` | `view.knowledge` |
+| POST `/v1/knowledge/items` | `view.knowledge` |
+| GET `/v1/knowledge/resources/{kind}/{resource_id}/history` | `view.knowledge` |
+| POST `/v1/knowledge/resources/{kind}/{resource_id}/restore` | `view.knowledge` |
+| GET `/v1/knowledge/resources` | `view.knowledge` |
+| POST `/v1/knowledge/resources` | `view.knowledge` |
+| POST `/v1/licensing/activate` | `licensing.manage` |
+| PUT `/v1/licensing/limits` | `licensing.manage` |
+| POST `/v1/licensing/offline` | `licensing.manage` |
+| GET `/v1/licensing/status` | `licensing.manage` |
+| GET `/v1/licensing/usage.csv` | `licensing.manage` |
+| GET `/v1/licensing/usage` | `licensing.manage` |
+| GET `/v1/licensing` | `licensing.manage` |
+| POST `/v1/machines/{name}/accounts` | `view.machines_ai` |
+| PUT `/v1/master/autonomy/budget` | `console.manage` |
+| GET `/v1/master/autonomy` | `view.machines_ai` |
+| GET `/v1/master/report` | `view.machines_ai` |
+| GET `/v1/memory/search` | `view.knowledge` |
+| GET `/v1/memory/study-cases` | `view.knowledge` |
+| POST `/v1/nodes/{name}/join-command` | `view.machines_ai` |
+| GET `/v1/nodes/{name}/operations` | `view.machines_ai` |
+| POST `/v1/nodes/{name}/operations` | `view.machines_ai` |
+| PUT `/v1/nodes/{name}/work-acceptance` | `view.machines_ai` |
+| DELETE `/v1/nodes/{name}` | `view.machines_ai` |
+| GET `/v1/projects/catalog` | `projects.manage` |
+| POST `/v1/projects/preflight` | `projects.manage` |
+| POST `/v1/projects/{key}/pause` | `projects.manage` |
+| GET `/v1/projects/{key}/repositories` | `projects.manage` |
+| PUT `/v1/projects/{key}/repositories` | `projects.manage` |
+| DELETE `/v1/projects/{key}` | `projects.manage` |
+| GET `/v1/projects` | `projects.manage` |
+| POST `/v1/projects` | `projects.manage` |
+| GET `/v1/reviews/export.csv` | `view.human_review` |
+| GET `/v1/reviews` | `view.human_review` |
+| PUT `/v1/role-health/settings` | `console.manage` |
+| GET `/v1/state` | `view.dashboard` |

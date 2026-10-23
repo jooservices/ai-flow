@@ -1,6 +1,6 @@
 # Delivery
 
-**Assumes:** you are signed in with any console role and at least one project exists.
+**Assumes:** you are signed in as an Administrator, Product owner, Delivery or Team Lead, and at least one project exists.
 
 Delivery (`/delivery`) shows one project at a time.
 

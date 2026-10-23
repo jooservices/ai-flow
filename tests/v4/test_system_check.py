@@ -68,6 +68,67 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
     assert joined.json()["node_token"]
 
 
+def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(client, monkeypatch):
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    build_provider_conditions = system_check._github_project_conditions
+
+    def slow_provider(*args, **kwargs):
+        provider_checks = args[3] if len(args) > 3 else kwargs.get("provider_checks", True)
+        if provider_checks:
+            provider_started.set()
+            provider_release.wait(timeout=8)
+        return build_provider_conditions(*args, **kwargs)
+
+    headers = _direct_join(client)
+    monkeypatch.setattr(system_check, "_github_project_conditions", slow_provider)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client.post, "/v1/nodes/cc/heartbeat", headers=headers, json={})
+        try:
+            provider_started_in_time = provider_started.wait(timeout=2)
+            try:
+                heartbeat = future.result(timeout=3)
+                response_sent_while_probe_waited = True
+            except TimeoutError:
+                heartbeat = None
+                response_sent_while_probe_waited = False
+            if response_sent_while_probe_waited:
+                readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+                pending = next(item for item in readiness["projects"]["TESTWP"]
+                               if item["id"] == "github-installation")
+                assert pending["result"] == "needs_action"
+                assert any(item["id"] == "github-installation" for
+                           item in system_check.blocking_reasons(readiness, "TESTWP", "claude-01", ["claude-01"]))
+        finally:
+            provider_release.set()
+        if heartbeat is None:
+            heartbeat = future.result(timeout=3)
+
+    assert provider_started_in_time
+    assert response_sent_while_probe_waited
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["desired"]["workers"]
+
+
+def test_legacy_heartbeat_marks_unreported_machine_conditions_uncheckable(client, monkeypatch):
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(api, "_schedule_heartbeat_readiness", lambda *_args: None)
+    headers = _direct_join(client)
+
+    response = client.post("/v1/nodes/cc/heartbeat", headers=headers, json={})
+
+    assert response.status_code == 200
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    machine = {item["id"]: item for item in readiness["machine"]}
+    for condition_id in ("workspace-permissions", "repository-network"):
+        assert machine[condition_id]["result"] == "not_possible_on_this_machine"
+        assert "Upgrade the node agent" in machine[condition_id]["action"]
+    blocked = system_check.blocking_reasons(readiness, "TESTWP", "claude-01", ["claude-01"])
+    assert {item["id"] for item in blocked} >= {"workspace-permissions", "repository-network"}
+
+
 def test_machine_join_project_add_upgrade_and_hourly_are_check_triggers(client, ctx, control_repo, monkeypatch):
     headers = _direct_join(client)
     assert _wait_for_join_readiness(ctx)["trigger"] == "machine_joined"
@@ -259,7 +320,7 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
 def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx, monkeypatch):
     monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
-        "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
+        "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
     }
     joined = join_node(client, "cc").json()
@@ -280,7 +341,7 @@ def test_jira_browse_access_without_issue_write_permissions_needs_action(client,
 def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx, monkeypatch):
     monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
-        "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+        "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
     }
     join_node(client, "cc")
@@ -303,7 +364,7 @@ def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, miss
                                                                monkeypatch):
     monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
-        "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+        "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
     }
     ctx.jira.project_permissions["TESTWP"][missing_permission] = False
@@ -317,6 +378,31 @@ def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, miss
         f"The connected Jira account is missing {label} permission in project TESTWP.")
     assert permission["action"] == (
         f"Grant the connected Jira account {label} permission in project TESTWP.")
+
+
+def test_jira_403_reports_missing_browse_permission_without_invalidating_credential(client, ctx, monkeypatch):
+    from aiflow.v4.control.jira import JiraError
+
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    ctx.jira.projects = lambda: (_ for _ in ()).throw(
+        JiraError("GET /rest/api/3/project/search -> 403: restricted project"))
+    ctx.jira.project_permissions["TESTWP"] = {
+        "BROWSE_PROJECTS": False, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+        "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
+    }
+
+    join_node(client, "cc")
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    conditions = {item["id"]: item for item in readiness["projects"]["TESTWP"]}
+
+    assert conditions["jira-credentials"]["result"] == "ready"
+    assert "Reconnect Jira" not in conditions["jira-credentials"]["action"]
+    browse = conditions["jira-write-permissions"]
+    assert browse["result"] == "needs_action"
+    assert browse["detail"] == (
+        "The connected Jira account is missing Browse Projects permission in project TESTWP.")
+    assert browse["action"] == (
+        "Grant the connected Jira account Browse Projects permission in project TESTWP.")
 
 
 def test_revoked_github_app_permission_is_reported_with_required_action(client, ctx):

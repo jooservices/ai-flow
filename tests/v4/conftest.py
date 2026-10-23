@@ -137,7 +137,7 @@ class FakeJira:
     def project_write_permissions(self, key: str) -> dict[str, bool]:
         self.project_permission_reads.append(key)
         return self.project_permissions.get(key, {
-            "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+            "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
             "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
         })
 

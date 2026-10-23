@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import version_release
+from aiflow.v4.control import api, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Account, Project
+from aiflow.v4.core.system_check import condition
 from aiflow.v4.worker import version_release as release_worker
 from aiflow.v4.worker.dev import Claimed
 from conftest import add_ticket, join_node
@@ -146,6 +147,37 @@ def test_candidate_claim_rechecks_live_gate_before_any_release_step(client, ctx)
     assert getattr(ctx.github, "merges", []) == []
     assert getattr(ctx.github, "tags", {}) == {}
     assert getattr(ctx.github, "releases", {}) == {}
+
+
+@pytest.mark.parametrize(("blocked_condition", "expected_name"), [
+    (condition("repository-settings", "Repository settings", "needs_action",
+               "Repository settings need attention.", "Configure the project repository settings."),
+     "Repository settings"),
+    (condition("credential:claude-01", "Credentials · claude-01", "needs_action",
+               "Credential is invalid.", "Sign in again to AI account claude-01 on this machine."),
+     "Credentials · claude-01"),
+])
+def test_release_candidates_and_claims_obey_project_and_account_readiness_gate(
+        client, ctx, monkeypatch, blocked_condition, expected_name):
+    configure(ctx)
+    evidence(ctx, "TESTWP-22")
+    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    headers = node_headers(client)
+    readiness = {"checked_at": datetime.now(timezone.utc).isoformat(), "machine": [],
+                 "projects": {"TESTWP": [blocked_condition]}}
+    if blocked_condition["id"].startswith("credential:"):
+        readiness["credential_statuses"] = {"claude-01": {"present": True, "valid": False}}
+    ctx.db.run("UPDATE nodes SET readiness=%s WHERE name='cc'", (J(readiness),))
+
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert candidates["versions"] == []
+    assert expected_name in candidates["reason"]
+    assert claim.status_code == 409
+    assert expected_name in claim.text
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
 
 
 def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_project(client, ctx):

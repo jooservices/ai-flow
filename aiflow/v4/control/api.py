@@ -58,6 +58,9 @@ from . import notify
 
 log = logging.getLogger("aiflow4.api")
 
+_READINESS_REFRESH_LOCK = threading.Lock()
+_PENDING_READINESS_REFRESHES: set[str] = set()
+
 
 def _refresh_join_readiness(ctx, node: str) -> None:
     """Run provider-backed readiness probes away from the one-use node join request."""
@@ -70,6 +73,37 @@ def _refresh_join_readiness(ctx, node: str) -> None:
 def _schedule_join_readiness(ctx, node: str) -> None:
     threading.Thread(target=_refresh_join_readiness, args=(ctx, node),
                      name=f"aiflow4-join-readiness-{node}", daemon=True).start()
+
+
+def _refresh_heartbeat_readiness(ctx, node: str, trigger: str) -> None:
+    try:
+        system_check.refresh_node(ctx, node, trigger)
+    except Exception as exc:  # noqa: BLE001 - readiness outages must not delay the node heartbeat
+        log.warning("heartbeat system check failed for node %s (%s)", node, type(exc).__name__)
+    finally:
+        with _READINESS_REFRESH_LOCK:
+            _PENDING_READINESS_REFRESHES.discard(node)
+
+
+def _schedule_heartbeat_readiness(ctx, node: str, trigger: str) -> None:
+    """Run provider-backed heartbeat checks away from the node's desired-state response."""
+    with _READINESS_REFRESH_LOCK:
+        if node in _PENDING_READINESS_REFRESHES:
+            return
+        _PENDING_READINESS_REFRESHES.add(node)
+    threading.Thread(target=_refresh_heartbeat_readiness, args=(ctx, node, trigger),
+                     name=f"aiflow4-heartbeat-readiness-{node}", daemon=True).start()
+
+
+def _system_check_block_reason(readiness: dict | None, project: str, account: str,
+                               assigned_accounts: list[str]) -> str:
+    reasons = system_check.blocking_reasons(readiness, project, account, assigned_accounts)
+    if not reasons:
+        return ""
+    first = reasons[0]
+    name = str(first.get("name") or "System check")
+    guidance = str(first.get("action") or first.get("detail") or "Review this condition on the System check screen.")
+    return f"System check: {name}. {guidance}"
 
 
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
@@ -2672,7 +2706,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             body.system_conditions if "system_conditions" in body.model_fields_set else None,
             body.auto_fixed_tools if "auto_fixed_tools" in body.model_fields_set else None,
             body.credential_checks if "credential_checks" in body.model_fields_set else None,
-            body.auto_fixed_conditions if "auto_fixed_conditions" in body.model_fields_set else None)
+            body.auto_fixed_conditions if "auto_fixed_conditions" in body.model_fields_set else None,
+            provider_checks=False)
+        _schedule_heartbeat_readiness(ctx, node, trigger)
         return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
                             "sign_ins": [{"account": row["id"], "provider": row["provider"],
                                           "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
@@ -3707,7 +3743,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
-        node_row = ctx.db.one("SELECT accepting_work FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
+        node_row = ctx.db.one("SELECT accepting_work,readiness FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
         if not node_row or not node_row["accepting_work"]:
             return {"versions": [], "reason": "machine is not accepting new work"}
         if account_master_paused(account):
@@ -3715,6 +3751,20 @@ def create_app(ctx: Ctx) -> FastAPI:
         if ctx.leases.cooling(account):
             return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
         versions = version_release.candidates(ctx, account, node)
+        repo = ctx.repo()
+        assigned_accounts = [item.id for item in repo.accounts_on(node)]
+        readiness_blocked: list[str] = []
+        readiness_allowed: list[dict] = []
+        for candidate in versions:
+            reason = _system_check_block_reason(node_row.get("readiness"), candidate["project"],
+                                                account, assigned_accounts)
+            if reason:
+                readiness_blocked.append(reason)
+            else:
+                readiness_allowed.append(candidate)
+        if versions and not readiness_allowed:
+            return {"versions": [], "reason": readiness_blocked[0]}
+        versions = readiness_allowed
         peer_candidates = quota_peer_release_candidates(account)
         available = [candidate for candidate in versions
                      if (candidate["project"], str(candidate["version_id"]),
@@ -3762,11 +3812,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, str(exc)) from None
         if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
-        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work,readiness FROM nodes WHERE name=%s",
+                              (node,)) or {}
         if not node_row.get("accepting_work", False):
             raise HTTPException(409, "machine is not accepting new work")
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
             raise HTTPException(403, "project is not assigned to this node")
+        readiness_reason = _system_check_block_reason(
+            node_row.get("readiness"), project.key, body.account,
+            [item.id for item in repo.accounts_on(node)])
+        if readiness_reason:
+            raise HTTPException(409, readiness_reason)
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
         if not version:
             raise HTTPException(404, "configured unreleased Jira version not found")

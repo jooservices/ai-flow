@@ -40,12 +40,13 @@ def test_jira_reads_project_versions_and_normalizes_fix_version_ids():
     assert Jira.normalize(jira_issue("TESTWP-1", "To Do", ("100", "200")))["fix_versions"] == ["100", "200"]
 
 
-def test_jira_reads_edit_transition_and_comment_permissions_without_writing():
+def test_jira_reads_browse_and_write_permissions_without_writing():
     requests = []
 
     def respond(request):
         requests.append(request)
         return httpx.Response(200, json={"permissions": {
+            "BROWSE_PROJECTS": {"havePermission": True},
             "CREATE_ISSUES": {"havePermission": True},
             "EDIT_ISSUES": {"havePermission": False},
             "LINK_ISSUES": {"havePermission": True},
@@ -57,7 +58,7 @@ def test_jira_reads_edit_transition_and_comment_permissions_without_writing():
                 client=httpx.Client(transport=httpx.MockTransport(respond), base_url="https://jira.example.test"))
 
     assert jira.project_write_permissions("TESTWP") == {
-        "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
+        "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
     }
     assert len(requests) == 1
@@ -65,7 +66,8 @@ def test_jira_reads_edit_transition_and_comment_permissions_without_writing():
     assert requests[0].url.path == "/rest/api/3/mypermissions"
     assert requests[0].url.params["projectKey"] == "TESTWP"
     assert set(requests[0].url.params["permissions"].split(",")) == {
-        "CREATE_ISSUES", "EDIT_ISSUES", "LINK_ISSUES", "TRANSITION_ISSUES", "ADD_COMMENTS",
+        "BROWSE_PROJECTS", "CREATE_ISSUES", "EDIT_ISSUES", "LINK_ISSUES", "TRANSITION_ISSUES",
+        "ADD_COMMENTS",
     }
 
 

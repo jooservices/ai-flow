@@ -130,14 +130,14 @@ def _machine_conditions(raw: list[dict] | None, metrics: dict[str, Any],
         disk_result = "needs_action"
     elif disk_result is None:
         disk_result = ("fixed_automatically" if "disk-space" in auto_fixed_conditions else "ready") \
-            if isinstance(free, (int, float)) and free >= 5 * 1024 ** 3 else "needs_action"
+            if isinstance(free, (int, float)) and free >= 5 * 1024 ** 3 else "not_possible_on_this_machine"
     disk_condition = _machine_condition("disk-space", disk_result)
     if disk_condition:
         out.append(disk_condition)
 
     workspace = _machine_condition("workspace-permissions", reported.get("workspace-permissions"))
     if workspace is None:
-        workspace = _machine_condition("workspace-permissions", "needs_action")
+        workspace = _machine_condition("workspace-permissions", "not_possible_on_this_machine")
     out.append(workspace)
 
     control_result = reported.get("control-network", "ready" if node_status == "online" else "needs_action")
@@ -145,7 +145,7 @@ def _machine_conditions(raw: list[dict] | None, metrics: dict[str, Any],
     if control:
         out.append(control)
 
-    repo_result = reported.get("repository-network", "needs_action")
+    repo_result = reported.get("repository-network", "not_possible_on_this_machine")
     repository = _machine_condition("repository-network", repo_result)
     if repository:
         out.append(repository)
@@ -175,13 +175,25 @@ def _cached_integration_probe(ctx, key: tuple[object, ...], trigger: str, probe)
     return value
 
 
-def _github_project_conditions(ctx, project, trigger: str) -> list[dict[str, object]]:
+def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool = True) -> list[dict[str, object]]:
     """Verify the live GitHub installation, every configured repository and each configured base branch.
 
     Provider errors are deliberately reduced to fixed display text. GitHub response bodies can contain request
     details and must never become a readiness result.
     """
     repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
+    if not provider_checks:
+        action = "Wait for the provider-backed System check to finish before starting work."
+        pending = condition("github-installation", "GitHub installation", "needs_action",
+                            "The GitHub installation check has not completed.", action)
+        out = [pending, condition("github-app-permissions", "GitHub App permissions", "needs_action",
+                                  "The GitHub permissions check has not completed.", action)]
+        for repository in repositories:
+            out.append(condition(f"repository-access:{repository}", f"Repository access · {repository}",
+                                 "needs_action", "Repository access has not been verified.", action))
+            out.append(condition(f"base-branch:{repository}", f"Base branch · {repository}", "needs_action",
+                                 "The configured base branch has not been verified.", action))
+        return out
     gateway = None
     try:
         from .api import github_gateway
@@ -333,10 +345,15 @@ def _check_jira_credential(ctx) -> dict[str, object]:
                              "Connect Jira on the Integrations screen.")
         if isinstance(exc, JiraError):
             status = re.search(r"->\s*(\d{3})", str(exc))
-            if status and status.group(1) in {"401", "403"}:
+            if status and status.group(1) == "401":
                 return condition("jira-credentials", "Jira credentials", "needs_action",
                                  "Jira credential is invalid.",
                                  "Reconnect Jira on the Integrations screen.")
+            if status and status.group(1) == "403":
+                # Jira can reject project search for a valid account without Browse Projects access. The
+                # project-scoped permission probe reports that permission separately below.
+                return condition("jira-credentials", "Jira credentials", "ready",
+                                 "Jira accepted the connected credential; project access is checked separately.")
         return condition("jira-credentials", "Jira credentials", "needs_action",
                          "Jira credential validity could not be confirmed.",
                          "Restore control-plane access to Jira and rerun the System check.")
@@ -349,13 +366,20 @@ def _jira_credential_condition(ctx, trigger: str) -> dict[str, object]:
     return _cached_integration_probe(ctx, ("jira-credentials", site), trigger, lambda: _check_jira_credential(ctx))
 
 
-def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dict[str, object]:
+def _jira_write_permission_condition(ctx, project_key: str, trigger: str,
+                                     provider_checks: bool = True) -> dict[str, object]:
     """Check the Jira write permissions this project needs using Jira's read-only permissions endpoint."""
     jira = getattr(ctx, "jira", None)
     if jira is None or not jira:
         return condition("jira-write-permissions", f"Jira write permissions · {project_key}", "needs_action",
                          "Jira write permissions could not be checked because Jira is not connected.",
                          "Connect Jira on the Integrations screen and rerun the System check.")
+
+    name = f"Jira write permissions · {project_key}"
+    if not provider_checks:
+        return condition("jira-write-permissions", name, "needs_action",
+                         f"Jira permissions for project {project_key} have not been verified.",
+                         "Wait for the provider-backed System check to finish before starting work.")
 
     site = str(getattr(ctx.settings, "jira_site", ""))
     try:
@@ -365,13 +389,12 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
     except Exception:  # noqa: BLE001 - discard Jira response bodies and request details
         permissions = None
 
-    name = f"Jira write permissions · {project_key}"
     if not isinstance(permissions, dict):
         return condition("jira-write-permissions", name, "needs_action",
                          "Jira write permissions could not be verified.",
                          "Restore control-plane access to Jira and rerun the System check.")
 
-    required = {"CREATE_ISSUES": "Create Issues", "EDIT_ISSUES": "Edit Issues",
+    required = {"BROWSE_PROJECTS": "Browse Projects", "CREATE_ISSUES": "Create Issues", "EDIT_ISSUES": "Edit Issues",
                 "LINK_ISSUES": "Link Issues", "TRANSITION_ISSUES": "Transition Issues",
                 "ADD_COMMENTS": "Add Comments"}
     missing = [label for permission, label in required.items() if permissions.get(permission) is not True]
@@ -388,7 +411,7 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
 
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,
                         auto_fixed_tools: set[str], credentials: dict[str, dict],
-                        trigger: str = "heartbeat") -> list[dict[str, object]]:
+                        trigger: str = "heartbeat", provider_checks: bool = True) -> list[dict[str, object]]:
     project = repo.projects.get(project_key)
     if not project:
         return []
@@ -445,9 +468,14 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
         out.append(condition("repository-settings", "Repository settings", "ready",
                              "Repositories and base branch settings are configured."))
 
-    out.extend(_github_project_conditions(ctx, project, trigger))
-    out.append(_jira_credential_condition(ctx, trigger))
-    out.append(_jira_write_permission_condition(ctx, project_key, trigger))
+    out.extend(_github_project_conditions(ctx, project, trigger, provider_checks))
+    if provider_checks:
+        out.append(_jira_credential_condition(ctx, trigger))
+    else:
+        out.append(condition("jira-credentials", "Jira credentials", "needs_action",
+                             "Jira credential validity has not been checked yet.",
+                             "Wait for the provider-backed System check to finish before starting work."))
+    out.append(_jira_write_permission_condition(ctx, project_key, trigger, provider_checks))
 
     account_rows = {row["id"]: row for row in ctx.db.all(
         "SELECT id,status,worker_state FROM accounts WHERE node=%s ORDER BY id", (node,))}
@@ -599,7 +627,8 @@ def _safe_readiness(readiness: object, account_ids: list[str] | None = None) -> 
 def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions: list[dict] | None = None,
                  auto_fixed_tools: list[str] | None = None,
                  credential_checks: dict[str, dict] | None = None,
-                 auto_fixed_conditions: list[str] | None = None) -> dict:
+                 auto_fixed_conditions: list[str] | None = None,
+                 provider_checks: bool = True) -> dict:
     """Re-evaluate a node from its latest heartbeat and configured projects; alert only on work-blocking changes."""
     row = ctx.db.one("SELECT name,status,tools,metrics,projects,dynamic,release_version,last_heartbeat,readiness"
                      " FROM nodes WHERE name=%s",
@@ -632,9 +661,25 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     project_keys = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
     project_results = {
         key: _project_conditions(ctx, node, key, repo, row.get("tools") or {}, row.get("metrics") or {},
-                                 auto_fixed, credentials, trigger)
+                                 auto_fixed, credentials, trigger, provider_checks)
         for key in project_keys
     }
+    if not provider_checks and trigger == "heartbeat":
+        # A normal heartbeat refreshes node-reported conditions. Reuse a previously verified provider snapshot
+        # while its background refresh runs; otherwise every heartbeat would turn a healthy project into a
+        # temporary blocker. An upgrade deliberately does not take this path and remains fail-closed.
+        provider_condition = lambda item: (
+            item.get("id") in {"github-installation", "github-app-permissions", "jira-credentials",
+                                "jira-write-permissions"}
+            or str(item.get("id", "")).startswith(("repository-access:", "base-branch:"))
+        )
+        previous_projects = stored.get("projects") if isinstance(stored.get("projects"), dict) else {}
+        for project_key, rows in project_results.items():
+            old_rows = previous_projects.get(project_key, [])
+            old_by_id = {str(item.get("id")): item for item in old_rows if isinstance(item, dict)}
+            project_results[project_key] = [
+                old_by_id.get(str(item.get("id")), item) if provider_condition(item) else item for item in rows
+            ]
     checked_at = datetime.now(timezone.utc).isoformat()
     result = {"node": node, "machine": machine, "projects": project_results,
               "checked_at": checked_at, "trigger": trigger,
@@ -647,7 +692,10 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     for key, item in current.items():
         old = previous.get(key)
         changed = old is None or old.get("result") != item.get("result")
-        if (not changed or not item.get("affects_work") or item.get("result") not in BLOCKING
+        provider_pending = not provider_checks and key[1] in {
+            "github-installation", "github-app-permissions", "jira-credentials", "jira-write-permissions",
+        } or (not provider_checks and key[1].startswith(("repository-access:", "base-branch:")))
+        if (not changed or provider_pending or not item.get("affects_work") or item.get("result") not in BLOCKING
                 or (trigger == "machine_joined" and row.get("last_heartbeat") is None)
                 or key[1] == "node-heartbeat"):
             continue

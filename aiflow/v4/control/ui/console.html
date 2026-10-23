@@ -3092,6 +3092,7 @@ function renderMachines() {
     var metrics = n.metrics || {}, editorId = state.accountEditor;
     h += '<article class="machine-card"><div class="machine-head"><h3>' + esc(n.name) + '</h3>' + pill(nodeTone(n), nodeLabel(n)) +
       (!n.accepting_work ? pill('warn', 'Not taking new work') : '') + '<span class="spacer"></span>';
+    h += '<button class="btn sm" data-act="open-node" data-id="' + esc(n.name) + '">Machine details</button>';
     if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-add-account" data-name="' + esc(n.name) + '">Add AI account</button>';
     if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-work" data-name="' + esc(n.name) + '" data-accept="' + String(!n.accepting_work) + '">' + (n.accepting_work ? 'Stop new work' : 'Resume work') + '</button>';
     if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="machine-remove" data-name="' + esc(n.name) + '">Remove machine</button>';

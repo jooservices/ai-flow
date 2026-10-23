@@ -67,7 +67,8 @@ var localStorage = {getItem:function(){return null;},setItem:function(){}}; var 
     html = result.stdout
     for expected in ("Machines and AI", "Memory", "Processors", "Sessions busy", "Quota used", "Limit resets",
                      "Today", "Stop new work", "Sessions and jobs", "Sign in again", "Sign-in pending",
-                     "Finish sign-in", "A1B2C3", "data-countdown", "Add a machine", "Add AI account"):
+                     "Finish sign-in", "A1B2C3", "data-countdown", "Add a machine", "Add AI account",
+                     'data-act="open-node" data-id="node-ui">Machine details'):
         assert expected in html
 
 

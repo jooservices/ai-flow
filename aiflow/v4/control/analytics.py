@@ -38,7 +38,7 @@ USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node"
 
 
 def usage(db, days: int = 7, group_by: str = "account", project: str = "", ticket: str = "",
-          account: str = "") -> list[dict[str, Any]]:
+          account: str = "", project_keys: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     """Aggregate recorded usage by one supported owner dimension; the column name is allow-listed."""
     column = USAGE_DIMENSIONS[group_by]
     rows = db.all(
@@ -47,8 +47,10 @@ def usage(db, days: int = 7, group_by: str = "account", project: str = "", ticke
         " coalesce(sum(extract(epoch FROM ended_at-started_at)) FILTER (WHERE ended_at IS NOT NULL),0) AS duration_s"
         " FROM runs WHERE started_at >= now() - %s * interval '1 day'"
         " AND (%s='' OR project=%s) AND (%s='' OR ticket_key=%s) AND (%s='' OR account_id=%s)"
+        " AND (%s OR project = ANY(%s))"
         f" GROUP BY {column} ORDER BY {column}",
-        (days, project, project, ticket, ticket, account, account))
+        (days, project, project, ticket, ticket, account, account,
+         project_keys is None, list(project_keys or ())))
     return [{"key": row["key"], "runs": int(row["runs"]), "tokens_in": int(row["tokens_in"]),
              "tokens_out": int(row["tokens_out"]), "tokens": int(row["tokens_in"] + row["tokens_out"]),
              "cost_usd": round(float(row["cost_usd"]), 6), "duration_s": round(float(row["duration_s"]), 1)}

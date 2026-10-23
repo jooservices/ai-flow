@@ -1,6 +1,6 @@
 # Business
 
-**Assumes:** you are signed in with any console role, a project is selected and Jira is connected.
+**Assumes:** you are signed in as an Administrator, Product owner, BA or Business, a project is selected and Jira is connected.
 
 Business (`/business`) is for people who decide, not for people who build.
 

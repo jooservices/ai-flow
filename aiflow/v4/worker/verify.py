@@ -26,6 +26,7 @@ from .notes import note, project_env
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
+QUEUE_POLL_S = 15
 
 
 def findings_of(text: str) -> str:
@@ -76,11 +77,22 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         wt = Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify"
         head = git.detached(mirror, wt, f"origin/{pr['branch']}")
         conflicts = git.merge_base_in(wt, project["base"], c.identity, commit=False)
+        auto_updated = False
+        if not conflicts and git.behind(wt, project["base"]):
+            # Behind the base without a conflict: AI Flow brings the branch up to date itself, no developer AI needed.
+            git.abort_merge(wt)
+            auto_updated = bring_up_to_date(api, c, git, mirror, wt, pr, project["base"], token,
+                                            credential.get("transport_url", ""))
+            if auto_updated:
+                head = pr["head_sha"]
+                result["head_sha"] = head
+            conflicts = git.merge_base_in(wt, project["base"], c.identity, commit=False)
         hb.progress = {"phase": "verify", "head": head[:10]}
         if conflicts:
             git.abort_merge(wt)
             findings = "- merge: the branch conflicts with the latest " + project["base"] + " in " + ", ".join(conflicts[:12]) + \
                        ". Merge " + project["base"] + " into the branch and resolve the conflicts."
+            result.setdefault("details", {})["reason"] = "conflict"
             return _rework(c, api, jira, pr_comment, result, findings, "conflicts with " + project["base"], t0=t0)
         jira("comment", body=note(c, "started", what=f"Verify PR #{pr['number']} at {head[:10]} merged with the latest {project['base']}",
                                   why=f"Developed by {pr.get('dev_account', 'another account')}; work is never graded by its author",
@@ -120,7 +132,7 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         findings = findings_of(text)
         result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
                              "duration_s": int(res.duration_s), "log": res.log_path,
-                             "qc_passed": False, "ci": []}
+                             "qc_passed": False, "ci": [], "auto_updated": auto_updated}
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result
@@ -156,6 +168,11 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             return result
         title = pr_title(c.ticket)
         m = merge_with_retries(api, c, pr, title, project.get("merge", {}).get("method", "squash"), hb)
+        if m.get("conflict"):  # an earlier merge in the queue changed the same lines: only now a real conflict
+            findings = (f"- merge: the branch conflicts with the latest {project['base']} (another pull request merged "
+                        f"first). Merge {project['base']} into the branch and resolve the conflicts.")
+            result["details"]["reason"] = "conflict"
+            return _rework(c, api, jira, pr_comment, result, findings, "conflicts with " + project["base"], checks, t0=t0)
         if not m.get("merged"):
             result.update(outcome="failed", summary=f"verify passed but the merge was refused: {m.get('message')}"[:500])
             jira("comment", body=note(c, "merge refused", what="Verify passed but GitHub refused the merge",
@@ -190,6 +207,25 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             pass
 
 
+def bring_up_to_date(api: ControlClient, c: Claimed, git: Git, mirror, wt: Path, pr: dict, base: str, token: str,
+                     transport_url: str = "", polls: int = 6, wait_s: float = 5) -> bool:
+    """Merge the base into the PR branch on GitHub (a clean merge only) and move the verify worktree to the new head.
+    False when GitHub refused (a real conflict, or no permission) or the new head did not show up: the caller then
+    judges the branch as it was."""
+    res = api.call("POST", "/v1/github/update-branch", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
+                                                        "body": ""})
+    if not res.get("ok"):
+        return False
+    ref = f"origin/{pr['branch']}"
+    for _ in range(polls):
+        git.mirror(c.project["repo"], token, transport_url)
+        if not git.behind(mirror, base, ref):
+            pr["head_sha"] = git.detached(mirror, wt, ref)
+            return True
+        time.sleep(wait_s)
+    return False
+
+
 def _rework(c, api, jira, pr_comment, result: dict, findings: str, why: str, checks: str = "", t0: float | None = None) -> dict:
     body = f"AI Flow verify: FAIL ({why}).\n\nFindings:\n{findings}" + (f"\n\nChecks: {checks}" if checks else "")
     pr_comment(body)
@@ -222,17 +258,30 @@ def wait_for_ci(api: ControlClient, c: Claimed, sha: str, hb: Heartbeat, max_wai
 
 
 def merge_with_retries(api: ControlClient, c: Claimed, pr: dict, title: str, method: str, hb: Heartbeat,
-                       attempts: int = 6) -> dict:
-    """Merge; when the base requires an up-to-date branch or checks are still expected, update the branch on
-    GitHub, wait for CI on the new head and try again. A failing check stops the merge."""
+                       attempts: int = 6, queue_wait_s: int = 2700) -> dict:
+    """Merge through the control merge queue: ready pull requests merge one after another, so this call waits for its
+    turn (the lease heartbeat keeps running). On its turn the control API first brings the branch up to date with
+    the base; this function then waits for CI on the new head and tries again. A failing check or a real conflict
+    stops the merge."""
     m: dict = {}
-    for _ in range(attempts):
+    attempt, queue_until = 0, time.time() + queue_wait_s
+    while attempt < attempts:
         m = api.call("POST", "/v1/github/merge", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
                                                   "title": title, "method": method})
         if m.get("merged"):
             return m
+        if m.get("queued"):  # another pull request merges first; waiting for the turn is not a failed attempt
+            if time.time() > queue_until or hb.lost.is_set():
+                return {"merged": False, "message": "gave up waiting in the merge queue: " + str(m.get("message", ""))}
+            time.sleep(QUEUE_POLL_S)
+            continue
+        attempt += 1
+        if m.get("conflict"):  # GitHub could not bring the branch up to date: a real conflict
+            return m
         msg = (m.get("message") or "").lower()
-        if m.get("mergeable_state") == "behind" or "not up to date" in msg or "behind" in msg:
+        if m.get("updated"):  # the branch was brought up to date on this turn; CI runs again on the new head
+            time.sleep(20)
+        elif m.get("mergeable_state") == "behind" or "not up to date" in msg or "behind" in msg:
             api.call("POST", "/v1/github/update-branch", {"run_id": c.run_id, "fence": c.fence, "number": pr["number"],
                                                           "body": ""})
             time.sleep(20)

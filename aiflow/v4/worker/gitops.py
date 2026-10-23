@@ -192,6 +192,11 @@ class Git:
         out = self.run("diff", "--name-only", "--diff-filter=U", cwd=path, check=False)
         return [x for x in out.splitlines() if x.strip()]
 
+    def behind(self, path: Path, base: str, ref: str = "HEAD") -> int:
+        """Commits of origin/<base> that `ref` does not have (0: up to date). Works in a worktree or a mirror."""
+        out = self.run("rev-list", "--count", f"{ref}..origin/{base}", cwd=path, check=False).strip()
+        return int(out) if out.isdigit() else 0
+
     def abort_merge(self, path: Path) -> None:
         self.run("merge", "--abort", cwd=path, check=False)
 

@@ -343,6 +343,10 @@ class FakeGitHub:
             self.merge_commit_enable_calls.append(repo)
             self.merge_commit_enabled = True
 
+    def update_branch(self, repo, number):
+        self.updated_branches = getattr(self, "updated_branches", []) + [(repo, number)]
+        return {"ok": True, "message": "202: Updating pull request branch."}
+
     def compare_branches(self, repo, base, head):
         return self.compare_results.get((repo, base, head), {"ahead_by": 1, "status": "ahead"})
 

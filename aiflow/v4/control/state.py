@@ -8,8 +8,11 @@ from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
+from . import role_health
+from . import tooling
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_view
+from .quota import assessments as quota_assessments
 
 NODE_OFFLINE_S = 75  # heartbeats every 15-30 s; three missed beats mean the node is gone
 
@@ -22,7 +25,7 @@ def _iso(ts: datetime | None) -> str | None:
     return None if ts is None else ts.isoformat()
 
 
-def snapshot(ctx) -> dict[str, Any]:
+def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     from . import api as control_api, release_progress, release_readiness, rollout
     db = ctx.db
     repo = ctx.repo()
@@ -33,7 +36,9 @@ def snapshot(ctx) -> dict[str, Any]:
     for a in repo.accounts:
         for machine in a.machines:
             assigned[machine] = assigned.get(machine, 0) + 1
-    for n in db.all("SELECT * FROM nodes ORDER BY role DESC, name"):
+    active_by_node = {row["node"]: int(row["busy"]) for row in db.all(
+        "SELECT node,count(*) AS busy FROM runs WHERE status='running' GROUP BY node")}
+    for n in db.all("SELECT * FROM nodes WHERE removed_at IS NULL ORDER BY role DESC, name"):
         age = _age(n["last_heartbeat"])
         status = n["status"]
         if status == "online" and (age is None or age > NODE_OFFLINE_S):
@@ -58,7 +63,10 @@ def snapshot(ctx) -> dict[str, Any]:
                           "image": (reported_services.get(svc) or {}).get("image", ""),
                           "detail": gaps.get(svc) or (reported_services.get(svc) or {}).get("detail", "")}
                          for svc in sorted(set(declared) | set(reported_services)) if svc in SERVICES]
-        nodes.append({"name": n["name"], "ip": n["ip"], "services": node_services, "role": n["role"], "status": status,
+        nodes.append({"name": n["name"], "ip": n["ip"], "services": node_services,
+                      "role": n["role"], "status": status,
+                      "accepting_work": bool(n["accepting_work"]),
+                      "sessions_busy": active_by_node.get(n["name"], int(n["slots_used"] or 0)),
                       "slots_total": n["slots_total"], "slots_used": n["slots_used"], "release": n["release_version"],
                       "metrics": n["metrics"], "tools": n["tools"],
                       "has_agent": bool(n["token_hash"]), "required_tools": required,
@@ -84,31 +92,55 @@ def snapshot(ctx) -> dict[str, Any]:
     running = {r["account_id"]: r for r in db.all(
         "SELECT r.*, t.summary FROM runs r LEFT JOIN tickets t ON t.key=r.ticket_key WHERE r.status='running'")}
     accounts = []
-    for a in db.all("SELECT * FROM accounts ORDER BY node, provider, id"):
+    account_rows = db.all("SELECT * FROM accounts ORDER BY node, provider, id")
+    quota_by_account = quota_assessments(db, account_rows)
+    today_by_account = {row["account_id"]: row for row in db.all(
+        "SELECT account_id,coalesce(sum(tokens_in),0) AS tokens_in,coalesce(sum(tokens_out),0) AS tokens_out,"
+        "coalesce(sum(cost_usd),0) AS cost_usd FROM runs WHERE started_at >= date_trunc('day',now()) "
+        "GROUP BY account_id")}
+    sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
+        "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    for a in account_rows:
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
         model, effort = repo.model_for(a["provider"], a["tier"])
         acc = repo.account(a["id"])
+        if not acc:
+            continue
         expiry = a["credential_expires_at"]
         expiry_warning = bool(expiry and expiry <= datetime.now(timezone.utc) + timedelta(
             days=sa_thresholds["credential_expiry_days"]))
-        status = "signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
-            "node_offline" if not any(node_status.get(m) == "online" for m in (acc.machines if acc else [a["node"]]))
-            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"])))
+        status = "stopped" if acc.paused else ("signed_out" if a["status"] == "signed_out" else ("cooldown" if cool else ("working" if r else (
+            "node_offline" if not any(node_status.get(machine, "offline") == "online" for machine in acc.machines)
+            and a["status"] not in ("signed_out", "error", "cooldown") else a["status"]))))
         probe = (a["worker_state"] or {}).get("probe") or {}
+        windows = (a["quota"] or {}).get("windows") or {}
+        used_windows = [window for window in windows.values()
+                        if isinstance(window, dict) and window.get("utilization") is not None]
+        resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
+        usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc and acc.machines else a["node"]),
-            "tier": a["tier"], "roles": a["roles"],
-            "machines": machines_view(db, acc, node_status), "session_limit": acc.sessions if acc else 1,
-            "shared": bool(acc and len(acc.machines) > 1),
+            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else a["node"]),
+            "tier": a["tier"], "roles": acc.roles,
+            "machines": machines_view(db, acc, node_status, include_signin=include_signin),
+            "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
             "explicit_only": bool(acc and acc.explicit_only),
+            "paused": bool(acc.paused), "jobs": [job for job, role in
+                (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))
+                if role in (acc.roles or [])],
+            "sign_in_pending": a["id"] in sign_in_states,
+            "sign_in_status": sign_in_states.get(a["id"], "idle"),
             "status": status, "provider_status": (a["status"] if a["status"] in ("signed_out", "error")
                                                     else "cooldown" if cool else a["status"]),
             "cooldown": {"reason": cool[0], "seconds_left": cool[1]} if cool else None,
             "cooldown_until": a["cooldown_until"], "cooldown_since": _iso(a["cooldown_since"]),
             "idle_since": _iso(a["idle_since"]), "credential_expires_at": _iso(expiry) or "unknown",
             "credential_expiry_warning": expiry_warning, "check_failed": probe.get("ok") is False or a["status"] == "error",
-            "quota": a["quota"], "last_error": a["last_error"],
+            "quota": a["quota"], "quota_awareness": quota_by_account.get(a["id"], {}),
+            "quota_used": max((float(w["utilization"]) for w in used_windows), default=None),
+            "quota_resets_at": min(resets) if resets else None,
+            "tokens_today": int(usage.get("tokens_in", 0)) + int(usage.get("tokens_out", 0)),
+            "cost_today": float(usage.get("cost_usd", 0)), "last_error": a["last_error"],
             "worker": a["worker_state"], "model": model, "effort": effort,
             "runs_active": runs_per_account.get(a["id"], 0), "parallel": acc.sessions if acc else 1,
             "run": None if not r else {"id": str(r["id"]), "ticket": r["ticket_key"], "summary": r["summary"],
@@ -181,11 +213,12 @@ def snapshot(ctx) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(), "env": ctx.settings.env,
         "control_repo": repo.ref, "versions": repo.versions, "version": VERSION,
         "links": {"o2": "/o2/", "mail": "/mail/", "gatus": ctx.settings.gatus_url},
+        "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
         "release_readiness": release_readiness.all_versions(db, repo.projects),
         "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
-        "events": events, "sa": sa, "rollout": rollout.summary(db),
+        "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),
         "version_policy": {"control": ctx.settings.control_version or VERSION,
                            "max_minor_lag": ctx.settings.version_max_minor_lag},
         "totals": {"runs_24h": today["runs"], "cost_24h": float(today["cost"]), "tokens_in_24h": int(today["tin"]),

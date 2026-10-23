@@ -98,7 +98,8 @@ class Worker:
                 "ok": ok, "error_kind": res.error_kind, "reset_at": res.reset_at.isoformat() if res.reset_at else None,
                 "credential_expires_at": res.credential_expires_at.isoformat() if res.credential_expires_at else None,
                 "quota": res.quota, "summary": summary, "duration_ms": int(res.duration_s * 1000),
-                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd})
+                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": res.cost_usd,
+                "model": spec.model})
         except Exception as e:  # noqa: BLE001
             log.warning("probe result not recorded: %s", e)
         now = time.time()
@@ -135,7 +136,7 @@ class Worker:
             c = Claimed(run_id=claimed["run_id"], fence=claimed["fence"], run_token=claimed["run_token"],
                         account=self.account, provider=claimed["provider"], model="", effort="",
                         ticket=claimed["ticket"], project=claimed["project"], identity=tuple(claimed["identity"]),
-                        step="version_release")
+                        step="version_release", context_pack=claimed.get("context_pack") or {})
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id,
                          step="version_release", since=time.time())
             result = run_version_release(self.api, c, claimed["version"], claimed["tracker_key"],
@@ -171,7 +172,9 @@ class Worker:
                         last_dev_summary=r.get("last_dev_summary") or "",
                         verify_findings=r.get("verify_findings") or "", recent_comments=r.get("recent_comments") or [],
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
-                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [])
+                        related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
+                        context_pack=r.get("context_pack") or {},
+                        machine_tools=r.get("machine_tools") or {})
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":

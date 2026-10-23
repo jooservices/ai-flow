@@ -56,12 +56,19 @@ class Settings:
     jira_oauth_resources_url: str = "https://api.atlassian.com/oauth/token/accessible-resources"
     jira_api_base: str = "https://api.atlassian.com/ex/jira"
     canary_bug_project: str = "TESTFLOW"
+    maintenance_project: str = "JAIF"  # the AI Flow project: tooling tickets (docs/v4/missing-tools.md)
     github_org: str = "jooservices"
     github_app_dir: str = "/etc/aiflow/secrets/github"
+    control_secrets_dir: str = "/etc/aiflow/secrets/control"
+    console_secrets_dir: str = "/etc/aiflow/secrets/console"
+    backup_key_file: str = "/etc/aiflow/secrets/control/backup.key"
+    backup_path: str = "/srv/aiflow/backups"
     control_repo: str = "/srv/aiflow/control/repos/aiflow-control"
     join_token: str = ""
     console_session_secret: str = ""
     console_login: bool = False  # AIFLOW4_CONSOLE_LOGIN=1: the console pages and read APIs need a signed-in user
+    license_service_url: str = ""
+    license_public_key: str = ""
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
     reviewer_token: str = ""
     owner_token: str = ""
@@ -102,11 +109,18 @@ class Settings:
         s.jira_oauth_resources_url = _env("JIRA_OAUTH_RESOURCES_URL", s.jira_oauth_resources_url)
         s.jira_api_base = _env("JIRA_API_BASE", s.jira_api_base)
         s.canary_bug_project = _env("CANARY_BUG_PROJECT", s.canary_bug_project)
+        s.maintenance_project = _env("MAINTENANCE_PROJECT", s.maintenance_project)
         s.github_org = _env("GITHUB_ORG", s.github_org)
         s.github_app_dir = _env("GITHUB_APP_DIR", s.github_app_dir)
+        s.control_secrets_dir = _env("CONTROL_SECRETS_DIR", s.control_secrets_dir)
+        s.console_secrets_dir = _env("CONSOLE_SECRETS_DIR", s.console_secrets_dir)
+        s.backup_key_file = _env("BACKUP_KEY_FILE", s.backup_key_file)
+        s.backup_path = _env("BACKUP_PATH", s.backup_path)
         s.control_repo = _env("CONTROL_REPO", s.control_repo)
         s.console_session_secret = _env("CONSOLE_SESSION_SECRET", s.console_session_secret)
         s.console_login = _env("CONSOLE_LOGIN", "0").strip().lower() in ("1", "true", "yes", "on")
+        s.license_service_url = _env("LICENSE_SERVICE_URL", s.license_service_url)
+        s.license_public_key = _env("LICENSE_PUBLIC_KEY", s.license_public_key)
         s.trusted_proxies = [value.strip() for value in _env("TRUSTED_PROXIES", "").split(",") if value.strip()]
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)

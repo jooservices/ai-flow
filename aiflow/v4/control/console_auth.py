@@ -22,7 +22,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "super_admin": frozenset({"*"}),
     "owner": frozenset({
         "console.read", "console.write", "console.manage", "integrations.manage", "nodes.manage", "projects.manage",
-        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve",
+        "node.operations.read", "knowledge.read", "knowledge.manage", "knowledge.approve", "licensing.manage",
+        "users.manage", "backup.read", "backup.manage", "notifications.manage",
     }),
     "lead": frozenset({"console.read", "node.operations.read", "knowledge.read"}),
 }

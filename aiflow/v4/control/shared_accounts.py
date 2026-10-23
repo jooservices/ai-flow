@@ -5,8 +5,8 @@ Design (docs/v4/shared-accounts.md):
   (`shared_accounts`). `account_machines` lists the extra machines an account is enabled on. `overlay` merges both
   into the `ControlRepo` every caller already uses, so `repo.account(id).machines` is the one answer.
 - The account has ONE total session limit (`Account.sessions`). Running sessions, quota and cooldown are counted per
-  account id across machines. `claim_run` takes the run row under a per-account advisory lock, so two machines
-  claiming at the same moment can never exceed the limit.
+  account id across machines. `claim_run` checks the total and per-machine share under a per-account advisory lock,
+  so simultaneous workers cannot exceed the limit or take another online machine's share.
 - Work is spread: a machine takes at most its fair share (limit / online machines) while other machines are online;
   when one goes offline the share of the others grows and its work moves.
 - Credentials stay on the machines that signed in. Control stores only the sign-in prompt a machine reports (a
@@ -59,8 +59,9 @@ def overlay(repo: ControlRepo, db) -> ControlRepo:
 
 
 def online_nodes(db) -> set[str]:
-    return {r["name"] for r in db.all("SELECT name FROM nodes WHERE status='online' AND last_heartbeat IS NOT NULL"
-                                      " AND last_heartbeat > now() - make_interval(secs => %s)", (NODE_ONLINE_S,))}
+    return {r["name"] for r in db.all(
+        "SELECT name FROM nodes WHERE removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
+        " AND last_heartbeat > now() - make_interval(secs => %s)", (NODE_ONLINE_S,))}
 
 
 def pending_nodes(db, account_id: str) -> set[str]:
@@ -94,14 +95,30 @@ def may_take(db, acc: Account, node: str) -> tuple[bool, str]:
 
 
 def claim_run(db, acc: Account, values: tuple) -> bool:
-    """Insert the run row unless the account already has its total of running sessions; atomic across machines."""
+    """Atomically enforce the account total and machine fair share before inserting a running session."""
+    node = str(values[7])
+    if not acc.runs_on(node):
+        return False
     with db.pool.connection() as conn:
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
-            used = conn.execute("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'",
-                                (acc.id,)).fetchone()["n"]
-            if acc.session_limit and used >= acc.sessions:
-                return False
+            if acc.session_limit:
+                pending = {row["node"] for row in conn.execute(
+                    "SELECT node FROM account_machines WHERE account_id=%s AND status='pending'", (acc.id,))}
+                if node in pending:
+                    return False
+                counts = {row["node"]: int(row["n"]) for row in conn.execute(
+                    "SELECT node,count(*) AS n FROM runs WHERE account_id=%s AND status='running' GROUP BY node",
+                    (acc.id,))}
+                if sum(counts.values()) >= acc.sessions:
+                    return False
+                online = {row["name"] for row in conn.execute(
+                    "SELECT name FROM nodes WHERE removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
+                    " AND last_heartbeat > now() - make_interval(secs => %s)", (NODE_ONLINE_S,))}
+                available = [machine for machine in acc.machines
+                             if machine not in pending and (machine == node or machine in online)]
+                if len(available) > 1 and counts.get(node, 0) >= math.ceil(acc.sessions / len(available)):
+                    return False
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"
                          " token_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", values)
     return True
@@ -113,7 +130,8 @@ def mark_signed_in(db, account_id: str, node: str) -> None:
            (account_id, node))
 
 
-def machines_view(db, acc: Account | None, node_status: dict[str, str]) -> list[dict[str, Any]]:
+def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
+                  include_signin: bool = False) -> list[dict[str, Any]]:
     """Per-machine breakdown of one account: where it is enabled, whether signed in, what runs there."""
     if not acc:
         return []
@@ -128,7 +146,8 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str]) -> list[
         row = rows.get(n)
         pending = bool(row and row["status"] == "pending")
         prompt = None
-        if pending and row["signin_link"] and row["signin_expires_at"] and row["signin_expires_at"] > now:
+        if (include_signin and pending and row["signin_link"] and row["signin_expires_at"]
+                and row["signin_expires_at"] > now):
             prompt = {"link": row["signin_link"], "code": row["signin_code"],
                       "expires_at": row["signin_expires_at"].isoformat()}
         out.append({"node": n, "node_status": node_status.get(n, "offline"), "signed_in": not pending,
@@ -164,8 +183,17 @@ class SigninPromptBody(BaseModel):
 
 
 def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
-    def sync() -> None:
-        app.state.sync_accounts()
+    sync_accounts = app.state.sync_accounts
+
+    def sync() -> list[str]:
+        warnings = sync_accounts()
+        for row in ctx.db.all("SELECT id,provider,tier,roles FROM shared_accounts WHERE managed"):
+            ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+                       " VALUES (%s,%s,'',%s,%s,'signed_out') ON CONFLICT (id) DO NOTHING",
+                       (row["id"], row["provider"], row["tier"], row["roles"] or []))
+        return warnings
+
+    app.state.sync_accounts = sync
 
     def account_or_404(account_id: str) -> Account:
         acc = ctx.repo().account(account_id)
@@ -173,18 +201,19 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
             raise HTTPException(404, f"unknown account {account_id}")
         return acc
 
-    def view(acc: Account) -> dict[str, Any]:
+    def view(acc: Account, *, include_signin: bool = False) -> dict[str, Any]:
         status = {r["name"]: "online" if r["name"] in online_nodes(ctx.db) else "offline"
                   for r in ctx.db.all("SELECT name FROM nodes")}
         running = sum(running_by_node(ctx.db, acc.id).values())
         return {"id": acc.id, "provider": acc.provider, "tier": acc.tier, "roles": acc.roles,
                 "session_limit": acc.sessions, "sessions_active": running,
-                "machines": machines_view(ctx.db, acc, status)}
+                "machines": machines_view(ctx.db, acc, status, include_signin=include_signin)}
 
     @app.get("/v1/shared-accounts")
     def list_accounts(request: Request) -> dict:
-        console_user(request, {"console.read"})
-        return {"accounts": [view(a) for a in ctx.repo().accounts]}
+        user = console_user(request, {"console.read"})
+        include_signin = "nodes.manage" in user.permissions or "*" in user.permissions
+        return {"accounts": [view(a, include_signin=include_signin) for a in ctx.repo().accounts]}
 
     @app.post("/v1/shared-accounts", status_code=201)
     def create_account(body: AccountBody, request: Request) -> dict:
@@ -199,7 +228,7 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
                     user.subject))
         sync()
         audit("account", "create", body.id, "", None, user.subject, True, "created")
-        return view(account_or_404(body.id))
+        return view(account_or_404(body.id), include_signin=True)
 
     @app.put("/v1/shared-accounts/{account_id}/session-limit")
     def set_limit(account_id: str, body: LimitBody, request: Request) -> dict:
@@ -210,7 +239,7 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
                    " ON CONFLICT (id) DO UPDATE SET session_limit=EXCLUDED.session_limit",
                    (acc.id, acc.provider, acc.tier, acc.roles, acc.explicit_only, body.session_limit, user.subject))
         audit("account", "session_limit", acc.id, "", None, user.subject, True, str(body.session_limit))
-        return view(account_or_404(account_id))
+        return view(account_or_404(account_id), include_signin=True)
 
     @app.post("/v1/shared-accounts/{account_id}/machines", status_code=201)
     def enable_machine(account_id: str, body: MachineBody, request: Request) -> dict:
@@ -229,7 +258,7 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         sync()
         audit("account", "enable_machine", acc.id, "", None, user.subject, True, body.node)
         ctx.events.emit("account.machine_enabled", account=acc.id, node=body.node, outcome="pending")
-        return view(account_or_404(account_id))
+        return view(account_or_404(account_id), include_signin=True)
 
     @app.delete("/v1/shared-accounts/{account_id}/machines/{node}")
     def remove_machine(account_id: str, node: str, request: Request, confirm: bool = False) -> dict:

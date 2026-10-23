@@ -51,6 +51,7 @@ class Account:
     parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
     session_limit: int = 0     # total concurrent sessions across all machines; 0 = `parallel`
     extra_machines: list[str] = field(default_factory=list)  # machines added beyond `node` (docs/v4/shared-accounts.md)
+    paused: bool = False       # console-managed accounts stay assigned but do not receive new work
 
     @property
     def machines(self) -> list[str]:

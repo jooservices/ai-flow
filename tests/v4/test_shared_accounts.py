@@ -1,6 +1,11 @@
 """Shared AI accounts: one account enabled on several machines with one total session limit (JAIF-246)."""
 from __future__ import annotations
 
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
+
 from conftest import add_ticket, join_node
 
 from aiflow.v4.control.console_auth import issue_session
@@ -51,7 +56,8 @@ def two_machines(client, ctx, limit=2):
     return cc, node1
 
 
-def test_account_exists_apart_from_machines_and_each_machine_signs_in_with_a_link_and_a_code(client, ctx):
+def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_sign_in(client, ctx, monkeypatch,
+                                                                                       tmp_path):
     sign_in(client, ctx)
     cc, node1 = join(client, "cc"), join(client, "node1")
     assert client.post("/v1/shared-accounts", json={"id": "shared-01", "provider": "claude"}).status_code == 201
@@ -63,28 +69,81 @@ def test_account_exists_apart_from_machines_and_each_machine_signs_in_with_a_lin
         enabled = client.post("/v1/shared-accounts/shared-01/machines", json={"node": name})
         assert enabled.status_code == 201
     assert client.post("/v1/shared-accounts/shared-01/machines", json={"node": "cc"}).status_code == 409
-    assert beat(client, "node1", node1)["signin"] == ["shared-01"]
+    desired = beat(client, "node1", node1)
+    handoff = desired["signin"][0]
+    assert handoff["account"] == "shared-01" and handoff["provider"] == "claude"
+    assert handoff["shared_account"] and handoff["request_id"]
+    assert client.post("/v1/accounts/shared-01/signin-prompt", json={
+        "link": "http://insecure.test", "code": "ABCD-2345"}, headers=node1).status_code == 422
 
-    # the machine reports the provider's link and code; Command Center shows them until the machine signs in
-    prompt = {"link": "https://claude.example.test/device", "code": "ABCD-2345", "token": "sk-secret-credential"}
-    assert client.post("/v1/accounts/shared-01/signin-prompt", json=prompt, headers=node1).json()["stored"]
-    assert client.post("/v1/accounts/shared-01/signin-prompt", headers=node1,
-                       json={"link": "http://insecure.test", "code": "ABCD-2345"}).status_code == 422
-    machines = {m["node"]: m for m in next(a for a in snapshot(ctx)["accounts"] if a["id"] == "shared-01")["machines"]}
+    # The node agent launches the provider CLI in the account's private home and relays its device handoff.
+    from aiflow.v4.node import agent
+    provider_cli = ('print("Open https://claude.example.test/device and enter code ABCD-2345 "'
+                    '+ "token sk-test-credential")')
+    monkeypatch.setattr(agent, "ensure_account_home", lambda *_args: True)
+    monkeypatch.setattr(agent, "SIGN_IN_COMMANDS", {"claude": [sys.executable, "-c", provider_cli]})
+    monkeypatch.setattr(agent, "_SIGN_IN_RUN_AS", [])
+
+    heartbeat_desired = {}
+    prompt_reported = Event()
+
+    class NodeAPI:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def call(self, method, path, body=None, **_kwargs):
+            response = client.request(method, path, json=body, headers=node1)
+            if not response.is_success:
+                raise RuntimeError(f"{method} {path} -> {response.status_code}")
+            result = response.json()
+            if path.endswith("/heartbeat"):
+                heartbeat_desired.update(result["desired"])
+            if path.endswith("/signin-prompt"):
+                prompt_reported.set()
+            return result
+
+    class StopAfterPrompt:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, _timeout=None):
+            assert prompt_reported.wait(timeout=5), "node agent did not report the provider prompt"
+            time.sleep(0.1)  # let the short provider CLI exit before run_agent cancels its sign-in threads
+            self.stopped = True
+
+    from aiflow.v4.node import operations
+    monkeypatch.setattr(agent, "ControlClient", NodeAPI)
+    monkeypatch.setattr(agent, "tool_versions", lambda: {})
+    monkeypatch.setattr(agent, "metrics", lambda prev: ({}, prev))
+    monkeypatch.setattr(agent, "worker_states", lambda: [])
+    monkeypatch.setattr(agent, "_process_node_operation_logged", lambda *_args: None)
+    monkeypatch.setattr(operations, "prepare_project_toolchains", lambda *_args: {})
+    monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+    agent.run_agent("https://control.example.test", "node1", "node-token", every_s=1, manage_workers=False,
+                    stop=StopAfterPrompt())
+    assert heartbeat_desired["signin"][0]["account"] == "shared-01"
+    assert heartbeat_desired["signin"][0]["provider"] == "claude"
+
+    machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
+                                             if a["id"] == "shared-01")["machines"]}
     assert machines["node1"]["signed_in"] is False
     assert machines["node1"]["signin"]["code"] == "ABCD-2345"
     assert machines["node1"]["signin"]["link"] == "https://claude.example.test/device"
 
     # signing in once on the machine (a passing check with its own credentials) completes it
     assert client.post("/v1/accounts/shared-01/probe", json={"ok": True}, headers=node1).status_code == 200
-    machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"] if a["id"] == "shared-01")["machines"]}
+    machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
+                                             if a["id"] == "shared-01")["machines"]}
     assert machines["node1"]["signed_in"] is True and machines["node1"]["signin"] is None
     assert machines["cc"]["signed_in"] is False
     assert beat(client, "node1", node1)["signin"] == []
 
     # AC6: control keeps no credential, only the prompt (cleared after sign-in)
     stored = ctx.db.all("SELECT * FROM account_machines")
-    assert "sk-secret-credential" not in str(stored) + str(ctx.db.all("SELECT * FROM write_audit"))
+    assert "sk-test-credential" not in str(stored) + str(ctx.db.all("SELECT * FROM write_audit"))
     columns = {r["column_name"] for r in ctx.db.all(
         "SELECT column_name FROM information_schema.columns WHERE table_name IN ('shared_accounts','account_machines')")}
     assert not {c for c in columns if "token" in c or "secret" in c or "password" in c or "credential" == c}
@@ -92,7 +151,8 @@ def test_account_exists_apart_from_machines_and_each_machine_signs_in_with_a_lin
 
 def test_two_machines_share_one_session_limit_and_work_is_spread(client, ctx):
     cc, node1 = two_machines(client, ctx, limit=2)
-    assert [w for w in beat(client, "cc", cc)["workers"] if w.startswith("shared")] == ["shared-01", "shared-01.2"]  # each machine can carry the whole limit
+    assert [w for w in beat(client, "cc", cc)["workers"] if w.startswith("shared")] == [
+        "shared-01", "shared-01.2"]  # each machine can carry the whole limit
 
     first = claim(client, cc, "TESTWP-1")
     assert first.status_code == 200 and first.json()["claimed"]
@@ -131,6 +191,30 @@ def test_concurrent_claims_never_exceed_the_total_limit(client, ctx):
                                                        "", node, i, "x"))
                for i, (rid, node) in enumerate(zip(ids, ("cc", "node1", "cc")), start=1)]
     assert results == [True, False, False]
+
+
+def test_simultaneous_claims_from_one_machine_cannot_take_another_online_machines_share(client, ctx):
+    from aiflow.v4.control import shared_accounts
+
+    cc, _node1 = two_machines(client, ctx, limit=2)
+    acc = ctx.repo().account("shared-01")
+    barrier = Barrier(3)
+
+    def claim_on_cc(index):
+        barrier.wait(timeout=5)
+        run_id = f"00000000-0000-0000-0000-{index:012d}"
+        return shared_accounts.claim_run(ctx.db, acc, (run_id, f"TESTWP-{index}", "TESTWP", "dev", "shared-01",
+                                                       "claude", "", "cc", index, "x"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(claim_on_cc, i) for i in (11, 12)]
+        barrier.wait(timeout=5)
+        results = [future.result(timeout=10) for future in futures]
+
+    assert sorted(results) == [False, True]
+    assert shared_accounts.claim_run(ctx.db, acc, ("00000000-0000-0000-0000-000000000013", "TESTWP-13", "TESTWP",
+                                                   "dev", "shared-01", "claude", "", "node1", 13, "x"))
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
 
 
 def test_work_moves_to_the_other_machine_when_one_goes_offline(client, ctx):
@@ -193,7 +277,8 @@ def test_removing_the_last_machine_with_confirmation_removes_the_account(client,
 
 def test_account_from_the_control_repo_can_be_shared_with_another_machine(client, ctx):
     sign_in(client, ctx)
-    cc, node1 = join(client, "cc"), join(client, "node1")
+    join(client, "cc")
+    node1 = join(client, "node1")
     shared = client.post("/v1/shared-accounts/claude-01/machines", json={"node": "node1"})
     assert shared.status_code == 201
     assert shared.json()["session_limit"] == 1  # keeps its previous capacity until the owner changes it
@@ -211,3 +296,28 @@ def test_account_management_needs_an_owner_session(client, ctx):
     sign_in(client, ctx, role="lead")
     assert client.post("/v1/shared-accounts", json={"id": "shared-01", "provider": "claude"}).status_code == 403
     assert client.get("/v1/shared-accounts").status_code == 200
+
+
+def test_console_read_can_see_shared_account_usage_but_not_sign_in_prompts(client, ctx):
+    sign_in(client, ctx)
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    client.post("/v1/shared-accounts", json={"id": "shared-01", "provider": "claude"})
+    client.post("/v1/shared-accounts/shared-01/machines", json={"node": "cc"})
+    client.post("/v1/shared-accounts/shared-01/machines", json={"node": "node1"})
+    prompt = {"link": "https://claude.example.test/device", "code": "ABCD-2345"}
+    assert client.post("/v1/accounts/shared-01/signin-prompt", json=prompt, headers=node1).json()["stored"]
+
+    owner_accounts = client.get("/v1/shared-accounts").json()["accounts"]
+    owner_machine = next(a for a in owner_accounts if a["id"] == "shared-01")["machines"]
+    assert next(m for m in owner_machine if m["node"] == "node1")["signin"]["code"] == "ABCD-2345"
+
+    sign_in(client, ctx, role="lead")
+    readonly_accounts = client.get("/v1/shared-accounts")
+    assert readonly_accounts.status_code == 200
+    readonly_machine = next(a for a in readonly_accounts.json()["accounts"] if a["id"] == "shared-01")["machines"]
+    assert next(m for m in readonly_machine if m["node"] == "node1")["signin"] is None
+    readonly_state = client.get("/v1/state")
+    assert readonly_state.status_code == 200
+    readonly_shared = next(a for a in readonly_state.json()["accounts"] if a["id"] == "shared-01")
+    assert next(m for m in readonly_shared["machines"] if m["node"] == "node1")["signin"] is None
+    assert "ABCD-2345" not in readonly_accounts.text + readonly_state.text

@@ -7,6 +7,7 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
+  aiflow4 notify --severity S --title T --detail D   deliver through saved notification channels
   aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
@@ -15,6 +16,8 @@
   aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)
   aiflow4 install control --rollback    return the control plane to the previous release (root)
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
+  aiflow4 backup restore --from FILE --key-file FILE [--s3-endpoint URL]
+                                        rebuild a new control plane from an encrypted backup
   aiflow4 version
 """
 from __future__ import annotations
@@ -124,8 +127,10 @@ def _console_user(a, s) -> int:
             login.write_password_file(a.password_file, password)
 
         try:
-            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver) if a.action == "seed"
-                        else login.reset_password(db, a.email, deliver=deliver))
+            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver,
+                                        public_key=getattr(s, "license_public_key", "")) if a.action == "seed"
+                        else login.reset_password(db, a.email, deliver=deliver,
+                                                  public_key=getattr(s, "license_public_key", "")))
         except (ValueError, OSError) as exc:
             print(f"{exc}; nothing changed", file=sys.stderr)
             return 2
@@ -184,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+    pnotify = sub.add_parser("notify", help="send a system alert using saved notification channels")
+    pnotify.add_argument("--severity", choices=("info", "warning", "critical"), required=True)
+    pnotify.add_argument("--title", required=True)
+    pnotify.add_argument("--detail", default="")
+    pnotify.add_argument("--link", default="")
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -206,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
     ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
+    pb = sub.add_parser("backup", help="encrypted Command Center backup operations")
+    backup_sub = pb.add_subparsers(dest="backup_action", required=True)
+    pbr = backup_sub.add_parser("restore", help="restore a backup onto a new control machine")
+    pbr.add_argument("--from", dest="source", required=True, help="local encrypted backup or s3://bucket/key")
+    pbr.add_argument("--key-file", required=True, help="the one-time backup key downloaded from Command Center")
+    pbr.add_argument("--s3-endpoint", default="", help="S3-compatible endpoint for an s3:// source")
+    pbr.add_argument("--s3-region", default="us-east-1")
     pu2 = sub.add_parser("console-user", help="create or reset a Command Center user (docs/v4/console-login.md)")
     pu2.add_argument("action", choices=["seed", "reset-password", "list"])
     pu2.add_argument("--email")
@@ -244,6 +261,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result["ok"] else 9
     if a.cmd == "console-user":
         return _console_user(a, s)
+    if a.cmd == "backup" and a.backup_action == "restore":
+        from .core import backups
+        try:
+            key = backups.read_key(a.key_file)
+            result = backups.restore_archive(a.source, key, s.database_url, s,
+                                             s3_endpoint=a.s3_endpoint, s3_region=a.s3_region)
+        except backups.BackupError as exc:
+            print(f"restore failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Backup: {result.get('backup', a.source)}")
+        for name in ("database", "stored_secrets", "control_repository", "knowledge"):
+            component = result["components"].get(name, {"status": "failed", "detail": "no outcome was recorded"})
+            label = {"database": "Database", "stored_secrets": "Stored secrets",
+                     "control_repository": "Control repository settings", "knowledge": "Knowledge"}[name]
+            print(f"{label}: {component['status']} — {component['detail']}")
+        return 0 if result.get("ok") else 1
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)
@@ -265,6 +298,16 @@ def main(argv: list[str] | None = None) -> int:
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
+        return 0
+    if a.cmd == "notify":
+        from types import SimpleNamespace
+        from .control.db import DB
+        from .control import notify
+        db = DB(s.database_url, max_size=2)
+        try:
+            notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
+        finally:
+            db.close()
         return 0
     if a.cmd == "canary":
         from datetime import datetime, timezone

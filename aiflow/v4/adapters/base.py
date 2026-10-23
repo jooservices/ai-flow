@@ -68,6 +68,7 @@ class RunResult:
     quota: dict = field(default_factory=dict)
     duration_s: float = 0.0
     log_path: str = ""
+    command_results: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -175,6 +176,9 @@ def _credential_expiry(event: dict, res: RunResult, credential_context: bool = F
 class Adapter:
     provider = "base"
 
+    def __init__(self) -> None:
+        self._command_path: str | None = None
+
     def argv(self, spec: RunSpec) -> list[str]:
         raise NotImplementedError
 
@@ -186,6 +190,19 @@ class Adapter:
 
     def parse_event(self, event: dict, res: RunResult) -> None:
         raise NotImplementedError
+
+    def record_command_result(self, res: RunResult, command: str, output: str, exit_code: object,
+                              *, failed: bool = False) -> None:
+        """Store an adapter event with PATH evidence for catalog executables when available."""
+        from ..core.toolchains import command_executable_found_on_path
+
+        result = {"command": command, "output": output, "exit_code": exit_code}
+        if failed:
+            result["failed"] = True
+        found = command_executable_found_on_path(command, self._command_path)
+        if found is not None:
+            result["executable_found_on_path"] = found
+        res.command_results.append(result)
 
     # --- shared -----------------------------------------------------------------------------------------------
     def base_env(self, spec: RunSpec) -> dict[str, str]:
@@ -202,7 +219,9 @@ class Adapter:
         res = RunResult(log_path=spec.log_path)
         started = time.time()
         log = open(spec.log_path, "w", encoding="utf-8") if spec.log_path else None
-        proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=self.base_env(spec), stdin=subprocess.DEVNULL,
+        run_env = self.base_env(spec)
+        self._command_path = run_env.get("PATH", "")
+        proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=run_env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         if spec.container_start_hook:
             try:

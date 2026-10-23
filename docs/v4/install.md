@@ -1,12 +1,14 @@
-# v4 release installation smoke test
+# v4 release installation smoke tests
 
-Every tagged v4 release must pass the install smoke test before AI Flow publishes either the GHCR control image
-or the GitHub Release. The release workflow packages and signs the tarball first, then installs those exact
-assets in fresh Ubuntu 24.04 containers running systemd. PostgreSQL with pgvector and Redis run as isolated CI
-services, and the control API, two node agents, and their systemd units run in the Ubuntu containers.
+Every tagged v4 release must pass the clean-install acceptance test and the fleet rollout smoke before AI Flow publishes
+either the GHCR control image or the GitHub Release. The release workflow packages and signs the tarball
+first. `clean-install-containers.sh` installs those exact candidate assets in fresh Ubuntu 24.04 systemd containers
+through the documented `aiflow4-control-install` command and `/v1/install.sh` join bootstrap; see
+[Clean-install acceptance](clean-install-acceptance.md). PostgreSQL with pgvector and Redis run as isolated CI
+services.
 
-The smoke test installs the control API and `control-loops` (which drives the fleet rollout) from the candidate
-tarball, creates a small CI-only control repo, and joins two nodes through the normal one-use join-token API. It
+The supplementary fleet smoke in `install-smoke.sh` sets up the control API and `control-loops` from the same
+candidate tarball, creates a small CI-only control repo, and joins two nodes through the one-use join-token API. It
 checks that both agents report online heartbeats, then submits a real development claim using one node's token.
 The worker units are disabled in this fixture so the claim remains available for the smoke check. The rollout runs
 with a 10 s soak, one node per wave and `smoke-node-a` as the canary, so it finishes within the job.
@@ -30,10 +32,9 @@ legacy develop baseline, an unversioned build. Control has no previous fleet rel
 is complete at once and there is nothing to halt. The test still requires the failed install's
 `release_verification` incident, then installs the real candidate on the second node by hand.
 
-The CI implementation is in `deploy/v4/ci/install-smoke.sh` and
-`deploy/v4/ci/systemd.Dockerfile`. The release job also runs the normal v4 tests and only builds or pushes the
-GHCR image and creates or updates a GitHub Release after the install smoke step succeeds. A smoke failure leaves
-the tag unpublished and fails the release job.
+The fleet rollout implementation is in `deploy/v4/ci/install-smoke.sh` and `deploy/v4/ci/systemd.Dockerfile`.
+The release job only builds or pushes the GHCR image and creates or updates a GitHub Release after both candidate
+smokes succeed. A failure leaves the tag unpublished and fails the release job.
 
 ## Installing a published release
 

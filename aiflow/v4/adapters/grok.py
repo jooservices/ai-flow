@@ -1,7 +1,7 @@
 """Grok Build: `grok -p` with streaming-json. Spike S4: an empty balance is an error event with HTTP 402."""
 from __future__ import annotations
 
-from .base import AUTH_PATTERN, QUOTA_PATTERN, Adapter, RunResult, RunSpec
+from .base import AUTH_PATTERN, QUOTA_PATTERN, Adapter, RunResult, RunSpec, quota_from_event
 
 
 def _token_count(value: object) -> int:
@@ -43,6 +43,9 @@ class GrokAdapter(Adapter):
         return cmd
 
     def parse_event(self, ev: dict, res: RunResult) -> None:
+        quota = quota_from_event(ev, self.provider)
+        if quota:
+            res.quota = quota
         t = ev.get("type")
         if t == "text":
             # streaming-json text.data is a delta, so keep appending chunks in arrival order.

@@ -1,5 +1,5 @@
 # AI Flow v4 control processes; joins the networks of aiflow4-control (registry, OpenObserve, Traefik)
-# and aiflow4-services (Mailpit for alerts). Secrets come from env files on the control-plane machine.
+# and aiflow4-services. Alert channels and credentials are managed in the Notifications screen.
 name: aiflow4-app
 
 x-app: &app
@@ -17,8 +17,7 @@ x-app: &app
     HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
     AIFLOW4_O2_SOURCE: control
-    AIFLOW4_SMTP_HOST: aiflow4-svc-mailpit
-    AIFLOW4_SMTP_PORT: "1025"
+    AIFLOW4_SUPPORT_LOG_DIR: /var/log/aiflow4
     OTEL_SERVICE_NAME: aiflow4-control
   volumes:
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
@@ -29,6 +28,7 @@ x-app: &app
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
     - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
     - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
+    - /srv/aiflow/control/logs:/var/log/aiflow4
   logging: { driver: journald, options: { tag: "{{.Name}}" } }
   networks: [control, services, edge]
 
@@ -47,7 +47,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: aiflow4-edge
-      traefik.http.routers.api.rule: "PathPrefix(`/v1`) || PathPrefix(`/cc`) || PathPrefix(`/delivery`) || PathPrefix(`/business`) || PathPrefix(`/review`) || PathPrefix(`/stakeholder`) || PathPrefix(`/integrations`) || PathPrefix(`/projects`) || PathPrefix(`/machines`) || PathPrefix(`/backup`) || Path(`/`) || Path(`/healthz`) || PathPrefix(`/login`) || PathPrefix(`/logout`)"
+      traefik.http.routers.api.rule: "PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)"
       traefik.http.routers.api.entrypoints: web
       traefik.http.services.api.loadbalancer.server.port: "8080"
       traefik.http.services.api.loadbalancer.healthcheck.path: /healthz

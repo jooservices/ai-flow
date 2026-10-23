@@ -10,9 +10,10 @@ import pytest
 import redis
 
 from aiflow.v4.control.api import Ctx, create_app
-from aiflow.v4.control.db import DB
+from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.events import Events
 from aiflow.v4.control.jira import Jira
+from aiflow.v4.control import licensing
 from aiflow.v4.core.controlrepo import ControlRepo
 from aiflow.v4.core.fencing import Leases
 from aiflow.v4.core.settings import Settings
@@ -104,6 +105,7 @@ class FakeJira:
         self.status_of: dict[str, str] = {}
         self.comments: list[tuple[str, str]] = []
         self.recent_comment_data: dict[str, list[dict]] = {}
+        self.jira_account_id = "jira-owner-account"
         self.fields: list[tuple[str, dict]] = []
         self.labels: list[tuple[str, str, str]] = []
         self.attachments: list[tuple[str, str, bytes, str]] = []
@@ -176,6 +178,9 @@ class FakeJira:
     def recent_comments(self, key: str, limit: int = 10) -> list[dict]:
         return self.recent_comment_data.get(key, [])[:limit]
 
+    def current_account_id(self) -> str:
+        return self.jira_account_id
+
     def set_fields(self, key: str, values: dict) -> None:
         self.fields.append((key, values))
 
@@ -221,6 +226,8 @@ class FakeGitHub:
         self.repositories = [{"full_name": "jooservices/test-aiflow-wp", "name": "test-aiflow-wp",
                               "default_branch": "develop"},
                              {"full_name": "jooservices/new-app", "name": "new-app",
+                              "default_branch": "develop"},
+                             {"full_name": "jooservices/aiflow-control", "name": "aiflow-control",
                               "default_branch": "develop"}]
         self.available_branches: dict[tuple[str, str], bool] = {}
         self.deleted_files: list[tuple[str, str]] = []
@@ -255,6 +262,10 @@ class FakeGitHub:
         for (file_repo, file_branch, path), content in list(self.files.items()):
             if file_repo == repo and file_branch == base:
                 self.files[(repo, branch, path)] = content
+
+    def delete_branch(self, repo, branch):
+        self.deleted_branches = getattr(self, "deleted_branches", []) + [(repo, branch)]
+        return self.branch_heads.pop((repo, branch), None) is not None
 
     def create_branch_at_sha(self, repo, branch, sha):
         self.branches.append((repo, branch, sha))
@@ -376,6 +387,11 @@ def ctx(db, leases, control_repo):
                  jira_projects=["TESTWP"])
     snap = ControlRepo.load(control_repo)
     c = Ctx(settings=s, db=db, leases=leases, events=Events(db), repo=lambda: snap, jira=FakeJira(), github=FakeGitHub())
+    # General integration fixtures exercise multi-node, multi-account flows; the licensing tests restore the
+    # product's actual Free, Team and Business defaults before checking entitlement behavior.
+    licensing.initialize(db)
+    roomy_limits = {plan: {key: 1000 for key in limits} for plan, limits in licensing.PLAN_DEFAULTS.items()}
+    db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(roomy_limits),))
     return c
 
 

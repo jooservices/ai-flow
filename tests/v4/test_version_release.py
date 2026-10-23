@@ -9,10 +9,11 @@ import pytest
 from aiflow.v4.control import version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
-from aiflow.v4.core.controlrepo import Project
+from aiflow.v4.control.github_connections import GitHubConnections
+from aiflow.v4.core.controlrepo import Account, Project
 from aiflow.v4.worker import version_release as release_worker
 from aiflow.v4.worker.dev import Claimed
-from conftest import add_ticket, join_node
+from conftest import FakeGitHub, add_ticket, join_node
 
 
 CORE = "WordPress Core 0.5.0-beta"
@@ -148,6 +149,83 @@ def test_candidate_claim_rechecks_live_gate_before_any_release_step(client, ctx)
     assert getattr(ctx.github, "releases", {}) == {}
 
 
+def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-231")
+    secondary = node_headers(client, "node-secondary")
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    enabled = client.post("/v1/shared-accounts/claude-01/machines", json={"node": "node-secondary"})
+    assert enabled.status_code == 201, enabled.text
+    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=secondary).status_code == 200
+
+    candidates = client.get("/v1/version-releases/candidates", params={"account": "claude-01"},
+                            headers=secondary).json()
+
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+
+
+def test_version_release_claim_is_refused_when_shared_account_is_at_capacity(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-232")
+    headers = node_headers(client)
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    limited = client.put("/v1/shared-accounts/claude-01/session-limit", json={"session_limit": 1})
+    assert limited.status_code == 200 and limited.json()["session_limit"] == 1
+    add_ticket(ctx.db, "TESTWP-233")
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,started_at)"
+               " VALUES (%s,'TESTWP-233','TESTWP','dev','claude-01','claude','cc',1,'running',now())",
+               (str(uuid.uuid4()),))
+
+    response = claim_release(client, headers)
+
+    assert response.status_code == 409
+    assert "limit" in response.text or "capacity" in response.text
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release' AND status='running'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
+    assert getattr(ctx.github, "merges", []) == []
+    assert getattr(ctx.github, "tags", {}) == {}
+    assert getattr(ctx.github, "releases", {}) == {}
+
+
+def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_project(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-21")
+    repo = ctx.repo()
+    # Repository routing now refuses projects outside the connected GitHub installation.
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
+    repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other", checks=["composer install"],
+                                     version_release={"enabled": True, "versions": ["Other 1.0"]})
+    ctx.jira.version_data["OTHER"] = [{"id": "201", "name": "Other 1.0", "released": False}]
+    ctx.jira.version_issue_data[("OTHER", "201")] = [issue("OTHER-1")]
+    add_ticket(ctx.db, "OTHER-1", status="Done", labels=())
+    now = datetime.now(timezone.utc)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at)"
+               " VALUES (%s,'OTHER-1','OTHER','dev','codex-01','codex','node1',1,'finished','done',%s)",
+               (str(uuid.uuid4()), now - timedelta(minutes=2)))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,details)"
+               " VALUES (%s,'OTHER-1','OTHER','verify','claude-01','claude','cc',1,'finished','merged',%s,%s)",
+               (str(uuid.uuid4()), now - timedelta(minutes=1), J({"verdict": "PASS", "qc_passed": True})))
+    repo.accounts.append(Account(id="claude-02", provider="claude", node="node-other",
+                                 roles=["master", "release"]))
+    ctx.db.run("INSERT INTO accounts (id,provider,node,roles,status)"
+               " VALUES ('claude-02','claude','node-other',%s,'idle')", (["master", "release"],))
+    ctx.db.run("INSERT INTO nodes (name,status,projects,dynamic)"
+               " VALUES ('node-other','online',%s,true)", (["OTHER"],))
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+    headers = node_headers(client)
+
+    assert [item["project"] for item in version_release.candidates(ctx, "claude-02", "node-other")] == ["OTHER"]
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert [item["version_id"] for item in candidates["versions"]] == ["101"]
+    assert claim.status_code == 200, claim.text
+
+
 def test_stopped_machine_gets_no_version_release_candidates_or_claim(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-24")
@@ -202,7 +280,7 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
         def __init__(self, _root, run_as=None):
             self.refs = git_refs
 
-        def mirror(self, _repo, _token):
+        def mirror(self, _repo, _token, _transport_url=""):
             return tmp_path
 
         def remote_branch_exists(self, _mirror, branch):
@@ -570,6 +648,43 @@ def test_success_releases_version_once_with_ticket_notes_tag_audit_and_merge_bac
     assert replay["released"] is True
     assert len(ctx.github.prs) == 1 and len(ctx.github.tags) == len(ctx.github.releases) == 1
     assert len(ctx.github.commits) == before_commits and ctx.jira.released_versions == ["101"]
+
+
+def test_release_completion_keeps_the_non_default_connection_selected_at_claim(client, ctx, tmp_path):
+    configure(ctx)
+    evidence(ctx, "TESTWP-52")
+    repo = "jooservices/test-aiflow-wp"
+    ctx.settings.github_app_dir = str(tmp_path / "github-secrets")
+    selected = FakeGitHub()
+    selected.branch_heads[("test-aiflow-wp", "develop")] = "a" * 40
+    registry = GitHubConnections(ctx.settings.github_app_dir, lambda _directory, _account: FakeGitHub(),
+                                 lambda _token, _account, _kind: selected)
+    connection = registry.add_token("Release access token", "stored-token", "jooservices", "Organization")
+    registry.assign(repo, connection)
+    ctx.github_registry = registry
+
+    headers = node_headers(client)
+    claim = claim_release(client, headers)
+    assert claim.status_code == 200, claim.text
+    run = claim.json()
+    assert run["project"]["source_sha"] == "a" * 40
+    assert ctx.db.one("SELECT details FROM runs WHERE id=%s", (run["run_id"],))["details"][
+        "github_connection"] == connection
+
+    result = client.post("/v1/version-releases/101/complete",
+                         json={"run_id": run["run_id"], "fence": run["fence"], "head_sha": "a" * 40,
+                               "source_sha": run["project"]["source_sha"],
+                               "checks": [{"command": "composer install", "passed": True},
+                                          {"command": "vendor/bin/phpunit", "passed": True}]},
+                         headers=headers)
+    assert result.status_code == 200 and result.json()["released"] is True, result.text
+    assert ("test-aiflow-wp", "testwp-core-v0.5.0-beta") in selected.tags
+    assert not ctx.github.tags
+    github_writes = ctx.db.all("SELECT action,payload FROM write_audit WHERE target='github' AND run_id=%s",
+                               (run["run_id"],))
+    assert {row["action"] for row in github_writes} >= {"github-release-branch", "github-release-files",
+                                                         "github-merge", "github-tag", "github-release"}
+    assert all(row["payload"]["connection"] == connection for row in github_writes)
 
 
 def test_scan_repairs_jira_released_version_after_registry_write_failure(client, ctx, monkeypatch):

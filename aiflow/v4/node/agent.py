@@ -23,7 +23,8 @@ from urllib.parse import quote
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
+                               tools_for_stacks)
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -38,7 +39,10 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],
          "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
-         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"]}
+         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"],
+         "gitleaks": ["gitleaks", "version"],
+         "xdebug": ["php", "-r", "echo extension_loaded('xdebug') ? 'Xdebug ' . phpversion('xdebug') : 'missing';"],
+         "cosign": ["cosign", "version"], "podman": ["podman", "--version"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
 SIGN_IN_COMMANDS = {
     "claude": ["claude", "auth", "login"],
@@ -101,6 +105,10 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
     """One version line per tool, or `missing`; names default to the node tools and every stack tool."""
     out = {}
     for name in names if names is not None else REPORTED_TOOLS:
+        if name == CONTAINER_RUNTIME_TOOL:
+            from ..worker.containers import safe_container_runtime_version
+            out[name] = safe_container_runtime_version()
+            continue
         cmd = TOOLS.get(name)
         if not cmd:
             out[name] = "missing"
@@ -260,27 +268,44 @@ def _post_sign_in_status(api: ControlClient, node: str, account: str, request_id
               "code": code, "error": error[:300]}, retries=1)
 
 
+def _post_shared_sign_in_prompt(api: ControlClient, account: str, sign_in_url: str, code: str) -> None:
+    """Relay only the provider's short-lived device handoff; the machine keeps the resulting credentials."""
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-prompt",
+             {"link": sign_in_url, "code": code, "expires_in_s": 900}, retries=1)
+
+
+def _post_shared_sign_in_complete(api: ControlClient, account: str, request_id: str) -> None:
+    """Report the provider CLI's successful login so the node can start its normal credential probe."""
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-complete",
+             {"request_id": request_id}, retries=1)
+
+
 def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: threading.Event,
                          accounts_root: str = "/srv/aiflow/accounts") -> None:
     """Run a provider login inside its private account home and relay its device handoff to the console."""
     account = str(request.get("account") or "")
     request_id = str(request.get("request_id") or "")
     provider = str(request.get("provider") or "")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or not request_id:
+    shared_account = bool(request.get("shared_account"))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or (not request_id and not shared_account):
         return
     command = provider_sign_in_command(provider)
     if not command:
         try:
+            if shared_account:
+                return
             _post_sign_in_status(api, node, account, request_id, "failed", error="Provider sign-in is unsupported.")
         except Exception:  # noqa: BLE001 - do not log provider output or auth details
             pass
         return
 
     try:
-        _post_sign_in_status(api, node, account, request_id, "starting")
+        if not shared_account:
+            _post_sign_in_status(api, node, account, request_id, "starting")
         if not ensure_account_home(account, accounts_root):
-            _post_sign_in_status(api, node, account, request_id, "failed",
-                                 error="Could not prepare the private account home on this machine.")
+            if not shared_account:
+                _post_sign_in_status(api, node, account, request_id, "failed",
+                                     error="Could not prepare the private account home on this machine.")
             return
         home = str(Path(accounts_root) / account)
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
@@ -326,20 +351,28 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
                     os.write(master_fd, b"c")
                     copied_auth_url = True
                 details = provider_sign_in_details(clean_output)
-                if details[0] and details != last_details:
-                    _post_sign_in_status(api, node, account, request_id, "waiting",
-                                         sign_in_url=details[0], code=details[1])
+                if details[0] and details != last_details and (not shared_account or details[1]):
+                    if shared_account:
+                        _post_shared_sign_in_prompt(api, account, details[0], details[1])
+                    else:
+                        _post_sign_in_status(api, node, account, request_id, "waiting",
+                                             sign_in_url=details[0], code=details[1])
                     last_details = details
             return_code = process.wait(timeout=10)
             if cancel.is_set():
                 return
-            if return_code == 0:
-                _post_sign_in_status(api, node, account, request_id, "completed",
-                                     sign_in_url=last_details[0], code=last_details[1])
-            else:
-                _post_sign_in_status(api, node, account, request_id, "failed",
-                                     sign_in_url=last_details[0], code=last_details[1],
-                                     error=f"Provider sign-in exited with status {return_code}.")
+            if not shared_account:
+                if return_code == 0:
+                    _post_sign_in_status(api, node, account, request_id, "completed",
+                                         sign_in_url=last_details[0], code=last_details[1])
+                else:
+                    _post_sign_in_status(api, node, account, request_id, "failed",
+                                         sign_in_url=last_details[0], code=last_details[1],
+                                         error=f"Provider sign-in exited with status {return_code}.")
+            elif return_code == 0:
+                # The next heartbeat starts the worker, whose first action is the usual credential probe. This
+                # completion report breaks the pending-assignment/worker-probe cycle without moving credentials.
+                _post_shared_sign_in_complete(api, account, request_id)
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)
@@ -348,8 +381,9 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
         if cancel.is_set():
             return
         try:
-            _post_sign_in_status(api, node, account, request_id, "failed",
-                                 error=f"Provider sign-in could not start ({type(exc).__name__}).")
+            if not shared_account:
+                _post_sign_in_status(api, node, account, request_id, "failed",
+                                     error=f"Provider sign-in could not start ({type(exc).__name__}).")
         except Exception:  # noqa: BLE001
             pass
         log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
@@ -358,17 +392,19 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
 def sync_provider_sign_ins(api: ControlClient, node: str, requests: list[dict],
                            active: dict[str, tuple[str, threading.Event, threading.Thread]]) -> None:
     """Keep one provider login process per account and cancel replaced or removed handoffs."""
-    desired = {str(item.get("account") or ""): item for item in requests if item.get("account")}
+    desired = {str(item.get("account") or ""): item for item in requests
+               if isinstance(item, dict) and item.get("account")}
     for account, (request_id, cancel, thread) in list(active.items()):
         current = desired.get(account)
-        if not thread.is_alive():
-            del active[account]
-        elif not current or current.get("request_id") != request_id:
-            cancel.set()
+        if not current or current.get("request_id") != request_id:
+            if thread.is_alive():
+                cancel.set()
+            else:
+                del active[account]
     for account, item in desired.items():
         request_id = str(item.get("request_id") or "")
         current = active.get(account)
-        if current and current[0] == request_id and current[2].is_alive():
+        if current and current[0] == request_id:
             continue
         if current and current[2].is_alive():
             continue
@@ -712,6 +748,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     service_names: list[str] = []
     service_at = 0.0
     service_lock = threading.Lock()
+    container_cleanup_thread: threading.Thread | None = None
+    container_cleanup_at = 0.0
     sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
     probe_thread: threading.Thread | None = None
     probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
@@ -741,10 +779,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
-            sync_provider_sign_ins(api, name, desired.get("sign_ins") or [], sign_in_processes)
+            sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
+            sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),
                              "project_stacks": desired.get("project_stacks", {}),
-                             "versions": desired.get("versions", {})}
+                             "versions": desired.get("versions", {}),
+                             "requested_tools": desired.get("tool_repairs", [])}
             signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
             if signature != toolchain_signature and (toolchain_thread is None or not toolchain_thread.is_alive()):
                 from .operations import prepare_project_toolchains
@@ -753,7 +793,11 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
 
                 def prepare(request=stack_request):
                     try:
-                        result = prepare_project_toolchains(request["project_stacks"], request["versions"])
+                        if request["requested_tools"]:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                                request["requested_tools"])
+                        else:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"])
                         with toolchain_lock:
                             toolchain_result.clear()
                             toolchain_result.update(result)
@@ -768,9 +812,13 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 # so tools fixed by hand or by repair are reported again.
                 with toolchain_lock:
                     prepared_tools = toolchain_result.pop("tools", None)
+                    request_gaps = toolchain_result.pop("request_gaps", [])
                 if isinstance(prepared_tools, dict) and prepared_tools:
                     tools.update({str(k): str(v) for k, v in prepared_tools.items()})
                     tools_at = time.time()
+                if request_gaps:
+                    # A failed install is retried at the next heartbeat while the control plane still requests it.
+                    toolchain_signature = ""
             wanted = sorted({str(s) for services in (desired.get("project_services") or {}).values()
                              for s in services})
             if wanted != service_names:
@@ -825,6 +873,15 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     clean_scratch()
                     clean_worktrees(api, name)
                     sweep_test_databases()
+                    if (tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
+                            and time.time() - container_cleanup_at >= 24 * 60 * 60
+                            and (container_cleanup_thread is None or not container_cleanup_thread.is_alive())):
+                        from ..worker.containers import prune_image_cache
+
+                        container_cleanup_at = time.time()
+                        container_cleanup_thread = threading.Thread(
+                            target=prune_image_cache, name=f"aiflow4-container-prune-{name}", daemon=True)
+                        container_cleanup_thread.start()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

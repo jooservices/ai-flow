@@ -13,7 +13,8 @@ from typing import Any
 import yaml
 
 from .services import normalize_services
-from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
+from .toolchains import (BASE_TOOLS, CATALOG_TOOLS, CONTAINER_RUNTIME_TOOL, NODE_TOOLS, STACK_TOOLS, missing_tools,
+                         tools_for_providers, tools_for_stack,
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
 
 __all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
@@ -49,7 +50,22 @@ class Account:
     roles: list[str] = field(default_factory=list)
     explicit_only: bool = False
     parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
+    session_limit: int = 0     # total concurrent sessions across all machines; 0 = `parallel`
+    extra_machines: list[str] = field(default_factory=list)  # machines added beyond `node` (docs/v4/shared-accounts.md)
     paused: bool = False       # console-managed accounts stay assigned but do not receive new work
+
+    @property
+    def machines(self) -> list[str]:
+        """Every machine the account is enabled on, its control-repo node first."""
+        return list(dict.fromkeys(([self.node] if self.node else []) + list(self.extra_machines)))
+
+    def runs_on(self, node: str) -> bool:
+        return bool(node) and node in self.machines
+
+    @property
+    def sessions(self) -> int:
+        """Concurrent sessions the account may have in total, however many machines use it."""
+        return max(1, int(self.session_limit or self.parallel or 1))
 
 
 @dataclass
@@ -62,6 +78,7 @@ class Project:
     databases: list[str] = field(default_factory=list)
     services: list[str] | str = field(default_factory=list)  # test services every node prepares: postgres, redis
     checks: list[str] = field(default_factory=list)
+    containers: bool = False
     release_check: list[str] = field(default_factory=list)
     tag_prefix: str = ""
     environments: dict[str, Any] = field(default_factory=dict)
@@ -106,10 +123,12 @@ class Project:
         """Return repository settings with legacy project values as defaults."""
         selected = next((item for item in self.repositories or []
                          if isinstance(item, dict) and str(item.get("repo") or "").lower() == repo.lower()), {})
+        repo_containers = selected.get("containers")
         return {"repo": repo or self.repo,
                 "base": str(selected.get("base") or self.base),
                 "checks": list(selected.get("checks") or self.checks),
-                "stack": selected.get("stack") or self.stack}
+                "stack": selected.get("stack") or self.stack,
+                "containers": bool(self.containers if repo_containers is None else repo_containers)}
 
     def settings_for_ticket(self, ticket: dict[str, Any] | None) -> dict[str, Any]:
         return self.settings_for_repo(self.repo_for(ticket))
@@ -126,7 +145,16 @@ class Project:
     @property
     def tools(self) -> list[str]:
         """The base worker tools plus the extra tools this project's stack needs."""
-        return tools_for_stacks_in_project(self.stacks)
+        out = tools_for_stacks_in_project(self.stacks)
+        if self.uses_containers and CONTAINER_RUNTIME_TOOL not in out:
+            out.append(CONTAINER_RUNTIME_TOOL)
+        return out
+
+    @property
+    def uses_containers(self) -> bool:
+        """Whether the project or any repository settings require the safe container runtime."""
+        return bool(self.containers or any(isinstance(item, dict) and item.get("containers") is True
+                                           for item in self.repositories or []))
 
     @property
     def stacks(self) -> list[str]:
@@ -229,13 +257,13 @@ class ControlRepo:
                    projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref)
 
     def accounts_on(self, node: str) -> list[Account]:
-        return [a for a in self.accounts if a.node == node]
+        return [a for a in self.accounts if a.runs_on(node)]
 
     def tools_for_node(self, node: str, projects: list[str] | None = None) -> list[str]:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
         out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
-        installable = set(NODE_TOOLS).union(*(set(tools) for tools in STACK_TOOLS.values()))
+        installable = set(NODE_TOOLS).union(CATALOG_TOOLS, *(set(tools) for tools in STACK_TOOLS.values()))
         for tool in (n.tools if n else []):
             if tool in installable and tool not in out:
                 out.append(tool)

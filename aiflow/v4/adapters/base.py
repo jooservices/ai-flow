@@ -48,6 +48,7 @@ class RunSpec:
     log_path: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
     sandbox: str = "workspace-write"
+    container_start_hook: Callable[[int], None] | None = None
 
 
 @dataclass
@@ -88,6 +89,69 @@ def _expiry_datetime(value) -> datetime | None:
         return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
     except ValueError:
         return None
+
+
+def quota_from_event(event: dict, provider: str) -> dict:
+    """Normalize quota/rate-limit objects some CLI versions include in their JSON event stream."""
+    keys = {"rate_limits", "ratelimits", "quota", "quota_status", "usage_limits", "usage_limits_info"}
+    found: list[dict] = []
+
+    def visit(value: object, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, dict):
+            return
+        for key, child in value.items():
+            if str(key).lower().replace("-", "_") in keys and isinstance(child, dict):
+                found.append(child)
+            if isinstance(child, dict):
+                visit(child, depth + 1)
+
+    visit(event)
+    if not found:
+        return {}
+    source = found[-1]
+    windows = source.get("windows") if isinstance(source.get("windows"), dict) else source
+    aliases = {"primary": "five_hour", "secondary": "seven_day", "five_hour": "five_hour",
+               "fivehour": "five_hour", "seven_day": "seven_day", "weekly": "seven_day"}
+    normalized: dict[str, dict] = {}
+    for raw_name, raw in windows.items():
+        if not isinstance(raw, dict):
+            continue
+        name = aliases.get(str(raw_name).lower())
+        if not name:
+            continue
+        utilization = next((raw[k] for k in ("utilization", "used_percent", "usedPercent", "utilization_percent")
+                            if raw.get(k) is not None), None)
+        if utilization is None:
+            used, limit = raw.get("used_tokens"), raw.get("limit_tokens") or raw.get("limit") or raw.get("total")
+            try:
+                if used is not None and limit:
+                    utilization = float(used) / float(limit)
+            except (TypeError, ValueError, ZeroDivisionError):
+                utilization = None
+        if utilization is None:
+            continue
+        try:
+            utilization = float(utilization)
+            if utilization > 1:
+                utilization /= 100
+        except (TypeError, ValueError):
+            continue
+        item = {"utilization": utilization}
+        reset = next((raw[k] for k in ("resets_at", "resetsAt", "reset_at", "resetAt") if raw.get(k) is not None), None)
+        if reset is not None:
+            item["resets_at"] = reset
+        for key in ("quota_tokens", "limit_tokens", "total_tokens", "window_duration_minutes", "windowDurationMins"):
+            if raw.get(key) is not None:
+                item[key] = raw[key]
+        if raw.get("limit") is not None and "limit_tokens" not in item:
+            item["limit_tokens"] = raw["limit"]
+        if raw.get("total") is not None and "total_tokens" not in item:
+            item["total_tokens"] = raw["total"]
+        duration = raw.get("window_duration_mins")
+        if duration is not None:
+            item["window_duration_minutes"] = duration
+        normalized[name] = item
+    return {"provider": provider, "windows": normalized} if normalized else {}
 
 
 def _credential_expiry(event: dict, res: RunResult, credential_context: bool = False) -> None:
@@ -140,6 +204,23 @@ class Adapter:
         log = open(spec.log_path, "w", encoding="utf-8") if spec.log_path else None
         proc = subprocess.Popen(self.argv(spec), cwd=spec.cwd, env=self.base_env(spec), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        if spec.container_start_hook:
+            try:
+                spec.container_start_hook(proc.pid)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                raise
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
         last_output = time.time()

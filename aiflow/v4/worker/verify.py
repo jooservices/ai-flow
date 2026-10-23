@@ -36,6 +36,8 @@ def findings_of(text: str) -> str:
 def build_prompt(c: Claimed, pr: dict) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "verify.md").read_text(encoding="utf-8")
     checks = "\n".join(f"   - {x}" for x in c.project.get("checks") or []) or "   - the project's test suite"
+    if c.project.get("containers"):
+        checks += "\n   - Docker commands go through the run's rootless, worktree-confined runtime"
     t = c.ticket
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
@@ -65,8 +67,10 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             log.warning("PR comment failed: %s", e)
 
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         if not git.remote_branch_exists(mirror, pr["branch"]):
             raise RuntimeError(f"branch {pr['branch']} is gone")
         wt = Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify"
@@ -97,7 +101,12 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             events["n"] += 1
             hb.progress = {"phase": "verify-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
 
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        if project.get("containers"):
+            from .containers import ContainerRuntime
+            with ContainerRuntime(spec, run_as):
+                res = adapter.run(spec, on_progress, stop=hb.lost)
+        else:
+            res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)

@@ -17,6 +17,13 @@ Rules:
   a question for the owner: stop and report `RESULT: BLOCKED: MISSING-TOOL: <tool>[, <tool>] - <what could not run>`
   (name the tool or service, e.g. php, composer, playwright, postgres). AI Flow then keeps the ticket waiting for a
   machine that has it. Never fake a result.
+- A refused command or write is a policy message about that one call, not a restriction that needs a person. The
+  message names the allowed alternative (commands must start with an allowed program; use the Edit tool to change
+  files); use it instead of stopping. Never ask the owner about a refusal.
+- Only a new business decision or an irreversible or production action is a question for the owner. A decision the
+  owner already made (for example no Docker for AI runs, no release or tag without the owner) is not asked again, and
+  an acceptance criterion that cannot be met here is narrowed by AI Flow, not by you. The log of a failing CI job is
+  given to you when it exists; never ask for it.
 - Keep the change focused on this ticket; no unrelated refactors.
 - When something in the ticket is ambiguous, choose the option that best fits the acceptance criteria and the
   existing code, and state the choice in your summary. Stop for the owner only for a real requirement conflict, an

@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..adapters.base import RunSpec
 from .client import ControlClient
 from .dev import Claimed, Heartbeat, LeaseLost
 from .gitops import Git
@@ -33,9 +34,10 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
     report: dict = {"head_sha": "", "source_sha": str(project.get("source_sha") or ""), "checks": [], "error": ""}
     env = project_env(project["key"])
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                        "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                             "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         branch = project.get("release_branch") or project["source_branch"]
         if not git.remote_branch_exists(mirror, branch):
             raise RuntimeError(f"configured release branch {branch} does not exist")
@@ -55,15 +57,31 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
                 raise LeaseLost()
             hb.progress = {"phase": "version-release-check", "version": version["name"], "head": head[:12],
                            "check": index, "checks_total": len(commands), "elapsed_s": int(time.monotonic() - started)}
-            proc = subprocess.Popen(run_as + ["bash", "-lc", command], cwd=wt, env=command_env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                    start_new_session=True)
-            try:
-                output, _ = proc.communicate(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                output, _ = proc.communicate()
-                output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
+            if project.get("containers"):
+                from .containers import ContainerRuntime
+                spec = RunSpec(prompt="", cwd=str(wt), account_home=str(Path(srv_root) / "cache"),
+                               extra_env=dict(command_env))
+                with ContainerRuntime(spec, run_as) as runtime:
+                    proc = subprocess.Popen(run_as + ["bash", "-c", command], cwd=wt,
+                                            env={**command_env, **spec.extra_env}, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                    runtime.bind_process(proc.pid)
+                    try:
+                        output, _ = proc.communicate(timeout=timeout_s)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        output, _ = proc.communicate()
+                        output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
+            else:
+                proc = subprocess.Popen(run_as + ["bash", "-lc", command], cwd=wt, env=command_env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                        start_new_session=True)
+                try:
+                    output, _ = proc.communicate(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    output, _ = proc.communicate()
+                    output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
             clean_output = _redact(output or "", env)[-12_000:]
             report["checks"].append({"command": command, "passed": proc.returncode == 0,
                                      "exit_code": proc.returncode, "output": clean_output})

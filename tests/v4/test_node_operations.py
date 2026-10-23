@@ -15,6 +15,7 @@ import pytest
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4 import cli
+from aiflow.v4.core.controlrepo import Account
 from aiflow.v4.node import agent, operations
 from conftest import join_node as issue_and_join
 
@@ -83,14 +84,15 @@ def test_untrusted_identity_headers_and_lead_cannot_install_but_lead_can_read_lo
     assert no_session.status_code == 401
 
     sign_in(client, ctx, "lead", "lead@example.test")
-    assert client.get("/v1/console/session").json() == {
-        "authenticated": True, "user": "lead@example.test", "role": "lead",
-        "permissions": sorted(ROLE_PERMISSIONS["lead"])}
+    session = client.get("/v1/console/session").json()
+    assert session["authenticated"] and session["user"] == "lead@example.test"
+    assert session["role"] == "team_lead" and session["roles"] == ["team_lead"]
+    assert session["permissions"] == sorted(ROLE_PERMISSIONS["team_lead"])
     refused = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert refused.status_code == 403
     assert client.get("/v1/nodes/node1/operations").status_code == 200
     assert ctx.db.one("SELECT accepted, result FROM write_audit WHERE action='install' ORDER BY id DESC LIMIT 1") == {
-        "accepted": False, "result": "owner role required"}
+        "accepted": False, "result": "not available for your role"}
 
 
 def publish_release(tmp_path, monkeypatch, version="v4.2.1"):
@@ -193,6 +195,19 @@ def test_join_command_uses_a_single_use_token_and_never_accepts_ssh_password(cli
         "consumed"] is True
 
 
+def test_join_returns_assigned_accounts_separately_from_expected_worker_accounts(client, ctx):
+    ctx.repo().accounts.extend([
+        Account(id="codex-active", provider="codex", node="fresh-node"),
+        Account(id="claude-paused", provider="claude", node="fresh-node", paused=True),
+    ])
+
+    joined = issue_and_join(client, "fresh-node")
+
+    assert joined.status_code == 200
+    assert joined.json()["accounts"] == ["codex-active", "claude-paused"]
+    assert joined.json()["worker_accounts"] == ["codex-active"]
+
+
 def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(client, ctx):
     headers = node_join(client, "node1")
     repo = ctx.repo()
@@ -214,6 +229,24 @@ def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(
     assert package_plan["packages"] == ["curl", "ca-certificates"]
     assert next(tool for tool in op["payload"]["tools"] if tool["name"] == "node")
     assert op["payload"]["services"] == repo.nodes["node1"].services
+
+
+def test_missing_safe_runtime_is_not_queued_as_an_installable_tool(client, ctx, monkeypatch):
+    headers = node_join(client, "node1")
+    ctx.repo().projects["TESTWP"].containers = True
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2,
+                                                    "tools": {"safe-container-runtime": "missing"}},
+                headers=headers)
+    sign_in(client, ctx, role="super_admin")
+    monkeypatch.setattr(control_api, "toolchain_gaps", lambda *args, **kwargs: ["safe-container-runtime"])
+
+    automatic = client.post("/v1/nodes/node1/operations", json={"action": "install"})
+    assert automatic.status_code == 409
+    assert automatic.json()["detail"] == "configure rootless Podman and project quotas on the node"
+    explicit = client.post("/v1/nodes/node1/operations", json={"action": "install",
+                                                                "component": "safe-container-runtime"})
+    assert explicit.status_code == 409
+    assert explicit.json()["detail"] == "configure rootless Podman and project quotas on the node"
 
 
 def test_repair_executor_installs_pinned_cli_and_waits_for_green_service_check(monkeypatch):

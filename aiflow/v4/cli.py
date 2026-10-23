@@ -7,6 +7,7 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
+  aiflow4 notify --severity S --title T --detail D   deliver through saved notification channels
   aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
@@ -98,6 +99,9 @@ def build_ctx(s: Settings):
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
               events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
+    from .control import shared_accounts
+    ctx.repo = lambda: shared_accounts.overlay(repo_cache(), db)  # accounts managed in Command Center
+    ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
     return ctx
@@ -124,8 +128,10 @@ def _console_user(a, s) -> int:
             login.write_password_file(a.password_file, password)
 
         try:
-            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver) if a.action == "seed"
-                        else login.reset_password(db, a.email, deliver=deliver))
+            password = (login.seed_user(db, a.email, a.role, a.name, deliver=deliver,
+                                        public_key=getattr(s, "license_public_key", "")) if a.action == "seed"
+                        else login.reset_password(db, a.email, deliver=deliver,
+                                                  public_key=getattr(s, "license_public_key", "")))
         except (ValueError, OSError) as exc:
             print(f"{exc}; nothing changed", file=sys.stderr)
             return 2
@@ -232,6 +238,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+    pnotify = sub.add_parser("notify", help="send a system alert using saved notification channels")
+    pnotify.add_argument("--severity", choices=("info", "warning", "critical"), required=True)
+    pnotify.add_argument("--title", required=True)
+    pnotify.add_argument("--detail", default="")
+    pnotify.add_argument("--link", default="")
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -345,6 +356,16 @@ def main(argv: list[str] | None = None) -> int:
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
+        return 0
+    if a.cmd == "notify":
+        from types import SimpleNamespace
+        from .control.db import DB
+        from .control import notify
+        db = DB(s.database_url, max_size=2)
+        try:
+            notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
+        finally:
+            db.close()
         return 0
     if a.cmd == "canary":
         from datetime import datetime, timezone

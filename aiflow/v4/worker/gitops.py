@@ -61,14 +61,17 @@ class Git:
             raise GitError(f"git {' '.join(args[:3])}: {p.stderr.strip()[-400:]}")
         return p.stdout
 
-    def mirror(self, repo: str, token: str) -> Path:
+    def mirror(self, repo: str, token: str, transport_url: str = "") -> Path:
         """Bare clone with remote-tracking refs, fetched before every use."""
         path = self.root / "mirrors" / f"{repo.replace('/', '__')}.git"
-        url = f"https://github.com/{repo}.git"
+        url = transport_url or f"https://github.com/{repo}.git"
         if not (path / "HEAD").exists():
             self.mkdirs(path.parent)
             self.run("clone", "--bare", "--quiet", url, str(path), token=token)
             self.run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=path)
+        else:
+            # The relay URL has no credential in it; the short-lived capability stays in GIT_ASKPASS.
+            self.run("remote", "set-url", "origin", url, cwd=path)
         self.run("fetch", "--prune", "--quiet", "origin", cwd=path, token=token)
         return path
 

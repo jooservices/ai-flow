@@ -1,12 +1,17 @@
 """Owner-managed project configuration and lifecycle through the console API."""
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
+from fastapi.testclient import TestClient
 
 from conftest import add_ticket, join_node
+from aiflow.v4.control import api as control_api, licensing
 from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import ControlRepo, Project, epic_for_ticket
 
 
@@ -29,6 +34,8 @@ def prepare_project_control(ctx, control_repo: Path):
     ctx.repo = lambda: ControlRepo.load(control_repo)
 
     def pull_fake_commit():
+        if not ctx.github.commits:
+            return
         commit = ctx.github.commits[-1]
         path = control_repo / commit["path"]
         if commit.get("deleted"):
@@ -127,6 +134,39 @@ def test_owner_adds_project_from_jira_and_github_catalog_and_worker_claims_ready
     assert history[-1]["accepted"] is True and "commit" in history[-1]["result"]
 
 
+def test_concurrent_project_creates_serialize_the_final_licence_slot(ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["projects"] = 2
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+    assert licensing.snapshot(ctx.db, "")["limits"]["projects"] == 2
+    assert len(ctx.repo().projects) == 1
+    first_client = TestClient(control_api.create_app(ctx))
+    second_client = TestClient(control_api.create_app(ctx))
+    owner_sign_in(first_client, ctx)
+    owner_sign_in(second_client, ctx)
+    barrier = threading.Barrier(2)
+
+    def add_project(client_to_use, project):
+        barrier.wait()
+        return client_to_use.post("/v1/projects", json=project_body(project))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda item: add_project(*item),
+                                  ((first_client, "FIRSTAPP"), (second_client, "SECONDAPP"))))
+    first_client.close()
+    second_client.close()
+
+    assert sorted(response.status_code for response in responses) == [200, 409], (
+        [response.text for response in responses], len(ctx.github.commits), len(ctx.repo().projects),
+        licensing.snapshot(ctx.db, "")["limits"]["projects"])
+    refused = next(response for response in responses if response.status_code == 409)
+    assert "Projects limit of 2" in refused.json()["detail"]
+    assert "raise the limit in the Licence screen" in refused.json()["detail"]
+    assert len(ctx.github.commits) == 1
+    assert len(ControlRepo.load(control_repo).projects) == 2
+
+
 def test_missing_jira_statuses_are_listed_exactly_and_block_every_write(client, ctx, control_repo):
     prepare_project_control(ctx, control_repo)
     owner_sign_in(client, ctx)
@@ -160,6 +200,24 @@ def test_missing_base_branch_blocks_save(client, ctx, control_repo):
     assert "base branch develop is missing" in saved.json()["detail"]["message"]
     assert ctx.github.commits == []
     assert not (control_repo / "projects" / "NEWAPP.yaml").exists()
+
+
+def test_owner_can_declare_container_checks_from_the_projects_ui_path(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "claude": "Claude 1.0",
+             "safe-container-runtime": "rootless Podman 5.4; podman-compose 1.2; project quota"}
+    worker_headers(client, tools)
+    body = project_body(containers=True, checks=["docker compose run --rm composer composer ci"])
+    checked = client.post("/v1/projects/preflight", json=body)
+    assert checked.status_code == 200, checked.text
+    assert "safe-container-runtime" in checked.json()["required_tools"]
+    assert next(item for item in checked.json()["nodes"] if item["name"] == "node1")["ready"] is True
+
+    saved = client.post("/v1/projects", json=body)
+    assert saved.status_code == 200, saved.text
+    config = yaml.safe_load((control_repo / "projects" / "NEWAPP.yaml").read_text(encoding="utf-8"))
+    assert config["containers"] is True
 
 
 def test_pause_keeps_running_run_alive_and_removes_project_from_candidates_and_sync(client, ctx, control_repo):
@@ -263,9 +321,11 @@ def test_project_epic_repository_lookup_inherits_project_defaults_and_all_repo_s
                       epic_repositories={"MULTI-2": "jooservices/core"})
     assert project.repo_for({"key": "MULTI-3", "epic": "MULTI-2"}) == "jooservices/core"
     assert project.settings_for_ticket({"epic": "MULTI-2"}) == {
-        "repo": "jooservices/core", "base": "main", "checks": ["pytest"], "stack": "python-3.12"}
+        "repo": "jooservices/core", "base": "main", "checks": ["pytest"], "stack": "python-3.12",
+        "containers": False}
     assert project.settings_for_ticket({"key": "MULTI-4"}) == {
-        "repo": "jooservices/default", "base": "develop", "checks": ["composer install"], "stack": "php-8.3"}
+        "repo": "jooservices/default", "base": "develop", "checks": ["composer install"], "stack": "php-8.3",
+        "containers": False}
     assert set(project.stacks) == {"php-8.3", "python-3.12"}
     assert {"php", "composer", "wp", "python3"}.issubset(project.tools)
     assert epic_for_ticket({"key": "MULTI-4", "type": "Sub-task", "parent_key": "MULTI-3"}, {

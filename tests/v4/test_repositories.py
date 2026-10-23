@@ -23,10 +23,10 @@ def test_repo_lookup_uses_epic_mapping_and_project_defaults():
     assert epic == "JOOWP-2"
     selected = project.settings_for_ticket({"key": "JOOWP-4", "epic": epic})
     assert selected == {"repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],
-                        "stack": "python-3.12"}
+                        "stack": "python-3.12", "containers": False}
     assert project.settings_for_ticket({"key": "JOOWP-5"}) == {
         "repo": "jooservices/wordpress-default", "base": "develop", "checks": ["composer install"],
-        "stack": "php-8.3"}
+        "stack": "php-8.3", "containers": False}
 
 
 def test_version_release_project_uses_the_repository_selected_by_version_tickets():
@@ -185,7 +185,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def mirror(self, repo, token):
+        def mirror(self, repo, token, _transport_url=""):
             calls["mirrors"].append((repo, token))
             return "mirror"
 
@@ -228,7 +228,7 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def mirror(self, repo, token):
+        def mirror(self, repo, token, _transport_url=""):
             calls["mirrors"].append((repo, token))
             return "mirror"
 

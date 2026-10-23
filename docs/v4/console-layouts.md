@@ -7,10 +7,9 @@ page the way they work, and the arrangement follows them to another browser or c
 Pages in scope: Dashboard (the "Work" and "AI and machines" sections), Human review, Machines and AI, Knowledge,
 Delivery, and Users and roles.
 
-Dashboard preserves those visible sections while laying them out: blocks can be reordered inside Work, inside AI and
-machines, and inside the additional panels. This keeps each block under its section heading. Owner defaults start the
-AI and machines section with Tokens and cost and AI account quota; other role defaults put that section's priorities
-first as well.
+Dashboard keeps its Work and AI and machines headings, while every block shares one page-wide layout grid. A person
+can move a block across those sections, so an owner can put Tokens and cost and AI account quota before the work board.
+The other role defaults also put each role's priorities first in the shared order.
 
 ## Using it
 
@@ -42,17 +41,19 @@ A saved layout is always *resolved* against the blocks that exist now:
 
 ## Role defaults
 
-Without a saved layout a person gets the default of their role. The defaults use the console roles of
-`console_auth.ROLE_PERMISSIONS` through `ROLE_PROFILE` in `layouts.py`:
+Without a saved layout a person gets the default of their role. `ROLE_PROFILE` maps the current role names in
+`console_auth.ROLE_PERMISSIONS` to these profiles:
 
 | Role | Profile | Dashboard starts with |
 | --- | --- | --- |
-| `owner`, `super_admin` | owner | Work starts with summary cards; AI and machines starts with tokens and cost, then quota, then usage |
-| `lead` | lead | summary cards, flow, waiting for you, what is being built (the board first); tokens and autonomy hidden |
+| `administrator`, `owner`, `super_admin` | owner | Tokens and cost, quota, usage, then the work summary |
+| `team_lead`, `lead`, `delivery` | lead | Summary cards, flow, waiting for you, then what is being built |
+| `business`, `ba`, `product_owner`, `stakeholder` | business | Work summary first; machine and cost panels hidden |
+| `sa` | sa | Quota and machine health first |
+| `reviewer`, `human_reviewer` | reviewer | Waiting tickets first on Human review; dashboard starts with items waiting for a person |
 
-Profiles also exist for `business`, `sa` and `reviewer` (Human review first); they apply when a role named `team_lead`,
-`business`, `sa`, `human_reviewer` or `reviewer` is added to `ROLE_PERMISSIONS`. A role without a profile gets the
-canonical layout, so adding a role never breaks the console.
+Every current role has a profile. A future role without a mapping gets the canonical layout, so adding a role never
+breaks the console.
 
 ## API
 

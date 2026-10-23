@@ -17,7 +17,8 @@ SECRET = "test-console-layout-secret-with-at-least-32-bytes"
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
-var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {}},
+var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
+  classList: {add: function () {}, remove: function () {}}},
   getElementById: function () { return null; }, querySelector: function () { return null; },
   querySelectorAll: function () { return []; }};
 var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
@@ -71,25 +72,25 @@ def test_role_defaults_differ_by_role_and_cover_the_roles_of_the_ticket():
     owner = layouts.default_layout("dashboard", "owner")
     lead = layouts.default_layout("dashboard", "lead")
     owner_ids = ids(owner)
-    ai_blocks = layouts.PAGE_SECTIONS["dashboard"]["ai"]
-    work_blocks = layouts.PAGE_SECTIONS["dashboard"]["work"]
-    assert [block for block in owner_ids if block in ai_blocks] == ["tokens", "quota", "usage"]
-    assert [block for block in owner_ids if block in work_blocks] == ["kpis", "flow", "projects", "building", "waiting"]
+    assert owner_ids[:3] == ["tokens", "quota", "usage"]
     assert ids(lead)[:3] == ["kpis", "flow", "waiting"]  # the board first
     assert layouts.default_layout("dashboard", "super_admin") == owner
-    for role in ("team_lead", "business", "sa", "human_reviewer"):  # roles a later release adds to ROLE_PERMISSIONS
+    assert layouts.profile_for("product_owner") == "business"
+    assert layouts.profile_for("delivery") == "lead"
+    assert layouts.profile_for("ba") == layouts.profile_for("business") == "business"
+    assert layouts.profile_for("team_lead") == "lead"
+    assert layouts.profile_for("reviewer") == "reviewer"
+    for role in ("team_lead", "business", "sa", "human_reviewer"):
         assert layouts.profile_for(role)
     assert ids(layouts.default_layout("dashboard", "human_reviewer"))[0] == "waiting"
     assert layouts.default_layout("dashboard", "unknown-role") == layouts.default_layout("dashboard", "nobody")
 
 
-def test_dashboard_sections_are_independent_layout_groups_that_cover_every_block():
-    groups = layouts.PAGE_SECTIONS["dashboard"]
-    grouped = [block for section in groups.values() for block in section]
-    assert len(grouped) == len(set(grouped))
-    assert set(grouped) == set(layouts.page_ids("dashboard"))
+def test_dashboard_has_one_page_wide_layout_grid_for_both_sections():
     html = PAGE.read_text()
-    assert re.findall(r'data-layout-section="([a-z-]+)"', html) == ["work", "ai"]
+    assert "data-layout-section=" not in html
+    assert "root.querySelectorAll('[data-block]')" in html
+    assert "Arrange all Dashboard blocks together" in html
 
 
 # --- resolve: stale and new blocks -----------------------------------------------------------------------------
@@ -371,24 +372,28 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
   try {
     const page = await browser.newPage();
     const base = process.env.AIFLOW4_LAYOUT_BASE_URL;
-    await page.goto(base + '/login?next=%2Fdashboard', { waitUntil: 'domcontentloaded' });
+    await page.goto(base + '/login?next=%2Fcc', { waitUntil: 'domcontentloaded' });
     await page.getByLabel('Email').fill(process.env.AIFLOW4_LAYOUT_EMAIL);
     await page.getByLabel('Password').fill(process.env.AIFLOW4_LAYOUT_PASSWORD);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.waitForURL(base + '/dashboard');
+    await page.waitForURL(base + '/cc');
+    await page.goto(base + '/dashboard', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Customize layout' }).waitFor({ state: 'visible', timeout: 10000 });
-    const ai = page.locator('#view-cc .dash-section').nth(1);
-    await page.waitForFunction(() => document.querySelectorAll('#view-cc .dash-section .block-cell').length >= 8);
-    assert.deepEqual(await ai.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId)),
-      ['tokens', 'quota', 'usage']);
+    const grid = page.locator('#view-cc .blocks');
+    await page.waitForFunction(() => document.querySelectorAll('#view-cc .blocks .block-cell').length >= 8);
+    let order = await grid.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
+    assert.deepEqual(order.slice(0, 3), ['tokens', 'quota', 'usage']);
     await page.getByRole('button', { name: 'Customize layout' }).click();
-    const work = page.locator('#view-cc .dash-section').nth(0);
-    const before = await work.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
-    assert.match(await page.locator('#view-cc [data-layout-bar]').innerText(), /Arrange blocks within Work, AI and machines/);
+    assert.match(await page.locator('#view-cc [data-layout-bar]').innerText(), /Arrange all Dashboard blocks together/);
+    await page.locator('#view-cc [data-layout-handle][data-id="tokens"]').focus();
+    await page.keyboard.press('End');
+    order = await grid.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
+    assert.equal(order.at(-1), 'tokens');
     await page.locator("#view-cc .sort-btn[data-key='open']").click();
     await page.locator("#view-cc [data-act='layout-done']").waitFor({ state: 'visible' });
     assert.ok(await page.locator('#view-cc [data-layout-handle]').count() >= 8);
-    assert.deepEqual(await work.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId)), before);
+    order = await page.locator('#view-cc .blocks .block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
+    assert.equal(order.at(-1), 'tokens');
     await page.locator("#view-cc [data-act='layout-done']").click();
     assert.equal(await page.locator('#view-cc [data-layout-handle]').count(), 0);
   } finally {
@@ -402,11 +407,12 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
 
             def sign_in_page(context):
                 page = context.new_page()
-                page.goto(base_url + "/login?next=%2Fusers", wait_until="domcontentloaded")
+                page.goto(base_url + "/login?next=%2Fcc", wait_until="domcontentloaded")
                 page.get_by_label("Email").fill(person)
                 page.get_by_label("Password").fill(password)
                 page.get_by_role("button", name="Sign in").click()
-                page.wait_for_url(base_url + "/users")
+                page.wait_for_url(base_url + "/cc")
+                page.goto(base_url + "/users", wait_until="domcontentloaded")
                 return page
 
             def order(page):
@@ -464,21 +470,23 @@ const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
             small.get_by_role("button", name="Customize layout").tap()
             assert small.locator("#view-users [data-layout-handle]").count() == 2
 
-            # The owner sees cost and quota first inside the AI and machines section. Dashboard sorting redraws
-            # content directly, so layout controls and handles must remain available while layout mode is active.
+            # The owner sees cost and quota first on the shared Dashboard grid. Keyboard movement crosses the
+            # former Work/AI section boundary; sorting redraws the content directly while layout mode stays active.
             page.goto(base_url + "/dashboard", wait_until="domcontentloaded")
             page.get_by_role("button", name="Customize layout").wait_for(state="visible", timeout=10000)
-            ai_section = page.locator("#view-cc .dash-section").nth(1)
-            assert ai_section.locator(".block-cell").evaluate_all("cells => cells.map(c => c.dataset.blockId)") == [
+            dashboard_grid = page.locator("#view-cc .blocks")
+            assert dashboard_grid.locator(".block-cell").evaluate_all("cells => cells.map(c => c.dataset.blockId)")[:3] == [
                 "tokens", "quota", "usage"]
             page.get_by_role("button", name="Customize layout").click()
-            before = page.locator("#view-cc .dash-section").nth(0).locator(".block-cell").evaluate_all(
-                "cells => cells.map(c => c.dataset.blockId)")
-            assert "Arrange blocks within Work, AI and machines" in page.locator("#view-cc [data-layout-bar]").inner_text()
+            assert "Arrange all Dashboard blocks together" in page.locator("#view-cc [data-layout-bar]").inner_text()
+            page.locator("#view-cc [data-layout-handle][data-id='tokens']").focus()
+            page.keyboard.press("End")
+            before = dashboard_grid.locator(".block-cell").evaluate_all("cells => cells.map(c => c.dataset.blockId)")
+            assert before[-1] == "tokens"
             page.locator("#view-cc .sort-btn[data-key='open']").click()
             assert page.locator("#view-cc [data-act='layout-done']").is_visible()
             assert page.locator("#view-cc [data-layout-handle]").count() >= 8
-            after = page.locator("#view-cc .dash-section").nth(0).locator(".block-cell").evaluate_all(
+            after = page.locator("#view-cc .blocks .block-cell").evaluate_all(
                 "cells => cells.map(c => c.dataset.blockId)")
             assert after == before
             page.locator("#view-cc [data-act='layout-done']").click()

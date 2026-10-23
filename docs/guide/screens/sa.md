@@ -1,6 +1,6 @@
 # SA health
 
-**Assumes:** you are signed in as an Owner or Super Administrator, the roles with `console.write`, and nodes have sent at least one heartbeat. Thresholds come
+**Assumes:** you are signed in as an Administrator or SA, the roles that can open this view, and nodes have sent at least one heartbeat. Thresholds come
 from `aiflow-control/sa.yaml`; without it the defaults apply (see `docs/v4/sa-health.md` in the repository).
 
 SA health (`/sa`) is read-only. It never changes the fleet.

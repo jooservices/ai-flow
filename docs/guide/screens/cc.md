@@ -1,7 +1,7 @@
 # Command Center
 
-**Assumes:** you are signed in with any console role. Adding nodes needs the `nodes.manage` permission (Owner,
-Super Administrator).
+**Assumes:** you are signed in with any role; the Dashboard shows only the projects you belong to. Adding nodes needs the `nodes.manage` permission (Administrator
+or SA).
 
 Command Center (`/cc`) is the first screen. It shows the state of the whole flow.
 

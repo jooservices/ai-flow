@@ -1,6 +1,6 @@
 # Notifications
 
-**Assumes:** you are signed in as an Owner or Super Administrator, the roles that can manage notifications, and are using the installed v4 release.
+**Assumes:** you are signed in as an Administrator and are using the installed v4 release.
 
 Notifications (`/notifications`) configures alert channels and decides which alerts use each channel. The page also
 shows recent delivery results and open delivery incidents.

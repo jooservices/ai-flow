@@ -1,6 +1,6 @@
 # Work board
 
-**Assumes:** you are signed in with any console role and at least one project exists.
+**Assumes:** you are signed in with any role (the Work board is open to every role and shows only your projects), and at least one project exists.
 
 The Work board (`/work`) shows the tickets of one project by state, like [Delivery](delivery.md), as the working
 view for the people who follow tickets day to day.

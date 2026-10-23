@@ -418,6 +418,21 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
 
 
+def test_support_screen_shows_ticket_picker_and_review_inventory_before_download():
+    rendered = run_script(f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-support' ? root : null; }};
+S.view = 'support'; S.consoleUser = {json.dumps(console_session_user('owner'))};
+S.data = {{tickets: [{{key: 'TESTWP-7', type: 'Bug', summary: 'Example issue'}}]}};
+S.support = {{ticketKey: 'TESTWP-7', busy: false, error: '', bundle: {{download_url: '/v1/support/bundles/random/download',
+  inventory: {{created_at: '2026-10-22T10:00:00+00:00', scan: 'passed', files: [{{name: 'incidents.json', bytes: 90}}]}}}}}};
+renderSupport(); console.log(root.innerHTML);
+""")
+    assert 'id="support-ticket"' in rendered and "TESTWP-7" in rendered
+    assert "Review bundle inventory" in rendered and "Sensitive data scan passed" in rendered
+    assert "Download reviewed bundle" in rendered and "/v1/support/bundles/random/download" in rendered
+
+
 def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring_and_logs():
     root = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
@@ -431,7 +446,8 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
-             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications")
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
+             "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -613,9 +629,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -626,10 +642,13 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']" in page
+    assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']") in page
+    assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
+    assert "licensing: 'licensing.manage'" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -1236,6 +1255,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
         ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
+        ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
@@ -1245,6 +1265,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
+        "support": "console.manage",
     }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,

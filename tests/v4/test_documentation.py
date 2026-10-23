@@ -380,6 +380,22 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
         return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in hunks))
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    support_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if 'id="tab-support"' in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("S.support =")),
+        next(i for i, line in enumerate(source_lines, 1) if "path.indexOf('/support')" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "{ view: 'support'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("  support: 'Build a diagnostic bundle")),
+        next(i for i, line in enumerate(source_lines, 1) if "v === 'support'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.view === 'support') renderSupport()" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "'support'].forEach(function (v)" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "act === 'support-build'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if i > 3500 and not line.strip()),
+    ]
+    current_lines = support_lines
+    assert docsite.changed_views("origin/develop") == {"support"}
+
+    current_lines = shared_lines + [hint_line]
     views = docsite.changed_views("origin/develop")
     assert views == set(docsite.console_views())
     all_pages = ["aiflow/v4/control/ui/console.html", *(f"docs/guide/screens/{v}.md" for v in views)]
@@ -414,6 +430,59 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
 
     current_lines = [hint_line]
     assert docsite.changed_views("origin/develop") == {"cc"}
+
+
+def test_ci_check_maps_one_view_added_to_shared_navigation(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    base_lines = source_lines.copy()
+    changed = []
+    for index, line in enumerate(source_lines):
+        if (line.startswith("  backup:") and "support: 'console.manage'" in line
+                or line.startswith("  projects:") and "support: '/support'" in line):
+            base_lines[index] = line.replace(", support: 'console.manage'", "").replace(", support: '/support'", "")
+            changed.append(index + 1)
+        elif line.startswith("  ['machines', 'users'") and "'support'" in line:
+            base_lines[index] = line.replace(", 'support'", "")
+            changed.append(index + 1)
+    assert len(changed) == 3
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    hunks = "".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed)
+
+    def fake_run(command, **kwargs):
+        if command[1] == "diff":
+            return Result(hunks)
+        return Result("\n".join(source_lines if command[2].startswith("HEAD:") else base_lines) + "\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"support"}
+
+
+def test_removing_duplicate_empty_view_panel_does_not_require_screen_docs(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    machine_line = next(index + 1 for index, line in enumerate(source_lines)
+                        if 'id="view-machines"' in line)
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "diff":
+            return Result(f"@@ -{machine_line},1 +{machine_line},0 @@\n")
+        return Result("\n".join(source_lines) + "\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == set()
 
 
 def test_traefik_routes_console_help_and_backups_to_control_api():

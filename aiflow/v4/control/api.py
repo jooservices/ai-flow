@@ -32,6 +32,7 @@ from urllib.parse import quote, urlsplit
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
                                Response, StreamingResponse)
 from pydantic import BaseModel, Field
@@ -44,7 +45,7 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
-               shared_accounts, tooling, version_release)
+               shared_accounts, support_bundle, tooling, version_release)
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
@@ -769,6 +770,10 @@ class ProjectRepositoriesBody(BaseModel):
     epic_repositories: dict[str, str] = Field(default_factory=dict, max_length=500)
 
 
+class SupportBundleBody(BaseModel):
+    ticket_key: str = Field(default="", max_length=40)
+
+
 class GitHubConnectionTokenBody(BaseModel):
     token: str = Field(min_length=20, max_length=600, repr=False)
     label: str = Field(default="", max_length=80)
@@ -1195,6 +1200,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         base_repo = ctx.repo
         ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
         ctx._shared_accounts = True
+    support_bundle.control_log_buffer(
+        *(v if isinstance(v, str) else "" for v in (ctx.settings.support_log_dir, ctx.settings.o2_source))
+    )
     app.state.license_sync_warnings = []
     # Release reconciliation loops receive the same per-repository routing as API handlers.
     ctx.github_connection_for_repository = lambda repository: github_context_for_repository(ctx, repository)
@@ -2063,6 +2071,49 @@ def create_app(ctx: Ctx) -> FastAPI:
                             secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
                             samesite="strict", path="/")
         return response
+
+    @app.post("/v1/support/bundles")
+    def create_support_bundle(body: SupportBundleBody, request: Request) -> dict:
+        creator = console_user(request, {"console.manage"}, target="support_bundle", action="create")
+        ticket_key = body.ticket_key.strip().upper() or None
+        try:
+            archive, inventory = support_bundle.build_support_bundle(ctx, ticket_key)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown ticket") from exc
+        except ValueError as exc:
+            log.warning("support bundle scan blocked; sensitive content remained after sanitization")
+            raise HTTPException(422, "bundle scan failed; no bundle was offered") from exc
+        bundle_id = secrets.token_urlsafe(24)
+        key = ctx.leases._k("support_bundle", bundle_id)
+        payload = json.dumps({"archive": base64.b64encode(archive).decode("ascii"), "inventory": inventory,
+                              "creator": creator.subject}, separators=(",", ":"))
+        try:
+            ctx.leases.r.set(key, payload, ex=600)
+        except Exception as exc:  # noqa: BLE001 - do not return an unreviewable or non-shared in-memory bundle
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        return {"bundle_id": bundle_id, "inventory": inventory, "download_url": f"/v1/support/bundles/{bundle_id}/download"}
+
+    @app.get("/v1/support/bundles/{bundle_id}/download")
+    def download_support_bundle(bundle_id: str, request: Request) -> Response:
+        user = console_user(request, {"console.manage"})
+        key = ctx.leases._k("support_bundle", bundle_id)
+        try:
+            stored = ctx.leases.r.get(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        if not stored:
+            raise HTTPException(404, "bundle expired or unknown")
+        item = json.loads(stored)
+        if not item.get("creator") or not secrets.compare_digest(str(item["creator"]), user.subject):
+            raise HTTPException(403, "bundle belongs to the user who created it")
+        ticket_key = item["inventory"].get("ticket_key")
+        filename = f"support-bundle-{ticket_key}.zip" if ticket_key else "support-bundle.zip"
+        archive = base64.b64decode(item["archive"], validate=True)
+        return Response(archive, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                 "Cache-Control": "no-store"})
 
     # --- per-person console layouts (layouts.py, docs/v4/console-layouts.md) ---------------------------------
     def layout_page(page: str) -> str:
@@ -4694,12 +4745,20 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["node"] != node:
             raise HTTPException(403, "run belongs to another node")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
+        details = dict(body.details)
+        run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
+        details.pop("support_log_truncated", None)
+        if isinstance(run_log, str) and run_log:
+            try:
+                support_bundle.store_run_log(ctx, run_id, run_log)
+            except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
+                log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         ctx.db.run("UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
                    " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
                    " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
                    " WHERE id=%s",
                    (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
-                    body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(body.details), run_id))
+                    body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id))
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
         sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}

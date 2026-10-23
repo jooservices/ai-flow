@@ -170,6 +170,62 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
     assert "SECRET-CREDENTIAL-VALUE" not in json.dumps(payload)
 
 
+def test_hourly_system_check_revalidates_repository_branch_and_jira_access(client, ctx, monkeypatch):
+    notifications = []
+    monkeypatch.setattr(notify, "send", lambda *args, **kwargs: notifications.append((args, kwargs)) or [])
+    joined = join_node(client, "cc").json()
+    ctx.github.available_branches[("test-aiflow-wp", "develop")] = False
+    branch_result = system_check.refresh_node(ctx, "cc", "hourly")
+    branch = next(item for item in branch_result["projects"]["TESTWP"]
+                  if item["id"] == "base-branch:jooservices/test-aiflow-wp")
+    assert branch["result"] == "needs_action"
+
+    ctx.github.repositories = []
+
+    from aiflow.v4.control.jira import JiraError
+
+    secret = "SECRET-JIRA-RESPONSE-TOKEN"
+
+    def revoked_jira_credential():
+        raise JiraError(f"GET /rest/api/3/project/search -> 401: {secret}")
+
+    ctx.jira.projects = revoked_jira_credential
+    result = system_check.refresh_node(ctx, "cc", "manual")
+    rows = result["projects"]["TESTWP"]
+    by_id = {item["id"]: item for item in rows}
+    assert by_id["github-installation"]["result"] == "ready"
+    assert by_id["repository-access:jooservices/test-aiflow-wp"]["result"] == "needs_action"
+    assert by_id["base-branch:jooservices/test-aiflow-wp"]["result"] == "needs_action"
+    assert by_id["jira-credentials"]["result"] == "needs_action"
+    assert by_id["jira-credentials"]["detail"] == "Jira credential is invalid."
+    assert secret not in json.dumps(result)
+    assert notifications
+
+    project = next(p for p in client.get("/v1/projects").json()["projects"] if p["key"] == "TESTWP")
+    node_result = next(n for n in project["node_readiness"] if n["name"] == "cc")
+    assert node_result["blocked"]
+    assert {row["id"] for row in node_result["conditions"]} >= {
+        "repository-access:jooservices/test-aiflow-wp", "base-branch:jooservices/test-aiflow-wp",
+        "jira-credentials"}
+
+
+def test_support_bundle_omits_untrusted_heartbeat_maps(client):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    secret = "SECRET-EXTRA-HEARTBEAT-FIELD"
+    client.post("/v1/nodes/cc/heartbeat", headers=headers, json={
+        "tools": {"unexpected-tool-field": secret},
+        "metrics": {"future-metric-field": secret},
+    })
+
+    bundle = client.get("/v1/support-bundle").json()
+    encoded = json.dumps(bundle)
+    assert secret not in encoded
+    assert "unexpected-tool-field" not in encoded and "future-metric-field" not in encoded
+    assert "tools" not in bundle["system_check"]["nodes"][0]
+    assert "metrics" not in bundle["system_check"]["nodes"][0]
+
+
 def test_system_check_screen_and_clean_install_acceptance_include_results():
     root = Path(__file__).resolve().parents[2]
     page = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
@@ -188,18 +244,38 @@ def test_system_check_screen_and_clean_install_acceptance_include_results():
 
 def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "_github_network_available", lambda: True)
+    monkeypatch.setattr(agent, "_worker_can_access_directory", lambda _path, _uid: True)
     machine = agent._system_machine_conditions({"disk_free": 20 * 1024 ** 3}, work_path=tmp_path / "work",
                                                state_path=tmp_path / "state")
     assert {item["id"] for item in machine} >= {"disk-space", "workspace-permissions", "control-network",
                                                    "repository-network"}
     assert next(item for item in machine if item["id"] == "workspace-permissions")["result"] == \
         "fixed_automatically"
+    import pwd
+    worker_uid = pwd.getpwnam("aiflow-worker").pw_uid
+    assert (tmp_path / "work").stat().st_uid == worker_uid
+    assert (tmp_path / "state").stat().st_uid == worker_uid
     checks = agent._credential_conditions([{"account": "codex-01", "state": "idle", "alive": True,
                                             "probe": {"ok": False, "error_kind": "auth",
                                                       "summary": "SECRET-CREDENTIAL-VALUE"}}])
     encoded = json.dumps(checks)
     assert checks["codex-01"] == {"present": True, "valid": False}
     assert "SECRET-CREDENTIAL-VALUE" not in encoded
+
+
+def test_workspace_permission_check_reports_a_directory_the_worker_cannot_write(tmp_path):
+    work, state = tmp_path / "locked-work", tmp_path / "state"
+    work.mkdir()
+    state.mkdir()
+    work.chmod(0o555)
+    import pwd
+    assert not agent._worker_can_access_directory(work, pwd.getpwnam("aiflow-worker").pw_uid)
+
+    machine = agent._system_machine_conditions({}, work_path=work, state_path=state)
+    workspace = next(item for item in machine if item["id"] == "workspace-permissions")
+    assert workspace["result"] == "needs_action"
+    assert "cannot write" in workspace["detail"]
+    assert "aiflow service account" in workspace["action"]
 
 
 def test_credential_heartbeat_is_rebuilt_from_boolean_status_fields_and_bundle_is_scrubbed(client, ctx):

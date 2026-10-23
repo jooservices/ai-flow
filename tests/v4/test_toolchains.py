@@ -124,6 +124,7 @@ def test_unhealthy_stack_blocks_only_its_project_and_watchdog_warns(client, ctx)
     repo.projects["TESTWP"].stack = "php-8.3"
     repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other")
     repo.nodes["cc"].projects = ["TESTWP", "OTHER"]
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
     repo.versions["tools"] = {"php": "8.3", "composer": "2.8", "wp": "2.12"}
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-930")

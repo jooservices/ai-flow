@@ -543,12 +543,24 @@ def _browser_binary(root: Path) -> Path | None:
 def _check_browser_launch(root: Path) -> str:
     """Launch Chromium headless once as the AI user; return its version, or raise with the missing piece in plain words."""
     import logging
+    import pwd
+
     binary = _browser_binary(root)
     if binary is None:
         raise OperationError(f"Chromium was installed but no browser program was found in {root}")
     prefix: list[str] = []
-    if os.geteuid() == 0 and shutil.which("runuser"):
-        prefix = ["runuser", "-u", _AI_USER, "--"]
+    if os.geteuid() == 0:
+        runuser = shutil.which("runuser")
+        if not runuser:
+            raise OperationError(f"Chromium cannot be verified as {_AI_USER} because runuser is unavailable")
+        prefix = [runuser, "-u", _AI_USER, "--"]
+    else:
+        try:
+            worker_uid = pwd.getpwnam(_AI_USER).pw_uid
+        except KeyError as exc:
+            raise OperationError(f"Chromium cannot be verified because the {_AI_USER} account is missing") from exc
+        if os.geteuid() != worker_uid:
+            raise OperationError(f"Chromium must be verified as {_AI_USER}")
     with tempfile.TemporaryDirectory(prefix="aiflow4-browser-") as home:
         os.chmod(home, 0o777)
         env = _installer_env(HOME=home, PLAYWRIGHT_BROWSERS_PATH=str(root))
@@ -586,8 +598,15 @@ def _install_playwright_browser(version: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     env = _installer_env(PLAYWRIGHT_BROWSERS_PATH=str(root))
     _run_installer("Playwright Chromium installer", ["playwright", "install", "--with-deps", "chromium"], 1800, env)
-    # the AI user runs the browser but root installed it
-    subprocess.run(["chmod", "-R", "a+rX", str(root)], capture_output=True, timeout=300)
+    # The worker consumes this shared install; never report it ready based on root's access alone.
+    try:
+        access = subprocess.run(["chmod", "-R", "a+rX", str(root)], capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"The shared Chromium install could not be made readable by {_AI_USER} "
+                             f"({type(exc).__name__})") from exc
+    if access.returncode:
+        raise OperationError(f"The shared Chromium install could not be made readable by {_AI_USER} "
+                             f"(exit {access.returncode})")
     reported = _check_browser_launch(root)
     logging.getLogger("aiflow4.node").info("Chromium launch check passed: %s", reported)
 

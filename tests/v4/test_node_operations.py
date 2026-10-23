@@ -420,7 +420,7 @@ def _playwright_fixture(monkeypatch, tmp_path, *, launch_code=0, launch_err="", 
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(operations.subprocess, "run", run)
-    monkeypatch.setattr(operations.shutil, "which", lambda name: None)
+    monkeypatch.setattr(operations.shutil, "which", lambda name: "/usr/sbin/runuser" if name == "runuser" else None)
     monkeypatch.setattr(operations, "PLAYWRIGHT_BROWSERS_DIR", str(browsers))
     monkeypatch.setattr(operations, "_TOOL_HOME", tmp_path / "home")
     monkeypatch.setattr(operations, "_NPM_CACHE", tmp_path / "npm-cache")
@@ -439,16 +439,33 @@ def test_playwright_toolchain_links_command_into_a_path_directory(monkeypatch, t
 
 def test_playwright_browser_installs_chromium_with_deps_into_shared_folder_and_launches(monkeypatch, tmp_path, caplog):
     calls, links, browsers, _ = _playwright_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(operations.os, "geteuid", lambda: 0)  # exercise the root agent -> worker verification path
     with caplog.at_level("INFO", logger="aiflow4.node"):
         operations._install_playwright_browser("1.56.1")
     install = next((c, e) for c, e in calls if c[:2] == ["playwright", "install"])
     assert install[0] == ["playwright", "install", "--with-deps", "chromium"]
     assert install[1]["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
     launch = next(e for c, e in calls if c[-1] == "about:blank")
+    launch_command = next(c for c, _ in calls if c[-1] == "about:blank")
+    assert launch_command[:4] == ["/usr/sbin/runuser", "-u", "aiflow-worker", "--"]
     assert "--headless" in next(c for c, _ in calls if c[-1] == "about:blank")
     assert launch["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers)
     assert "Chromium 141.0.1" in caplog.text
     assert any(c[0] == "chmod" for c, _ in calls)
+
+
+def test_playwright_install_fails_if_shared_browser_tree_cannot_be_made_worker_readable(monkeypatch, tmp_path):
+    _playwright_fixture(monkeypatch, tmp_path)
+    real_run = operations.subprocess.run
+
+    def run(command, **kwargs):
+        if command and command[0] == "chmod":
+            return SimpleNamespace(returncode=1, stdout="", stderr="permission denied")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(operations.subprocess, "run", run)
+    with pytest.raises(operations.OperationError, match="could not be made readable by aiflow-worker"):
+        operations._install_playwright_browser("1.56.1")
 
 
 def test_playwright_launch_failure_names_the_missing_library_in_plain_words(monkeypatch, tmp_path, caplog):

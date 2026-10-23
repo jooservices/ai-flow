@@ -1,6 +1,8 @@
 """Build, persist and alert on machine and project readiness results."""
 from __future__ import annotations
 
+import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -154,8 +156,168 @@ def _machine_conditions(raw: list[dict] | None, metrics: dict[str, Any],
     return out
 
 
+def _cached_integration_probe(ctx, key: tuple[object, ...], trigger: str, probe):
+    """Cache one sanitized integration probe through an hour and deduplicate same-trigger fan-out."""
+    cache = getattr(ctx, "_system_check_integration_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(ctx, "_system_check_integration_cache", cache)
+    now = time.monotonic()
+    entry = cache.get(key)
+    if isinstance(entry, dict) and now - entry.get("at", 0) < 3600:
+        # Heartbeats refresh machine conditions every 15 seconds. Event and hourly triggers recheck once, then
+        # reuse that result while refresh_all fans the same check out across projects and machines.
+        if trigger == "heartbeat" or (entry.get("trigger") == trigger and now - entry.get("at", 0) < 5):
+            return entry.get("value")
+    value = probe()
+    cache[key] = {"at": now, "trigger": trigger, "value": value}
+    return value
+
+
+def _github_project_conditions(ctx, project, trigger: str) -> list[dict[str, object]]:
+    """Verify the live GitHub installation, every configured repository and each configured base branch.
+
+    Provider errors are deliberately reduced to fixed display text. GitHub response bodies can contain request
+    details and must never become a readiness result.
+    """
+    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
+    gateway = None
+    try:
+        from .api import github_gateway
+
+        gateway = github_gateway(ctx)
+    except Exception:  # noqa: BLE001 - provider details are not safe for a readiness result
+        gateway = None
+    meta = getattr(gateway, "meta", None) if gateway else None
+    installation = str(meta.get("installation_id") or "") if isinstance(meta, dict) else ""
+
+    def read_installation_repositories() -> set[str] | None:
+        try:
+            if not gateway:
+                return None
+            rows = gateway.installation_repositories()
+            return {str(item.get("full_name") or "").lower() for item in rows
+                    if isinstance(item, dict) and item.get("full_name")}
+        except Exception:  # noqa: BLE001 - provider details are not safe for a readiness result
+            return None
+
+    accessible = _cached_integration_probe(ctx, ("github-repositories", installation), trigger,
+                                            read_installation_repositories)
+
+    if accessible is not None:
+        out = [condition("github-installation", "GitHub installation", "ready",
+                         "AI Flow verified access to the connected GitHub App installation.")]
+    else:
+        out = [condition("github-installation", "GitHub installation", "needs_action",
+                         "GitHub App access could not be verified.",
+                         "Reconnect the GitHub App on the Integrations screen and rerun the System check.")]
+
+    for repository in repositories:
+        access_id = f"repository-access:{repository}"
+        branch_id = f"base-branch:{repository}"
+        repo_settings = project.settings_for_repo(repository)
+        base = str(repo_settings.get("base") or "")
+        has_access = accessible is not None and repository.lower() in accessible
+        if has_access:
+            out.append(condition(access_id, f"Repository access · {repository}", "ready",
+                                 "The GitHub App can access the configured repository."))
+        else:
+            detail = "The GitHub App cannot access the configured repository." if accessible is not None \
+                else "Repository access could not be verified."
+            action = "Grant the GitHub App access to this repository in GitHub settings." if accessible is not None \
+                else "Restore GitHub App access and rerun the System check."
+            out.append(condition(access_id, f"Repository access · {repository}", "needs_action", detail, action))
+
+        if not base:
+            out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
+                                 "A base branch is not configured for this repository.",
+                                 "Configure a base branch for this repository in the Projects screen."))
+        elif not has_access:
+            out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
+                                 "The configured base branch could not be checked without repository access.",
+                                 "Restore GitHub App access to this repository and rerun the System check."))
+        else:
+            def check_base_branch() -> bool | None:
+                try:
+                    return bool(gateway.branch_exists(repository.split("/", 1)[-1], base))
+                except Exception:  # noqa: BLE001 - discard provider response bodies and request details
+                    return None
+
+            exists = _cached_integration_probe(ctx, ("github-branch", installation, repository.lower(), base),
+                                               trigger, check_base_branch)
+            if exists is True:
+                out.append(condition(branch_id, f"Base branch · {repository}", "ready",
+                                     "The configured base branch exists in the repository."))
+            elif exists is False:
+                out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
+                                     "The configured base branch does not exist in the repository.",
+                                     "Create the configured base branch in the repository and rerun the System check."))
+            else:
+                out.append(condition(branch_id, f"Base branch · {repository}", "needs_action",
+                                     "The configured base branch could not be checked.",
+                                     "Restore GitHub App access to this repository and rerun the System check."))
+    return out
+
+
+def _check_jira_credential(ctx) -> dict[str, object]:
+    """Check Jira credentials with a read-only request and expose only missing/valid/invalid state."""
+    jira = getattr(ctx, "jira", None)
+    if jira is None:
+        return condition("jira-credentials", "Jira credentials", "needs_action", "Jira credential is missing.",
+                         "Connect Jira on the Integrations screen.")
+
+    auth = getattr(ctx, "jira_auth", None)
+    if auth is not None:
+        try:
+            state = auth.state()
+        except Exception:  # noqa: BLE001 - credential store details are not safe to display
+            state = {}
+        if isinstance(state, dict) and state.get("usable") is False:
+            if state.get("reason") == "needs_reconnect":
+                return condition("jira-credentials", "Jira credentials", "needs_action",
+                                 "Jira credential is invalid.",
+                                 "Reconnect Jira on the Integrations screen.")
+            return condition("jira-credentials", "Jira credentials", "needs_action", "Jira credential is missing.",
+                             "Connect Jira on the Integrations screen.")
+
+    try:
+        jira.projects()
+    except Exception as exc:  # noqa: BLE001 - response text may contain tokens or other provider data
+        from .jira import JiraError
+        from .jira_connect import JiraNotConnected
+
+        if isinstance(exc, JiraNotConnected):
+            try:
+                current_state = auth.state() if auth is not None else {}
+            except Exception:  # noqa: BLE001 - credential store details are not safe to display
+                current_state = {}
+            if isinstance(current_state, dict) and current_state.get("reason") == "needs_reconnect":
+                return condition("jira-credentials", "Jira credentials", "needs_action",
+                                 "Jira credential is invalid.",
+                                 "Reconnect Jira on the Integrations screen.")
+            return condition("jira-credentials", "Jira credentials", "needs_action", "Jira credential is missing.",
+                             "Connect Jira on the Integrations screen.")
+        if isinstance(exc, JiraError):
+            status = re.search(r"->\s*(\d{3})", str(exc))
+            if status and status.group(1) in {"401", "403"}:
+                return condition("jira-credentials", "Jira credentials", "needs_action",
+                                 "Jira credential is invalid.",
+                                 "Reconnect Jira on the Integrations screen.")
+        return condition("jira-credentials", "Jira credentials", "needs_action",
+                         "Jira credential validity could not be confirmed.",
+                         "Restore control-plane access to Jira and rerun the System check.")
+    return condition("jira-credentials", "Jira credentials", "ready", "Jira credential is present and valid.")
+
+
+def _jira_credential_condition(ctx, trigger: str) -> dict[str, object]:
+    """Run a read-only Jira credential probe on scheduled checks and reuse its sanitized state per control plane."""
+    site = str(getattr(ctx.settings, "jira_site", ""))
+    return _cached_integration_probe(ctx, ("jira-credentials", site), trigger, lambda: _check_jira_credential(ctx))
+
+
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,
-                        auto_fixed_tools: set[str], credentials: dict[str, dict]) -> list[dict[str, object]]:
+                        auto_fixed_tools: set[str], credentials: dict[str, dict],
+                        trigger: str = "heartbeat") -> list[dict[str, object]]:
     project = repo.projects.get(project_key)
     if not project:
         return []
@@ -203,29 +365,17 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
             out.append(condition(f"service:{service}", f"Service · {service}", "ready",
                                  f"The {service} service is healthy."))
 
-    repo_settings = project.settings_for_repo(project.repo_for(None))
-    if not project.repo or not repo_settings.get("base"):
+    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
+    if not repositories or any(not project.settings_for_repo(name).get("base") for name in repositories):
         out.append(condition("repository-settings", "Repository settings", "needs_action",
                              "A repository and base branch are required to start work.",
                              f"Configure a repository and base branch for {project_key} in the Projects screen."))
     else:
         out.append(condition("repository-settings", "Repository settings", "ready",
-                             f"Repository {project.repo_for(None)} uses base branch {repo_settings['base']}."))
+                             "Repositories and base branch settings are configured."))
 
-    try:
-        from .api import github_gateway
-        github = github_gateway(ctx)
-        meta = getattr(github, "meta", None) if github else None
-        github_connected = bool(github) and (not isinstance(meta, dict) or bool(meta.get("installation_id")))
-    except Exception:  # noqa: BLE001 - the readiness result stays useful if secret-store metadata is unreadable
-        github_connected = False
-    if github_connected:
-        out.append(condition("github-installation", "GitHub installation", "ready",
-                             "AI Flow has a connected GitHub App installation."))
-    else:
-        out.append(condition("github-installation", "GitHub installation", "needs_action",
-                             "The GitHub App installation is not connected.",
-                             "Connect the GitHub App and select its installation on the Integrations screen."))
+    out.extend(_github_project_conditions(ctx, project, trigger))
+    out.append(_jira_credential_condition(ctx, trigger))
 
     account_rows = {row["id"]: row for row in ctx.db.all(
         "SELECT id,status,worker_state FROM accounts WHERE node=%s ORDER BY id", (node,))}
@@ -410,7 +560,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     project_keys = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
     project_results = {
         key: _project_conditions(ctx, node, key, repo, row.get("tools") or {}, row.get("metrics") or {},
-                                 auto_fixed, credentials)
+                                 auto_fixed, credentials, trigger)
         for key in project_keys
     }
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -470,13 +620,12 @@ def blocking_reasons(readiness: dict | None, project: str, account: str = "") ->
 
 def support_bundle(ctx) -> dict:
     """Safe, compact support snapshot with credential rows rebuilt from allowlisted status only."""
-    nodes = ctx.db.all("SELECT name,status,release_version,tools,metrics,readiness,readiness_checked_at"
+    nodes = ctx.db.all("SELECT name,status,release_version,readiness,readiness_checked_at"
                        " FROM nodes ORDER BY name")
     repo = ctx.repo()
     return {"generated_at": datetime.now(timezone.utc).isoformat(),
             "system_check": {"nodes": [
                 {"name": row["name"], "status": row["status"], "release": row["release_version"],
-                 "tools": row["tools"] or {}, "metrics": row["metrics"] or {},
                  "readiness": _safe_readiness(row["readiness"] or {},
                                               [account.id for account in repo.accounts_on(row["name"])]),
                  "checked_at": row["readiness_checked_at"].isoformat() if row["readiness_checked_at"] else None}

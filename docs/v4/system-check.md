@@ -20,8 +20,11 @@ the disk row reports **fixed automatically**. Space below the minimum that remai
 free-space action.
 
 The control plane checks after a node joins, after a project is added, when a node reports a new release, and once
-per hour. An owner or Super Administrator can also use **Run now**. A newly failing condition alerts only when it
-blocks work; a healthy transition or a change marked as not affecting work does not send an alert.
+per hour. Those scheduled checks revalidate the GitHub App installation, access to every configured repository,
+each repository's base branch, and the Jira credential with read-only integration calls. Their sanitized results are
+reused between heartbeats. An owner or Super Administrator can also use **Run now**. A newly failing condition
+alerts only when it blocks work; a healthy transition or a change marked as not affecting work does not send an
+alert.
 
 Before offering work, the control plane filters out any project with a failed machine or project condition. A
 credential failure, including an unconfirmed credential status, blocks only work requested by that account, so a
@@ -29,5 +32,6 @@ different healthy account on the same node can still serve the project. A machin
 readiness snapshot is held until the check completes. The Projects screen names the machine and failed condition
 that prevents work.
 
-The clean-install acceptance test waits for each newly installed node's machine and project result, then confirms
-that the support bundle contains that result.
+The support bundle includes the sanitized readiness results and omits raw node heartbeat tool and metric maps. The
+clean-install acceptance test waits for each newly installed node's machine and project result, then confirms that
+the support bundle contains that result.

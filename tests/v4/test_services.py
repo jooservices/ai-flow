@@ -175,6 +175,7 @@ def test_project_without_healthy_services_gets_no_work_and_command_center_shows_
     repo.projects["TESTWP"].services = ["postgres", "redis"]
     repo.projects["OTHER"] = Project(key="OTHER", repo="jooservices/other")
     repo.nodes["cc"].projects = ["TESTWP", "OTHER"]
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-940")
     add_ticket(ctx.db, "OTHER-940")

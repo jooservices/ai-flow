@@ -210,14 +210,22 @@ def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[st
     state = Path(state_path or STATE_DIR)
     created = False
     try:
+        import pwd
+
+        worker = pwd.getpwnam("aiflow-worker")
         if not work.exists():
-            work.mkdir(parents=True, mode=0o755)
+            work.mkdir(parents=True, mode=0o770)
+            os.chown(work, worker.pw_uid, worker.pw_gid)
+            os.chmod(work, 0o770)
             created = True
         if not state.exists():
-            state.mkdir(parents=True, mode=0o750)
+            state.mkdir(parents=True, mode=0o770)
+            os.chown(state, worker.pw_uid, worker.pw_gid)
+            os.chmod(state, 0o770)
             created = True
-        writable = os.access(work, os.W_OK | os.X_OK) and os.access(state, os.W_OK | os.X_OK)
-    except OSError:
+        writable = _worker_can_access_directory(work, worker.pw_uid) \
+            and _worker_can_access_directory(state, worker.pw_uid)
+    except (KeyError, OSError, ImportError):
         writable = False
     if writable:
         result = "fixed_automatically" if created else "ready"
@@ -239,6 +247,24 @@ def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[st
                              "The machine cannot reach GitHub over HTTPS.",
                              "Allow outbound HTTPS access to github.com on port 443 from this machine."))
     return out
+
+
+def _worker_can_access_directory(path: Path, worker_uid: int) -> bool:
+    """Check directory write and traversal access using the same identity as the worker's setpriv commands."""
+    if os.geteuid() == worker_uid:
+        return os.access(path, os.W_OK | os.X_OK)
+    if os.geteuid() != 0:
+        return False
+    runuser = shutil.which("runuser")
+    if not runuser:
+        return False
+    try:
+        result = subprocess.run([runuser, "-u", "aiflow-worker", "--", "sh", "-c",
+                                 'test -w "$1" && test -x "$1"', "aiflow4-permission-check", str(path)],
+                                capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _credential_conditions(states: list[dict]) -> dict[str, dict]:

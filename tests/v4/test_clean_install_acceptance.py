@@ -631,6 +631,13 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     release_download = next(s for s in bug["steps"]
                             if s.get("uses", "").startswith("actions/download-artifact@"))
     assert release_download["with"]["name"] == "clean-install-acceptance-release"
+    candidate_upload = next(s for s in release["jobs"]["release"]["steps"]
+                            if s.get("uses", "").startswith("actions/upload-artifact@"))
+    assert candidate_upload["if"] == "always()" and candidate_upload["with"]["name"] == "clean-install-candidate-release"
+    candidate_download = next(s for s in bug["steps"] if s.get("with", {}).get("name") == "clean-install-candidate-release")
+    assert candidate_download["with"]["path"] == "${{ runner.temp }}/aiflow-acceptance-logs"
+    script = (ROOT / "deploy/v4/ci/clean-install-acceptance.sh").read_text()
+    assert script.index("clean-install-containers.sh") < script.index("ACCEPTANCE_PREVIOUS:-} && -n")  # one release is enough to install
     release_open = next(s for s in bug["steps"] if "open-bug-ticket.sh" in s.get("run", ""))
     assert release_open["env"]["ACCEPTANCE_LOG_DIR"] == "${{ runner.temp }}/aiflow-acceptance-logs"
     assert (ROOT / "deploy/v4/ci/open-bug-ticket.sh").is_file()

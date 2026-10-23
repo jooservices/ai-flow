@@ -5,9 +5,9 @@
 #         tickets through Intake, development, verification and merge, Human review, policy calls, deploy
 #         scripts, backup and restore, upgrade and rollback, adding a machine and an AI account)
 #   full  nightly and before every release: fast, then the whole tests/v4 suite and, when
-#         ACCEPTANCE_PREVIOUS and ACCEPTANCE_TARGET name two published releases, the systemd containers
-#         (control-install-smoke.sh: install, rerun, failed upgrade, upgrade, rollback) and the real clean machines
-#         (clean-install-containers.sh: control plane and two machines in containers, sign-in on, backup and restore)
+#         ACCEPTANCE_TARGET names a published release, the real clean machines (clean-install-containers.sh: control
+#         plane and two machines in containers, sign-in on, backup and restore) and, when ACCEPTANCE_PREVIOUS names a
+#         second one, the systemd containers (control-install-smoke.sh: install, rerun, failed upgrade, upgrade, rollback)
 # The output of every step goes to $ACCEPTANCE_LOG_DIR (default aiflow-acceptance-logs in the runner temp directory, outside the repository) for the bug ticket.
 set -Eeuo pipefail
 
@@ -40,11 +40,15 @@ pipefail_step acceptance-cases uv run --frozen pytest tests/v4/test_clean_instal
 
 if [[ $MODE == full ]]; then
   pipefail_step v4-suite uv run --frozen pytest tests/v4 -q -p no:warnings
-  if [[ -n ${ACCEPTANCE_PREVIOUS:-} && -n ${ACCEPTANCE_TARGET:-} ]]; then
-    pipefail_step control-install-systemd bash deploy/v4/ci/control-install-smoke.sh "$ACCEPTANCE_PREVIOUS" "$ACCEPTANCE_TARGET"
+  if [[ -n ${ACCEPTANCE_TARGET:-} ]]; then
     pipefail_step clean-machines-containers bash deploy/v4/ci/clean-install-containers.sh "$ACCEPTANCE_TARGET"
   else
-    echo "no two published releases to install; the systemd containers run in the release workflow" | tee "$LOGS/control-install-systemd.log"
+    echo "no published release to install; the clean machines run in the release workflow" | tee "$LOGS/clean-machines-containers.log"
+  fi
+  if [[ -n ${ACCEPTANCE_PREVIOUS:-} && -n ${ACCEPTANCE_TARGET:-} ]]; then
+    pipefail_step control-install-systemd bash deploy/v4/ci/control-install-smoke.sh "$ACCEPTANCE_PREVIOUS" "$ACCEPTANCE_TARGET"
+  else
+    echo "upgrade and rollback need two published releases; the systemd containers run in the release workflow" | tee "$LOGS/control-install-systemd.log"
   fi
 fi
 echo "clean-install acceptance ($MODE) passed"

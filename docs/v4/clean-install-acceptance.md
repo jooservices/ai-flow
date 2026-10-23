@@ -76,8 +76,8 @@ data directories; Redis leases and caches are rebuilt.
 | Run | Trigger | Content |
 |---|---|---|
 | fast | every pull request that changes `aiflow/v4/install`, `aiflow/v4/control`, `aiflow/v4/node`, `deploy/v4` or the workflows (`acceptance-fast` in `ci.yml`) | syntax check of every deploy script and the acceptance cases |
-| full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast and the whole `tests/v4` suite; when two published releases are available, the sign-in-enabled clean control and two-machine container run against the newer release, plus systemd control install, upgrade and rollback between them |
-| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; when two published releases are available, the sign-in-enabled clean install and control upgrade/rollback checks run against them |
+| full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast and the whole `tests/v4` suite; when a published release exists, the sign-in-enabled clean control and two-machine container run against it; when two exist, systemd control install, upgrade and rollback between them as well |
+| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; when a published release exists, the sign-in-enabled clean install runs against it; upgrade and rollback run when two exist. The signed candidate's own install log is uploaded by the release job and attached to the bug ticket |
 
 After signing the candidate tarball, the release job passes that exact tarball, Sigstore bundle and checksum manifest
 to `clean-install-containers.sh` before it pushes the control image or creates the GitHub Release. The test stages the

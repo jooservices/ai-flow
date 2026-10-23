@@ -19,7 +19,8 @@ def test_stack_values_map_to_node_and_project_tools():
     assert tools_for_stack("unknown") == list(BASE_TOOLS)
     assert tools_for_stacks(["php-8.3", "python-3.12"]) == list(NODE_TOOLS) + list(CATALOG_TOOLS)
     assert tools_for_stack("node-24") == list(BASE_TOOLS) + ["node"]
-    assert tools_for_stack("playwright") == list(BASE_TOOLS) + ["node", "playwright", "playwright-browser"]
+    assert tools_for_stack("playwright") == list(BASE_TOOLS) + ["node", "playwright", "chromium", "firefox", "webkit"]
+    assert tools_for_stack("wordpress") == list(BASE_TOOLS) + ["podman", "node", "playwright", "chromium", "firefox", "webkit"]
     # AI CLIs are required by the providers of a node's accounts, not by project stacks
     assert tools_for_providers(["codex", "claude"]) == ["codex", "codex-code-mode-host", "claude"]
 
@@ -28,6 +29,19 @@ def test_project_tools_follow_the_stack_and_missing_is_explicit():
     project = Project(key="TESTWP", repo="jooservices/test-aiflow-wp", stack="php-8.3")
     assert project.tools == list(BASE_TOOLS) + ["php", "composer", "wp"]
     assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == ["git", "uv", "composer", "wp"]
+
+
+def test_wordpress_stack_uses_rootless_podman_and_requires_every_browser_engine():
+    required = tools_for_stack("wordpress")
+    versions = {"tools": {"podman": "4.9", "node": "24.x", "playwright": "1.56"}}
+    healthy = {"git": "git version 2.43.0", "uv": "uv 0.13.4", "podman": "podman version 4.9.3",
+               "node": "node v24.22.0", "playwright": "Version 1.56.1",
+               "chromium": "Chromium Playwright 1.56.1", "firefox": "Firefox Playwright 1.56.1",
+               "webkit": "WebKit Playwright 1.56.1"}
+    assert set(required) == {"git", "uv", "podman", "node", "playwright", "chromium", "firefox", "webkit"}
+    assert toolchain_gaps(healthy, required, versions, ["wordpress"], require_pins=True) == []
+    healthy["webkit"] = "missing"
+    assert toolchain_gaps(healthy, required, versions, ["wordpress"], require_pins=True) == ["webkit"]
 
 
 def test_control_repo_reads_the_project_stack_and_node_tool_union(control_repo):
@@ -47,21 +61,22 @@ def test_project_yaml_can_declare_multiple_stacks_and_versions_lock_pins_each_to
     repo = ControlRepo.load(control_repo)
     project = repo.projects["TESTWP"]
     assert project.stacks == ["php-8.3", "node-24", "playwright"]
-    assert project.tools == list(BASE_TOOLS) + ["php", "composer", "wp", "node", "playwright", "playwright-browser"]
+    assert project.tools == list(BASE_TOOLS) + ["php", "composer", "wp", "node", "playwright", "chromium", "firefox", "webkit"]
     assert [pinned_version(repo.versions, tool, project.stacks)
-            for tool in ("php", "composer", "wp", "node", "playwright-browser")] == [
-                "8.3", "2.8", "2.12", "24.x", "1.56"]
+            for tool in ("php", "composer", "wp", "node", "chromium", "firefox", "webkit")] == [
+                "8.3", "2.8", "2.12", "24.x", "1.56", "1.56", "1.56"]
 
     healthy = {"git": "git version 2.43", "uv": "uv 0.5.0", "php": "PHP 8.3.12", "composer": "Composer 2.8.9",
                "wp": "WP-CLI 2.12.0", "node": "node v24.8.0", "playwright": "Version 1.56.1",
-               "playwright-browser": "Playwright Chromium 1.56.1"}
+               "chromium": "Chromium Playwright 1.56.1", "firefox": "Firefox Playwright 1.56.1",
+               "webkit": "WebKit Playwright 1.56.1"}
     assert toolchain_gaps(healthy, project.tools, repo.versions, project.stacks, require_pins=True) == []
     healthy["composer"] = "Composer 2.7.9"
-    healthy["playwright-browser"] = "missing"
+    healthy["firefox"] = "missing"
     assert toolchain_gaps(healthy, project.tools, repo.versions, project.stacks,
-                          require_pins=True) == ["composer", "playwright-browser"]
+                          require_pins=True) == ["composer", "firefox"]
     assert set(toolchain_gaps(healthy, project.tools, {"tools": {"php": "8.3"}}, project.stacks,
-                              require_pins=True)) == {"composer", "wp", "node", "playwright", "playwright-browser"}
+                              require_pins=True)) == {"composer", "wp", "node", "playwright", "chromium", "firefox", "webkit"}
     assert version_matches("node v24.8.0", "24.x")
     assert version_matches("WP-CLI 2.12.1", "2.12")
     assert not version_matches("WP-CLI 2.11.9", "2.12")

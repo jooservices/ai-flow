@@ -14,8 +14,6 @@
   aiflow4 install control --version vX.Y.Z --domain D [--admin-email E]   install, re-run or upgrade the control plane (root)
   aiflow4 console-user seed --email E --password-file F   create a Command Center user; the password goes to F (0600)
   aiflow4 install control --rollback    return the control plane to the previous release (root)
-  aiflow4 backup create --out F         archive the registry, the secret files and CURRENT (root; docs/v4/clean-install-acceptance.md)
-  aiflow4 backup restore F              put an archive back on a control machine whose release is installed (root)
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
   aiflow4 version
 """
@@ -201,10 +199,6 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--otel-collector", action="store_true")
     pi.add_argument("--health-timeout", type=int, default=300)
     pi.add_argument("--admin-email", default="", help="the first Super Administrator of Command Center (first install)")
-    pb = sub.add_parser("backup", help="operator backup and restore of the control plane")
-    pb.add_argument("action", choices=["create", "restore"])
-    pb.add_argument("archive", nargs="?", help="the archive to restore")
-    pb.add_argument("--out", help="where `create` writes the archive (mode 0600)")
     ps = sub.add_parser("secret")
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
@@ -227,25 +221,6 @@ def main(argv: list[str] | None = None) -> int:
         return secret_command(a.action, a.name, a.stdin)
     s = Settings.from_env()
 
-    if a.cmd == "backup":
-        from .install import backup
-        try:
-            if a.action == "create":
-                if not a.out:
-                    print("usage: aiflow4 backup create --out FILE", file=sys.stderr)
-                    return 2
-                m = backup.create(s.database_url, Path(a.out))
-                print(f"backup of release {m['release'] or 'unknown'}: {len(m['tables'])} tables, written to {a.out}")
-            else:
-                if not a.archive:
-                    print("usage: aiflow4 backup restore FILE", file=sys.stderr)
-                    return 2
-                m = backup.restore(s.database_url, Path(a.archive))
-                print(f"restored {len(m['tables'])} tables and the secret files; run release {m['release'] or 'unknown'}")
-        except (backup.BackupError, OSError) as e:
-            print(f"backup {a.action} failed: {e}", file=sys.stderr)
-            return 1
-        return 0
     if a.cmd == "version":
         print(VERSION)
         return 0

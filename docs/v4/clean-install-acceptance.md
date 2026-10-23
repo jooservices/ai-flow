@@ -30,7 +30,7 @@ Further cases in the same file:
 | `test_machines_policy_calls_and_heartbeats_work_with_sign_in_on` | policy decisions (`/v1/policy/decide`), claims and heartbeats from a client without the console cookie |
 | `test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on` | `aiflow4-autodeploy` and `aiflow4-autodeploy-develop` are run against a mock control endpoint with sign-in on: every `/v1/state` read carries the owner token from the installed secret file, the promoted release is kept, the token is never printed |
 | `test_a_failed_state_health_check_rolls_the_deploy_back` | the same scripts with a refused `/v1/state` call the release unhealthy and deploy the previous release again |
-| `test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation` | `aiflow4 backup create` / `restore` (below): after restoring onto freshly migrated tables, the Super Administrator signs in again, a machine's heartbeat works with its old node token, and the restored event sequence generates a new id |
+| `test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working` | CI-only backup/restore: after restoring freshly migrated tables, the Super Administrator signs in, a machine's old node token works, Jira refreshes its OAuth token, the GitHub App issues an installation token, and the restored event sequence generates a new id |
 | `test_upgrade_keeps_sign_in_and_data_and_rollback_returns_to_the_previous_release` | upgrade keeps secrets and the sign-in setting, rollback returns to the previous release, an unhealthy upgrade undoes itself (exit 5) |
 | `test_adding_a_machine_and_an_ai_account_while_sign_in_is_on` | a third machine joins and its new AI account is assigned by the next heartbeat |
 | `test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures_open_a_bug` | the CI wiring below |
@@ -41,36 +41,32 @@ with stubs for `docker`, `sleep` and the deploy helpers; `AIFLOW4_CONTROL_URL`, 
 `AIFLOW4_ALERT_HOST` and `AIFLOW4_ALERT_PORT` point them at the mock control endpoint (the defaults are the
 production values).
 
-The real-machine tier needs Docker and a published release:
+The real-machine tier needs Docker and a signed release. Nightly runs use a published release; before publication the
+release workflow supplies its signed candidate tarball, Sigstore bundle and checksum manifest:
 
-- `deploy/v4/ci/clean-install-containers.sh vX.Y.Z` builds a clean control machine and two clean machines (Ubuntu
+- `deploy/v4/ci/clean-install-containers.sh vX.Y.Z` tests a published release. For an unpublished candidate, use
+  `deploy/v4/ci/clean-install-containers.sh vX.Y.Z TAR SIGSTORE_BUNDLE SHA256SUMS`. It builds a clean control machine and two clean machines (Ubuntu
   systemd containers on a private network), installs the control plane with the documented command and
   `--admin-email`, checks that anonymous callers are refused, signs in with the password file, runs the documented join bootstrap (`curl .../v1/install.sh | sh -s -- --token-file F`, with a one-use join token) on both machines, which installs the signed release and starts the node agent,
   checks that both agents report online with their node token only, reads `/v1/state` with the owner token,
-  then runs the backup, a wipe and the restore. The restore refuses, before changing anything, an archive with any
-  entry other than `manifest.json`, `db/<table>.copy` of a listed table and `secrets/{control,console}/<file name>`;
-  `backup create` writes through a private temporary file, so the archive is `0600` even over an older file.
-- `deploy/v4/ci/control-install-smoke.sh` (install, rerun, failed upgrade, upgrade, rollback) and
-  `deploy/v4/ci/install-smoke.sh` (signed release, two nodes, canary, failed install and rollback,
-  [Release installation smoke test](install.md)).
+  then runs the CI-only backup helper, a wipe and restore. The restore refuses, before changing anything, an archive
+  with any entry other than `manifest.json`, `db/<table>.copy` of a listed table and
+  `secrets/{control,console,jira,github}/<file name>`. Active Jira credentials and GitHub App metadata and private
+  keys are included; the test verifies that Jira can refresh and the GitHub App can issue an installation token after
+  restore. The backup is written through a private temporary file, so it is `0600` even over an older file.
+- `deploy/v4/ci/control-install-smoke.sh` exercises install, rerun, failed upgrade, upgrade and rollback.
+- `deploy/v4/ci/install-smoke.sh` supplements the documented fresh install with candidate canary, wave, unhealthy-node and fleet rollback checks.
 
-## Backup and restore
+## Backup and restore in acceptance
 
-On the control machine, as root:
-
-```sh
-aiflow4 backup create --out /root/aiflow-backup.tar.gz     # archive, mode 0600
-aiflow4 backup restore /root/aiflow-backup.tar.gz          # after installing the release named in the backup
-```
-
-The archive holds every registry table (users, projects, machines and their tokens, tickets, runs), the secret files
-of `/etc/aiflow/secrets/control` and `/etc/aiflow/secrets/console`, and the release (`CURRENT`) it was taken on. The
-restore needs the release installed (so the tables exist; `aiflow4-control-install --version vX.Y.Z ...`), replaces
-the registry content, resets each sequence owned by a restored table to its restored maximum, writes the secret files
-back (directory `0700`, files `0600`) and prints the release to run. Restart the control containers afterwards.
-Secret values are never printed. Keep the archive as private as the secrets.
-It does not contain the PostgreSQL/Redis/OpenObserve data directories of the host; Redis holds only leases and
-caches that are rebuilt.
+Backup and restore are CI-only acceptance helpers, not operator commands. The control plane has no Command Center
+backup flow yet, so the helper is intentionally not registered under `aiflow4`. The acceptance archive holds every
+registry table (users, projects, machines and their tokens, tickets, runs), the secret files in
+`/etc/aiflow/secrets/{control,console,jira,github}`, and the release (`CURRENT`) it was taken on. Restore runs after
+the release schema exists, replaces the registry contents, resets each owned sequence to the restored maximum and
+writes secret directories as `0700` with files at `0600`. The test verifies console sign-in, machine tokens, Jira OAuth
+refresh and GitHub App token issuance after restore. The archive does not contain the PostgreSQL, Redis or OpenObserve
+data directories; Redis leases and caches are rebuilt.
 
 ## When it runs
 
@@ -81,13 +77,13 @@ caches that are rebuilt.
 |---|---|---|
 | fast | every pull request that changes `aiflow/v4/install`, `aiflow/v4/control`, `aiflow/v4/node`, `deploy/v4` or the workflows (`acceptance-fast` in `ci.yml`) | syntax check of every deploy script and the acceptance cases |
 | full, nightly | `schedule` at 02:17 UTC and `workflow_dispatch` (`acceptance-full` in `ci.yml`) | fast and the whole `tests/v4` suite; when two published releases are available, the sign-in-enabled clean control and two-machine container run against the newer release, plus systemd control install, upgrade and rollback between them |
-| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; the release relies on the signed install smoke against the exact candidate tarball before publishing |
+| full, release | every `v*` tag (`acceptance` in `release-v4.yml`) | fast and the whole `tests/v4` suite; when two published releases are available, the sign-in-enabled clean install and control upgrade/rollback checks run against them |
 
-`clean-install-containers.sh` installs a published release, so the release acceptance job cannot pass it the tag being
-released before that tag is published. The release job instead runs `install-smoke.sh` with the signed candidate
-tarball and its signature bundle in clean Ubuntu systemd containers, including a control plane and two machines, with console sign-in on (anonymous callers refused, the Super Administrator signs in, machines join and heartbeat with their node tokens only, owner-token state reads),
-before it creates the GitHub Release or pushes the control image. The sign-in-enabled `clean-install-containers.sh`
-run is part of the nightly full test when two published releases are available, against the newer release.
+After signing the candidate tarball, the release job passes that exact tarball, Sigstore bundle and checksum manifest
+to `clean-install-containers.sh` before it pushes the control image or creates the GitHub Release. The test stages the
+candidate locally, then uses the documented `aiflow4-control-install` command and `/v1/install.sh` join bootstrap on
+the control machine and both nodes. The candidate's control image is built from the signed release contents inside
+the temporary control machine, so no unpublished artifact is fetched from GitHub or GHCR.
 
 The release job `needs` the `acceptance` job, so a failure blocks the GHCR image and the GitHub Release. When a
 nightly or release run fails, `deploy/v4/ci/open-bug-ticket.sh` opens a bug ticket (a GitHub issue labelled `bug`)
@@ -104,5 +100,8 @@ Known problems covered so far:
 - the sign-in gate blocked the machines' own calls: `test_machines_policy_calls_and_heartbeats_work_with_sign_in_on`
 - deploy and canary scripts failed with sign-in on (`/v1/state` answered `401`):
   `test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on`
+- backup omitted active Jira and GitHub App credentials: `test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working`
+- backup/restore had no UI path, so its command surface stays CI-only:
+  `test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operator_cli`
 - the bug ticket was not opened when a failed run's log was longer than the body limit (`head` closed the pipe and
   `pipefail` aborted the script): `test_the_bug_ticket_survives_a_log_longer_than_the_size_limit`

@@ -28,7 +28,8 @@ step() {  # step <log name> <command...>: run it, keep the output, name the fail
 }
 pipefail_step() { set -o pipefail; step "$@"; }
 
-for script in deploy/v4/bin/* deploy/v4/ci/*.sh; do
+for script in deploy/v4/bin/* deploy/v4/ci/*.sh deploy/v4/ci/*.py; do
+  [[ -f $script ]] || continue  # ignore generated __pycache__ directories and other non-scripts
   if head -n1 "$script" | grep -q python; then  # a few helpers are Python
     pipefail_step "syntax-$(basename "$script")" python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$script"
   else

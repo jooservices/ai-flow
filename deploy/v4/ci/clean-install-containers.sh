@@ -9,12 +9,17 @@
 #      with a one-use join token): it installs the signed release, and the node agent it starts heartbeats with only
 #      its node token (the sign-in gate must not block it); both nodes show online in the state
 #   4. the owner-token read of /v1/state that the deploy and canary scripts use answers 200
-#   5. `aiflow4 backup create`, the state is wiped, `aiflow4 backup restore`: the Super Administrator signs in again
-#      and the machines' tokens still work
+#   5. the CI-only backup helper is exercised: after wiping the test state, restore keeps sign-in and machine tokens
+#      working
 # usage: clean-install-containers.sh <vX.Y.Z>   (a published release)
+#        clean-install-containers.sh <vX.Y.Z> <signed-tarball> <sigstore-bundle> <SHA256SUMS>
+#        The second form installs the signed, unpublished release candidate before the GitHub Release is created.
 set -Eeuo pipefail
 
-[[ $# -eq 1 ]] || { echo "usage: clean-install-containers.sh <vX.Y.Z>" >&2; exit 2; }
+[[ $# -eq 1 || $# -eq 4 ]] || {
+  echo "usage: clean-install-containers.sh <vX.Y.Z> [signed-tarball sigstore-bundle SHA256SUMS]" >&2
+  exit 2
+}
 VERSION=$1
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 NAME="aiflow4-clean-$$"
@@ -24,10 +29,30 @@ CONTROL="$NAME-control"
 NODES=("$NAME-node-a" "$NAME-node-b")
 DOMAIN=control.clean.test
 ADMIN=owner@example.test
+CANDIDATE=0
+ARTIFACTS=
+COSIGN=
+if [[ $# -eq 4 ]]; then
+  CANDIDATE=1
+  [[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+    echo "candidate version must be vX.Y.Z" >&2; exit 2;
+  }
+  COSIGN=$(command -v cosign || true)
+  [[ -n $COSIGN && -x $COSIGN ]] || { echo "cosign must be installed to verify the candidate" >&2; exit 2; }
+  COSIGN=$(realpath "$COSIGN")
+  ARTIFACTS=$(mktemp -d "${RUNNER_TEMP:-/tmp}/aiflow4-clean-candidate.XXXXXX")
+  cp "$(realpath "$2")" "$ARTIFACTS/aiflow4-$VERSION.tar.gz"
+  cp "$(realpath "$3")" "$ARTIFACTS/aiflow4-$VERSION.tar.gz.sigstore.json"
+  cp "$(realpath "$4")" "$ARTIFACTS/SHA256SUMS"
+  (cd "$ARTIFACTS" && sha256sum --check --status SHA256SUMS) || {
+    echo "candidate checksum manifest does not match its tarball" >&2; exit 2;
+  }
+fi
 cleanup() {
   docker rm -f "${NODES[@]}" "$CONTROL" >/dev/null 2>&1 || true
   docker volume rm "$NAME-docker" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  [[ -z $ARTIFACTS ]] || rm -rf "$ARTIFACTS"
 }
 trap cleanup EXIT
 fail() { echo "CLEAN INSTALL FAILED: $*" >&2; exit 1; }
@@ -41,8 +66,15 @@ start() {  # start <name> <alias> [extra docker args...]
   for _ in $(seq 1 30); do docker exec "$name" systemctl is-active --quiet basic.target && return 0; sleep 1; done
   fail "systemd did not start in $name"
 }
-start "$CONTROL" control --volume "$NAME-docker:/var/lib/docker" \
+CONTROL_MOUNTS=(--volume "$NAME-docker:/var/lib/docker"
   --volume "$ROOT/deploy/v4/bin/aiflow4-control-install:/opt/aiflow4-control-install:ro"
+  --volume "$ROOT/deploy/v4/ci/acceptance-backup.py:/opt/aiflow4-acceptance-backup.py:ro")
+if [[ $CANDIDATE == 1 ]]; then
+  CONTROL_MOUNTS+=(--volume "$ARTIFACTS:/candidate:ro"
+    --volume "$COSIGN:/usr/local/bin/cosign:ro"
+    --volume "$ROOT/deploy/v4/ci/candidate-deploy.sh:/opt/aiflow4-candidate-deploy:ro")
+fi
+start "$CONTROL" control "${CONTROL_MOUNTS[@]}"
 CONTROL_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$CONTROL")
 [[ -n $CONTROL_IP ]] || fail "no address for the control container"
 # the machines reach the control plane by its public name, as machines do in production
@@ -54,7 +86,24 @@ URL=http://127.0.0.1
 HOSTHDR="Host: $DOMAIN"
 
 echo "== 1. documented control install of $VERSION (sign-in on)"
-docker exec "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
+if [[ $CANDIDATE == 1 ]]; then
+  # Stage only the signed assets where the documented installer looks for downloaded releases. Its own checksum and
+  # cosign checks run before the release code is installed; the candidate deploy adapter supplies the local image.
+  docker exec --env VERSION="$VERSION" "$CONTROL" bash -se <<'STAGE_CANDIDATE'
+set -euo pipefail
+target="/srv/aiflow/control/releases/$VERSION"
+install -d -m 0755 "$target"
+install -m 0644 "/candidate/aiflow4-$VERSION.tar.gz" \
+  "/candidate/aiflow4-$VERSION.tar.gz.sigstore.json" /candidate/SHA256SUMS "$target/"
+install -m 0755 /opt/aiflow4-candidate-deploy /usr/local/sbin/aiflow4-deploy
+STAGE_CANDIDATE
+  docker exec --env AIFLOW4_ACCEPTANCE_CANDIDATE="$VERSION" \
+    --env AIFLOW4_ACCEPTANCE_REVISION="${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD)}" \
+    --env AIFLOW4_ACCEPTANCE_ARTIFACTS=/candidate \
+    "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
+else
+  docker exec "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
+fi
 docker exec "$CONTROL" grep -qx 'AIFLOW4_CONSOLE_LOGIN=1' /etc/aiflow/secrets/control/aiflow4.env \
   || fail "the install did not turn console sign-in on"
 
@@ -142,11 +191,21 @@ AIFLOW4_CONTROL_URL=$URL bash -c '
 CHECK
 
 echo "== 5. backup, wipe, restore"
-docker exec "$CONTROL" /usr/local/sbin/aiflow4 backup create --out /root/clean-backup.tar.gz
+docker exec "$CONTROL" bash -se <<'BACKUP'
+set -euo pipefail
+set -a; . /etc/aiflow/secrets/control/aiflow4.env; set +a
+python=/srv/aiflow/control/cli/current/.venv/bin/python
+"$python" /opt/aiflow4-acceptance-backup.py create /root/clean-backup.tar.gz
+BACKUP
 docker exec "$CONTROL" bash -c 'stat -c %a /root/clean-backup.tar.gz | grep -qx 600'
 docker exec "$CONTROL" docker exec aiflow4-postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -qc "TRUNCATE console_users, nodes CASCADE"'
-docker exec "$CONTROL" /usr/local/sbin/aiflow4 backup restore /root/clean-backup.tar.gz
+docker exec "$CONTROL" bash -se <<'RESTORE'
+set -euo pipefail
+set -a; . /etc/aiflow/secrets/control/aiflow4.env; set +a
+python=/srv/aiflow/control/cli/current/.venv/bin/python
+"$python" /opt/aiflow4-acceptance-backup.py restore /root/clean-backup.tar.gz
+RESTORE
 in_control <<CHECK || fail "sign-in after the restore"
 set -euo pipefail
 body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/etc/aiflow/secrets/console/super-admin-password").read().strip()}))' '$ADMIN')

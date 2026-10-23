@@ -1,16 +1,18 @@
-"""Operator backup and restore of the control plane (docs/v4/clean-install-acceptance.md).
+"""Backup and restore primitives exercised by the clean-install acceptance test.
 
-`aiflow4 backup create --out F` writes one archive (mode 0600) with
+This is deliberately not exposed as an operator CLI command: the feature has no Command Center flow yet. The
+acceptance-only helper writes one archive (mode 0600) with
 - the registry: every table of the public schema as PostgreSQL COPY text (users, projects, machines and their tokens,
   tickets, runs), in an order that respects foreign keys,
-- the secret files of the control machine (`/etc/aiflow/secrets/control`, `/etc/aiflow/secrets/console`), which hold the
-  keys the sessions and the machines' tokens depend on,
+- the secret files of the control machine (`/etc/aiflow/secrets/control`, `/etc/aiflow/secrets/console`,
+  `/etc/aiflow/secrets/jira` and `/etc/aiflow/secrets/github`), which hold the keys the sessions, machines' tokens and
+  connected integrations depend on,
 - `CURRENT`, the release the backup was taken on.
 
-`aiflow4 backup restore F` runs on a control machine whose release is installed (so the schema exists): it puts the
+Restore runs on a control machine whose release is installed (so the schema exists): it puts the
 secret files back (directory 0700, files 0600), replaces the registry content and tells which release to run. People
-sign in again and machines carry on with their node tokens; nothing else has to be re-entered. Secret values are never
-printed.
+sign in again, machines carry on with their node tokens, and Jira and GitHub integrations keep working from their
+restored credentials. Secret values are never printed.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ from psycopg import sql
 from .control import Layout
 
 FORMAT = 1
-SECRET_DIRS = ("control", "console")  # below /etc/aiflow/secrets
+SECRET_DIRS = ("control", "console", "jira", "github")  # below /etc/aiflow/secrets
 
 
 class BackupError(Exception):

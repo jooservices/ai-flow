@@ -50,7 +50,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     services:
       redis:
         image: redis:8.2.10-bookworm
@@ -72,10 +72,21 @@ jobs:
           fetch-depth: 0
       - name: Install
         run: pip install uv==0.13.4 && uv sync --frozen --group dev
+      - name: Two newest published releases for clean install, upgrade and rollback
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json isDraft,isPrerelease,tagName \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false) | .tagName] | .[:2] | reverse | .[]' || true)
+          echo "previous=$(echo "$TAGS" | sed -n 1p)" >> "$GITHUB_OUTPUT"
+          echo "target=$(echo "$TAGS" | sed -n 2p)" >> "$GITHUB_OUTPUT"
       - name: Acceptance test (full)
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          ACCEPTANCE_PREVIOUS: ${{ steps.releases.outputs.previous }}
+          ACCEPTANCE_TARGET: ${{ steps.releases.outputs.target }}
         run: bash deploy/v4/ci/clean-install-acceptance.sh full
 
   release:
@@ -83,7 +94,7 @@ jobs:
     needs: [v4-tests, acceptance]
     if: github.repository == 'jooservices/ai-flow'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     services:
       redis:
         image: redis:8.2.10-bookworm
@@ -168,10 +179,18 @@ jobs:
             --bundle "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
             "dist/aiflow4-$VERSION.tar.gz"
 
-      # Console sign-in is on in this run: anonymous callers are refused, the Super Administrator signs in, and the
-      # machines join and heartbeat with their node tokens only (docs/v4/clean-install-acceptance.md). It runs against
-      # the signed candidate and before anything is published.
-      - name: Install release on Ubuntu systemd control and two nodes
+      # The signed, unpublished candidate is staged into the documented installer flow. Console sign-in is on,
+      # anonymous callers are refused, the Super Administrator signs in, and both machines use the documented join.
+      - name: Clean-install signed candidate on Ubuntu control and two nodes
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          bash deploy/v4/ci/clean-install-containers.sh "$VERSION" \
+            "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" dist/SHA256SUMS
+
+      # The documented clean install above is the acceptance gate. This focused smoke additionally exercises the
+      # canary wave and failed-node rollback paths with the same signed candidate.
+      - name: Fleet rollout and rollback smoke using signed candidate artifacts
         env:
           VERSION: ${{ steps.release.outputs.version }}
           PREVIOUS: ${{ steps.release.outputs.previous }}

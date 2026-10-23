@@ -6,9 +6,9 @@ machines), and the first tickets travel through Intake, development, verificatio
 needs a human reaches the Human review screen. The same sign-in gate then has to let the machines' own calls and the
 deploy scripts through, and backup and restore, upgrade and rollback, adding a machine and an AI account work.
 
-The control host, Jira and GitHub are the fakes of the other v4 tests; the release-signed systemd tiers (two Ubuntu
-containers) are `deploy/v4/ci/install-smoke.sh` and `control-install-smoke.sh`, driven by
-`deploy/v4/ci/clean-install-acceptance.sh full`.
+The control host, Jira and GitHub are the fakes of the other v4 tests; the release-signed systemd tiers (Ubuntu
+containers) are `deploy/v4/ci/clean-install-containers.sh` and `control-install-smoke.sh`, driven by
+`deploy/v4/ci/clean-install-acceptance.sh full` or the tagged release workflow.
 
 Every problem found later in real use gets a case in REGRESSIONS at the end (AC5).
 """
@@ -18,20 +18,28 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from conftest import join_node
 from test_control_install import ROOT, FakeHost, installer, machine  # noqa: F401 - `machine` is a fixture
 from test_projects import SITE, prepare_project_control, project_body
 from aiflow.v4 import cli
+from aiflow.v4.control.github import GitHubApp
+from aiflow.v4.control.jira_connect import JiraAuth, SecretStore
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
@@ -133,7 +141,7 @@ def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_t
 def test_every_setup_step_the_test_takes_is_in_the_document():
     text = DOC.read_text()
     for step in ("aiflow4-control-install", "--admin-email", "super-admin-password", "/login", "Projects",
-                 "join command", "/review", "install-smoke.sh", "clean-install-acceptance.sh"):
+                 "join command", "/review", "signed candidate", "clean-install-acceptance.sh"):
         assert step in text, step
 
 
@@ -369,7 +377,8 @@ def test_every_deploy_script_parses_and_probes_only_open_endpoints():
 
 
 # --- AC3: backup and restore ------------------------------------------------------------------------------------------
-def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fresh, test_database_url, tmp_path):
+def test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working(
+        fresh, test_database_url, tmp_path):
     ctx, lay = fresh.ctx, Layout(fresh.machine.root)
     fresh.sign_in()
     cc, _ = fresh.join("cc")
@@ -378,11 +387,33 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
     # Ensure a restored serial value collides with a newly initialized sequence unless restore advances it.
     ctx.db.run("TRUNCATE events RESTART IDENTITY")
     ctx.db.run("INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.test','TESTWP-9','saved','{}')")
+
+    # Seed realistic active Integration credentials on the clean machine. They must be restored along with the
+    # control keys because the connected Jira OAuth app and the GitHub App private key live outside `control/`.
+    jira_dir = lay.p("/etc/aiflow/secrets/jira")
+    github_dir = lay.p("/etc/aiflow/secrets/github")
+    jira_store = SecretStore(jira_dir)
+    jira_store.save_app("restored-client-id", "restored-client-secret")
+    jira_store.save_credential({"kind": "oauth", "cloud_id": "restored-cloud", "site_url": "https://jira.test",
+                                "access_token": "expired-access", "refresh_token": "restored-refresh-token",
+                                "expires_at": time.time() + 1})
+    github_dir.mkdir(parents=True, exist_ok=True)
+    github_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    github_pem = github_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                          serialization.NoEncryption())
+    (github_dir / "app.json").write_text(json.dumps({"id": "901", "account_login": "acme",
+                                                       "installation_id": 77}))
+    (github_dir / "app.pem").write_bytes(github_pem)
+    (github_dir / "app.json").chmod(0o600)
+    (github_dir / "app.pem").chmod(0o600)
+
     secret_files = [fresh.machine.p("/etc/aiflow/secrets/control/aiflow4.env"),
-                    fresh.machine.p("/etc/aiflow/secrets/console/super-admin-password")]
+                    fresh.machine.p("/etc/aiflow/secrets/console/super-admin-password"),
+                    jira_dir / "oauth-app.json", jira_dir / "credential.json",
+                    github_dir / "app.json", github_dir / "app.pem"]
     secrets_before = {p: p.read_bytes() for p in secret_files}
 
-    archive = tmp_path / "aiflow-backup.tar.gz"  # the supported backup artifact: `aiflow4 backup create --out F`
+    archive = tmp_path / "aiflow-backup.tar.gz"  # invoked only by deploy/v4/ci/acceptance-backup.py
     made = backup.create(test_database_url, archive, lay)
     assert archive.stat().st_mode & 0o777 == 0o600
     assert made["release"] == "v4.1.0" and {"console_users", "nodes", "tickets"} <= set(made["tables"])
@@ -390,21 +421,23 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
         names = tar.getnames()
     assert "manifest.json" in names and "db/console_users.copy" in names
     assert "secrets/console/super-admin-password" in names and "secrets/control/aiflow4.env" in names
+    assert {"secrets/jira/oauth-app.json", "secrets/jira/credential.json",
+            "secrets/github/app.json", "secrets/github/app.pem"} <= set(names)
 
     # the disaster: a fresh install has recreated the registry schema and its sequences start at 1.
     with ctx.db.pool.connection() as c:
         c.execute("DROP TABLE " + ", ".join(f'"{t}"' for t in made["tables"]) + " CASCADE")
     ctx.db.migrate()
-    for p in secret_files:
-        p.unlink()
+    shutil.rmtree(lay.p("/etc/aiflow/secrets"))
     assert ctx.db.one("SELECT count(*) AS n FROM console_users")["n"] == 0
     assert fresh.client.post("/v1/auth/login", json={"email": ADMIN, "password": fresh.password}).status_code == 401
 
-    restored = backup.restore(test_database_url, archive, lay)  # `aiflow4 backup restore F`
+    restored = backup.restore(test_database_url, archive, lay)
     assert restored["release"] == "v4.1.0"
     assert {p: p.read_bytes() for p in secret_files} == secrets_before
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in secret_files)
     assert fresh.machine.p("/etc/aiflow/secrets/control").stat().st_mode & 0o777 == 0o700
+    assert jira_dir.stat().st_mode & 0o777 == 0o700 and github_dir.stat().st_mode & 0o777 == 0o700
     assert ctx.db.one("SELECT summary FROM tickets WHERE key='TESTWP-9'")["summary"] == "keep me"
     inserted = ctx.db.one(
         "INSERT INTO events (type, ticket, outcome, data) VALUES ('backup.after_restore','TESTWP-9','new','{}') "
@@ -416,8 +449,42 @@ def test_operator_backup_and_restore_bring_back_sign_in_and_machine_operation(fr
     # the machine resumes with the node token it already had
     assert fresh.machine_client().post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=cc).status_code == 200
 
+    # Jira can refresh the restored OAuth credential with the restored app secret and refresh token.
+    ctx.settings.jira_secret_dir = str(jira_dir)
+    jira_requests = []
 
-def test_restore_refuses_a_file_that_is_not_a_backup_and_the_backup_command_checks_its_usage(fresh, test_database_url, tmp_path):
+    def refresh_jira(request):
+        payload = json.loads(request.content)
+        jira_requests.append(payload)
+        assert payload == {"grant_type": "refresh_token", "client_id": "restored-client-id",
+                           "client_secret": "restored-client-secret", "refresh_token": "restored-refresh-token"}
+        return httpx.Response(200, json={"access_token": "refreshed-jira-access", "expires_in": 3600,
+                                         "refresh_token": "rotated-refresh-token"})
+
+    jira_http = httpx.Client(transport=httpx.MockTransport(refresh_jira))
+    jira_auth = JiraAuth(ctx.settings, SecretStore(jira_dir), jira_http)
+    jira_credential = jira_auth.credential()
+    assert jira_requests and jira_credential.headers() == {"Authorization": "Bearer refreshed-jira-access"}
+    jira_http.close()
+
+    # The restored GitHub App key and installation id still authorize a fresh installation-token request.
+    github_requests = []
+
+    def issue_github_token(request):
+        github_requests.append(request)
+        assert request.url.path == "/app/installations/77/access_tokens"
+        assert request.headers["Authorization"].startswith("Bearer ey")
+        return httpx.Response(201, json={"token": "ghs-restored-installation-token",
+                                         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=55)).isoformat()})
+
+    github_http = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(issue_github_token))
+    github_app = GitHubApp(str(github_dir), "acme", github_http)
+    github_token, _ = github_app.token("acme/repo")
+    assert github_token == "ghs-restored-installation-token" and github_requests
+    github_http.close()
+
+
+def test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operator_cli(fresh, test_database_url, tmp_path):
     junk = tmp_path / "junk.tar.gz"
     with tarfile.open(junk, "w:gz") as tar:
         info = tarfile.TarInfo("etc/passwd")
@@ -425,7 +492,10 @@ def test_restore_refuses_a_file_that_is_not_a_backup_and_the_backup_command_chec
         tar.addfile(info, io.BytesIO(b""))
     with pytest.raises(backup.BackupError, match="not an AI Flow backup"):
         backup.restore(test_database_url, junk, Layout(fresh.machine.root))
-    assert cli.main(["backup", "create"]) == 2 and cli.main(["backup", "restore"]) == 2  # usage errors, no side effects
+    for args in (["backup", "create", "--out", str(tmp_path / "unused")], ["backup", "restore", str(junk)]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(args)
+        assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("member", ["secrets/control//etc/passwd", "secrets/control/../x", "secrets/other/f",
@@ -521,12 +591,19 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
 
     release = _workflow("release-v4.yml")
     gate = release["jobs"]["acceptance"]
-    assert "clean-install-acceptance.sh full" in "".join(s.get("run", "") for s in gate["steps"])
+    full_step = next(s for s in gate["steps"] if "clean-install-acceptance.sh full" in s.get("run", ""))
+    assert "ACCEPTANCE_PREVIOUS" in full_step["env"] and "ACCEPTANCE_TARGET" in full_step["env"]
+    assert "${{ steps.releases.outputs.previous }}" in full_step["env"]["ACCEPTANCE_PREVIOUS"]
+    assert "${{ steps.releases.outputs.target }}" in full_step["env"]["ACCEPTANCE_TARGET"]
+    assert any("Two newest published releases" in s.get("name", "") for s in gate["steps"])
     assert set(release["jobs"]["release"]["needs"]) == {"v4-tests", "acceptance"}  # a failure blocks the release
     release_steps = "".join(s.get("run", "") for s in release["jobs"]["release"]["steps"])
-    assert "install-smoke.sh \"$VERSION\"" in release_steps  # the signed candidate is tested before publication
+    assert "clean-install-containers.sh \"$VERSION\"" in release_steps
+    assert "dist/aiflow4-$VERSION.tar.gz.sigstore.json" in release_steps
+    assert "dist/SHA256SUMS" in release_steps
     doc = DOC.read_text().lower()
-    assert "release relies on the signed install smoke" in doc
+    assert "before it pushes the control image or creates the github release" in doc
+    assert ".venv/" in (ROOT / ".gitignore").read_text()
     bug = release["jobs"]["release-bug"]
     assert set(bug["needs"]) == {"v4-tests", "acceptance", "release"} and "failure()" in bug["if"]
     assert (ROOT / "deploy/v4/ci/open-bug-ticket.sh").is_file()
@@ -538,7 +615,7 @@ def test_the_real_machine_run_installs_with_sign_in_and_is_part_of_the_full_run(
     script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
     for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/nodes/join-tokens",
-                 "backup create", "backup restore", "super-admin-password"):
+                 "acceptance-backup.py create", "acceptance-backup.py restore", "super-admin-password"):
         assert step in script, step
     assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
     # the machines run the documented join bootstrap (the signed release is installed by it), not hand-made HTTP calls
@@ -549,17 +626,21 @@ def test_the_real_machine_run_installs_with_sign_in_and_is_part_of_the_full_run(
     assert not re.search(r"docker exec -i \"\$node\" bash -se <<", script)
 
 
-def test_the_signed_candidate_run_before_publishing_has_sign_in_on():
-    smoke = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
-    assert "AIFLOW4_CONSOLE_LOGIN=1" in smoke and "console-user seed" in smoke and "/v1/auth/login" in smoke
-    assert "!= 401" not in smoke and "$anon == 401" in smoke and "$anon == 302" in smoke
-    assert not re.search(r"curl [^\n]*18080/v1/state", smoke)  # every state read carries the owner token (state_read)
+def test_the_signed_candidate_uses_documented_install_and_join_before_publishing():
+    real_machine = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
+    candidate_adapter = (ROOT / "deploy/v4/ci/candidate-deploy.sh").read_text()
+    assert "--version \"$VERSION\" --domain \"$DOMAIN\" --admin-email \"$ADMIN\"" in real_machine
+    assert "cosign verify-blob" in candidate_adapter
+    assert "enable -q --now aiflow4-autodeploy.timer" not in candidate_adapter
+    assert "aiflow4-control-install" in real_machine
+    assert "/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file" in real_machine
+    assert "AIFLOW4_CONSOLE_LOGIN=1" in real_machine and "/v1/auth/login" in real_machine
+    assert "AIFLOW4_DATABASE_URL=postgresql://" not in real_machine
     steps = _workflow("release-v4.yml")["jobs"]["release"]["steps"]
     names = [s.get("name", "") for s in steps]
-    smoke_step = next(i for i, n in enumerate(names) if n == "Install release on Ubuntu systemd control and two nodes")
-    assert "install-smoke.sh" in steps[smoke_step]["run"]
-    assert smoke_step < next(i for i, n in enumerate(names) if "GitHub Release" in n or "GHCR" in n)  # before publishing
-    assert "clean-install-containers.sh" in (ROOT / "deploy/v4/ci/clean-install-acceptance.sh").read_text()
+    smoke_step = next(i for i, n in enumerate(names) if n == "Clean-install signed candidate on Ubuntu control and two nodes")
+    assert "clean-install-containers.sh" in steps[smoke_step]["run"]
+    assert smoke_step < next(i for i, n in enumerate(names) if "GitHub Release" in n or "GHCR" in n)
 
 
 def test_the_bug_ticket_survives_a_log_longer_than_the_size_limit(tmp_path):
@@ -591,6 +672,8 @@ def test_the_topic_is_linked_from_the_deploy_readme():
 REGRESSIONS = {
     "login gate blocked the machines' own calls": "test_machines_policy_calls_and_heartbeats_work_with_sign_in_on",
     "deploy and canary scripts failed with login enabled": "test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on",
+    "backup omitted active Jira and GitHub App credentials": "test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working",
+    "backup restore had no UI path and must stay CI-only": "test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operator_cli",
     "the bug ticket was not opened for a long log (broken pipe)": "test_the_bug_ticket_survives_a_log_longer_than_the_size_limit",
 }
 

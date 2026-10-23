@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..core.toolchains import (STACK_TOOLS, locked_version, pinned_version, toolchain_gaps,
+from ..core.toolchains import (PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, locked_version, pinned_version, toolchain_gaps,
                                tools_for_stacks_in_project, version_matches)
 
 AI_PACKAGES = {
@@ -470,27 +470,126 @@ def _install_codex_host(version: str) -> None:
     _install_file("codex-code-mode-host.version", f"{normalized}\n".encode(), directory=parent)
 
 
+_TOOL_HOME = Path("/usr/local/lib/aiflow4/home")
+_NPM_CACHE = Path("/usr/local/lib/aiflow4/npm-cache")
+_AI_USER = "aiflow-worker"
+_TAIL = 400
+
+
+def _installer_env(**extra: str) -> dict[str, str]:
+    """Environment for npm and Playwright installers: works when the node agent has no HOME or npm cache set."""
+    env = dict(os.environ)
+    fallbacks = []
+    if not env.get("HOME"):
+        env["HOME"] = str(_TOOL_HOME)
+        fallbacks.append(_TOOL_HOME)
+    if not env.get("npm_config_cache") and not env.get("NPM_CONFIG_CACHE"):
+        env["npm_config_cache"] = str(_NPM_CACHE)
+        fallbacks.append(_NPM_CACHE)
+    for folder in fallbacks:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    env.update(extra)
+    return env
+
+
+def _output_tail(result: Any) -> str:
+    return " ".join(str(result.stderr or result.stdout or "").split())[-_TAIL:]
+
+
+def _run_installer(label: str, command: list[str], timeout: int, env: dict[str, str]) -> Any:
+    """Run an installer; a failure carries the installer's own message (logged and in the error), not only an exit code."""
+    import logging
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OperationError(f"{label} could not run ({type(exc).__name__})") from exc
+    if result.returncode:
+        tail = _output_tail(result)
+        logging.getLogger("aiflow4.node").warning("%s failed (exit %s): %s", label, result.returncode, tail)
+        raise OperationError(f"{label} failed (exit {result.returncode}): {tail}" if tail
+                             else f"{label} failed (exit {result.returncode})")
+    return result
+
+
+def _link_playwright(env: dict[str, str], link_dir: Path = Path("/usr/local/bin")) -> None:
+    """Node's global bin folder is only inside its own prefix; link the playwright command into a PATH directory."""
+    result = _run_installer("npm prefix lookup", ["npm", "prefix", "--global"], 60, env)
+    prefix = Path((result.stdout or "").strip() or "/nonexistent")
+    source = prefix / "bin" / "playwright"
+    if not (source.exists() or source.is_symlink()):
+        raise OperationError(f"Playwright was installed but its command is missing from {prefix / 'bin'}")
+    link = link_dir / "playwright"
+    temp_link = link.with_name(".playwright.aiflow4")
+    try:
+        temp_link.unlink(missing_ok=True)
+        temp_link.symlink_to(source)
+        os.replace(temp_link, link)
+    except OSError as exc:
+        raise OperationError(f"Playwright command could not be linked into {link_dir} ({type(exc).__name__})") from exc
+
+
+def _browser_binary(root: Path) -> Path | None:
+    for pattern in ("chromium-*/chrome-linux*/chrome",
+                    "chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell"):
+        found = sorted(path for path in root.glob(pattern) if path.is_file())
+        if found:
+            return found[-1]
+    return None
+
+
+def _check_browser_launch(root: Path) -> str:
+    """Launch Chromium headless once as the AI user; return its version, or raise with the missing piece in plain words."""
+    import logging
+    binary = _browser_binary(root)
+    if binary is None:
+        raise OperationError(f"Chromium was installed but no browser program was found in {root}")
+    prefix: list[str] = []
+    if os.geteuid() == 0 and shutil.which("runuser"):
+        prefix = ["runuser", "-u", _AI_USER, "--"]
+    with tempfile.TemporaryDirectory(prefix="aiflow4-browser-") as home:
+        os.chmod(home, 0o777)
+        env = _installer_env(HOME=home, PLAYWRIGHT_BROWSERS_PATH=str(root))
+        try:
+            ran = subprocess.run([*prefix, str(binary), "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom",
+                                  "about:blank"], capture_output=True, text=True, timeout=60, env=env)
+            version = subprocess.run([*prefix, str(binary), "--version"], capture_output=True, text=True,
+                                     timeout=30, env=env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OperationError(f"Chromium could not be started as {_AI_USER} ({type(exc).__name__})") from exc
+    if ran.returncode:
+        logging.getLogger("aiflow4.node").warning("Chromium launch check failed (exit %s): %s", ran.returncode,
+                                                  _output_tail(ran))
+        library = re.search(r"error while loading shared libraries:\s*([^\s:]+)", ran.stderr or "", re.IGNORECASE)
+        if library:
+            raise OperationError(f"Chromium cannot start: the system library {library.group(1)} is missing")
+        raise OperationError(f"Chromium cannot start headless as {_AI_USER} (exit {ran.returncode}): "
+                             f"{_output_tail(ran) or 'no message'}")
+    return " ".join((version.stdout or version.stderr or "").split()) or "version unknown"
+
+
 def _install_playwright(version: str) -> None:
     pinned = _check_version(version, required=True)
-    try:
-        result = subprocess.run(["npm", "install", "--global", "--no-audit", "--no-fund", "--registry",
-                                 "https://registry.npmjs.org", f"playwright@{pinned}"],
-                                capture_output=True, text=True, timeout=900)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise OperationError(f"Playwright installer could not run ({type(exc).__name__})") from exc
-    if result.returncode:
-        raise OperationError(f"Playwright installer failed (exit {result.returncode})")
+    env = _installer_env()
+    _run_installer("Playwright installer", ["npm", "install", "--global", "--no-audit", "--no-fund", "--registry",
+                                            "https://registry.npmjs.org", f"playwright@{pinned}"], 900, env)
+    _link_playwright(env)
 
 
 def _install_playwright_browser(version: str) -> None:
+    import logging
     if not shutil.which("playwright"):
         _install_playwright(version)
-    try:
-        result = subprocess.run(["playwright", "install", "--with-deps", "chromium"], capture_output=True, text=True, timeout=1800)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise OperationError(f"Playwright Chromium installer could not run ({type(exc).__name__})") from exc
-    if result.returncode:
-        raise OperationError(f"Playwright Chromium installer failed (exit {result.returncode})")
+    root = Path(PLAYWRIGHT_BROWSERS_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    env = _installer_env(PLAYWRIGHT_BROWSERS_PATH=str(root))
+    _run_installer("Playwright Chromium installer", ["playwright", "install", "--with-deps", "chromium"], 1800, env)
+    # the AI user runs the browser but root installed it
+    subprocess.run(["chmod", "-R", "a+rX", str(root)], capture_output=True, timeout=300)
+    reported = _check_browser_launch(root)
+    logging.getLogger("aiflow4.node").info("Chromium launch check passed: %s", reported)
 
 
 def _install_component(name: str, version: str, packages: list[str]) -> None:

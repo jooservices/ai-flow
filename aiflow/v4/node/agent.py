@@ -40,6 +40,7 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
          "playwright-browser": ["playwright", "install", "--dry-run", "chromium"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
+MIN_WORK_DISK_FREE = 5 * 1024 ** 3
 SIGN_IN_COMMANDS = {
     "claude": ["claude", "auth", "login"],
     "codex": ["codex", "login", "--device-auth"],
@@ -213,7 +214,7 @@ def _system_machine_conditions(metrics_data: dict, auto_fixed_conditions: set[st
     free = metrics_data.get("disk_free")
     if isinstance(free, (int, float)):
         gib = int(free / (1024 ** 3))
-        if free >= 5 * 1024 ** 3:
+        if free >= MIN_WORK_DISK_FREE:
             result = "fixed_automatically" if "disk-space" in (auto_fixed_conditions or set()) else "ready"
             detail = f"The node freed space automatically; {gib} GiB is available." if result == "fixed_automatically" \
                 else f"{gib} GiB is available."
@@ -546,6 +547,25 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
 
 
 _last_testdb_sweep = 0.0
+
+
+def _disk_free_bytes() -> int:
+    """Return free space on the filesystem used for AI Flow work."""
+    return shutil.disk_usage("/srv/aiflow" if os.path.isdir("/srv/aiflow") else "/").free
+
+
+def _run_disk_cleanup(cleanup, auto_fixed_conditions: set[str]) -> int:
+    """Run cleanup and report disk-space as fixed only if it reclaims enough space to meet the minimum."""
+    before = _disk_free_bytes()
+    removed = cleanup()
+    if not removed:
+        return removed
+
+    after = _disk_free_bytes()
+    reclaimed = max(0, after - before)
+    if before < MIN_WORK_DISK_FREE and reclaimed >= MIN_WORK_DISK_FREE - before:
+        auto_fixed_conditions.add("disk-space")
+    return removed
 
 
 def _test_database_urls(projects_dir: str = "/etc/aiflow/projects") -> list[str]:
@@ -954,10 +974,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
             try:
                 if manage_workers:
                     reconcile(desired.get("workers") or desired.get("accounts", []))
-                    clean_scratch()
-                    removed_worktrees = clean_worktrees(api, name)
-                    if removed_worktrees and isinstance(m.get("disk_free"), (int, float)) and m["disk_free"] < 5 * 1024 ** 3:
-                        auto_fixed_conditions.add("disk-space")
+                    _run_disk_cleanup(clean_scratch, auto_fixed_conditions)
+                    _run_disk_cleanup(lambda: clean_worktrees(api, name), auto_fixed_conditions)
                     sweep_test_databases()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)

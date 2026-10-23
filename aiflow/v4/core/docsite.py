@@ -142,6 +142,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin"), "projects"),
+    (re.compile(r"^\s*systemCheck(?:Error|Busy)?:"), "system-check"),
 )
 
 SCREEN_SHARED_UI_PATTERNS = (
@@ -159,13 +160,14 @@ SCREEN_SHARED_UI_PATTERNS = (
 
 # View-specific navigation, state and event branches live outside the section/render functions. Infer their
 # documentation target from the view name instead of treating them as unmapped shared UI.
+SCREEN_VIEW_ARRAY_LOOP = re.compile(r",\s*'([a-z-]+)'\]\s*\.forEach")
 SCREEN_VIEW_UI_PATTERNS = (
     re.compile(r'\bid="tab-([a-z-]+)"'),
     re.compile(r"\bS\.([a-z]+)\s*=\s*\{"),
     re.compile(r"\bHINTS\.([a-z-]+)\s*="),
     re.compile(r"\bpath\.indexOf\('/([a-z-]+)'"),
     re.compile(r"\{\s*view:\s*'([a-z-]+)'"),
-    re.compile(r",\s*'([a-z-]+)'\]\s*\.forEach"),
+    SCREEN_VIEW_ARRAY_LOOP,
     re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z-]+)'"),
     re.compile(r"\bact\s*===\s*'([a-z-]+)-[\w-]+'"),
 )
@@ -980,7 +982,7 @@ def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
 
 def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str]) -> set[str]:
     """Map edits to shared navigation tables to the view entries that actually changed."""
-    item = r"([a-z-]+)\s*:\s*(['\"])(.*?)\2"
+    item = r"['\"]?([a-z-]+)['\"]?\s*:\s*(['\"])(.*?)\2"
     old_items = {name: value for name, _, value in re.findall(item, old_line) if name in all_views}
     new_items = {name: value for name, _, value in re.findall(item, new_line) if name in all_views}
     changed = {name for name in old_items.keys() | new_items.keys()
@@ -1043,14 +1045,17 @@ def changed_views(base: str) -> set[str]:
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
-            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
-                              if (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            navigation_views: set[str] = set()
             # Navigation objects are kept on one line. Compare the base and current lines so one
             # added or edited view entry does not make all existing screens require doc changes.
             if old_count == count and 1 <= old_first <= len(base_lines):
                 old_index = old_first - 1 + (line_no - first)
                 if old_index < len(base_lines):
-                    specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
+                    navigation_views = _changed_navigation_views(base_lines[old_index], changed_line, all_views)
+            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
+                              if not (pattern is SCREEN_VIEW_ARRAY_LOOP and navigation_views)
+                              and (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            specific_views |= navigation_views
             layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
@@ -1082,7 +1087,7 @@ def changed_views(base: str) -> set[str]:
             # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
             # screen, including edits to the top-bar link, first-use container and dismiss behavior.
             if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:
-                hint = re.match(r"\s*([a-z-]+):\s*'", changed_line)
+                hint = re.match(r"\s*['\"]?([a-z-]+)['\"]?:\s*'", changed_line)
                 if hint:
                     hint_view = hint.group(1)
                     line_views.add(hint_view)

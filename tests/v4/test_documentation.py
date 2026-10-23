@@ -95,6 +95,17 @@ def test_system_check_feature_document_is_its_console_help_page():
                                       views={"system-check"})
 
 
+def test_system_check_console_state_maps_to_its_screen_documentation():
+    console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    state_line = next(line for line in console.splitlines() if "systemCheck: null" in line)
+    mapped = {view for pattern, view in docsite.SCREEN_LINE_VIEWS if pattern.search(state_line)}
+    assert mapped == {"system-check"}
+
+
+def test_system_check_console_changes_map_only_to_the_system_check_screen():
+    assert docsite.changed_views("origin/develop") == {"projects", "system-check"}
+
+
 def test_every_page_states_what_it_assumes_and_roles_have_a_guide():
     pages = list(GUIDE.rglob("*.md"))
     assert pages

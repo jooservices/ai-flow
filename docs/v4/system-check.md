@@ -1,8 +1,12 @@
 # System readiness check
 
+**Console screens:** `system-check`, `projects`
+
 The Console has a **System check** screen at `/system-check`. It shows machine-wide conditions and each configured
 project's conditions on every machine assigned to that project. The same readiness snapshot is available from
-`GET /v1/system-check`; `GET /v1/support-bundle` downloads a safe JSON support bundle that includes it.
+`GET /v1/system-check`; `GET /v1/support-bundle` downloads a safe JSON support bundle that includes it. The Support
+screen also creates a scanned archive with `POST /v1/support/bundles` and downloads it through
+`GET /v1/support/bundles/{bundle_id}/download`.
 
 Each row has one result: **ready**, **fixed automatically**, **needs an action**, or **not possible on this machine**.
 Rows that need a person include one direct action. Credential checks expose only whether a credential is present
@@ -42,6 +46,9 @@ the support bundle contains that result.
 The readiness gate and trigger points touch these control API routes:
 
 - `GET /v1/system-check` returns the snapshot; `POST /v1/system-check/run` starts a manual check.
+- `POST /v1/support/bundles` builds and scans an archive containing the sanitized readiness snapshot;
+  `GET /v1/support/bundles/{bundle_id}/download` returns the archive after review.
+- `POST /v1/runs/{run_id}/result` stores any sanitized worker support log for ticket-specific bundles.
 - `POST /v1/nodes/join` returns the node token promptly and schedules the first check; `POST /v1/nodes/{name}/heartbeat`
   stores the node's reported conditions, schedules provider probes in the background and never waits for them.
 - `POST /v1/projects` schedules a check for the new project; `GET /v1/projects` adds the per-machine readiness

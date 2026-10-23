@@ -1035,7 +1035,7 @@ def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
     from aiflow.v4.control import notify
     from aiflow.v4.control.loops import watchdog
     sent = []
-    monkeypatch.setattr(notify, "send", lambda sev, title, detail="", link="": sent.append((sev, title)) or ["test"])
+    monkeypatch.setattr(notify, "send", lambda sev, title, detail="", link="", **kwargs: sent.append((sev, title)) or ["test"])
     n1 = join(client, "node1")
     client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1)
     ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='node1'")

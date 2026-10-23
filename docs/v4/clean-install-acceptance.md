@@ -37,9 +37,8 @@ Further cases in the same file:
 
 The pytest tier runs the real installer against a fake host, the real control API with sign-in on, and Jira and
 GitHub fakes (the test accounts), so it needs only the shared Redis and PostgreSQL. The deploy scripts run for real
-with stubs for `docker`, `sleep` and the deploy helpers; `AIFLOW4_CONTROL_URL`, `AIFLOW4_CONTROL_ENV`,
-`AIFLOW4_ALERT_HOST` and `AIFLOW4_ALERT_PORT` point them at the mock control endpoint (the defaults are the
-production values).
+with stubs for `docker`, `sleep` and the deploy helpers; `AIFLOW4_CONTROL_URL` and `AIFLOW4_CONTROL_ENV` point them
+at the mock control endpoint (the defaults are the production values).
 
 The real-machine tier needs Docker and a signed release. Nightly runs use a published release; before publication the
 release workflow supplies its signed candidate tarball, Sigstore bundle and checksum manifest:

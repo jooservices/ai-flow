@@ -330,8 +330,7 @@ def run_promotion(tmp_path, script, env_file, control, previous="v4.1.0", target
         stub.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\n{body}\n')
         stub.chmod(0o755)
     env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "AIFLOW4_ROOT": str(root),
-           "AIFLOW4_CONTROL_URL": control.url, "AIFLOW4_CONTROL_ENV": str(env_file),
-           "AIFLOW4_ALERT_HOST": "127.0.0.1", "AIFLOW4_ALERT_PORT": "1"}
+           "AIFLOW4_CONTROL_URL": control.url, "AIFLOW4_CONTROL_ENV": str(env_file)}
     done = subprocess.run(["bash", str(ROOT / "deploy/v4/bin" / script)], env=env, capture_output=True, text=True,
                           timeout=120)
     return done, calls.read_text().splitlines() if calls.exists() else []

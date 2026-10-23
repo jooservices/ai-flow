@@ -236,6 +236,7 @@ LOGIN_PAGE = """<!doctype html>
 @media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#171b21;--text:#e8ebef;--muted:#9aa4b0;--line:#2a313a;--accent:#7aa2ff;--err:#ff8b84}}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);
 font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;padding:16px}
+main{width:100%;display:grid;place-items:center}
 form{width:100%;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
 h1{font-size:20px;margin:0 0 4px}p{margin:0 0 20px;color:var(--muted);font-size:13px}
 label{display:block;font-size:13px;margin:12px 0 4px}
@@ -244,10 +245,10 @@ input:focus{outline:2px solid var(--accent);outline-offset:1px}
 button{width:100%;margin-top:20px;padding:10px;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 button:disabled{opacity:.6;cursor:default}#msg{min-height:20px;margin-top:12px;color:var(--err);font-size:13px}
 </style></head><body>
-<form id="f" autocomplete="on"><h1>AI Flow Command Center</h1><p>Sign in to continue.</p>
+<main><form id="f" autocomplete="on"><h1>AI Flow Command Center</h1><p>Sign in to continue.</p>
 <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" required autofocus>
 <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
-<button id="go" type="submit">Sign in</button><div id="msg" role="alert"></div></form>
+<button id="go" type="submit">Sign in</button><div id="msg" role="alert"></div></form></main>
 <script>
 var next=new URLSearchParams(location.search).get("next")||"/cc";
 if(next.charAt(0)!=="/"||next.charAt(1)==="/"||next.indexOf("\\\\")>=0){next="/cc"}

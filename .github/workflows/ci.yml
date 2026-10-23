@@ -61,7 +61,7 @@ jobs:
     name: Test (v4)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       redis:
         image: redis:8.2.10-bookworm
@@ -83,13 +83,27 @@ jobs:
           persist-credentials: false
 
       - name: Install
-        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
 
       - name: Tests (real Redis and PostgreSQL)
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: uv run pytest tests/v4 -p no:warnings
+
+      - name: Upload sanitized Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: v4-console-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Clean-install acceptance test (docs/v4/clean-install-acceptance.md): the fast version on every pull request
   # that touches install, deploy, control or node code ...
@@ -133,13 +147,18 @@ jobs:
 
       - name: Install
         if: steps.touched.outputs.run == 'true'
-        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
 
       - name: Acceptance test (fast)
         if: steps.touched.outputs.run == 'true'
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: bash deploy/v4/ci/clean-install-acceptance.sh fast
 
       - name: Upload fast acceptance logs
@@ -148,6 +167,15 @@ jobs:
         with:
           name: clean-install-acceptance-fast
           path: ${{ runner.temp }}/aiflow-acceptance-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload clean-install acceptance Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-install-acceptance-fast-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -179,7 +207,11 @@ jobs:
           persist-credentials: false
 
       - name: Install
-        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
 
       - name: Two newest published releases for the systemd install, upgrade and rollback
         id: releases
@@ -212,6 +244,7 @@ jobs:
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
           ACCEPTANCE_PREVIOUS: ${{ steps.releases.outputs.previous }}
           ACCEPTANCE_TARGET: ${{ steps.releases.outputs.target }}
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: bash deploy/v4/ci/clean-install-acceptance.sh full
 
       - name: Upload nightly acceptance logs
@@ -220,6 +253,15 @@ jobs:
         with:
           name: clean-install-acceptance-nightly
           path: ${{ runner.temp }}/aiflow-acceptance-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload nightly acceptance Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-install-acceptance-nightly-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
           if-no-files-found: ignore
           retention-days: 14
 

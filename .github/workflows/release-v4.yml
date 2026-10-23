@@ -15,7 +15,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       redis:
         image: redis:8.2.10-bookworm
@@ -36,12 +36,25 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install
-        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
       - name: Run v4 tests
         env:
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: uv run --frozen pytest tests/v4 -q
+      - name: Upload sanitized v4 Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-v4-console-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # The clean-install acceptance test (docs/v4/clean-install-acceptance.md) gates the release: a failure stops the
   # publication and release-bug opens a bug ticket.
@@ -218,12 +231,22 @@ jobs:
             "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json" dist/SHA256SUMS \
             2>&1 | tee "$RUNNER_TEMP/aiflow-candidate-logs/candidate-clean-install.log"
 
+      - name: Install browser tools for the release install smoke
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
+
       # The documented clean install above is the acceptance gate. This focused smoke additionally exercises the
       # canary wave and failed-node rollback paths with the same signed candidate.
       - name: Fleet rollout and rollback smoke using signed candidate artifacts
         env:
           VERSION: ${{ steps.release.outputs.version }}
           PREVIOUS: ${{ steps.release.outputs.previous }}
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/aiflow-candidate-logs"
@@ -247,6 +270,15 @@ jobs:
         with:
           name: clean-install-candidate-release
           path: ${{ runner.temp }}/aiflow-candidate-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload sanitized release install smoke Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-install-smoke-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
           if-no-files-found: ignore
           retention-days: 14
 

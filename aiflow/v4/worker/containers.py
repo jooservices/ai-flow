@@ -68,16 +68,29 @@ def engine_prefix() -> list[str]:
     return ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--"]
 
 
+HOST_ENGINE_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock", "/var/run/podman/podman.sock",
+                       "/run/podman/podman.sock")
+
+
 def _worker_can_run_podman() -> bool:
-    """True when the AI run's own account could execute the real Podman (so it could bypass the broker)."""
+    """True when the AI run's own account (with the groups a run gets) could execute Podman or reach an engine socket."""
     uid, gid, _ = _identity(WORKER_USER)
+    # Same group handling as loop.RUN_AS, so a supplementary group that grants Podman access is seen here.
+    prefix = ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--init-groups", "--"]
     try:
-        probe = subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--",
-                                "podman", "--version"], capture_output=True, text=True, timeout=15)
+        probe = subprocess.run([*prefix, "podman", "--version"], capture_output=True, text=True, timeout=15)
+        # 126/127: found but not executable, or not found for that account. Anything else is not proof of denial.
+        if probe.returncode not in {126, 127}:
+            return True
+        engine_socket = f"/run/user/{_engine_identity()[0]}/podman/podman.sock"
+        for path in (*HOST_ENGINE_SOCKETS, engine_socket):
+            reach = subprocess.run([*prefix, "sh", "-c", 'test -S "$1" && test -w "$1"', "probe", path],
+                                   capture_output=True, text=True, timeout=15)
+            if reach.returncode == 0:
+                return True
     except (OSError, subprocess.TimeoutExpired):
         return True
-    # 126/127: found but not executable, or not found for that account. Anything else is not proof of denial.
-    return probe.returncode not in {126, 127}
+    return False
 
 
 def _private_to_engine(path: Path) -> bool:
@@ -1076,6 +1089,14 @@ class ContainerRuntime(AbstractContextManager):
         self.acl_root = root
 
     def __enter__(self):
+        try:
+            return self._setup()
+        except BaseException:
+            # Python skips __exit__ when __enter__ raises: undo the ACL, broker and run directories here.
+            self.__exit__(None, None, None)
+            raise
+
+    def _setup(self):
         root = Path(self.spec.cwd).resolve(strict=True)
         if not self.run_as:
             raise RuntimeError("the container broker must run as the unprivileged engine user")

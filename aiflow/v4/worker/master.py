@@ -13,7 +13,7 @@ from typing import Any
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, with_knowledge_context
 
 log = logging.getLogger("aiflow4.master")
 
@@ -25,7 +25,7 @@ def build_prompt(c: Claimed, snapshot: dict[str, Any]) -> str:
               "snapshot": json.dumps(snapshot, ensure_ascii=False, indent=2, default=str)}
     for key, value in values.items():
         template = template.replace("{" + key + "}", str(value))
-    return template
+    return with_knowledge_context(template, c.context_pack)
 
 
 def parse_plan(text: str) -> dict[str, Any] | None:

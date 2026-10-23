@@ -462,6 +462,23 @@ def test_runtime_is_missing_when_the_run_account_can_execute_podman(monkeypatch,
     assert containers.safe_container_runtime_version() == "missing"
 
 
+def test_worker_probe_uses_run_groups_and_flags_reachable_engine_sockets(monkeypatch):
+    monkeypatch.setattr(containers, "_identity", lambda user: (1001, 1, "/"))
+    seen: list[list[str]] = []
+
+    def run(argv, code=127, **kw):
+        seen.append(argv)
+        reachable = argv[-1] == "/run/docker.sock"
+        return subprocess.CompletedProcess(argv, 0 if reachable else (1 if argv[5] == "sh" else code), "", "")
+
+    monkeypatch.setattr(containers.subprocess, "run", run)
+    assert containers._worker_can_run_podman() is True
+    assert all("--init-groups" in call and "--clear-groups" not in call for call in seen)
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 127 if argv[5] == "podman" else 1, "", ""))
+    assert containers._worker_can_run_podman() is False
+
+
 def test_worker_podman_probe_treats_not_executable_as_denied(monkeypatch):
     monkeypatch.setattr(containers, "_identity", lambda user: (1001, 1, "/"))
     for code, expected in ((126, False), (127, False), (0, True), (1, True)):
@@ -503,3 +520,33 @@ def test_real_podman_builds_runs_worktree_and_rejects_forbidden_mounts(tmp_path)
     for forbidden in ("/", "/etc/" + "aiflow", str(other)):
         with pytest.raises(containers.ContainerPolicyError):
             execute("run", "--rm", "-v", f"{forbidden}:/mnt", "aiflow-it:latest", "true")
+
+
+def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_directories(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (tmp_path / "home").mkdir()
+    spec = SimpleNamespace(cwd=str(worktree), extra_env={}, container_start_hook=None)
+    monkeypatch.setattr(containers, "scratch_root", lambda spec: tmp_path / "scratch")
+    monkeypatch.setattr(containers, "_identity", lambda user: (os.getuid(), os.getgid(), str(tmp_path / "home")))
+    monkeypatch.setattr(containers, "safe_container_runtime_version", lambda: "rootless Podman 5")
+    monkeypatch.setattr(containers, "_broker_invocation", lambda root, home: (["broker"], str(tmp_path)))
+    monkeypatch.setattr(containers.os, "chown", lambda *a, **k: None)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def broker_fails(*args, **kwargs):
+        raise OSError("cannot start broker")
+
+    monkeypatch.setattr(containers.subprocess, "run", fake_run)
+    monkeypatch.setattr(containers.subprocess, "Popen", broker_fails)
+    runtime = containers.ContainerRuntime(spec, ["setpriv"])
+    with pytest.raises(OSError):
+        runtime.__enter__()
+    assert any(call[:3] == ["setfacl", "-R", "-m"] for call in calls)
+    assert any(call[:3] == ["setfacl", "-R", "-x"] for call in calls)
+    assert not runtime.public_dir.exists() and not runtime.runtime_dir.exists()
+    assert spec.container_start_hook is None

@@ -30,6 +30,16 @@ def test_project_tools_follow_the_stack_and_missing_is_explicit():
     assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == ["git", "uv", "composer", "wp"]
 
 
+def test_null_repository_containers_inherits_the_project_setting():
+    project = Project(key="TESTWP", repo="jooservices/test-aiflow-wp", containers=True,
+                      repositories=[{"repo": "jooservices/other", "containers": None},
+                                    {"repo": "jooservices/legacy", "containers": False}])
+    assert project.settings_for_repo("jooservices/other")["containers"] is True
+    assert project.settings_for_repo("jooservices/legacy")["containers"] is False
+    off = Project(key="X", repo="a/b", containers=False, repositories=[{"repo": "a/c", "containers": None}])
+    assert off.settings_for_repo("a/c")["containers"] is False
+
+
 def test_container_declaration_adds_the_safe_runtime_and_can_be_overridden_per_repository():
     project = Project(key="TESTWP", repo="jooservices/test-aiflow-wp", containers=True,
                       repositories=[{"repo": "jooservices/legacy", "containers": False}])

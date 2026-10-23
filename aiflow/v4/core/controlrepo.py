@@ -106,11 +106,12 @@ class Project:
         """Return repository settings with legacy project values as defaults."""
         selected = next((item for item in self.repositories or []
                          if isinstance(item, dict) and str(item.get("repo") or "").lower() == repo.lower()), {})
+        repo_containers = selected.get("containers")
         return {"repo": repo or self.repo,
                 "base": str(selected.get("base") or self.base),
                 "checks": list(selected.get("checks") or self.checks),
                 "stack": selected.get("stack") or self.stack,
-                "containers": bool(selected.get("containers", self.containers))}
+                "containers": bool(self.containers if repo_containers is None else repo_containers)}
 
     def settings_for_ticket(self, ticket: dict[str, Any] | None) -> dict[str, Any]:
         return self.settings_for_repo(self.repo_for(ticket))

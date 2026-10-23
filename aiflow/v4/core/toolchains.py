@@ -13,6 +13,10 @@ from collections.abc import Iterable
 NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "docker",
               "safe-container-runtime", "git", "node", "uv", "gh")
 
+# Shared folder for Playwright's browsers: installed by root, readable by the AI user, handed to runs through
+# PLAYWRIGHT_BROWSERS_PATH (see worker/notes.py project_env).
+PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/aiflow4/playwright-browsers"
+
 # Required on every worker node, and per AI provider of the accounts the node runs.
 BASE_TOOLS = ("git", "uv")
 PROVIDER_TOOLS: dict[str, tuple[str, ...]] = {

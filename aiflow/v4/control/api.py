@@ -5603,6 +5603,36 @@ def create_app(ctx: Ctx) -> FastAPI:
         metrics = review_metrics.calculate_review_metrics(metrics_tickets, events, runs, audits)
         return {"metrics": metrics, "projects": configured}
 
+    def review_queue_keys(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> list[str]:
+        """Return the keys selected for Human review, resolving blockers against the full ticket registry."""
+        if project_filter:
+            where, params = " AND project=%s", (project_filter,)
+        elif project_scope is not None:
+            where, params = " AND project=ANY(%s)", (list(project_scope),)
+        else:
+            where, params = "", ()
+        candidates = ctx.db.all(
+            "SELECT key, status, blocked_by FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
+            " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where + " ORDER BY project,key",
+            params)
+        all_statuses = {row["key"]: row["status"] for row in ctx.db.all("SELECT key,status FROM tickets")}
+        keys = []
+        for ticket in candidates:
+            if ticket["status"] in ("Human review", "Needs owner"):
+                keys.append(ticket["key"])
+            elif any(str(blocker) not in all_statuses or all_statuses[str(blocker)] not in ("Done", "Closed")
+                     for blocker in (ticket.get("blocked_by") or [])):
+                keys.append(ticket["key"])
+        return keys
+
+    @app.get("/v1/dashboard/waiting")
+    def dashboard_waiting(request: Request) -> dict:
+        """Return dashboard-visible Human review ticket keys without exposing queue details."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = user.project_keys if user and user.project_keys is not None else None
+        return {"ticket_keys": review_queue_keys(project_scope=scope)}
+
     @app.get("/v1/reviews")
     def human_reviews(request: Request, project: str = Query(default="")) -> dict:
         """Queue waiting items with their action set and project-filtered human-review metrics."""
@@ -5616,25 +5646,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                     "roles": list(user.effective_roles)})
             raise HTTPException(403, "not available for your role")
         metrics_data = review_data(project, scope)
-        if project:
-            where, params = " AND project=%s", (project,)
-        elif scope is not None:
-            where, params = " AND project=ANY(%s)", (list(scope),)
-        else:
-            where, params = "", ()
+        selected_keys = review_queue_keys(project, scope)
         tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
-                             " FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
-                             " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where
-                             + " ORDER BY project, key", params)
+                             " FROM tickets WHERE key=ANY(%s) ORDER BY project,key", (selected_keys,))
         all_statuses = {row["key"]: row["status"] for row in ctx.db.all("SELECT key,status FROM tickets")}
         epics = {r["key"]: r["status"] for r in ctx.db.all(
             "SELECT key, status FROM tickets WHERE key='TESTFLOW-5' AND type='Epic'")}
         out = []
         for ticket in tickets:
-            if ticket["status"] not in ("Human review", "Needs owner") and not any(
-                    str(blocker) not in all_statuses or all_statuses[str(blocker)] not in ("Done", "Closed")
-                    for blocker in (ticket.get("blocked_by") or [])):
-                continue
             dev = ctx.db.one("SELECT pr_url, summary, details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                              " ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
             latest = ctx.db.one("SELECT step,outcome,summary,details,started_at FROM runs"

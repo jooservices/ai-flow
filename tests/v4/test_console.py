@@ -164,7 +164,8 @@ ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_busin
 
 
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
-                     weekly_report: dict | None = None, dashboard_tab: str = "work") -> str:
+                     weekly_report: dict | None = None, dashboard_tab: str = "work",
+                     dashboard_waiting_keys: list[str] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
@@ -180,6 +181,7 @@ S.data = {json.dumps(state)};
 S.analytics = {json.dumps(analytics or [])};
 S.dashboardUsage = {json.dumps(analytics or [])}; S.dashboardUsageError = '';
 S.dashboardTab = {json.dumps(dashboard_tab)};
+S.dashboardWaiting.keys = {json.dumps(dashboard_waiting_keys)};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
@@ -1569,6 +1571,66 @@ var result = {total: tickets.length,
 console.log(JSON.stringify(result));
 """))
     assert out == {"total": 8, "done": 1, "inFlight": 4, "waiting": 3, "reviewQueue": 3}
+
+
+def test_dashboard_waiting_queue_handles_scoped_missing_blockers_terminal_tickets_and_epics():
+    out = json.loads(run_script("""
+var tickets = [
+  {key: 'ALPHA-1', project: 'ALPHA', type: 'Story', status: 'To Do', blocked_by: ['BETA-1']},
+  {key: 'ALPHA-2', project: 'ALPHA', type: 'Story', status: 'Done', blocked_by: ['ALPHA-5']},
+  {key: 'ALPHA-3', project: 'ALPHA', type: 'Story', status: 'Closed', blocked_by: ['ALPHA-5']},
+  {key: 'ALPHA-4', project: 'ALPHA', type: 'Epic', status: 'To Do', blocked_by: ['ALPHA-5']},
+  {key: 'ALPHA-5', project: 'ALPHA', type: 'Story', status: 'In Progress'},
+  {key: 'ALPHA-6', project: 'ALPHA', type: 'Story', status: 'Needs owner'}
+];
+var inferred = dashboardWaitingTickets(tickets).map(function (ticket) { return ticket.key; });
+var fromReviewApi = dashboardWaitingTickets(tickets, ['ALPHA-4', 'ALPHA-6']).map(function (ticket) { return ticket.key; });
+console.log(JSON.stringify({inferred: inferred, fromReviewApi: fromReviewApi}));
+"""))
+    assert out == {"inferred": ["ALPHA-4", "ALPHA-6"], "fromReviewApi": ["ALPHA-4", "ALPHA-6"]}
+
+
+def test_dashboard_waiting_endpoint_matches_human_review_for_project_scoped_snapshot(client, ctx):
+    from aiflow.v4.control import login
+
+    ctx.settings.console_login = True
+    ctx.settings.console_session_secret = "dashboard-review-queue-session-secret-at-least-32-bytes"
+    email = "dashboard-reviewer@example.test"
+    login.seed_user(ctx.db, email, "reviewer", "Dashboard Reviewer")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], email))
+    client.cookies.set(COOKIE_NAME, issue_session(email, "reviewer", int(time.time()) + 3600,
+                                                  ctx.settings.console_session_secret))
+
+    for key, status in (("TESTWP-120", "To Do"), ("TESTWP-121", "Done"), ("TESTWP-122", "Closed"),
+                        ("TESTWP-123", "To Do"), ("TESTWP-124", "Needs owner"),
+                        ("TESTWP-125", "In Progress"), ("HIDDEN-1", "Done")):
+        add_ticket(ctx.db, key, status=status, labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTWP-123'")
+    ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-120'", (["HIDDEN-1"],))
+    ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key IN ('TESTWP-121','TESTWP-122','TESTWP-123')",
+               (["TESTWP-125"],))
+
+    snapshot = client.get("/v1/state").json()
+    assert "HIDDEN-1" not in {ticket["key"] for ticket in snapshot["tickets"]}
+    dashboard_queue = client.get("/v1/dashboard/waiting")
+    review_queue = client.get("/v1/reviews")
+    assert dashboard_queue.status_code == review_queue.status_code == 200
+    expected = ["TESTWP-123", "TESTWP-124"]
+    assert dashboard_queue.json()["ticket_keys"] == expected
+    assert [ticket["key"] for ticket in review_queue.json()["tickets"]] == expected
+
+    board_keys = json.loads(run_script(f"""
+S.data = {{tickets: {json.dumps(snapshot['tickets'])}}};
+S.dashboardWaiting.keys = {json.dumps(dashboard_queue.json()['ticket_keys'])};
+S.project = 'all';
+console.log(JSON.stringify(projTickets().filter(function (ticket) {{
+  return dashboardWorkStatusMatches(ticket, 'waiting');
+}}).map(function (ticket) {{ return ticket.key; }})));
+"""))
+    assert board_keys == expected
+    dashboard = render_dashboard(snapshot, dashboard_waiting_keys=dashboard_queue.json()["ticket_keys"])
+    waiting_card = re.search(r'data-card="waiting">(.*?)</button>', dashboard).group(1)
+    assert '<span class="value">2</span>' in waiting_card
 
 
 def test_dashboard_ticket_counts_match_state_work_board_filters_and_human_review_api(client, ctx):

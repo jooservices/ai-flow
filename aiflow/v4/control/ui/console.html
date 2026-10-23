@@ -671,7 +671,8 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  dashboardUsage: [], dashboardUsageError: '', dashboardTab: 'work', workStatusFilter: 'all',
+  dashboardUsage: [], dashboardUsageError: '', dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
+  dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
   consoleUser: null, consoleSessionLoaded: false,
@@ -1007,6 +1008,7 @@ function pollConsoleSession() {
       location.replace(S.consoleUser.landing_page || '/cc'); return;
     }
     render();
+    if (S.view === 'cc' || S.view === 'work' || S.view === 'delivery') loadDashboardWaiting(true);
     if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
     if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
@@ -1590,6 +1592,30 @@ function pollDashboardUsage() {
   }).catch(function (e) { S.dashboardUsageError = String(e.message || e); })
     .then(function () { setTimeout(pollDashboardUsage, ANALYTICS_MS); });
 }
+function loadDashboardWaiting(force) {
+  var waiting = S.dashboardWaiting;
+  if (waiting.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (!force && waiting.keys !== null && Date.now() - waiting.loadedAt < 12000) return;
+  waiting.loading = true;
+  if (waiting.keys === null && S.view === 'cc' && S.data) renderDashboard();
+  fetch('/v1/dashboard/waiting', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    waiting.keys = Array.isArray(d.ticket_keys) ? d.ticket_keys : [];
+    waiting.error = ''; waiting.loadedAt = Date.now();
+  }).catch(function (e) {
+    waiting.keys = null; waiting.error = String(e.message || e); waiting.loadedAt = Date.now();
+  }).then(function () {
+    waiting.loading = false;
+    if (S.view === 'cc' && S.data) renderDashboard();
+    else if ((S.view === 'work' || S.view === 'delivery') && S.data) renderDBody();
+  });
+}
+function pollDashboardWaiting() {
+  if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) loadDashboardWaiting();
+  setTimeout(pollDashboardWaiting, 15000);
+}
 function loadReviews() {
   fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1717,7 +1743,7 @@ function dashboardProjectCounts(projectKey) {
   var rows = allRows.filter(function (t) { return t.type !== 'Epic'; });
   return { total: rows.length, open: rows.filter(function (t) { return t.status !== 'Done'; }).length,
     building: rows.filter(function (t) { return ['In Progress', 'In Verify', 'Human review'].indexOf(t.status) >= 0; }).length,
-    waiting: dashboardWaitingTickets(allTickets).filter(function (t) { return t.project === projectKey; }).length,
+    waiting: dashboardWaitingTickets(allTickets, S.dashboardWaiting.keys).filter(function (t) { return t.project === projectKey; }).length,
     done: rows.filter(function (t) { return t.status === 'Done'; }).length };
 }
 function providerUsageChart(rows) {
@@ -1778,13 +1804,19 @@ function dashboardUsageShare(rows) {
   providers.forEach(function (key) { h += '<span><i class="provider-' + esc(key) + '" style="background:var(--provider-' + esc(key) + ')"></i>' + esc(PROVIDER[key] || key) + ' · ' + Math.round(100 * totals.byProvider[key] / grand) + '% · ' + tok(totals.byProvider[key]) + ' tokens</span>'; });
   return h + '</div></div>';
 }
-function dashboardWaitingTickets(tickets) {
+function dashboardWaitingTickets(tickets, queueKeys) {
   var allTickets = tickets || [], byKey = {};
+  if (Array.isArray(queueKeys)) {
+    var queue = {}; queueKeys.forEach(function (key) { queue[String(key)] = true; });
+    return allTickets.filter(function (ticket) { return !!queue[ticket.key]; });
+  }
   allTickets.forEach(function (ticket) { byKey[ticket.key] = ticket; });
   return allTickets.filter(function (ticket) {
-    if (ticket.type === 'Epic') return false;
+    if (ticket.status === 'Done' || ticket.status === 'Closed') return false;
     if (ticket.status === 'Needs owner' || ticket.status === 'Human review') return true;
-    return (ticket.blocked_by || []).some(function (key) { var blocker = byKey[key]; return !blocker || (blocker.status !== 'Done' && blocker.status !== 'Closed'); });
+    return (ticket.blocked_by || []).some(function (key) {
+      var blocker = byKey[key]; return blocker && blocker.status !== 'Done' && blocker.status !== 'Closed';
+    });
   });
 }
 function setDashboardTab(tab) {
@@ -1813,7 +1845,8 @@ function renderDashboard() {
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
   var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
   var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
-  var waiting = dashboardWaitingTickets(d.tickets);
+  var waiting = dashboardWaitingTickets(d.tickets, S.dashboardWaiting.keys);
+  var waitingCount = S.dashboardWaiting.keys === null ? waiting.length : S.dashboardWaiting.keys.length;
   var done = tickets.filter(function (t) { return t.status === 'Done'; }), days = utcDays(7), usage = dashboardUsageTotals(S.dashboardUsage);
   var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
   var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};
@@ -1856,7 +1889,7 @@ function renderDashboard() {
   h += '<div class="dash-kpis" data-block="kpis" aria-label="Work summary">';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="done"><span class="label">Done</span><span class="kpi-main"><span class="value">' + done.length + '</span>' + dashboardSpark(doneTrend, 'var(--good)') + '</span><span class="kpi-delta">+' + doneThisWeek + ' this week</span><span class="detail">of ' + total + ' tickets · ' + donePct + '% complete</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="in-flight"><span class="label">In flight</span><span class="kpi-main"><span class="value">' + inFlight + '</span>' + dashboardSpark(inFlightTrend, 'var(--provider-codex)') + '</span><span class="kpi-delta">' + Number(d.active_runs.length || 0) + ' live runs</span><span class="detail">In progress, verify or human review</span></button>';
-  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + waiting.length + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waiting.length ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
+  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
@@ -2357,7 +2390,7 @@ function dashboardWorkStatusMatches(ticket, filter) {
   if (!filter || filter === 'all') return true;
   if (filter === 'done') return ticket.status === 'Done';
   if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review'].indexOf(ticket.status) >= 0;
-  if (filter === 'waiting') return dashboardWaitingTickets(D().tickets).some(function (row) { return row.key === ticket.key; });
+  if (filter === 'waiting') return dashboardWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
   return ticket.status === filter;
 }
 function projectCloseControl(project) {
@@ -4540,6 +4573,7 @@ function setView(v) {
   if (v === 'work' && S.workStatusFilter && S.workStatusFilter !== 'all') viewPath += '?status=' + encodeURIComponent(S.workStatusFilter);
   try { history.pushState(null, '', viewPath); } catch (e) { /* file preview */ }
   render();
+  if (v === 'cc' || v === 'work' || v === 'delivery') loadDashboardWaiting(true);
   if (v === 'support') renderSupport();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
@@ -5279,7 +5313,7 @@ if (S.view === 'integrations') {
   loadIntegrations();
 }
 if (S.view === 'notifications') loadNotifications();
-poll(); pollServices(); pollAnalytics(); pollDashboardUsage(); pollConsoleSession(); pollReviews();
+poll(); pollServices(); pollAnalytics(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
 setInterval(tick, 1000);
 })();
 </script>

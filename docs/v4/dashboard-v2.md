@@ -28,8 +28,11 @@ The per-person theme preference is read with `GET /v1/console/preferences` and s
 `PUT /v1/console/preferences`. Daily AI usage by provider is returned by
 `GET /v1/analytics/usage/daily?days=14`.
 
-Dashboard ticket totals and the Done this-week trend use the shared ticket snapshot from `GET /v1/state`. The same
-snapshot helper serves deployment clients through `GET /v1/deploy/state`; each ticket includes its `done_at` value.
+Dashboard ticket totals and the Done this-week trend use the shared ticket snapshot from `GET /v1/state`. Waiting
+ticket keys come from `GET /v1/dashboard/waiting`, which uses the same project scope and queue rules as
+`GET /v1/reviews` while returning only keys. This resolves blockers against the full ticket registry even when a
+person's state snapshot omits another project. The same snapshot helper serves deployment clients through
+`GET /v1/deploy/state`; each ticket includes its `done_at` value.
 
 ## Dashboard screenshots
 

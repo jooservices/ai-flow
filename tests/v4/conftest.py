@@ -222,6 +222,8 @@ class FakeGitHub:
         self.repositories = [{"full_name": "jooservices/test-aiflow-wp", "name": "test-aiflow-wp",
                               "default_branch": "develop"},
                              {"full_name": "jooservices/new-app", "name": "new-app",
+                              "default_branch": "develop"},
+                             {"full_name": "jooservices/aiflow-control", "name": "aiflow-control",
                               "default_branch": "develop"}]
         self.available_branches: dict[tuple[str, str], bool] = {}
         self.deleted_files: list[tuple[str, str]] = []
@@ -256,6 +258,10 @@ class FakeGitHub:
         for (file_repo, file_branch, path), content in list(self.files.items()):
             if file_repo == repo and file_branch == base:
                 self.files[(repo, branch, path)] = content
+
+    def delete_branch(self, repo, branch):
+        self.deleted_branches = getattr(self, "deleted_branches", []) + [(repo, branch)]
+        return self.branch_heads.pop((repo, branch), None) is not None
 
     def create_branch_at_sha(self, repo, branch, sha):
         self.branches.append((repo, branch, sha))

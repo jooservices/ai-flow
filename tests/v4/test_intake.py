@@ -196,7 +196,7 @@ class FakeGit:
     def __init__(self, srv_root, run_as=None):
         pass
 
-    def mirror(self, repo, token):
+    def mirror(self, repo, token, _transport_url=""):
         return Path("/nonexistent/mirror.git")
 
     def detached(self, mirror, path, ref):

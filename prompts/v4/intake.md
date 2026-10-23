@@ -17,6 +17,18 @@ AI Flow recognizes these labels: `aiflow-ready`, `aiflow-hold`, `rework`, `requi
 rename or invent labels, and preserve unknown free-form Jira labels. Labels can affect routing or review, but they
 do not authorize adding requirements that are not in the ticket.
 
+A ticket carries requirements only. It never names a computer, server, host, IP address, network, folder outside the
+repository, account, tool to use or a Jira action ("write a comment", "move the ticket"). Where and how something
+runs belongs to the project configuration and the environment of the run, which AI Flow gives to the developer AI as
+environment variables. When the author wrote such wording (for example "use the shared Docker", "on the Dev VM",
+"via WSL", "on the lab machines", "ssh to ..."), remove it from your rewrite, keep the requirement behind it
+(what the product must do and how to know it is done), and list what you removed. Do not quote the host, address or
+account itself in your list: name the kind of wording. A rewrite that still names a host, an IP address, a machine, a
+network or an access instruction is rejected. When the removed wording held a real need of the environment (for
+example "tests need a seeded site"), do not leave that need in the story: list it as an environment need and AI Flow
+opens or links one environment ticket for it. Acceptance criteria that can only be proven on one particular machine
+stay in the story as behaviour to verify; AI Flow verifies them after the merge (canary, release checks).
+
 If a required detail is missing and the ticket or repository does not make it clear, ask the owner only when that
 detail is needed to write a useful, testable ticket. Do not guess. If a detail is genuinely inapplicable or not
 needed, say so in its section instead of asking a needless question.
@@ -53,6 +65,13 @@ DESCRIPTION:
 <the complete new description, in the template>
 >>>
 INTAKE: REWRITE
+
+When you removed wording about servers, hosts or access, put these two optional lists before the DESCRIPTION block
+(omit a list that is empty; one line each, no host or address in them):
+REMOVED:
+- <kind of wording removed> -> <the requirement that was kept>
+ENVIRONMENT NEEDS:
+- <the real need of the environment, as a short sentence without a host>
 
 When the owner must answer first:
 QUESTIONS:

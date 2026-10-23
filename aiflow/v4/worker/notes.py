@@ -17,11 +17,21 @@ def note(c, headline: str, what: str = "", why: str = "", result: str = "", next
     return "\n".join(lines)
 
 
-def project_env(project_key: str) -> dict[str, str]:
-    """Node-local environment for a project's AI runs (test service URLs and the like), from
-    /etc/aiflow/projects/<KEY>.env (root-only on the node, never in the control repo)."""
+def project_env(project_key: str, items: list[dict] | None = None, step: str = "dev") -> dict[str, str]:
+    """Environment of a project's AI runs. The environment section of the project configuration (`items`, as the
+    claim carries it) gives the values of its test services, URLs, databases and browsers to the runs allowed to use
+    them, and the node-local /etc/aiflow/projects/<KEY>.env (root-only, never in the control repo) holds the secrets
+    those items name; the file also keeps working for variables the section does not list."""
+    from ..core.environment import items_of, run_environment
     from ..core.settings import read_env_file
     from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
+    node_env = read_env_file(f"/etc/aiflow/projects/{project_key}.env")
     # the shared browsers folder is part of every run's environment; a project file may override it
     return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-            **read_env_file(f"/etc/aiflow/projects/{project_key}.env")}
+            **node_env, **run_environment(items_of(items or []), step, node_env)}
+
+
+def environment_notes(items: list[dict] | None, step: str, env: dict[str, str]) -> str:
+    """The names (never the values of secrets) of the environment items of this run, for the run notes."""
+    from ..core.environment import items_of, notes_block
+    return notes_block(items_of(items or []), step, env)

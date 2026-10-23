@@ -21,7 +21,7 @@ from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
 from .dev import api_node, related_block, with_knowledge_context
 from .gitops import Git
-from .notes import note, project_env
+from .notes import environment_notes, note, project_env
 
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
@@ -33,7 +33,7 @@ def findings_of(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_prompt(c: Claimed, pr: dict) -> str:
+def build_prompt(c: Claimed, pr: dict, env: dict[str, str] | None = None) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "verify.md").read_text(encoding="utf-8")
     checks = "\n".join(f"   - {x}" for x in c.project.get("checks") or []) or "   - the project's test suite"
     if c.project.get("containers"):
@@ -42,7 +42,10 @@ def build_prompt(c: Claimed, pr: dict) -> str:
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
                       dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)",
-                      related=related_block(c.related))
+                      related=related_block(c.related),
+                      environment=environment_notes(
+                          c.project.get("environment"), "verify",
+                          project_env(t["project"], c.project.get("environment"), "verify") if env is None else env))
     return with_knowledge_context(prompt, c.context_pack)
 
 
@@ -88,10 +91,11 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                                   node=api_node(api)))
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, pr), cwd=str(wt), account_home=str(Path(srv_root) / "accounts" / c.account),
+        env = project_env(project["key"], project.get("environment"), "verify")
+        spec = RunSpec(prompt=build_prompt(c, pr, env), cwd=str(wt), account_home=str(Path(srv_root) / "accounts" / c.account),
                        model=c.model, effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
                        control_url=control_url, run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
-                       extra_env=project_env(project["key"]))
+                       extra_env=env)
         adapter = get_adapter(c.provider)
         base_argv = adapter.argv
         adapter.argv = lambda s: run_as + base_argv(s)

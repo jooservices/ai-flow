@@ -20,7 +20,9 @@ Rules:
 
 The developer's summary:
 {dev_summary}
-{related}
+{related}{environment}
+A criterion that can only be proven on one particular machine is verified by AI Flow after the merge (canary,
+release checks); it is not a failure of this review and never a question about a server.
 
 Ticket description:
 ---

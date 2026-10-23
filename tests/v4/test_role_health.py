@@ -1,7 +1,10 @@
 """Role health (JAIF-243): outcome scoring, switching a role off per AI account, probation and the owner's thresholds."""
 from __future__ import annotations
 
+import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -88,8 +91,11 @@ def ready_enabled_count(ctx, role):
     ({"step": "dev", "outcome": "done", "decision": "merged"}, "finished", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "human"}, "finished", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "rework"}, "sent_back", 0.5),
-    ({"step": "dev", "outcome": "failed", "decision": "rework", "pr_url": "https://example.test/pr/1"}, "finished", 0.0),
-    ({"step": "dev", "outcome": "tool_missing", "pr_url": "https://example.test/pr/2"}, "finished", 0.0),
+    ({"step": "dev", "outcome": "failed", "decision": "rework", "pr_url": "https://example.test/pr/1"}, "failed", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "pr_url": "https://example.test/pr/2", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "done", "pr_url": "https://example.test/pr/3", "details": {
+        "pr_url_source": "current"}}, "finished", 0.0),
     ({"step": "dev", "outcome": "no_changes"}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change."}, "no_changes", 0.0),
@@ -116,6 +122,13 @@ def test_outcome_scoring(run_, label, failure):
 
 def test_a_finished_dev_run_waits_for_verification():
     assert role_health.classify({"step": "dev", "outcome": "done", "error_kind": "", "summary": ""}) is None
+
+
+def test_a_failing_follow_up_run_with_inherited_pr_is_still_a_failure():
+    scored = role_health.classify({"step": "dev", "outcome": "failed", "error_kind": "",
+                                   "summary": "follow-up failed", "pr_url": "https://example.test/pr/1",
+                                   "details": {"pr_url_source": "inherited"}})
+    assert (scored.label, scored.failure) == ("failed", 1.0)
 
 
 def test_steps_map_to_the_roles_of_the_account():
@@ -176,6 +189,45 @@ def test_three_account_role_never_disables_below_two_and_all_bad_keeps_pool_on(c
     incident = db.one("SELECT * FROM incidents WHERE kind='role_health' AND subject='dev' AND closed_at IS NULL")
     assert incident and "most frequent cause: failed" in incident["title"]
     assert db.one("SELECT count(*) AS n FROM incidents WHERE kind='role_health' AND closed_at IS NULL")["n"] == 1
+
+
+def test_concurrent_role_health_evaluations_serialize_capacity_decisions(ctx, alerts, monkeypatch):
+    _failure_window(ctx.db, "claude-01", prefix="731")
+    _failure_window(ctx.db, "codex-01", prefix="741")
+
+    original_states = role_health._states
+    guard = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def tracked_states(db):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)  # widen the race window between the capacity snapshot and role updates
+            return original_states(db)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(role_health, "_states", tracked_states)
+    start = threading.Barrier(3)
+
+    def evaluate_together():
+        start.wait()
+        role_health.evaluate(ctx)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(evaluate_together)
+        second = pool.submit(evaluate_together)
+        start.wait()
+        first.result(timeout=30)
+        second.result(timeout=30)
+
+    assert max_active == 1
+    assert ready_enabled_count(ctx, "dev") >= 2
 
 
 def test_role_health_incident_lists_failure_kinds_and_tickets(ctx, alerts):

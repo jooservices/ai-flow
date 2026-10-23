@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -19,6 +20,12 @@ from .incidents import close_incident, open_incident
 from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.role_health")
+
+# The API and watchdog can evaluate role health at the same time. This lock avoids same-process
+# evaluations holding pool connections while waiting for PostgreSQL; the advisory lock also covers
+# evaluations from another control process.
+_EVALUATION_LOCK = threading.Lock()
+_EVALUATION_ADVISORY_LOCK = (261, 261)
 
 DEFAULT_WINDOW = 10
 DEFAULT_FAILURE_PERCENT = 60
@@ -67,8 +74,6 @@ def classify(run: dict) -> Scored | None:
     """Score one finished run; None while verification has not yet judged a finished dev run."""
     outcome, kind = run["outcome"], (run.get("error_kind") or "").lower()
     summary = (run.get("summary") or "").strip().lower()
-    if run.get("step") == "dev" and run.get("pr_url"):
-        return Scored("finished", 0.0)
     if outcome == "merged":
         return Scored("merged", 0.0)
     if outcome == "no_changes" or (run.get("step") == "dev" and outcome in {"failed", "tool_missing"}
@@ -83,6 +88,9 @@ def classify(run: dict) -> Scored | None:
             return Scored("excluded", None)
         return Scored("tool_missing", 1.0)
     if outcome == "done" and run["step"] == "dev":
+        details = run.get("details") or {}
+        if run.get("pr_url") and details.get("pr_url_source") == "current":
+            return Scored("finished", 0.0)
         decision = run.get("decision")
         if decision in ("merged", "human"):
             return Scored("finished", 0.0)
@@ -409,6 +417,17 @@ def _open_role_wide_incident(ctx, role: str, accounts: list, window: int, percen
 
 def evaluate(ctx, account_id: str = "") -> None:
     """Re-score whole role pools so one result cannot disable too many peers; settle probation tickets."""
+    with _EVALUATION_LOCK:
+        with ctx.db.pool.connection() as connection:
+            connection.execute("SELECT pg_advisory_lock(%s, %s)", _EVALUATION_ADVISORY_LOCK)
+            try:
+                _evaluate(ctx)
+            finally:
+                connection.execute("SELECT pg_advisory_unlock(%s, %s)", _EVALUATION_ADVISORY_LOCK)
+
+
+def _evaluate(ctx) -> None:
+    """Run one serialized role health sweep after acquiring the process and database locks."""
     # Pool capacity and the all-accounts incident require every peer's history, even when called after one account's run.
     _resolve_probation(ctx)
     settings = get_settings(ctx.db)

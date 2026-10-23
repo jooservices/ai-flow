@@ -4414,9 +4414,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
             # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
-            # uses this row to bind branch and SHA requests to this ticket's pull request.
-            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s WHERE id=%s",
-                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "", run_id))
+            # uses this row to bind branch and SHA requests to this ticket's pull request. Preserve provenance so
+            # role health does not treat a later failed run as the run that produced the PR.
+            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s, details=details || %s WHERE id=%s",
+                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "",
+                        J({"pr_url_source": "inherited"}), run_id))
         if probation_id is not None:
             role_health.attach_probation_run(ctx.db, probation_id, run_id)
             ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -4753,6 +4755,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "run belongs to another node")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
         details = dict(body.details)
+        details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
+        if body.pr_url:
+            details["pr_url_source"] = "current"
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:

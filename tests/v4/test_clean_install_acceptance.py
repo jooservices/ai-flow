@@ -689,6 +689,16 @@ def test_real_machine_run_uses_command_center_project_and_machine_setup():
     assert "acceptance-providers.py" in script
 
 
+def test_release_install_helper_matches_the_release_or_candidate_under_test():
+    script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
+    assert "https://raw.githubusercontent.com/jooservices/ai-flow/$VERSION/deploy/v4/bin/aiflow4-control-install" in script
+    assert "tar -xOf \"$ARTIFACTS/aiflow4-$VERSION.tar.gz\" deploy/v4/bin/aiflow4-control-install" in script
+    assert script.index('"$COSIGN" verify-blob') < script.index('tar -xOf "$ARTIFACTS/aiflow4-$VERSION.tar.gz"')
+    assert '--volume "$CONTROL_INSTALLER:/opt/aiflow4-control-install:ro"' in script
+    assert '--volume "$ROOT/deploy/v4/bin/aiflow4-control-install:' not in script
+    assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
+
+
 def test_the_signed_candidate_uses_documented_install_and_join_before_publishing():
     real_machine = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     candidate_adapter = (ROOT / "deploy/v4/ci/candidate-deploy.sh").read_text()
@@ -765,6 +775,8 @@ REGRESSIONS = {
     "backup restore had no UI path and must stay CI-only": "test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operator_cli",
     "release acceptance bypassed Command Center project and node setup": "test_real_machine_run_uses_command_center_project_and_machine_setup",
     "the bug ticket was not opened for a long log (broken pipe)": "test_the_bug_ticket_survives_a_log_longer_than_the_size_limit",
+    "published clean installs used the checkout's installer instead of the target release":
+        "test_release_install_helper_matches_the_release_or_candidate_under_test",
 }
 
 

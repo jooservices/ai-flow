@@ -46,9 +46,11 @@ at the mock control endpoint (the defaults are the production values).
 The real-machine tier needs Docker and a signed release. Nightly runs use a published release; before publication the
 release workflow supplies its signed candidate tarball, Sigstore bundle and checksum manifest:
 
-- `deploy/v4/ci/clean-install-containers.sh vX.Y.Z` tests a published release. For an unpublished candidate, use
+- `deploy/v4/ci/clean-install-containers.sh vX.Y.Z` tests a published release. It fetches
+  `deploy/v4/bin/aiflow4-control-install` from that exact release tag. For an unpublished candidate, use
   `deploy/v4/ci/clean-install-containers.sh vX.Y.Z TAR SIGSTORE_BUNDLE SHA256SUMS`. It builds a clean control machine
-  and two clean machines (Ubuntu systemd containers on a private network), installs the control plane with the
+  and two clean machines (Ubuntu systemd containers on a private network), extracts the installer from that candidate
+  tarball, and installs the control plane with the
   documented command and `--admin-email`, and connects disposable Jira and GitHub App fakes as test accounts. After
   signing in with the password file, it loads the catalogs, runs project preflight, and adds the project through the
   same authenticated Command Center API calls used by the Projects screen. It then requests each one-use join
@@ -120,3 +122,5 @@ Known problems covered so far:
   legacy join tokens: `test_real_machine_run_uses_command_center_project_and_machine_setup`
 - the bug ticket was not opened when a failed run's log was longer than the body limit (`head` closed the pipe and
   `pipefail` aborted the script): `test_the_bug_ticket_survives_a_log_longer_than_the_size_limit`
+- published clean installs could use a different checkout's installer than the release under test:
+  `test_release_install_helper_matches_the_release_or_candidate_under_test`

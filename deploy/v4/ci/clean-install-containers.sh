@@ -21,6 +21,9 @@ set -Eeuo pipefail
   exit 2
 }
 VERSION=$1
+[[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+  echo "version must be vX.Y.Z" >&2; exit 2;
+}
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 NAME="aiflow4-clean-$$"
 IMAGE="$NAME-systemd"
@@ -34,9 +37,6 @@ ARTIFACTS=
 COSIGN=
 if [[ $# -eq 4 ]]; then
   CANDIDATE=1
-  [[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
-    echo "candidate version must be vX.Y.Z" >&2; exit 2;
-  }
   COSIGN=$(command -v cosign || true)
   [[ -n $COSIGN && -x $COSIGN ]] || { echo "cosign must be installed to verify the candidate" >&2; exit 2; }
   COSIGN=$(realpath "$COSIGN")
@@ -58,6 +58,27 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "CLEAN INSTALL FAILED: $*" >&2; exit 1; }
 
+# Use the installer shipped for the version under test. Published runs follow the documented raw tag URL;
+# candidate runs extract the helper from the exact tarball that the installer will verify and install.
+if [[ $CANDIDATE == 1 ]]; then
+  "$COSIGN" verify-blob "$ARTIFACTS/aiflow4-$VERSION.tar.gz" \
+    --bundle "$ARTIFACTS/aiflow4-$VERSION.tar.gz.sigstore.json" \
+    --certificate-identity "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/$VERSION" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    || fail "candidate tarball signature verification failed"
+  CONTROL_INSTALLER="$ARTIFACTS/aiflow4-control-install"
+  tar -xOf "$ARTIFACTS/aiflow4-$VERSION.tar.gz" deploy/v4/bin/aiflow4-control-install > "$CONTROL_INSTALLER" \
+    || fail "candidate tarball does not contain deploy/v4/bin/aiflow4-control-install"
+else
+  ARTIFACTS=$(mktemp -d "${RUNNER_TEMP:-/tmp}/aiflow4-clean-release.XXXXXX")
+  CONTROL_INSTALLER="$ARTIFACTS/aiflow4-control-install"
+  curl -fsSL --max-time 120 \
+    "https://raw.githubusercontent.com/jooservices/ai-flow/$VERSION/deploy/v4/bin/aiflow4-control-install" \
+    -o "$CONTROL_INSTALLER" || fail "could not fetch the control installer from release tag $VERSION"
+fi
+[[ -s $CONTROL_INSTALLER ]] || fail "control installer for $VERSION is empty"
+chmod 0755 "$CONTROL_INSTALLER"
+
 docker build --pull -f "$ROOT/deploy/v4/ci/systemd.Dockerfile" -t "$IMAGE" "$ROOT"
 docker network create "$NETWORK" >/dev/null
 start() {  # start <name> <alias> [extra docker args...]
@@ -68,7 +89,7 @@ start() {  # start <name> <alias> [extra docker args...]
   fail "systemd did not start in $name"
 }
 CONTROL_MOUNTS=(--volume "$NAME-docker:/var/lib/docker"
-  --volume "$ROOT/deploy/v4/bin/aiflow4-control-install:/opt/aiflow4-control-install:ro"
+  --volume "$CONTROL_INSTALLER:/opt/aiflow4-control-install:ro"
   --volume "$ROOT/deploy/v4/ci/acceptance-backup.py:/opt/aiflow4-acceptance-backup.py:ro"
   --volume "$ROOT/deploy/v4/ci/acceptance-providers.py:/opt/aiflow4-acceptance-providers.py:ro")
 if [[ $CANDIDATE == 1 ]]; then

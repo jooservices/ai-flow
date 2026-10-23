@@ -17,11 +17,12 @@ def note(c, headline: str, what: str = "", why: str = "", result: str = "", next
     return "\n".join(lines)
 
 
-def project_env(project_key: str) -> dict[str, str]:
+def project_env(project_key: str, runtime_env: dict[str, str] | None = None) -> dict[str, str]:
     """Node-local environment for a project's AI runs (test service URLs and the like), from
     /etc/aiflow/projects/<KEY>.env (root-only on the node, never in the control repo)."""
     from ..core.settings import read_env_file
     from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
-    # the shared browsers folder is part of every run's environment; a project file may override it
+    # The browser folder is part of every run's environment; project settings may override it. Per-run values
+    # (such as the throw-away WordPress URL and credentials) always take precedence over static project values.
     return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-            **read_env_file(f"/etc/aiflow/projects/{project_key}.env")}
+            **read_env_file(f"/etc/aiflow/projects/{project_key}.env"), **(runtime_env or {})}

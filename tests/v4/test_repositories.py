@@ -1,6 +1,7 @@
 """Repository selection passed from project configuration into each worker checkout."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from aiflow.v4.core.controlrepo import Project, epic_for_ticket
@@ -158,11 +159,39 @@ class _API:
         return response(body) if callable(response) else (response or {})
 
 
-def _adapter(final_text):
+def _fake_container_runtime(monkeypatch, calls, worker_module, url, password):
+    """A stand-in ContainerRuntime that records cleanup; the site start only fills the run spec."""
+    from aiflow.v4.worker import containers, wordpress
+
+    class Runtime:
+        def __init__(self, spec, run_as):
+            self.spec = spec
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            calls["site_cleanup"].append(True)
+            return False
+
+    def site(site_runtime, _wt, _project, _run_id, spec):
+        assert isinstance(site_runtime, Runtime)
+        spec.extra_env.update({"WP_BASE_URL": url, "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": password})
+        notes = wordpress.run_notes(spec.extra_env)
+        spec.prompt += notes
+        return notes
+
+    monkeypatch.setattr(containers, "ContainerRuntime", Runtime)
+    monkeypatch.setattr(worker_module, "start_wordpress_site", site)
+
+
+def _adapter(final_text, on_run=None):
     class Adapter:
         argv = lambda self, _spec: []
 
-        def run(self, *_args, **_kwargs):
+        def run(self, spec, *_args, **_kwargs):
+            if on_run:
+                on_run(spec)
             return SimpleNamespace(tokens_in=1, tokens_out=2, cost_usd=0, quota={}, error_kind="", reset_at=None,
                                    verdict="PASS", verdict_reason="", error_message="", final_text=final_text,
                                    permission_denials=[], exit_code=0, duration_s=1, log_path="run.jsonl")
@@ -179,7 +208,7 @@ def _claim(project):
 
 
 def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path):
-    calls = {"mirrors": [], "worktrees": [], "pushes": [], "prs": []}
+    calls = {"mirrors": [], "worktrees": [], "pushes": [], "prs": [], "specs": [], "site_cleanup": []}
 
     class Git:
         def __init__(self, *_args, **_kwargs):
@@ -208,9 +237,13 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     api = _API({"/v1/github/token": {"token": "github-token"},
                 "/v1/github/pr": lambda body: (calls["prs"].append(body) or {"url": "https://github.com/jooservices/wordpress-core/pull/4", "number": 4})})
     monkeypatch.setattr(dev, "Git", Git)
-    monkeypatch.setattr(dev, "get_adapter", lambda _provider: _adapter("SUMMARY: implemented\nTESTS: pytest passed"))
+    monkeypatch.setattr(dev, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
+
+    _fake_container_runtime(monkeypatch, calls, dev, "http://127.0.0.1:40123", "private-to-run")
+    monkeypatch.setattr(dev, "get_adapter", lambda _provider: _adapter(
+        "SUMMARY: implemented\nTESTS: pytest passed", calls["specs"].append))
     project = {"key": "JOOWP", "repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],
-               "work_minutes": {"hard": 60}, "merge": {"method": "squash"}}
+               "stack": "wordpress", "work_minutes": {"hard": 60}, "merge": {"method": "squash"}}
 
     result = dev.run_dev(api, _claim(project), str(tmp_path), "https://control", 3600, [])
 
@@ -219,10 +252,19 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     assert calls["worktrees"][0][3] == "main"
     assert calls["prs"][0]["repo"] == "jooservices/wordpress-core"
     assert calls["prs"][0]["base"] == "main"
+    assert calls["site_cleanup"] == [True]
+    spec = calls["specs"][0]
+    assert spec.extra_env["WP_BASE_URL"] == "http://127.0.0.1:40123"
+    assert spec.extra_env["WP_ADMIN_USER"] == "aiflow-admin"
+    assert spec.extra_env["WP_ADMIN_PASSWORD"] == "private-to-run"
+    assert "npx playwright test" in spec.prompt and "Chromium, Firefox, and WebKit" in spec.prompt
+    notes = "\n".join(call[2].get("body", "") for call in api.calls if isinstance(call[2], dict))
+    assert "WordPress test site ready" in notes and "npx playwright test" in notes
+    assert "private-to-run" not in notes
 
 
 def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypatch, tmp_path):
-    calls = {"mirrors": [], "bases": [], "scrubs": []}
+    calls = {"mirrors": [], "bases": [], "scrubs": [], "specs": [], "site_cleanup": []}
 
     class Git:
         def __init__(self, *_args, **_kwargs):
@@ -248,9 +290,13 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
     api = _API({"/v1/github/token": {"token": "github-token"}, "/v1/github/checks": {"checks": []},
                 "/v1/github/merge": {"merged": True, "sha": "b" * 40}})
     monkeypatch.setattr(verify, "Git", Git)
-    monkeypatch.setattr(verify, "get_adapter", lambda _provider: _adapter("VERDICT: PASS\nCHECKS: pytest passed"))
+    monkeypatch.setattr(verify, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
+
+    _fake_container_runtime(monkeypatch, calls, verify, "http://127.0.0.1:40124", "private-to-verify")
+    monkeypatch.setattr(verify, "get_adapter", lambda _provider: _adapter(
+        "VERDICT: PASS\nCHECKS: pytest passed", calls["specs"].append))
     project = {"key": "JOOWP", "repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],
-               "work_minutes": {"hard": 60}, "merge": {"method": "squash", "auto": True,
+               "stack": "wordpress", "work_minutes": {"hard": 60}, "merge": {"method": "squash", "auto": True,
                                                           "require_human": False}}
     pr = {"number": 4, "branch": "JOOWP-4-work", "url": "https://github.com/jooservices/wordpress-core/pull/4",
           "head_sha": "a" * 40}
@@ -262,3 +308,11 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
     assert calls["bases"] == [("main", False)]
     assert calls["scrubs"]
     assert any(path == "/v1/github/merge" for _, path, _, _ in api.calls)
+    assert calls["site_cleanup"] == [True]
+    spec = calls["specs"][0]
+    assert spec.extra_env["WP_BASE_URL"] == "http://127.0.0.1:40124"
+    assert spec.extra_env["WP_ADMIN_PASSWORD"] == "private-to-verify"
+    assert "npx playwright test" in spec.prompt and "Chromium, Firefox, and WebKit" in spec.prompt
+    notes = "\n".join(call[2].get("body", "") for call in api.calls if isinstance(call[2], dict))
+    assert "WordPress test site ready" in notes and "npx playwright test" in notes
+    assert "private-to-verify" not in notes

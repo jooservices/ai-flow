@@ -78,49 +78,29 @@ def test_node_tool_versions_report_stack_tools(monkeypatch):
     assert versions["wp"] == "missing"
 
 
-def test_node_tool_versions_require_current_playwright_chromium_and_report_its_package_pin(monkeypatch, tmp_path):
-    browser = tmp_path / "chromium-1234" / "chrome-linux64" / "chrome"
-    browser.parent.mkdir(parents=True)
-    browser.write_text("browser")
-
+def test_node_tool_versions_probe_each_playwright_browser_and_name_missing_engine(monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd == ["playwright", "--version"]:
             return SimpleNamespace(returncode=0, stdout="Version 1.56.2\n", stderr="")
-        if cmd == ["playwright", "install", "--dry-run", "chromium"]:
-            return SimpleNamespace(returncode=0, stdout=f"Install location: {browser.parent.parent}\n", stderr="")
-        if cmd[0] == str(browser):  # headless launch without extra settings
-            assert "--headless" in cmd and "--no-sandbox" in cmd
-            return SimpleNamespace(returncode=0, stdout="<html></html>", stderr="")
+        if cmd[:2] == ["node", "-e"]:
+            assert kwargs["env"]["PLAYWRIGHT_BROWSERS_PATH"].endswith("playwright-browser")
+            if cmd[-1] == "firefox":
+                return SimpleNamespace(returncode=1, stdout="", stderr="Executable doesn't exist at firefox")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(cmd)
 
     monkeypatch.setattr(agent.subprocess, "run", fake_run)
-    assert agent.tool_versions(["playwright", "playwright-browser"]) == {
-        "playwright": "Version 1.56.2", "playwright-browser": "Playwright Chromium 1.56.2"}
-
-    def missing_library(cmd, **kwargs):
-        if cmd[0] == str(browser):
-            return SimpleNamespace(returncode=127, stdout="", stderr=(
-                f"{browser}: error while loading shared libraries: libnss3.so: cannot open shared object file\n"))
-        return fake_run(cmd, **kwargs)
-
-    monkeypatch.setattr(agent.subprocess, "run", missing_library)
-    result = agent.tool_versions(["playwright", "playwright-browser"])
-    assert result["playwright-browser"] == "broken: missing system library libnss3.so"
-    # A machine tool problem: the stack gap names the browser, so the watchdog opens a tool incident.
+    monkeypatch.setattr(agent.shutil, "which", lambda name: {
+        "playwright": "/opt/node_modules/playwright/cli.js", "node": "/usr/bin/node"}.get(name))
+    result = agent.tool_versions(["playwright", "chromium", "firefox", "webkit"])
+    assert result == {"playwright": "Version 1.56.2", "chromium": "Chromium Playwright 1.56.2",
+                      "firefox": "missing", "webkit": "WebKit Playwright 1.56.2"}
+    # A missing browser requirement names the actual browser, not an executable-like tool label.
     from aiflow.v4.core.toolchains import missing_tools, toolchain_gaps
-    required = ["playwright", "playwright-browser"]
-    assert missing_tools(result, required) == ["playwright-browser"]
+    required = ["playwright", "chromium", "firefox", "webkit"]
+    assert missing_tools(result, required) == ["firefox"]
     assert toolchain_gaps(result, required, {"tools": {"playwright": "1.56"}}, ["playwright"],
-                          require_pins=True) == ["playwright-browser"]
-
-    def stale_browser(cmd, **kwargs):
-        if cmd == ["playwright", "--version"]:
-            return SimpleNamespace(returncode=0, stdout="Version 1.56.2\n", stderr="")
-        return SimpleNamespace(returncode=0, stdout=f"Install location: {tmp_path / 'chromium-stale'}\n", stderr="")
-
-    monkeypatch.setattr(agent.subprocess, "run", stale_browser)
-    assert agent.tool_versions(["playwright", "playwright-browser"]) == {
-        "playwright": "Version 1.56.2", "playwright-browser": "missing"}
+                          require_pins=True) == ["firefox"]
 
 
 def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypatch):

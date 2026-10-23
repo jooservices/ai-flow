@@ -1,6 +1,6 @@
 # Command Center Dashboard V2
 
-**Console screens:** `cc`
+**Console screens:** Command Center (`cc`), Work board (`work`), Delivery (`delivery`), Human review (`review`), SA (`sa`), Machines and AI (`machines`), Users and roles (`users`), Team lead (`lead`), Business (`business`), Stakeholder (`stakeholder`), Knowledge (`knowledge`), Backups (`backup`), Integrations (`integrations`), Projects (`projects`), Licensing (`licensing`), Notifications (`notifications`), and Support (`support`).
 
 The Dashboard follows the approved V2 layout. It opens in the **Work** tab and also has an **AI and machines** tab.
 The Work tab has four linked summary cards: Done, In flight, Waiting for you, and AI usage today. Done counts
@@ -20,13 +20,16 @@ access. The dashboard usage aggregation reads AI provider runs in the `runs` tab
 and is scoped to the signed-in person's visible projects. The quota panel reuses the account quota and usage data
 already shown on Machines and AI.
 
-Dark is the default theme. A person can switch to light from the theme control in the menu. The choice is saved
-against the signed-in account, so it follows that person across browsers; the browser's local preference is used as
-a fallback when the console API is not available.
+Dark is the default theme across the console. A person can switch to light from the theme control in the menu. The
+choice is saved against the signed-in account, so it follows that person across browsers; the browser's local
+preference is used as a fallback when the console API is not available.
 
 The per-person theme preference is read with `GET /v1/console/preferences` and saved with
 `PUT /v1/console/preferences`. Daily AI usage by provider is returned by
 `GET /v1/analytics/usage/daily?days=14`.
+
+Dashboard ticket totals and the Done this-week trend use the shared ticket snapshot from `GET /v1/state`. The same
+snapshot helper serves deployment clients through `GET /v1/deploy/state`; each ticket includes its `done_at` value.
 
 ## Dashboard screenshots
 

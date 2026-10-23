@@ -49,6 +49,20 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "dashboardProjectCounts": ("cc",),
+    "providerUsageChart": ("cc",),
+    "dashboardSpark": ("cc",),
+    "dashboardUsageTotals": ("cc",),
+    "dashboardUsageShare": ("cc",),
+    "dashboardWaitingTickets": ("cc",),
+    "setDashboardTab": ("cc",),
+    "openDashboardWorkFilter": ("cc", "work"),
+    "openDashboardCard": ("cc", "work", "review"),
+    "pollDashboardUsage": ("cc",),
+    "themeStorageKey": None,
+    "applyTheme": None,
+    "loadConsoleThemePreference": None,
+    "saveConsoleTheme": None,
     "renderCC": ("cc", "machines"),
     "renderNodeJoin": ("cc",),
     "renderSA": ("sa",),
@@ -130,6 +144,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "syncMenuVisibility": None,
     "applyRoleNavigation": None,
     "pollConsoleSession": None,
+    "loadPrefs": ("cc", "work"),
+    "savePrefs": ("cc", "work"),
+    "projTickets": ("work", "delivery"),
+    "dashboardWorkStatusMatches": ("work", "delivery"),
     "adminRequest": ("users",),
     "projectChoices": ("users", "projects"),
     "pollServices": ("machines", "cc"),
@@ -151,6 +169,10 @@ SCREEN_LINE_VIEWS = (
 )
 
 SCREEN_SHARED_UI_PATTERNS = (
+    # The default palette and per-person theme choice apply to every console view.
+    re.compile(r"^\s*:root(?:\[data-theme=[^\]]+\])?\{|^\s*--(?:bg|surface|surface-2|line|line-soft|fg|muted|faint|accent|accent-weak|"
+               r"accent-fg|good|good-weak|warn|warn-weak|crit|crit-weak|track|overlay|shadow|f-ui|f-cond|f-mono):|"
+               r"^\s*color-scheme:|\bthemePreference\b|saveConsoleTheme\(|aiflow4-theme|act === ['\"]theme['\"]"),
     re.compile(r"^\s*\.firstuse\{"),
     re.compile(r'\bid="(?:help-link|firstuse)"'),
     re.compile(r"\bhint-dismiss\b"),
@@ -181,6 +203,24 @@ SCREEN_VIEW_UI_PATTERNS = (
 SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\besc:\s*\{\s*data:"), ("cc", "machines")),
     (re.compile(r"\bact\s*===\s*[\"']esc-(?:answer|retire|add)[\"']"), ("cc", "machines")),
+    (re.compile(r"\bact\s*===\s*[\"']dashboard-tab[\"']"), ("cc",)),
+    (re.compile(r"\bact\s*===\s*[\"']dashboard-card[\"']"), ("cc", "work", "review")),
+    (re.compile(r"\bact\s*===\s*[\"']flow-step[\"']"), ("cc", "work")),
+)
+
+# Styles for the V2 dashboard and its Work board destination are outside the static view sections.
+SCREEN_LINE_VIEWS += (
+    (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
+                r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
+                r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"
+                r"quota-ai|dashboard-empty)\b"), "cc"),
+    (re.compile(r"^\s*\.work-status-filter\b"), "work"),
+    (re.compile(r"^\s*--provider-(?:claude|codex|grok|opencode):"), "cc"),
+    (re.compile(r"dashboardUsage|dashboardTab|dashboard-card|dashboard-tab|flow-step"), "cc"),
+    (re.compile(r"workStatusFilter|work-status-filter|S\.view === 'work' && S\.project === 'all'|"
+                r"get\('status'\)"), "work"),
+    (re.compile(r"history\.replaceState|boardPath|renderDBody\(\); tick\(\)"), "work"),
+    (re.compile(r"pollDashboardUsage"), "cc"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -1019,6 +1059,8 @@ def changed_views(base: str) -> set[str]:
     for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
         old_first, old_count = int(m.group(1)), int(m.group(2) or 1)
         first, count = int(m.group(3)), int(m.group(4) or 1)
+        hunk_touched: set[str] = set()
+        hunk_unmapped: set[int] = set()
         if count == 0 and 1 <= old_first <= len(base_lines):
             removed_section = re.search(r'<section class="view" id="view-([a-z]+)"',
                                         base_lines[old_first - 1])
@@ -1028,6 +1070,12 @@ def changed_views(base: str) -> set[str]:
                 view = removed_section.group(1)
                 if view not in all_views:
                     touched.add(view)
+                continue
+            removed_line = base_lines[old_first - 1]
+            if any(pattern.search(removed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
+                # A removed global theme initializer still affects every screen. Do not classify the new line
+                # now occupying the deletion coordinate; it is unrelated to this hunk.
+                touched |= all_views
                 continue
         last = first + max(count, 1) - 1
         for line_no in range(max(first, 1), last + 1):
@@ -1099,8 +1147,16 @@ def changed_views(base: str) -> set[str]:
                 line_views |= specific_views
             if line_views:
                 touched |= line_views
+                hunk_touched |= line_views
             elif changed_line.strip():
                 unmapped.add(line_no)
+                hunk_unmapped.add(line_no)
+        if hunk_touched:
+            # A closing brace is part of the changed block in a zero-context diff. Let the mapped lines in
+            # that same hunk provide its screen, instead of reporting the brace as an independent UI change.
+            for line_no in hunk_unmapped:
+                if line_no <= len(lines) and lines[line_no - 1].strip() == "}":
+                    unmapped.discard(line_no)
     if unmapped:
         lines_text = ", ".join(str(n) for n in sorted(unmapped))
         raise ValueError("console UI change could not be mapped to a screen at line(s) " + lines_text

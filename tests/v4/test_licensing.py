@@ -201,6 +201,25 @@ def test_limits_are_editable_and_project_machine_account_and_user_caps_are_enfor
         login.seed_user(ctx.db, "second@example.test", "lead")
 
 
+def test_managed_ai_account_creation_is_refused_at_the_plan_cap(client, ctx):
+    sign_in(client, ctx)
+    current = licensing.resource_counts(ctx)["ai_accounts"]
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["ai_accounts"] = current
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+    before = ctx.db.one("SELECT count(*) AS count FROM managed_ai_accounts WHERE removed_at IS NULL")["count"]
+
+    response = client.post("/v1/machines/node1/accounts", json={
+        "provider": "grok", "sessions": 1, "jobs": ["develop"],
+    })
+
+    assert response.status_code == 409
+    assert "AI accounts limit of" in response.json()["detail"]
+    assert "raise the limit in the Licence screen" in response.json()["detail"]
+    assert ctx.db.one("SELECT count(*) AS count FROM managed_ai_accounts WHERE removed_at IS NULL")["count"] == before
+    assert ctx.db.one("SELECT count(*) AS count FROM accounts")["count"] == current
+
+
 def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(client, ctx):
     sign_in(client, ctx)
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
@@ -307,6 +326,30 @@ def test_missing_verification_key_records_invalid_grace_without_refusing_writes(
     saved = ctx.db.one("SELECT invalid_since FROM licensing_state WHERE id=1")
     assert saved["invalid_since"] is not None
     assert licensing.require_writable(ctx.db, "")["status"] == "grace"
+
+
+def test_malformed_verification_key_records_invalid_grace_and_rejects_activation_clearly(client, ctx):
+    private, public = issuer_key()
+    installation_id, license_token = signed_in_license(client, ctx, private, public)
+    activated = client.post("/v1/licensing/offline", json={"license_file": license_token})
+    assert activated.status_code == 200
+    ctx.settings.license_public_key = "not a valid EdDSA public key"
+
+    status = client.get("/v1/licensing")
+    assert status.status_code == 200
+    assert status.json()["status"] == "grace" and status.json()["reason"] == "invalid"
+    assert not status.json()["read_only"]
+    before = ctx.db.one("SELECT plan,expires_at,license_token,license_source,invalid_since,plan_limits"
+                        " FROM licensing_state WHERE id=1")
+    assert before["invalid_since"] is not None
+
+    renewed = token(private, installation_id, plan="business")
+    rejected = client.post("/v1/licensing/offline", json={"license_file": renewed})
+    assert rejected.status_code == 422
+    assert "misconfigured" in rejected.json()["detail"].lower()
+    assert "AIFLOW4_LICENSE_PUBLIC_KEY" in rejected.json()["detail"]
+    assert ctx.db.one("SELECT plan,expires_at,license_token,license_source,invalid_since,plan_limits"
+                      " FROM licensing_state WHERE id=1") == before
 
 
 def test_excess_machines_and_projects_cannot_start_work_but_existing_runs_can_finish(client, ctx):

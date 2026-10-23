@@ -96,12 +96,16 @@ def _decode_license(token: str, public_key: str, installation_id: str, now: date
         if activation and datetime.fromtimestamp(expiry, timezone.utc) <= now:
             raise ValueError("licence has expired")
         return {"plan": plan, "expires_at": datetime.fromtimestamp(expiry, timezone.utc)}
-    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError, OverflowError) as exc:
+    except jwt.InvalidKeyError:
+        if activation:
+            raise LicenseError("Licence verification is misconfigured. Check AIFLOW4_LICENSE_PUBLIC_KEY.") from None
+        raise LicenseError("Stored licence cannot be verified with the configured public key.") from None
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError, OverflowError) as exc:
         if activation and str(exc) == "licence has expired":
             raise LicenseError("This licence has expired. Use a current licence key or file.") from None
         if activation:
             raise LicenseError("Licence rejected: the signature, plan, expiry, or installation ID is invalid.") from None
-        raise
+        raise LicenseError("Stored licence cannot be verified with the configured public key.") from None
 
 
 def activate(db, token: str, public_key: str, source: str, now: datetime | None = None) -> dict[str, Any]:
@@ -227,14 +231,16 @@ _ACTIVE_ACCOUNTS = ("SELECT id FROM accounts WHERE id NOT IN (SELECT id FROM man
                     " AND node NOT IN (SELECT name FROM nodes WHERE removed_at IS NOT NULL)")
 
 
-def resource_counts(ctx) -> dict[str, int]:
-    registered_account_ids = {str(row["id"]) for row in ctx.db.all(_ACTIVE_ACCOUNTS)}
+def resource_counts(ctx, *, connection=None) -> dict[str, int]:
+    query_all = (lambda sql, params=None: list(connection.execute(sql, params).fetchall())) if connection else ctx.db.all
+    query_one = (lambda sql, params=None: connection.execute(sql, params).fetchone()) if connection else ctx.db.one
+    registered_account_ids = {str(row["id"]) for row in query_all(_ACTIVE_ACCOUNTS)}
     configured_account_ids = {str(account.id) for account in ctx.repo().accounts}
     return {
-        "machines": int(ctx.db.one("SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL")["count"]),
+        "machines": int(query_one("SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL")["count"]),
         "ai_accounts": len(registered_account_ids | configured_account_ids),
         "projects": len(ctx.repo().projects),
-        "users": int(ctx.db.one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"]),
+        "users": int(query_one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"]),
     }
 
 
@@ -249,7 +255,7 @@ def require_capacity(ctx, resource: str, count: int | None = None, *, public_key
                      connection=None) -> dict[str, Any]:
     if resource not in LIMIT_LABELS:
         raise LicenseError("Unknown licence limit.")
-    current = resource_counts(ctx)[resource] if count is None else int(count)
+    current = resource_counts(ctx, connection=connection)[resource] if count is None else int(count)
     return require_count_capacity(ctx.db, resource, current, public_key=public_key, connection=connection)
 
 

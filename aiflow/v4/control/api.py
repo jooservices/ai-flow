@@ -1858,12 +1858,16 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "branch_exists": branch_exists, "nodes": node_results, "required_tools": required_tools,
                 "ok": not missing_statuses and branch_exists}
 
-    def refresh_projects() -> None:
+    def refresh_projects() -> bool:
+        if not ctx.refresh_repo:
+            return True
         if ctx.refresh_repo:
             try:
                 ctx.refresh_repo()
-            except Exception as exc:  # commit already exists remotely; RepoCache will retry its pull later
+            except Exception as exc:  # RepoCache will retry its pull on a later refresh
                 log.warning("project control repo refresh failed (%s)", type(exc).__name__)
+                return False
+        return True
 
     def project_audit(action: str, key: str, actor: str, accepted: bool, result: str,
                       payload: dict[str, Any] | None = None) -> None:
@@ -2076,50 +2080,60 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
-        require_capacity("projects", len(ctx.repo().projects))
-        try:
-            result = project_preflight(body, user.subject)
-        except HTTPException as exc:
-            project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
-                          {"project_input": body.project, "repo": body.repo})
-            raise
-        key = result["project"]
-        if key in ctx.repo().projects:
-            project_audit("add_project", key, user.subject, False, "project is already configured",
-                          {"repo": body.repo})
-            raise HTTPException(409, "project is already configured")
-        if not result["ok"]:
-            reasons = []
-            if result["missing_statuses"]:
-                reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
-            if not result["branch_exists"]:
-                reasons.append(f"base branch {body.base} is missing from {body.repo}")
-            detail = {"message": "; ".join(reasons) or "project checks failed",
-                      "missing_statuses": result["missing_statuses"],
-                      "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
-            project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
-            raise HTTPException(422, detail)
+        with ctx.db.pool.connection() as connection:
+            with connection.transaction():
+                # Keep the shared admission lock through preflight, the external commit, and repo refresh. A
+                # competing request then counts the project just committed before it can take the final slot.
+                licensing.lock_resource_admission(connection)
+                if not refresh_projects():
+                    project_audit("add_project", body.project[:32], user.subject, False,
+                                  "control repo refresh failed before capacity check", {"repo": body.repo})
+                    raise HTTPException(503, "could not refresh the control repo before checking project capacity")
+                require_capacity("projects", len(ctx.repo().projects), connection=connection)
+                try:
+                    result = project_preflight(body, user.subject)
+                except HTTPException as exc:
+                    project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
+                                  {"project_input": body.project, "repo": body.repo})
+                    raise
+                key = result["project"]
+                if key in ctx.repo().projects:
+                    project_audit("add_project", key, user.subject, False, "project is already configured",
+                                  {"repo": body.repo})
+                    raise HTTPException(409, "project is already configured")
+                if not result["ok"]:
+                    reasons = []
+                    if result["missing_statuses"]:
+                        reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
+                    if not result["branch_exists"]:
+                        reasons.append(f"base branch {body.base} is missing from {body.repo}")
+                    detail = {"message": "; ".join(reasons) or "project checks failed",
+                              "missing_statuses": result["missing_statuses"],
+                              "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
+                    project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
+                    raise HTTPException(422, detail)
 
-        worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
-        worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
-        checks = [check.strip() for check in body.checks if check.strip()]
-        config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                  "checks": checks, "merge": {"method": body.merge_method},
-                  "limits": {"parallel": body.parallel_limit,
-                             "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
-                  "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
-        content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-        control_name = Path(ctx.settings.control_repo).name
-        try:
-            github = github_gateway(ctx)
-            branch = github.default_branch(control_name)
-            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
-                                            f"projects: add {key} via AI Flow console")
-        except Exception as exc:
-            log.warning("project add commit failed (%s)", type(exc).__name__)
-            project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
-            raise HTTPException(502, "could not save the project to aiflow-control") from exc
-        refresh_projects()
+                worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
+                worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
+                checks = [check.strip() for check in body.checks if check.strip()]
+                config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
+                          "checks": checks, "merge": {"method": body.merge_method},
+                          "limits": {"parallel": body.parallel_limit,
+                                     "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
+                          "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
+                content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+                control_name = Path(ctx.settings.control_repo).name
+                try:
+                    github = github_gateway(ctx)
+                    branch = github.default_branch(control_name)
+                    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                                f"projects: add {key} via AI Flow console")
+                except Exception as exc:
+                    log.warning("project add commit failed (%s)", type(exc).__name__)
+                    project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
+                    raise HTTPException(502, "could not save the project to aiflow-control") from exc
+                # Make the committed project visible to the next admission before releasing the lock.
+                refresh_projects()
         project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
@@ -2514,6 +2528,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         request_id = str(uuid.uuid4())
         with ctx.db.pool.connection() as connection:
             lock_machine_capacity(connection, name)
+            licensing.lock_resource_admission(connection)
             node = connection.execute("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)).fetchone()
             if not node:
                 audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
@@ -2526,6 +2541,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                          "machine session limit is eight",
                          {"current_sessions": capacity, "requested_sessions": body.sessions})
                 raise HTTPException(422, "a machine can run at most 8 sessions")
+            require_capacity("ai_accounts", connection=connection)
             existing_ids = {account.id for account in repo.accounts}
             existing_ids.update(row["id"] for row in connection.execute(
                 "SELECT id FROM managed_ai_accounts").fetchall())

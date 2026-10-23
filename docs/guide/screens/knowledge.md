@@ -1,6 +1,6 @@
 # Knowledge
 
-**Assumes:** you are signed in with a role that has `knowledge.read`. Creating and editing needs `knowledge.manage`;
+**Assumes:** you are signed in as an Administrator, Product owner, SA, BA or Team Lead (the roles that can open Knowledge; project-limited people see their projects only). Creating and editing needs `knowledge.manage`;
 approving policies needs `knowledge.approve` (Owner and Super Administrator).
 
 Knowledge (`/knowledge`) holds study cases, knowledge, skills, agents, guides and policies that AI workers read.

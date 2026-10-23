@@ -1,14 +1,17 @@
 # Users and roles
 
-**Assumes:** you are signed in as a Super Administrator. In this version, Owners and Leads cannot open this screen.
+**Assumes:** you are signed in as an Administrator. Other roles cannot open this screen.
 
-Users and roles (`/users`) shows the signed-in account, its role, and which console screens that role can use. It does not list or edit other accounts.
+Users and roles (`/users`) lists the people who can sign in and lets an Administrator manage them without a terminal or a file edit.
 
 ## What you can do here
 
-- Check which screens are available to your account.
-- Review the role assigned to your signed-in account.
+- Add a person with an email, a name and one or more roles. A temporary password is shown once.
+- Give or remove roles. A person with several roles sees the union of the views of those roles.
+- Limit a person to chosen projects, or leave the person on all projects.
+- Disable or enable a person.
+- Use **View as** in the top bar to see exactly the views of a selected role without signing out.
 
-Invitations and role assignments use the configured console login process; this screen does not add, edit, or disable users.
+Every change is recorded with your name and shown in the audit list on this screen. The last administrator cannot be removed or disabled. See the role table in `docs/v4/role-based-views.md`.
 
 See the [security guide](../admin/security.md) for the recommendations on sign-in and access.

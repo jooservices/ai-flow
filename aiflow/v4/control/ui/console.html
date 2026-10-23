@@ -45,6 +45,7 @@
 }
 *{box-sizing:border-box}
 html{overflow-x:hidden}
+html.role-loading .tabs,html.role-loading #view-as-switch,html.role-loading main{visibility:hidden}
 body{margin:0; min-height:100vh; display:flex; flex-direction:column; overflow-x:hidden; background:var(--bg); color:var(--fg); font-family:var(--f-ui); font-size:14px; line-height:1.45}
 body > main{flex:1 0 auto; width:100%}
 body::before{content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top,0px); z-index:30; background:var(--surface)}
@@ -66,6 +67,7 @@ a{color:var(--accent)}
 .tabs{display:flex; min-width:0; max-width:100%; gap:4px; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; scrollbar-width:thin; -webkit-overflow-scrolling:touch; background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:3px}
 .tab{flex:0 0 auto; white-space:nowrap; border:0; background:transparent; padding:8px 14px; border-radius:8px; cursor:pointer; color:var(--muted); font-weight:500; min-height:38px}
 .tab[aria-selected="true"]{background:var(--surface); color:var(--fg); box-shadow:0 1px 2px rgba(0,0,0,.08), inset 0 0 0 1px var(--line)}
+.tab-divider{align-self:center;width:1px;height:20px;background:var(--line);margin-inline:5px;flex:none}
 .spacer{flex:1 1 auto}
 .sim{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
 .sim .clock{font-family:var(--f-mono); font-size:15px; padding:6px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); min-width:92px; text-align:center}
@@ -487,8 +489,8 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <span>AI Flow</span>
     </div>
     <div class="tabs" role="tablist" aria-label="Console views">
-      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-view="cc">Dashboard</button>
-      <button class="tab" role="tab" id="tab-work" aria-controls="view-work" aria-selected="false" data-act="view" data-view="work">Work board</button>
+      <button class="tab" role="tab" id="tab-cc" aria-controls="view-cc" aria-selected="true" data-act="view" data-menu-view data-view="cc">Dashboard</button>
+      <button class="tab" role="tab" id="tab-work" aria-controls="view-work" aria-selected="false" data-act="view" data-menu-view data-view="work">Work board</button>
       <button class="tab" role="tab" id="tab-delivery" aria-controls="view-delivery" aria-selected="false" data-act="view" data-menu-view data-view="delivery">Delivery</button>
       <button class="tab" role="tab" id="tab-sa" aria-controls="view-sa" aria-selected="false" data-act="view" data-menu-view data-view="sa">SA</button>
       <button class="tab" role="tab" id="tab-lead" aria-controls="view-lead" aria-selected="false" data-act="view" data-menu-view data-view="lead">Team Lead</button>
@@ -504,6 +506,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
     </div>
+    <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
@@ -541,10 +544,12 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
   </section>
+  <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
 </main>
@@ -575,6 +580,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 </div>
 <script>
 (function () {
+document.documentElement.classList.add('role-loading');
 'use strict';
 /* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder, Knowledge and Backup, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
@@ -627,7 +633,10 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  consoleUser: null, autonomy: { data: null, error: '', busy: false, saving: false },
+  consoleUser: null, consoleSessionLoaded: false,
+  userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
+    loading: false, error: '', editing: '', temporaryPassword: '' },
+  autonomy: { data: null, error: '', busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
@@ -656,10 +665,19 @@ var S = {
   licensing: { data: null, status: null, usage: [], error: '', busy: false, statusBusy: false,
     loadedAt: 0, statusAt: 0, limitsPlan: '' }
 };
+var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
+  lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
+  machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage',
+  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage' };
+var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
+  review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
+  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications' };
+var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']];
 function viewOf(path) {
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
-  if (path.indexOf('/work') === 0) return 'work';
+  if (path.indexOf('/work') === 0 || path.indexOf('/board') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
   if (path.indexOf('/integrations') === 0) return 'integrations';
@@ -683,38 +701,25 @@ var MENU_ITEMS = [
   { view: 'cc', label: 'Dashboard' },
   { view: 'work', label: 'Work board' },
   { view: 'delivery', label: 'Delivery' },
-  { view: 'sa', label: 'SA', permission: 'console.write' },
+  { view: 'sa', label: 'SA' },
   { view: 'lead', label: 'Team Lead' },
   { view: 'business', label: 'Business' },
   { view: 'review', label: 'Human review' },
   { view: 'stakeholder', label: 'Stakeholder' },
-  { view: 'machines', label: 'Machines and AI', permission: 'node.operations.read' },
-  { view: 'users', label: 'Users and roles', permission: 'users.manage' },
-  { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
-  { view: 'backup', label: 'Backup & Restore', permission: 'backup.read' },
-  { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
-  { view: 'projects', label: 'Projects', permission: 'projects.manage' },
-  { view: 'licensing', label: 'Licence', permission: 'licensing.manage' },
-  { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' }
+  { view: 'machines', label: 'Machines and AI' },
+  { view: 'users', label: 'Users and roles' },
+  { view: 'knowledge', label: 'Knowledge' },
+  { view: 'backup', label: 'Backup & Restore' },
+  { view: 'integrations', label: 'Integrations' },
+  { view: 'projects', label: 'Projects' },
+  { view: 'licensing', label: 'Licence' },
+  { view: 'notifications', label: 'Notifications' }
 ];
-// Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
-function viewAllowed(view, role) {
-  var item = MENU_ITEMS.filter(function (x) { return x.view === view; })[0];
-  return !!item && !!role && (!item.permission || consoleCan(item.permission));
+// Visibility reads the effective permissions sent from ROLE_PERMISSIONS; the server enforces the same grants.
+function viewAllowed(view) {
+  return !S.consoleUser || (!!VIEW_PERMISSION[view] && consoleCan(VIEW_PERMISSION[view]));
 }
-function syncMenuVisibility() {
-  var role = S.consoleUser && S.consoleUser.role;
-  $$('.tab[data-menu-view]').forEach(function (tab) {
-    var visible = viewAllowed(tab.getAttribute('data-view'), role);
-    tab.hidden = !visible;
-    tab.setAttribute('aria-hidden', String(!visible));
-  });
-  if (role && !viewAllowed(S.view, role)) {
-    S.view = 'cc';
-    showView();
-    try { history.replaceState(null, '', '/dashboard'); } catch (x) { /* embedded preview */ }
-  }
-}
+function syncMenuVisibility() { applyRoleNavigation(); }
 
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
 function since() { return (Date.now() - S.fetchedAt) / 1000; }
@@ -831,23 +836,69 @@ function poll() {
 }
 function pollConsoleSession() {
   fetch('/v1/console/session', { cache: 'no-store' }).then(function (r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) { var error = new Error('HTTP ' + r.status); error.status = r.status; throw error; }
     return r.json();
   }).then(function (d) {
-    S.consoleUser = d.authenticated ? d : null;
-    syncMenuVisibility();
+    S.consoleUser = d.authenticated ? d : null; S.consoleSessionLoaded = true;
+    document.documentElement.classList.remove('role-loading');
+    applyRoleNavigation();
+    if (S.consoleUser && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
+      location.replace(S.consoleUser.landing_page || '/cc'); return;
+    }
     render();
     if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
     if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
-    if (S.view === 'users' && consoleCan('users.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();
+    if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
+    if (consoleCan('view.machines_ai')) pollServices();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
-  }).catch(function () { S.consoleUser = null; syncMenuVisibility(); render(); })
+  }).catch(function (error) {
+    if (error && error.status === 401) { location.replace('/login'); return; }
+    S.consoleUser = null; S.consoleSessionLoaded = true;
+    document.documentElement.classList.remove('role-loading'); applyRoleNavigation(); render(); pollServices(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
+}
+function applyRoleNavigation() {
+  var tabs = $$('.tab[data-view]');
+  tabs.forEach(function (tab) {
+    var view = tab.getAttribute('data-view'), permission = VIEW_PERMISSION[view] || 'view.dashboard';
+    tab.hidden = !!S.consoleUser && !consoleCan(permission);
+    tab.setAttribute('aria-hidden', String(tab.hidden));
+  });
+  var nav = $('.tabs');
+  if (nav) {
+    $$('.tab-divider', nav).forEach(function (divider) { divider.remove(); });
+    VIEW_GROUPS.forEach(function (group, index) {
+      if (index) { var divider = document.createElement('span'); divider.className = 'tab-divider'; divider.setAttribute('aria-hidden', 'true'); nav.appendChild(divider); }
+      group.forEach(function (view) { var tab = $('#tab-' + view); if (tab) nav.appendChild(tab); });
+    });
+  }
+  var as = $('#view-as-switch'), select = $('#view-as-role'), user = S.consoleUser;
+  if (user && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
+    location.replace(user.landing_page || '/cc'); return;
+  }
+  if (!as || !select) return;
+  as.hidden = !(user && user.can_view_as);
+  if (!user || !user.can_view_as) return;
+  var choices = user.role_options || [];
+  select.innerHTML = '<option value="">' + (user.viewing_as ? 'Viewing as ' + esc(user.role_label) : 'My roles') + '</option>' +
+    (user.viewing_as ? '<option value="__stop">Return to my role</option>' : '') + choices.map(function (r) {
+      return '<option value="' + esc(r.id) + '">' + esc(r.label) + '</option>';
+    }).join('');
+  select.value = '';
+  select.onchange = function () {
+    var value = select.value; if (!value) return;
+    var endpoint = value === '__stop' ? '/v1/console/view-as/stop' : '/v1/console/view-as';
+    fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: value === '__stop' ? '{}' : JSON.stringify({ role: value }) })
+      .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+      .then(function () { location.href = value === '__stop' ? '/cc' : (choices.filter(function (r) { return r.id === value; })[0] || {}).landing_page || '/cc'; })
+      .catch(function (e) { toast('View as failed', String(e.message || e), 'crit'); select.value = ''; });
+  };
 }
 function projectResponseError(response) {
   return response.json().then(function (data) {
@@ -864,6 +915,110 @@ function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+}
+function adminRequest(url, options) {
+  return fetch(url, Object.assign({ cache: 'no-store' }, options || {})).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+}
+function loadUsers(force) {
+  var u = S.userAdmin;
+  if (!consoleCan('console.manage') || u.loading || (u.users && !force)) return;
+  u.loading = true; u.error = ''; renderUsers();
+  adminRequest('/v1/console/users').then(function (d) {
+    u.users = d.users || []; u.projects = d.projects || []; u.roleOptions = d.role_options || []; u.audit = d.audit || [];
+    u.error = ''; u.loading = false; renderUsers();
+  }).catch(function (e) { u.error = String(e.message || e); u.loading = false; renderUsers(); });
+}
+var ROLE_VIEW_LABELS = { 'view.dashboard': 'Dashboard', 'view.work_board': 'Work board', 'view.delivery': 'Delivery',
+  'view.sa': 'SA', 'view.team_lead': 'Team Lead', 'view.business': 'Business', 'view.human_review': 'Human review',
+  'view.stakeholder': 'Stakeholder', 'view.machines_ai': 'Machines and AI', 'view.knowledge': 'Knowledge',
+  'view.integrations': 'Integrations', 'projects.manage': 'Projects', 'console.manage': 'Users and roles' };
+function roleChecks(root, className, selected) {
+  return S.userAdmin.roleOptions.map(function (r) {
+    return '<label class="chip2" style="cursor:pointer"><input type="checkbox" class="' + className + '" value="' + esc(r.id) + '"' +
+      (selected.indexOf(r.id) >= 0 ? ' checked' : '') + '> ' + esc(r.label) + '</label>';
+  }).join('');
+}
+function projectChoices(selected, all) {
+  return '<label class="fld">Projects <select class="in" data-user-projects multiple size="' + Math.min(5, Math.max(2, S.userAdmin.projects.length)) + '"' + (all ? ' disabled' : '') + '>' +
+    S.userAdmin.projects.map(function (key) { return '<option value="' + esc(key) + '"' + (selected.indexOf(key) >= 0 ? ' selected' : '') + '>' + esc(key) + '</option>'; }).join('') +
+    '</select></label><label class="chip2" style="cursor:pointer"><input type="checkbox" data-user-all' + (all ? ' checked' : '') + '> All projects</label>';
+}
+function renderUsers() {
+  var root = $('#view-users'); if (!root) return;
+  if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
+  var u = S.userAdmin, h = '<section class="panel"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
+  if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
+  if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
+  if (u.loading && !u.users) h += '<div class="muted">Loading people…</div>';
+  else {
+    h += '<div class="project-table"><table><thead><tr><th>Person</th><th>Roles</th><th>Projects</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead><tbody>';
+    (u.users || []).forEach(function (person) {
+      var labels = (person.roles || []).map(function (role) { return (u.roleOptions.filter(function (r) { return r.id === role; })[0] || {}).label || role; });
+      var projects = person.project_keys == null ? 'All projects' : person.project_keys.length ? person.project_keys.join(', ') : 'No projects';
+      h += '<tr><td><b>' + esc(person.display_name || person.email) + '</b><div class="small muted">' + esc(person.email) + '</div></td><td>' +
+        labels.map(function (label) { return '<span class="pill">' + esc(label) + '</span>'; }).join(' ') + '</td><td>' + esc(projects) + '</td><td>' +
+        esc(person.last_login_at ? new Date(person.last_login_at).toLocaleString() : 'Never') + '</td><td>' +
+        (person.disabled ? '<span class="pill" data-tone="crit">Disabled</span>' : '<span class="pill" data-tone="ok">Active</span>') +
+        '</td><td><div class="project-actions"><button class="btn sm" data-user-edit="' + esc(person.email) + '">Edit</button><button class="btn sm' +
+        (person.disabled ? '' : ' danger') + '" data-user-toggle="' + esc(person.email) + '" data-disabled="' + (!person.disabled) + '">' +
+        (person.disabled ? 'Enable' : 'Disable') + '</button></div></td></tr>';
+      if (u.editing === person.email) {
+        h += '<tr><td colspan="6"><div class="project-form"><div class="wide"><strong>Roles</strong><div>' +
+          roleChecks(root, 'edit-role', person.roles || []) + '</div></div><div>' + projectChoices(person.project_keys || [], person.project_keys == null) +
+          '</div><div class="project-actions"><button class="btn primary sm" data-user-save="' + esc(person.email) + '">Save changes</button>' +
+          '<button class="btn sm" data-user-cancel>Cancel</button></div></div></td></tr>';
+      }
+    });
+    if (!(u.users || []).length) h += '<tr><td colspan="6" class="muted">No people have been added.</td></tr>';
+    h += '</tbody></table></div>';
+  }
+  h += '</section><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
+    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required></label>' +
+    '<label>Name<input class="in" data-user-name autocomplete="off"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', []) +
+    '</div></div><div>' + projectChoices([], true) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Views by role</h2><span class="hint">A person with multiple roles sees the union of their views.</span></div>' +
+    '<div class="project-table"><table><thead><tr><th>View</th>' + u.roleOptions.map(function (r) { return '<th>' + esc(r.label) + '</th>'; }).join('') +
+    '</tr></thead><tbody>' + Object.keys(ROLE_VIEW_LABELS).map(function (permission) {
+      return '<tr><td>' + esc(ROLE_VIEW_LABELS[permission]) + '</td>' + u.roleOptions.map(function (r) {
+        var on = r.permissions.indexOf('*') >= 0 || r.permissions.indexOf(permission) >= 0;
+        return '<td>' + (on ? '✓' : '—') + '</td>';
+      }).join('') + '</tr>';
+    }).join('') + '</tbody></table></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Change history</h2><span class="hint">Who made each account or role change</span></div>' +
+    '<div class="project-table"><table><thead><tr><th>When</th><th>Who</th><th>Change</th><th>Details</th></tr></thead><tbody>' +
+    (u.audit || []).map(function (item) { return '<tr><td>' + esc(item.ts ? new Date(item.ts).toLocaleString() : '') + '</td><td>' + esc(item.actor) +
+      '</td><td>' + esc(item.action.replace(/_/g, ' ')) + '</td><td>' + esc(item.result) + '<div class="small muted">' +
+      esc(JSON.stringify(item.payload || {})) + '</div></td></tr>'; }).join('') +
+    '</tbody></table></div></section>';
+  root.innerHTML = h;
+  $$('[data-user-refresh]', root).forEach(function (b) { b.onclick = function () { loadUsers(true); }; });
+  $$('[data-user-password-dismiss]', root).forEach(function (b) { b.onclick = function () { u.temporaryPassword = ''; renderUsers(); }; });
+  $$('[data-user-edit]', root).forEach(function (b) { b.onclick = function () { u.editing = b.dataset.userEdit; renderUsers(); }; });
+  $$('[data-user-cancel]', root).forEach(function (b) { b.onclick = function () { u.editing = ''; renderUsers(); }; });
+  $$('[data-user-all]', root).forEach(function (box) { box.onchange = function () { var select = $('[data-user-projects]', box.closest('.project-form')); if (select) select.disabled = box.checked; }; });
+  $$('[data-user-toggle]', root).forEach(function (b) { b.onclick = function () {
+    adminRequest('/v1/console/users/' + encodeURIComponent(b.dataset.userToggle) + '/disabled', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ disabled: b.dataset.disabled === 'true' })
+    }).then(function () { loadUsers(true); }).catch(function (e) { toast('Account update failed', String(e.message || e), 'crit'); });
+  }; });
+  $$('[data-user-save]', root).forEach(function (b) { b.onclick = function () {
+    var edit = b.closest('.project-form'), roles = $$('.edit-role:checked', edit).map(function (x) { return x.value; });
+    var all = $('[data-user-all]', edit).checked, projects = all ? null : $$('[data-user-projects] option:checked', edit).map(function (x) { return x.value; });
+    adminRequest('/v1/console/users/' + encodeURIComponent(b.dataset.userSave), { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roles: roles, project_keys: projects })
+    }).then(function () { u.editing = ''; loadUsers(true); }).catch(function (e) { toast('Person update failed', String(e.message || e), 'crit'); });
+  }; });
+  $$('[data-user-add]', root).forEach(function (b) { b.onclick = function () {
+    var form = b.closest('.project-form'), email = $('[data-user-email]', form).value, name = $('[data-user-name]', form).value;
+    var roles = $$('.new-role:checked', form).map(function (x) { return x.value; }), all = $('[data-user-all]', form).checked;
+    var projects = all ? null : $$('[data-user-projects] option:checked', form).map(function (x) { return x.value; });
+    adminRequest('/v1/console/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, display_name: name, roles: roles, project_keys: projects })
+    }).then(function (d) { u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true); })
+      .catch(function (e) { toast('Person could not be added', String(e.message || e), 'crit'); });
+  }; });
 }
 function loadProjectRepositories(key) {
   S.projectAdmin.repositoryEditor = { key: key, busy: true, saving: false, error: '', data: null };
@@ -1090,8 +1245,11 @@ function copyJoinCommand(name) {
   } else toast('Select and copy the join command', '', 'info');
 }
 function pollServices() {
+  if (!S.consoleSessionLoaded) { setTimeout(pollServices, SVC_MS); return; }
+  if (S.consoleUser && !consoleCan('view.machines_ai')) return;
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
     S.services = d.services || []; S.svcError = d.error || '';
+    if (S.view === 'cc' && S.data) renderDashboard();
     if (S.view === 'machines' && S.data) renderMachines();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
@@ -1263,6 +1421,7 @@ function providerUsageChart(rows) {
   return svg + '</svg>';
 }
 function renderDashboard() {
+  if (S.consoleUser && !consoleCan('view.machines_ai')) { renderCC(); return; }
   var root = $('#view-cc'); if (!root) return;
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
@@ -1339,7 +1498,7 @@ function renderDashboard() {
   });
   h += '</tbody></table></div></section></section>';
   h += toolWaitsPanel(d);
-  h += masterAutonomyPanel();
+  if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
 }
@@ -1388,6 +1547,19 @@ function masterAutonomyPanel() {
 }
 function renderCC() {
   var d = D();
+  if (S.consoleUser && !consoleCan('view.machines_ai')) {
+    var h = '<section class="panel"><div class="panel-h"><h2>My projects</h2><span class="hint">Projects available to your account</span><span class="spacer"></span>' +
+      '<button class="btn primary sm" data-act="view" data-view="work">Open work board</button></div>';
+    if (!(d.projects || []).length) h += '<div class="empty">No projects are assigned to your account.</div>';
+    else h += '<div class="project-table"><table><thead><tr><th>Project</th><th>Repository</th><th>Open tickets</th><th>Completed</th></tr></thead><tbody>' +
+      d.projects.map(function (p) {
+        var counts = p.counts || {}, total = Object.keys(counts).reduce(function (sum, key) { return sum + Number(counts[key] || 0); }, 0);
+        return '<tr><td><b class="mono">' + esc(p.key) + '</b></td><td>' + esc((p.repositories || [p.repo]).join(', ')) +
+          '</td><td class="num">' + Math.max(0, total - Number(counts.Done || 0)) + '</td><td class="num">' + Number(counts.Done || 0) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    $('#view-cc').innerHTML = h + '</section>';
+    return;
+  }
   var online = d.nodes.filter(function (n) { return n.status === 'online'; });
   var offline = d.nodes.filter(function (n) { return n.status === 'offline'; });
   var hasAcc = {}; d.accounts.forEach(function (a) { hasAcc[a.node] = 1; });
@@ -1923,7 +2095,7 @@ function renderReviews() {
   (S.reviewProjects || []).forEach(function (p) { h += '<option value="' + esc(p) + '"' + (S.reviewProject === p ? ' selected' : '') + '>' + esc(p) + '</option>'; });
   h += '</select></label><a class="btn sm" href="/v1/reviews/export.csv' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : '') + '" download>Export metrics CSV</a></div>';
   h += reviewMetricsPanel(metrics);
-  h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Reviewer access is required for actions; the token stays in this page until it is closed.</span>';
+  if (!reviewByRole()) h += '<label class="review-auth">Reviewer access token <input type="password" autocomplete="new-password" data-reviewer-token value="' + esc(S.reviewerToken) + '" aria-label="Reviewer access token"></label><span class="small muted">Reviewer access is required for actions; the token stays in this page until it is closed.</span>';
   if (S.reviewsError) h += '<div class="empty" style="color:var(--crit)">Could not load the review queue: ' + esc(S.reviewsError) + '</div>';
   else if (S.reviews === null) h += '<div class="empty">Loading review queue…</div>';
   else if (!rows.length) h += '<div class="empty">No items are waiting for a person in this project.</div>';
@@ -2003,17 +2175,20 @@ function reviewMetricsPanel(metrics) {
   h += '</tbody></table></div></div></section>';
   return h;
 }
+// A signed-in person whose roles grant review.actions acts with the session; the shared token is the fallback.
+function reviewByRole() { return !!S.consoleUser && consoleCan('review.actions'); }
 function submitReview(key, action, comment) {
-  var tokenField = $('[data-reviewer-token]');
+  var tokenField = $('[data-reviewer-token]'), byRole = reviewByRole();
   S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
-  if (!S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
+  if (!byRole && !S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
   if (['rework', 'reject', 'ask-ai', 'answer'].indexOf(action) >= 0 && !String(comment || '').trim()) {
     toast('A note is required', 'Enter the required reason, comment, answer, or question before taking this action.', 'warn'); return;
   }
   var body = action === 'rework' ? { comment: comment } : action === 'reject' ? { reason: comment } :
     action === 'ask-ai' ? { question: comment } : action === 'answer' ? { answer: comment } : {};
   fetch('/v1/reviews/' + encodeURIComponent(key) + '/' + action, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.reviewerToken },
+    method: 'POST', headers: byRole ? { 'Content-Type': 'application/json' }
+      : { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.reviewerToken },
     body: JSON.stringify(body)
   }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
@@ -3700,67 +3875,6 @@ function captureNotificationPreferences() {
   state.preferencesDirty = true;
 }
 
-function renderUsers() {
-  var root = $('#view-users'); if (!root) return;
-  var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
-  var role = S.consoleUser && S.consoleUser.role || 'unknown';
-  var h = '<h1 class="dash-title">Users and roles</h1><p class="lead">Console access is assigned to signed-in accounts. Dashboard and Work board are open to every console role.</p>';
-  if (!consoleCan('users.manage')) { root.innerHTML = h + '<section class="panel"><div class="muted">User management is available to owners and super administrators.</div></section>'; return; }
-  if (S.users.error) h += '<div class="alert" data-tone="crit" role="alert"><span class="a-detail">' + esc(S.users.error) + '</span></div>';
-  var userData = S.users.data || { users: [], count: 0, limit: 0 };
-  h += '<section class="panel"><div class="panel-h"><h2>Console users</h2><span class="hint">' + userData.count + ' of ' + userData.limit + ' enabled user slots in use</span></div>';
-  h += '<p class="small muted">Create an account here. AI Flow generates an initial password for you to share with the user through a secure channel.</p>';
-  h += '<form class="project-form" id="users-create-form"><label>Email<input name="email" type="email" required maxlength="320" autocomplete="off"></label>';
-  h += '<label>Display name<input name="display_name" maxlength="120" autocomplete="name"></label>';
-  h += '<label>Role<select name="role"><option value="lead">Lead</option><option value="owner">Owner</option><option value="super_admin">Super Administrator</option></select></label>';
-  h += '<div><button class="btn primary" type="submit"' + (S.users.busy || !S.users.data ? ' disabled' : '') + '>Create user</button></div></form>';
-  if (S.users.initialPassword) h += '<div class="alert" data-tone="ok"><strong>Initial password</strong><p class="small">Copy this password and share it securely: <code data-initial-password>' + esc(S.users.initialPassword) + '</code></p></div>';
-  h += '<div class="tablebox"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Status</th></tr></thead><tbody>';
-  if (!userData.users.length) h += '<tr><td colspan="4" class="muted">' + (S.users.busy ? 'Loading users…' : 'No console users.') + '</td></tr>';
-  userData.users.forEach(function (item) {
-    h += '<tr><td>' + esc(item.email) + '</td><td>' + esc(item.name || '—') + '</td><td>' + esc(roleLabels[item.role] || item.role) + '</td><td>' + (item.disabled ? 'Disabled' : 'Enabled') + '</td></tr>';
-  });
-  h += '</tbody></table></div></section>';
-  h += '<section class="panel"><div class="panel-h"><h2>Your console access</h2><span class="hint">Authenticated session</span></div><div class="facts">';
-  h += '<div class="fact"><span class="fl">Signed in as</span><span class="fv">' + esc(S.consoleUser && S.consoleUser.user || 'Unknown user') + '</span></div>';
-  h += '<div class="fact"><span class="fl">Role</span><span class="fv">' + esc(roleLabels[role] || role) + '</span></div></div>';
-  h += '<div class="tablebox"><table><thead><tr><th>View</th><th>Your access</th></tr></thead><tbody>';
-  MENU_ITEMS.forEach(function (item) {
-    h += '<tr><td>' + esc(item.label) + '</td><td>' + (viewAllowed(item.view, role) ? 'Available' : 'Not available') + '</td></tr>';
-  });
-  h += '</tbody></table></div></section>';
-  root.innerHTML = h;
-}
-function loadUsers() {
-  if (S.users.busy || !consoleCan('users.manage')) return;
-  S.users.busy = true;
-  fetch('/v1/auth/users', { cache: 'no-store' }).then(licensingResponse)
-    .then(function (data) { S.users.data = data; S.users.loadedAt = Date.now(); S.users.error = ''; })
-    .catch(function (error) { S.users.error = String(error.message || error); })
-    .then(function () { S.users.busy = false; renderUsers(); });
-}
-function submitConsoleUser(form) {
-  if (S.users.busy) return;
-  var fields = new FormData(form), payload = {
-    email: String(fields.get('email') || '').trim(), display_name: String(fields.get('display_name') || '').trim(),
-    role: String(fields.get('role') || 'lead')
-  };
-  S.users.busy = true; S.users.error = ''; renderUsers();
-  fetch('/v1/auth/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload) }).then(licensingResponse)
-    .then(function (data) {
-      S.users.initialPassword = data.initial_password;
-      S.users.data = S.users.data || { users: [], count: 0, limit: 0 };
-      S.users.data.users.unshift({ email: data.email, name: data.name, role: data.role, disabled: false });
-      S.users.data.count += 1;
-      S.users.busy = false;
-      form.reset();
-      toast('User created', data.message, 'ok');
-    })
-    .catch(function (error) { S.users.error = String(error.message || error); })
-    .then(function () { S.users.busy = false; renderUsers(); });
-}
-
 function quickSearchResults(query) {
   var q = String(query || '').trim().toLowerCase(), role = S.consoleUser && S.consoleUser.role;
   var views = MENU_ITEMS.filter(function (item) { return viewAllowed(item.view, role) && (!q || item.label.toLowerCase().indexOf(q) >= 0); })
@@ -3815,13 +3929,13 @@ function render() {
   renderLicenseNotice();
   if (S.view === 'cc') renderDashboard();
   else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
-  else if (S.view === 'machines') renderMachines();
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'users') renderUsers();
   else if (S.view === 'lead') renderLead();
   else if (S.view === 'business') renderBusiness();
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
+  else if (S.view === 'machines') renderMachines();
   else if (S.view === 'knowledge') renderKnowledge();
   else if (S.view === 'backup') renderBackup();
   else if (S.view === 'integrations') renderIntegrations();
@@ -3856,7 +3970,7 @@ var HINTS = {
   cc: 'Start here: nodes, AI accounts, runs and incidents. Open an incident for its detail and a runbook.',
   work: 'Pick a project to see its tickets by state. Open a ticket for its runs, questions and links.',
   machines: 'Machines that run AI work and the AI accounts on them: heartbeat, slots and sign-in state.',
-  users: 'See the role and screen permissions for your signed-in account. User invitations and role changes use the configured console login process.',
+  users: 'See the role and screen permissions of each person. Add people, change roles and project limits, or disable a person here; every change is audited.',
   delivery: 'Pick a project to see its board. "Needs attention" lists tickets that wait on a person or did not finish.',
   sa: 'Read-only health of nodes and accounts, with advice on capacity. Nothing here changes the fleet.',
   lead: 'Choose a project to check that each epic has enough tasks for its acceptance criteria, then export a report.',
@@ -3883,19 +3997,20 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
 }
 function setView(v) {
-  if (S.consoleUser && !viewAllowed(v, S.consoleUser.role)) v = 'cc';
+  if (S.consoleUser && !viewAllowed(v)) {
+    toast('View unavailable', 'This view is not available for your role.', 'warn'); return;
+  }
   if (S.view === v) return;
   S.view = v;
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
   showView();
-  var paths = { cc: '/dashboard', work: '/work', machines: '/machines', users: '/users' };
-  try { history.pushState(null, '', paths[v] || '/' + v); } catch (e) { /* file preview */ }
+  try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
@@ -3904,6 +4019,7 @@ function setView(v) {
   if (v === 'projects') loadProjectList();
   if (v === 'licensing') loadLicensing();
   if (v === 'users') loadUsers();
+  if (v === 'machines') pollServices();
   if (v === 'notifications') loadNotifications();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
@@ -4331,7 +4447,6 @@ document.addEventListener('submit', function (e) {
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
   if (e.target.id === 'notification-channel-form') { e.preventDefault(); notificationFormSubmit(); }
   if (e.target.id === 'rh-form') { e.preventDefault(); saveRoleHealth(); }
-  if (e.target.id === 'users-create-form') { e.preventDefault(); submitConsoleUser(e.target); }
 });
 window.addEventListener('popstate', function () {
   S.view = viewOf(location.pathname);

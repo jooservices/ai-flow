@@ -265,9 +265,10 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "key": _STATE_STRING, "project": _STATE_STRING, "status": _STATE_STRING, "type": _STATE_STRING,
         "priority": _STATE_STRING, "labels": _STATE_STRING_ARRAY, "summary": _STATE_STRING,
         "parent_key": _state_nullable(_STATE_STRING), "blocked_by": _STATE_STRING_ARRAY,
+        "done_at": _state_nullable(_STATE_DATETIME),
         "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
         "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
-    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "epic",
+    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
         "repository", "run", "last_run", "updated_age_s"))),
     "release_readiness": _state_array(_state_object({
         "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
@@ -2142,6 +2143,26 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, None)
         layouts.reset(ctx.db, user.subject, layout_page(page))
         return layouts.page_view(page, user.role, None)
+
+    @app.get("/v1/console/preferences")
+    def console_preferences(request: Request) -> dict:
+        user = console_user(request, None)
+        row = ctx.db.one("SELECT theme FROM console_preferences WHERE email=%s", (user.subject,))
+        return {"theme": row["theme"] if row else "dark"}
+
+    @app.put("/v1/console/preferences")
+    async def console_preferences_save(request: Request) -> dict:
+        user = console_user(request, None)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "invalid console preferences") from None
+        if not isinstance(body, dict) or body.get("theme") not in {"dark", "light"}:
+            raise HTTPException(400, "theme must be dark or light")
+        ctx.db.run("INSERT INTO console_preferences (email, theme) VALUES (%s, %s)"
+                   " ON CONFLICT (email) DO UPDATE SET theme=EXCLUDED.theme, updated_at=now()",
+                   (user.subject, body["theme"]))
+        return {"theme": body["theme"]}
 
     def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
         return console_user(request, {"notifications.manage"}, target="notifications", action=action)
@@ -6417,6 +6438,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             rows = daily(ctx.db, days, project)
         return {"days": days, "project": project, "rows": rows}
+
+    @app.get("/v1/analytics/usage/daily")
+    def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:
+        from .analytics import daily_usage
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        project_keys = user.project_keys if user and user.project_keys is not None else None
+        return {"days": days, "group_by": "ai", "rows": daily_usage(ctx.db, days, project_keys)}
 
     @app.get("/v1/analytics/usage")
     def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),

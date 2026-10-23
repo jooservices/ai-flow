@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from conftest import add_ticket
 from aiflow.v4 import VERSION
 from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
 from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
@@ -163,7 +164,7 @@ ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_busin
 
 
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
-                     weekly_report: dict | None = None) -> str:
+                     weekly_report: dict | None = None, dashboard_tab: str = "work") -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
@@ -177,6 +178,8 @@ var dashboard = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-cc' ? dashboard : null; }};
 S.data = {json.dumps(state)};
 S.analytics = {json.dumps(analytics or [])};
+S.dashboardUsage = {json.dumps(analytics or [])}; S.dashboardUsageError = '';
+S.dashboardTab = {json.dumps(dashboard_tab)};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
@@ -465,9 +468,11 @@ def test_footer_has_version_environment_control_ref_links_and_copyright():
 
 def test_no_new_libraries_and_both_themes_still_defined():
     page = html()
+    style = css()
     assert "<script src" not in page and "<script type=\"module\"" not in page
     assert page.count("<script>") == 1 and page.count("<style>") == 1
-    assert ':root[data-theme="dark"]' in page and ':root:not([data-theme="light"])' in page
+    assert ':root[data-theme="light"]' in page and '--bg:#121110' in style and '--bg:#f5f1eb' in style
+    assert '.dash-section[hidden]{display:none}' in style
     footer_css = "\n".join(line for line in css().splitlines() if line.startswith(".footer"))
     assert "#" not in footer_css.replace("#f-", "")  # footer colours come from theme variables only
 
@@ -1112,7 +1117,7 @@ console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4
     out = json.loads(run_script(driver, prelude))
     assert out["restored"] == {"project": "TESTFLOW", "typeFilter": "Bug", "epic": "TESTFLOW-2"}
     assert out["saved"] == {"project": "OTHER", "typeFilter": "Feature", "aiFilter": "all",
-                            "epic": "OTHER-7", "starredProjects": []}
+                            "epic": "OTHER-7", "starredProjects": [], "workStatusFilter": "all"}
     page = html()
     assert "loadPrefs();" in page.split(BOOT, 1)[1]
     assert "savePrefs(); render();" in page
@@ -1198,7 +1203,7 @@ def test_poll_falls_back_to_the_first_project_and_clears_a_stale_epic():
     assert out["typeFilter"] == "all"
     assert "TESTFLOW-3" in out["body"]
     assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "aiFilter": "all",
-                            "epic": "all", "starredProjects": []}
+                            "epic": "all", "starredProjects": [], "workStatusFilter": "all"}
 
 
 def test_poll_clears_a_stale_epic_and_type_filter_in_the_current_project():
@@ -1216,7 +1221,7 @@ def test_poll_clears_a_stale_epic_and_type_filter_in_the_current_project():
     assert out["typeFilter"] == "all"
     assert "TESTFLOW-3" in out["body"]
     assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "aiFilter": "all",
-                            "epic": "all", "starredProjects": []}
+                            "epic": "all", "starredProjects": [], "workStatusFilter": "all"}
 
 
 def test_delivery_selection_storage_errors_are_ignored():
@@ -1377,7 +1382,7 @@ console.log(JSON.stringify(roles));
     assert "machines" not in visible["team_lead"] and "sa" not in visible["lead"]
 
 
-def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
+def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     day = datetime.now(timezone.utc).date().isoformat()
     reset = int(datetime.now(timezone.utc).timestamp()) + 3600
     awareness = {"source": "reported", "is_estimate": False, "runs_24h": 20, "confidence": "high",
@@ -1405,6 +1410,9 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
              "status": "Needs owner", "labels": [], "parent_key": "ALPHA-2", "run": None},
             {"key": "ALPHA-5", "project": "ALPHA", "type": "Story", "summary": "Review this",
              "status": "Human review", "labels": [], "parent_key": "ALPHA-2", "run": None},
+            {"key": "ALPHA-6", "project": "ALPHA", "type": "Story", "summary": "Done this week",
+             "status": "Done", "done_at": datetime.now(timezone.utc).isoformat(), "labels": [],
+             "parent_key": "ALPHA-2", "run": None},
         ],
         "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
                    "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
@@ -1424,20 +1432,39 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
         "totals": {"runs_24h": 3, "done_24h": 2, "failed_24h": 1, "tokens_in_24h": 1200,
                    "tokens_out_24h": 800, "cost_24h": 0.12}, "versions": {},
     }
-    analytics = [{"day": day, "account": "codex-alpha", "runs": 3, "done": 2, "merged": 0,
-                  "rework": 0, "failed": 1, "tokens_in": 1200, "tokens_out": 800, "cost_usd": 0.12}]
+    analytics = [{"day": day, "key": "codex", "runs": 3, "tokens_in": 1200, "tokens_out": 800,
+                  "tokens": 2000, "cost_usd": 0.12}]
     weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
               "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
                                                                "quota_awareness": awareness}]}
     rendered = render_dashboard(state, analytics, weekly)
     assert rendered.count('class="dash-kpi"') == 4
-    for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
-                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next quota reset:",
+    cards = dict(re.findall(r'<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="([^"]+)">(.*?)</button>', rendered))
+    assert set(cards) == {"done", "in-flight", "waiting", "ai-usage"}
+    assert '<span class="value">1</span>' in cards["done"]
+    assert "+1 this week" in cards["done"] and "of 4 tickets · 25% complete" in cards["done"]
+    assert '<span class="value">2</span>' in cards["in-flight"]
+    assert '<span class="value">2</span>' in cards["waiting"]
+    assert "2k <small>tokens</small>" in cards["ai-usage"] and "Approx. $0.1200" in cards["ai-usage"]
+    assert all('class="kpi-trend"' in card for card in cards.values())
+    assert 'data-dashboard-panel="ai" hidden' in rendered
+    assert rendered.count('class="flow-step"') == 8 and rendered.count('class="flow-track"') == 8
+    for text in ("Work", "AI and machines", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
+                 "Done", "In flight", "AI usage today", "dashboard-tab-work", "dashboard-tab-ai",
+                 "data-act=\"flow-step\"", "data-act=\"dashboard-card\"", "kpi-trend", "of 4 tickets · 25% complete",
+                 "+1 this week", "In progress, verify or human review", "Questions, decisions and reviews",
+                 "Approximate cost today", "AI usage", "Share of usage", "Quota by AI", "codex-alpha", "Codex", "Next quota reset:",
                  "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
-                 "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
                  "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
-                 "Weekly quota and usage", "Largest context run"):
+                 "Weekly quota and usage", "Largest context run", "Tokens today", "Tokens · last 14 days"):
         assert text in rendered
+    ai_tab = render_dashboard(state, analytics, weekly, dashboard_tab="ai")
+    assert 'id="dashboard-tab-ai" aria-controls="dashboard-panel" aria-selected="true"' in ai_tab
+    assert 'data-dashboard-panel="work" hidden' in ai_tab
+    assert 'data-dashboard-panel="ai"' in ai_tab and 'class="provider-chart"' in ai_tab
+    assert "Share of usage · last 14 days" in ai_tab and "Quota by AI" in ai_tab
+
+
     # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
     for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
                  "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
@@ -1478,6 +1505,80 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     assert "Tokens · today" in account_detail and "Cost · today" in account_detail
     assert "<td>120</td><td>$0.030</td>" in account_detail
     assert "<td>30</td><td>$0.010</td>" in account_detail
+
+
+def test_dashboard_card_routes_and_funnel_filters_match_board_statuses():
+    result = run_script("""
+var selected = '';
+setView = function (view) { selected = view; S.view = view; };
+S.consoleUser = {authenticated: true, user: 'owner@example.test', permissions: ['*']};
+openDashboardCard('done'); var done = {view: selected, filter: S.workStatusFilter};
+openDashboardCard('in-flight'); var flight = {view: selected, filter: S.workStatusFilter};
+S.workStatusFilter = 'all';
+openDashboardCard('waiting'); var waiting = {view: selected, filter: S.workStatusFilter};
+openDashboardWorkFilter('In Verify'); var flow = {view: selected, filter: S.workStatusFilter};
+S.consoleUser = {authenticated: true, user: 'business@example.test', permissions: ['view.dashboard', 'view.work_board']};
+openDashboardCard('waiting'); var fallback = {view: selected, filter: S.workStatusFilter};
+console.log(JSON.stringify({done: done, flight: flight, waiting: waiting, flow: flow, fallback: fallback, project: S.project}));
+""")
+    assert json.loads(result) == {
+        "done": {"view": "work", "filter": "done"},
+        "flight": {"view": "work", "filter": "in-flight"},
+        "waiting": {"view": "review", "filter": "all"},
+        "flow": {"view": "work", "filter": "In Verify"},
+        "fallback": {"view": "work", "filter": "waiting"},
+        "project": "all",
+    }
+
+
+def test_dashboard_aggregate_counts_match_the_all_projects_work_filters_and_review_queue():
+    out = json.loads(run_script("""
+S.data = {projects: [{key: 'ALPHA'}, {key: 'BETA'}], tickets: [
+  {key: 'ALPHA-1', project: 'ALPHA', type: 'Epic', status: 'In Progress'},
+  {key: 'ALPHA-2', project: 'ALPHA', type: 'Story', status: 'Done'},
+  {key: 'ALPHA-3', project: 'ALPHA', type: 'Story', status: 'In Progress'},
+  {key: 'ALPHA-4', project: 'ALPHA', type: 'Bug', status: 'In Verify'},
+  {key: 'BETA-1', project: 'BETA', type: 'Story', status: 'Needs owner'},
+  {key: 'BETA-2', project: 'BETA', type: 'Story', status: 'Human review'},
+  {key: 'BETA-3', project: 'BETA', type: 'Story', status: 'To Do', blocked_by: ['BETA-4']},
+  {key: 'BETA-4', project: 'BETA', type: 'Story', status: 'In Progress'}
+]};
+S.project = 'all';
+var tickets = projTickets().filter(function (t) { return t.type !== 'Epic'; });
+var result = {total: tickets.length,
+  done: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'done'); }).length,
+  inFlight: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'in-flight'); }).length,
+  waiting: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'waiting'); }).length,
+  reviewQueue: dashboardWaitingTickets(tickets).length};
+console.log(JSON.stringify(result));
+"""))
+    assert out == {"total": 7, "done": 1, "inFlight": 4, "waiting": 3, "reviewQueue": 3}
+
+
+def test_dashboard_ticket_counts_match_state_work_board_filters_and_human_review_api(client, ctx):
+    for key, status in (("TESTWP-101", "Done"), ("TESTWP-102", "In Progress"),
+                        ("TESTWP-103", "In Verify"), ("TESTWP-104", "Needs owner"),
+                        ("TESTWP-105", "Human review"), ("TESTWP-106", "To Do"),
+                        ("TESTWP-107", "To Do")):
+        add_ticket(ctx.db, key, status=status, labels=())
+    ctx.db.run("UPDATE tickets SET done_at=now() WHERE key='TESTWP-101'")
+    ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-107'", (["TESTWP-106"],))
+
+    snapshot = client.get("/v1/state").json()
+    script = f"""
+S.data = {{tickets: {json.dumps(snapshot['tickets'])}}}; S.project = 'all';
+var tickets = projTickets().filter(function (t) {{ return t.type !== 'Epic'; }});
+console.log(JSON.stringify({{
+  total: tickets.length,
+  done: tickets.filter(function (t) {{ return dashboardWorkStatusMatches(t, 'done'); }}).length,
+  inFlight: tickets.filter(function (t) {{ return dashboardWorkStatusMatches(t, 'in-flight'); }}).length,
+  waiting: tickets.filter(function (t) {{ return dashboardWorkStatusMatches(t, 'waiting'); }}).length
+}}));
+"""
+    counts = json.loads(run_script(script))
+    review_queue = client.get("/v1/reviews").json()["tickets"]
+    assert counts == {"total": 7, "done": 1, "inFlight": 3, "waiting": 3}
+    assert counts["waiting"] == len(review_queue) == 3
 
 
 def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():
@@ -1602,8 +1703,10 @@ def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal()
     page = html()
     style = css()
     assert "--bg:#f5f1eb" in style and "--bg:#121110" in style
-    assert ':root[data-theme="dark"]' in style and ':root:not([data-theme="light"])' in style
-    assert "data-act=\"theme\"" in page and "aiflow4-theme" in page
+    assert ':root[data-theme="light"]' in style and "--bg:#121110" in style
+    assert "data-act=\"theme\"" in page and "aiflow4-theme:" in page
+    assert "function loadConsoleThemePreference()" in page and "PUT" in page[page.index("function saveConsoleTheme"):page.index("function applyRoleNavigation")]
+    assert "prefers-color-scheme" not in style
     assert ":focus-visible" in style and "ArrowRight" in page and "ArrowLeft" in page
     assert "Control+K" in page and "Meta+K" in page and "Tab" in page
     assert "overflow-x:auto" in style and "@media (max-width:900px)" in style

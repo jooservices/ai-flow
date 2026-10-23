@@ -7,7 +7,7 @@ that a screen or API change comes with a documentation change.
 The site is plain HTML written with the standard library only (no site generator dependency). The release
 packaging (`deploy/v4/ci/package-release.sh`) puts it into the release tarball as `docs-site/`; control serves it
 at `/help/` and the console Help links open `/help/screens/<view>.html`. The API reference page is generated from
-the FastAPI routes of `control/api.py` at build time and is never written by hand. The runbook set is checked
+the mounted FastAPI control app at build time and is never written by hand. The runbook set is checked
 against the incident kinds the code raises (`incident_kinds()`).
 """
 from __future__ import annotations
@@ -23,6 +23,7 @@ import sys
 import tempfile
 import typing
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 GUIDE = ROOT / "docs" / "guide"
@@ -30,6 +31,7 @@ CONTROL = ROOT / "aiflow" / "v4" / "control"
 UI = CONTROL / "ui" / "console.html"
 SITE_ENV = "AIFLOW4_DOCS_SITE"
 API_PAGE = "reference/api.md"
+SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
 # Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
 SCREEN_PAGE = "screens/{view}.md"
@@ -127,18 +129,28 @@ def role_names() -> list[str]:
     return sorted(ROLE_PERMISSIONS)
 
 
+def _mounted_control_app():
+    """Create the control app with its UI routes mounted for API discovery and reference generation."""
+    from unittest.mock import MagicMock
+
+    from ..control.api import create_app
+    from ..control.ui import mount_ui
+
+    app = create_app(MagicMock())
+    mount_ui(app, MagicMock())
+    return app
+
+
 # --- API reference, generated from the FastAPI app --------------------------------------------------------------
 def api_reference_markdown() -> str:
     """Markdown for every route of the control API, from the app's OpenAPI schema."""
-    from unittest.mock import MagicMock
-
     from .. import VERSION
-    from ..control.api import create_app
 
-    schema = create_app(MagicMock()).openapi()
+    schema = _mounted_control_app().openapi()
     out = ["# API reference", "",
            f"**Assumes:** you know HTTP and JSON, you have a role or a token that may call the endpoint, and you use "
-           f"control API version {VERSION}. This page is generated from the code of `aiflow/v4/control/api.py` when "
+           f"control API version {VERSION}. This page is generated from the code in the mounted FastAPI control app "
+           "when "
            "the documentation site is built; do not edit it by hand.", "",
            "Console routes need a signed-in session when console login is on. Node, worker, reviewer and owner "
            "routes need their bearer token (see [Security](../admin/security.md)). Examples never contain a real "
@@ -185,13 +197,36 @@ def _inline(text: str, page: str) -> str:
     text = re.sub(r"(?<![\w*])\*([^*\s][^*]*)\*(?![\w*])", r"<em>\1</em>", text)
 
     def link(m):
-        target = m.group(2)
-        if not re.match(r"[a-z]+:|#|/", target):
-            target = re.sub(r"\.md(#|$)", r".html\1", target)
+        raw_target = m.group(2)
+        target = _decode_link_target(raw_target)
+        if not _safe_link_target(raw_target):
+            return m.group(1)
+        parsed = urlsplit(target)
+        if not parsed.scheme and not target.startswith(("#", "/")):
+            target = re.sub(r"\.md(?=($|[?#]))", ".html", target)
         return f'<a href="{html.escape(target)}">{m.group(1)}</a>'
 
     text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, text)
     return re.sub(r"\0(\d+)\0", lambda m: codes[int(m.group(1))], text)
+
+
+def _decode_link_target(target: str) -> str:
+    """Undo HTML escaping from `_inline` and decode entities supplied in the Markdown source."""
+    return html.unescape(html.unescape(target)).strip()
+
+
+def _safe_link_target(raw_target: str) -> bool:
+    """Accept safe external schemes and same-site relative URLs, never active or network-path URLs."""
+    target = _decode_link_target(raw_target)
+    if not target or "\\" in target or any(ord(char) < 0x20 or ord(char) == 0x7F for char in target):
+        return False
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return False
+    if parsed.scheme:
+        return parsed.scheme.lower() in SAFE_LINK_SCHEMES
+    return not parsed.netloc and not target.startswith("//")
 
 
 def render_markdown(source: str, page: str = "") -> tuple[str, str]:
@@ -279,13 +314,18 @@ def collect_pages(guide: Path = GUIDE, with_api: bool = True) -> dict[str, str]:
 
 
 def check_links(pages: dict[str, str]) -> list[str]:
-    """Broken relative links between pages (and unknown anchors are ignored)."""
+    """Unsafe targets and broken relative links between pages (unknown anchors are ignored)."""
     errors = []
     for name, source in pages.items():
         for target in re.findall(r"\]\(([^)\s]+)\)", re.sub(r"```.*?```", "", source, flags=re.S)):
-            if re.match(r"[a-z]+:|#|/", target):
+            if not _safe_link_target(target):
+                errors.append(f"{name}: unsafe link target {target}")
                 continue
-            ref = os.path.normpath((Path(name).parent / target.split("#")[0]).as_posix())
+            target = _decode_link_target(target)
+            parsed = urlsplit(target)
+            if parsed.scheme or target.startswith("/") or not parsed.path:
+                continue
+            ref = os.path.normpath((Path(name).parent / parsed.path).as_posix())
             if ref not in pages:
                 errors.append(f"{name}: broken link {target}")
     return errors
@@ -341,12 +381,8 @@ def site_dir() -> Path | None:
 def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
     """Repo-relative API module -> method and route contract -> source spans of its handlers.
     Derived from the running app, so a new route module is watched without editing this file."""
-    from unittest.mock import MagicMock
-
-    from ..control.api import create_app
-
     found: dict[str, dict[str, list[tuple[int, int]]]] = {}
-    for route in create_app(MagicMock()).routes:
+    for route in _mounted_control_app().routes:
         endpoint = getattr(route, "endpoint", None)
         code = getattr(endpoint, "__code__", None)
         path = getattr(route, "path", "")
@@ -535,6 +571,9 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
         texts = [read(f) for f in docs]
         for f in api_files:
             if f not in routes and not changed_routes.get(f):
+                continue
+            if f in changed_routes and not changed_routes[f]:
+                # Route-level diffing succeeded and found no changed handler, registration or schema contract.
                 continue
             expected = changed_routes.get(f, routes.get(f, set()))
             missing = {contract for contract in expected if not any(_mentions(text, {contract}) for text in texts)}

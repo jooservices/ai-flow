@@ -105,6 +105,59 @@ def test_build_fails_on_a_broken_link(tmp_path):
         docsite.build(tmp_path / "out", guide=guide, with_api=False)
 
 
+def test_markdown_links_allow_safe_targets_and_reject_active_schemes(tmp_path):
+    _, rendered = docsite.render_markdown(
+        "[external](https://example.test/docs) [email](mailto:help@example.test) "
+        "[relative](screens/cc.md) [unsafe](javascript:alert) "
+        "[encoded](java&#x73;cript:alert)"
+    )
+    assert 'href="https://example.test/docs"' in rendered
+    assert 'href="mailto:help@example.test"' in rendered
+    assert 'href="screens/cc.html"' in rendered
+    assert "javascript:" not in rendered
+    assert "java&#x73;cript:" not in rendered
+    assert rendered.count("<a href=") == 3  # unsafe links render as inert label text
+
+    guide = tmp_path / "guide"
+    guide.mkdir()
+    (guide / "index.md").write_text("# Home\n\n**Assumes:** reader.\n\n[unsafe](javascript:alert)\n")
+    with pytest.raises(ValueError, match="unsafe link target"):
+        docsite.build(tmp_path / "out", guide=guide, with_api=False)
+
+
+def test_api_route_discovery_uses_the_fully_mounted_control_app():
+    ui_module = "aiflow/v4/control/ui/__init__.py"
+    contracts = docsite.api_route_contract_spans()[ui_module]
+    assert "GET /v1/tickets/{key}" in contracts
+    assert "GET /v1/services" in contracts
+    reference = docsite.api_reference_markdown()
+    assert "GET /v1/tickets/{key}" in reference
+    assert "GET /v1/services" in reference
+
+
+def test_unchanged_ui_api_routes_are_not_reported_as_removed(monkeypatch):
+    module = "aiflow/v4/control/ui/__init__.py"
+    source = (ROOT / module).read_text()
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result(source)
+        # An unrelated edit near the top of the module leaves both endpoint decorators unchanged.
+        return Result("@@ -1,1 +1,1 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    changed = docsite.changed_api_routes("origin/develop", [module])
+    assert changed == {module: set()}
+    assert docsite.documentation_gaps([module, "docs/guide/screens/cc.md"], routes=docsite.api_routes_by_module(),
+                                      changed_routes=changed) == []
+
+
 def test_ci_check_fails_without_documentation_and_passes_with_it():
     ui = "aiflow/v4/control/ui/console.html"
     api = "aiflow/v4/control/api.py"

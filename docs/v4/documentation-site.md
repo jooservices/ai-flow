@@ -11,7 +11,7 @@ The product documentation lives in `docs/guide/`, is built into a static site by
 | One page per console screen | `docs/guide/screens/<view>.md` |
 | Administrator guide: install, upgrade, backup, security | `docs/guide/admin/` |
 | Runbooks, one page per incident kind | `docs/guide/runbooks/<kind>.md` |
-| API reference | generated from the FastAPI routes in `control/api.py`; never written by hand |
+| API reference | generated from the mounted FastAPI control app, including JSON routes mounted with the console; never written by hand |
 
 Every page states who it is for and what it assumes in a line that starts with `**Assumes:**` (a test enforces it).
 Keep pages in plain language, and never put a secret, a token or the content of `/etc/aiflow` in them.
@@ -31,7 +31,8 @@ JavaScript renderers such as `renderProjects` to their screen pages. Shared Help
 plumbing map to every screen; an edit to one hint maps to that screen. The renderer map lives in
 `SCREEN_RENDERER_VIEWS` in `aiflow/v4/core/docsite.py`. If a UI change cannot be mapped, the check fails until its
 screen mapping is added; an unrelated screen page cannot satisfy it. A change in any control module that registers
-`/v1/...` routes (found from the app's routes, so `api.py`, `login.py` and `jira_connect.py` today) needs a changed
+`/v1/...` routes (found from the fully mounted app, including `api.py`, `login.py`, `jira_connect.py` and
+`ui/__init__.py`) needs a changed
 page in `docs/guide/` or `docs/v4/` that names one of that module's routes. An unrelated documentation edit does not
 count.
 
@@ -41,7 +42,8 @@ count.
 uv run --frozen python -m aiflow.v4.core.docsite build --out build/docs-site --version vX.Y.Z
 ```
 
-The build fails on a broken link between pages. In the release workflow `deploy/v4/ci/add-docs-site.sh VERSION
+The build fails on an unsafe link scheme or a broken relative link between pages. Relative paths, same-site root paths,
+in-page anchors and external `http`, `https` and `mailto` links are accepted. In the release workflow `deploy/v4/ci/add-docs-site.sh VERSION
 TARBALL` adds `docs-site/` to the tarball before it is checksummed and signed. The control image builds the same
 site to `/app/docs-site`.
 

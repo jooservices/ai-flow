@@ -20,7 +20,7 @@ import uuid
 import html
 import json
 import httpx
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from pydantic import BaseModel, Field
 
 from .. import VERSION
-from ..core.controlrepo import ControlRepo, epic_for_ticket
+from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
 from ..core import backups as control_backups
 from ..core.fencing import Leases
 from ..core.settings import Settings
@@ -571,9 +571,67 @@ class JoinCommandBody(BaseModel):
     project: str = Field(default="", max_length=32)
 
 
+class ManagedAccountCreateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    provider: Literal["claude", "codex", "opencode", "grok"]
+    sessions: int = Field(ge=1, le=8)
+    jobs: list[Literal["develop", "verify", "intake", "master"]] = Field(min_length=1, max_length=4)
+
+
+class ManagedAccountUpdateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    sessions: int | None = Field(default=None, ge=1, le=8)
+    jobs: list[Literal["develop", "verify", "intake", "master"]] | None = Field(default=None, min_length=1,
+                                                                                  max_length=4)
+    action: Literal["pause", "resume"] | None = None
+
+
+class ConfirmBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    confirm: bool = False
+
+
+class ManagedAccountSignInStatusBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    request_id: str = Field(min_length=1, max_length=64)
+    status: Literal["starting", "waiting", "completed", "failed"]
+    sign_in_url: str = Field(default="", max_length=2048)
+    code: str = Field(default="", max_length=80)
+    error: str = Field(default="", max_length=300)
+
+
 # --- app --------------------------------------------------------------------------------------------------
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
+
+    configured_repo = getattr(ctx, "_configured_repo", ctx.repo)
+    ctx._configured_repo = configured_repo
+
+    def runtime_repo() -> ControlRepo:
+        """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
+        base = configured_repo()
+        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
+        removed_ids = {row["id"] for row in ctx.db.all(
+            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
+        managed = [row for row in ctx.db.all(
+            "SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")
+                   if row["node"] not in removed_nodes]
+        if not managed and not removed_nodes and not removed_ids:
+            return base
+        managed_ids = {row["id"] for row in managed}
+        accounts = {account.id: account for account in base.accounts
+                    if account.id not in managed_ids and account.id not in removed_ids
+                    and account.node not in removed_nodes}
+        for row in managed:
+            accounts[row["id"]] = Account(
+                id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
+                roles=list(row["roles"] or []), parallel=int(row["parallel"]),
+                explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
+        return replace(base, accounts=list(accounts.values()))
+
+    # The registry is the live source for screen-managed accounts. Configured accounts stay supported,
+    # while the console can add and edit account assignments without a control-repo file change.
+    ctx.repo = runtime_repo
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -587,13 +645,21 @@ def create_app(ctx: Ctx) -> FastAPI:
     app.state.ctx = ctx
 
     def sync_accounts() -> None:
-        repo = ctx.repo()
+        repo = configured_repo()
+        removed = {row["id"] for row in ctx.db.all(
+            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
+        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
         for a in repo.accounts:
+            if a.id in removed or a.node in removed_nodes:
+                continue
             ctx.db.run(
                 "INSERT INTO accounts (id, provider, node, tier, roles) VALUES (%s,%s,%s,%s,%s)"
                 " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
                 " roles=EXCLUDED.roles, updated_at=now()", (a.id, a.provider, a.node, a.tier, a.roles))
         for n in repo.nodes.values():
+            removed_node = ctx.db.one("SELECT removed_at FROM nodes WHERE name=%s", (n.name,))
+            if removed_node and removed_node["removed_at"]:
+                continue
             # Keep the IP a node reported at join: a restart must not replace where it was last seen with
             # the control repo value. Only a first insert (no join yet) takes the configured address.
             ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total, projects) VALUES (%s,%s,%s,%s,%s)"
@@ -617,7 +683,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- auth -----------------------------------------------------------------------------------------------
     def node_auth(authorization: str = Header(default="")) -> str:
         token = authorization.removeprefix("Bearer ").strip()
-        row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> ''", (h(token),)) if token else None
+        row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> '' AND removed_at IS NULL",
+                         (h(token),)) if token else None
         if not row:
             raise HTTPException(401, "unknown node token")
         return row["name"]
@@ -1899,9 +1966,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         dynamic = name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
-        existing = ctx.db.one("SELECT name,status FROM nodes WHERE name=%s", (name,))
-        if existing and dynamic and existing["status"] == "online":
-            raise HTTPException(409, "an online node already uses this name")
+        existing = ctx.db.one("SELECT name,removed_at FROM nodes WHERE name=%s AND token_hash<>''"
+                              " AND last_heartbeat > now()-interval '75 seconds'", (name,))
+        if existing and not existing["removed_at"]:
+            raise HTTPException(409, "a live node already uses this name")
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
@@ -1912,8 +1980,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                                   " RETURNING expires_at",
                                   (h(token), name, role, project, dynamic)).fetchone()
             # Register a pending dynamic node so Command Center can show it before its first heartbeat.
-            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic) VALUES (%s,%s,'joined',%s,%s)"
-                         " ON CONFLICT (name) DO NOTHING", (name, role, [project], dynamic))
+            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic,accepting_work,removed_at)"
+                         " VALUES (%s,%s,'joined',%s,%s,true,NULL) ON CONFLICT (name) DO UPDATE"
+                         " SET removed_at=NULL,accepting_work=true WHERE nodes.removed_at IS NOT NULL",
+                         (name, role, [project], dynamic))
         return token, issued["expires_at"]
 
     @app.post("/v1/nodes/join-tokens")
@@ -1953,7 +2023,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " SELECT node_name,%s,role,%s,'joined',ARRAY[project],dynamic FROM grant_row"
                 " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash,"
                 " ip=coalesce(nullif(EXCLUDED.ip,''),nodes.ip), role=EXCLUDED.role,projects=EXCLUDED.projects,"
-                " dynamic=EXCLUDED.dynamic,status='joined'"
+                " dynamic=EXCLUDED.dynamic,status='joined',accepting_work=true,removed_at=NULL"
                 " RETURNING name,role,projects,dynamic",
                 (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()
             if row:
@@ -1972,8 +2042,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
-        prev = ctx.db.one("SELECT status FROM nodes WHERE name=%s", (node,))
-        ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
+        prev = ctx.db.one("SELECT status,accepting_work FROM nodes WHERE name=%s", (node,))
+        ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
+                   " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
@@ -1984,9 +2055,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                        (expires_at, account_id, node))
         from .sa import update_slot_pressure
         update_slot_pressure(ctx)
-        ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
+        heartbeat_status = "online" if not prev or prev.get("accepting_work", True) else "draining"
+        ctx.events.ship("node.heartbeat", node=node, outcome=heartbeat_status, slots_total=body.slots_total,
                         slots_used=body.slots_used, release_version=body.release_version, metrics=body.metrics)
-        if prev and prev["status"] != "online":
+        if prev and prev["status"] != "online" and prev.get("accepting_work", True):
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
             from .incidents import close_incident
             close_incident(ctx, "node_down", node, "heartbeats are back")
@@ -2013,7 +2085,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " cooldown_since=CASE WHEN status='cooldown' THEN coalesce(cooldown_since,now()) ELSE NULL END"
                        " WHERE id=%s AND node=%s", (acc, node))
         repo = ctx.repo()
-        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
+        sign_in_requests = ctx.db.all(
+            "SELECT id,provider,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')"
+            " ORDER BY created_at,id", (node,))
+        signing_in = {row["id"] for row in sign_in_requests}
+        assigned = [a for a in repo.accounts_on(node) if not a.paused and a.id not in signing_in]
+        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in assigned
                      for i in range(1, max(1, int(a.parallel or 1)) + 1)]
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
@@ -2024,7 +2102,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
-        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+        return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
+                            "sign_ins": [{"account": row["id"], "provider": row["provider"],
+                                          "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
+                                         for row in sign_in_requests],
                             "release": release,
                             "projects": node_projects,
                             "project_stacks": project_stacks,
@@ -2134,6 +2215,282 @@ def create_app(ctx: Ctx) -> FastAPI:
                         reason="one-time token expires in five minutes", data={"actor": user.subject})
         return {"node": name, "role": role, "project": project, "command": command,
                 "expires_at": expires_at.isoformat(), "expires_in_s": 300}
+
+    JOB_ROLES = {"develop": "dev", "verify": "verify", "intake": "intake_refiner", "master": "master"}
+    def account_jobs(roles: list[str]) -> list[str]:
+        return [job for job, role in JOB_ROLES.items() if role in roles]
+
+    def lock_machine_capacity(connection, name: str) -> None:
+        """Serialize all account session-budget checks for this machine across API processes."""
+        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                           (f"aiflow4-machine-sessions:{name}",))
+
+    def machine_capacity(repo: ControlRepo, name: str) -> int:
+        return sum(max(1, int(account.parallel or 1)) for account in repo.accounts_on(name))
+
+    def save_managed_account(account: Account, roles: list[str], sessions: int, paused: bool,
+                             sign_in_url: str = "", sign_in_code: str = "",
+                             expires_at: datetime | None = None, connection=None) -> None:
+        sql = (
+            "INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,parallel,explicit_only,paused,"
+            "sign_in_url,sign_in_code,sign_in_expires_at,sign_in_started_at,removed_at)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s<>'' THEN now() ELSE NULL END,NULL)"
+            " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider,node=EXCLUDED.node,tier=EXCLUDED.tier,"
+            "roles=EXCLUDED.roles,parallel=EXCLUDED.parallel,explicit_only=EXCLUDED.explicit_only,paused=EXCLUDED.paused,"
+            "sign_in_url=CASE WHEN EXCLUDED.sign_in_url='' THEN managed_ai_accounts.sign_in_url"
+            " ELSE EXCLUDED.sign_in_url END,sign_in_code=CASE WHEN EXCLUDED.sign_in_code=''"
+            " THEN managed_ai_accounts.sign_in_code ELSE EXCLUDED.sign_in_code END,"
+            "sign_in_expires_at=coalesce(EXCLUDED.sign_in_expires_at,managed_ai_accounts.sign_in_expires_at),"
+            "sign_in_started_at=CASE WHEN EXCLUDED.sign_in_code<>'' THEN now()"
+            " ELSE managed_ai_accounts.sign_in_started_at END,"
+            "removed_at=NULL,updated_at=now()")
+        params = (account.id, account.provider, account.node, account.tier, roles, sessions, account.explicit_only,
+                  paused, sign_in_url, sign_in_code, expires_at, sign_in_code)
+        if connection is None:
+            ctx.db.run(sql, params)
+        else:
+            connection.execute(sql, params)
+
+    @app.post("/v1/machines/{name}/accounts")
+    def add_managed_account(name: str, body: ManagedAccountCreateBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="add", node=name)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
+            raise HTTPException(422, "invalid machine name")
+        roles = [JOB_ROLES[job] for job in dict.fromkeys(body.jobs)]
+        request_id = str(uuid.uuid4())
+        with ctx.db.pool.connection() as connection:
+            lock_machine_capacity(connection, name)
+            node = connection.execute("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)).fetchone()
+            if not node:
+                audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
+                         "machine is not registered", {})
+                raise HTTPException(404, "machine is not registered")
+            repo = ctx.repo()
+            capacity = machine_capacity(repo, name)
+            if capacity + body.sessions > 8:
+                audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
+                         "machine session limit is eight",
+                         {"current_sessions": capacity, "requested_sessions": body.sessions})
+                raise HTTPException(422, "a machine can run at most 8 sessions")
+            existing_ids = {account.id for account in repo.accounts}
+            existing_ids.update(row["id"] for row in connection.execute(
+                "SELECT id FROM managed_ai_accounts").fetchall())
+            index = 1
+            while f"{body.provider}-{name}-{index:02d}" in existing_ids:
+                index += 1
+            account_id = f"{body.provider}-{name}-{index:02d}"
+            connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,parallel,paused,"
+                               "sign_in_request_id,sign_in_status,sign_in_started_at)"
+                               " VALUES (%s,%s,%s,'middle',%s,%s,false,%s,'queued',now())",
+                               (account_id, body.provider, name, roles, body.sessions, request_id))
+            connection.execute("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+                               " VALUES (%s,%s,%s,'middle',%s,'signed_out')",
+                               (account_id, body.provider, name, roles))
+            audit_in(connection, "ai-account", "add", account_id, "", None, user.subject, True,
+                     "account added; sign-in pending", {"node": name, "provider": body.provider,
+                                                         "sessions": body.sessions, "jobs": account_jobs(roles)})
+        ctx.events.emit("account.added", account=account_id, provider=body.provider, node=name,
+                        outcome="sign_in_queued", reason="provider sign-in started on the machine")
+        return {"account": account_id, "node": name, "provider": body.provider, "sessions": body.sessions,
+                "jobs": account_jobs(roles), "status": "queued", "sign_in_url": "", "code": ""}
+
+    @app.patch("/v1/accounts/{account_id}")
+    def update_managed_account(account_id: str, body: ManagedAccountUpdateBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="update", node=account_id)
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        if body.sessions is None and body.jobs is None and body.action is None:
+            raise HTTPException(422, "choose sessions, jobs, pause, or resume")
+        with ctx.db.pool.connection() as connection:
+            lock_machine_capacity(connection, account.node)
+            repo = ctx.repo()
+            account = repo.account(account_id)
+            if not account:
+                raise HTTPException(404, "AI account is not registered")
+            sessions = body.sessions if body.sessions is not None else max(1, int(account.parallel or 1))
+            total = machine_capacity(repo, account.node)
+            if total - max(1, int(account.parallel or 1)) + sessions > 8:
+                audit_in(connection, "ai-account", "update", account_id, "", None, user.subject, False,
+                         "machine session limit is eight", {"current_sessions": total, "requested_sessions": sessions})
+                raise HTTPException(422, "a machine can run at most 8 sessions")
+            roles = ([JOB_ROLES[job] for job in dict.fromkeys(body.jobs)] if body.jobs is not None
+                     else list(account.roles or []))
+            paused = body.action == "pause" if body.action else account.paused
+            save_managed_account(account, roles, sessions, paused, connection=connection)
+            connection.execute("UPDATE accounts SET roles=%s,updated_at=now() WHERE id=%s", (roles, account_id))
+            action = body.action or "update"
+            payload = {"sessions": sessions, "jobs": account_jobs(roles), "paused": paused}
+            audit_in(connection, "ai-account", action, account_id, "", None, user.subject, True, "updated", payload)
+        ctx.events.emit("account.management_changed", account=account_id, node=account.node,
+                        outcome=action, reason="account settings updated", data=payload)
+        return {"account": account_id, **payload}
+
+    @app.post("/v1/accounts/{account_id}/sign-in")
+    def restart_account_sign_in(account_id: str, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="sign_in_again", node=account_id)
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        if ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1", (account_id,)):
+            raise HTTPException(409, "account has an active session; wait for it to finish before signing in again")
+        request_id = str(uuid.uuid4())
+        with ctx.db.pool.connection() as connection:
+            save_managed_account(account, list(account.roles or []), max(1, int(account.parallel or 1)),
+                                 account.paused, connection=connection)
+            connection.execute("UPDATE managed_ai_accounts SET sign_in_request_id=%s,sign_in_status='queued',"
+                               "sign_in_url='',sign_in_code='',sign_in_expires_at=NULL,sign_in_error='',"
+                               "sign_in_started_at=now(),updated_at=now() WHERE id=%s",
+                               (request_id, account_id))
+            connection.execute("UPDATE accounts SET status='signed_out',last_error='',updated_at=now() WHERE id=%s",
+                               (account_id,))
+            audit_in(connection, "ai-account", "sign_in_again", account_id, "", None, user.subject, True,
+                     "provider sign-in queued on the machine", {"provider": account.provider,
+                                                                  "node": account.node})
+        ctx.events.emit("account.sign_in_started", account=account_id, provider=account.provider,
+                        node=account.node, outcome="queued", reason="owner requested provider sign-in again")
+        return {"account": account_id, "status": "queued", "sign_in_url": "", "code": ""}
+
+    @app.get("/v1/accounts/{account_id}/sign-in")
+    def account_sign_in_details(account_id: str, request: Request) -> dict:
+        console_user(request, {"nodes.manage"})
+        row = ctx.db.one("SELECT node,provider,sign_in_status,sign_in_url,sign_in_code,sign_in_error,"
+                         "sign_in_expires_at FROM managed_ai_accounts"
+                         " WHERE id=%s AND removed_at IS NULL AND sign_in_status<>'idle'", (account_id,))
+        if not row:
+            raise HTTPException(404, "no active sign-in link for this account")
+        return {"account": account_id, "node": row["node"], "provider": row["provider"],
+                "status": row["sign_in_status"], "sign_in_url": row["sign_in_url"],
+                "code": row["sign_in_code"], "error": row["sign_in_error"],
+                "expires_at": row["sign_in_expires_at"].isoformat() if row["sign_in_expires_at"] else None}
+
+    @app.post("/v1/accounts/{account_id}/sign-in/status")
+    def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
+                                      node: str = Depends(node_auth)) -> dict:
+        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+                         " WHERE id=%s AND removed_at IS NULL", (account_id,))
+        if not row or row["node"] != node:
+            raise HTTPException(404, "account sign-in request is not assigned to this machine")
+        if row["sign_in_request_id"] != body.request_id:
+            raise HTTPException(409, "sign-in request has been replaced")
+        if body.sign_in_url:
+            try:
+                parsed = urlsplit(body.sign_in_url)
+                _ = parsed.port
+            except ValueError as exc:
+                raise HTTPException(422, "provider sign-in URL is invalid") from exc
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise HTTPException(422, "provider sign-in URL must be an HTTPS URL")
+        if body.code and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{3,79}", body.code):
+            raise HTTPException(422, "provider sign-in code has an invalid format")
+        if body.status == "waiting" and not body.sign_in_url:
+            raise HTTPException(422, "provider sign-in must supply its authorization URL")
+        with ctx.db.pool.connection() as connection:
+            updated = connection.execute(
+                "UPDATE managed_ai_accounts SET sign_in_status=%s,"
+                "sign_in_url=CASE WHEN %s<>'' THEN %s ELSE sign_in_url END,"
+                "sign_in_code=CASE WHEN %s<>'' THEN %s ELSE sign_in_code END,"
+                "sign_in_error=%s,updated_at=now() WHERE id=%s AND node=%s AND sign_in_request_id=%s"
+                " AND removed_at IS NULL RETURNING id",
+                (body.status, body.sign_in_url, body.sign_in_url, body.code, body.code,
+                 body.error[:300], account_id, node, body.request_id)).fetchone()
+            if not updated:
+                raise HTTPException(409, "sign-in request has been replaced")
+        return {"account": account_id, "status": body.status}
+
+    @app.post("/v1/accounts/{account_id}/sign-in/complete")
+    def complete_account_sign_in(account_id: str, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="sign_in_complete",
+                            node=account_id)
+        with ctx.db.pool.connection() as connection:
+            row = connection.execute(
+                "SELECT m.node,m.provider,m.sign_in_status,a.status,a.last_probe_at,m.sign_in_started_at"
+                " FROM managed_ai_accounts m JOIN accounts a ON a.id=m.id"
+                " WHERE m.id=%s AND m.removed_at IS NULL AND m.sign_in_status<>'idle'"
+                " FOR UPDATE OF m", (account_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "no pending sign-in for this account")
+            if row["sign_in_status"] != "completed":
+                raise HTTPException(409, "provider authorization has not completed on the machine")
+            if row["status"] not in ("idle", "working") or not row["last_probe_at"] or not row["sign_in_started_at"] \
+                    or row["last_probe_at"] < row["sign_in_started_at"]:
+                raise HTTPException(409, "the machine has not reported a successful account check since sign-in started")
+            connection.execute("UPDATE managed_ai_accounts SET sign_in_url='',sign_in_code='',sign_in_error='',"
+                               "sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+                               "sign_in_started_at=NULL,updated_at=now() WHERE id=%s",
+                               (account_id,))
+            audit_in(connection, "ai-account", "sign_in_complete", account_id, "", None, user.subject, True,
+                     "provider account check succeeded", {"node": row["node"], "provider": row["provider"]})
+        ctx.events.emit("account.sign_in_completed", account=account_id, provider=row["provider"],
+                        node=row["node"], outcome="ready", reason="owner confirmed the successful provider check")
+        return {"account": account_id, "signed_in": True}
+
+    @app.delete("/v1/accounts/{account_id}")
+    def remove_managed_account(account_id: str, body: ConfirmBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="remove", node=account_id)
+        if not body.confirm:
+            audit("ai-account", "remove", account_id, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm account removal")
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'", (account_id,))
+        if active and active["n"]:
+            raise HTTPException(409, "account has an active session; wait for it to finish before removing it")
+        with ctx.db.pool.connection() as connection:
+            connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,removed_at)"
+                               " VALUES (%s,%s,%s,%s,%s,now()) ON CONFLICT (id) DO UPDATE SET removed_at=now(),"
+                               "updated_at=now()", (account.id, account.provider, account.node, account.tier,
+                                                     account.roles))
+            connection.execute("DELETE FROM accounts WHERE id=%s", (account_id,))
+            audit_in(connection, "ai-account", "remove", account_id, "", None, user.subject, True,
+                     "account removed from machine", {"node": account.node})
+        ctx.events.emit("account.removed", account=account_id, provider=account.provider, node=account.node,
+                        outcome="removed", reason="removed from Machines and AI screen")
+        return {"account": account_id, "removed": True}
+
+    @app.put("/v1/nodes/{name}/work-acceptance")
+    def set_node_work_acceptance(name: str, body: ConfirmBody, accepting_work: bool, request: Request) -> dict:
+        action = "resume_work" if accepting_work else "stop_taking_work"
+        user = console_user(request, {"nodes.manage"}, target="node", action=action, node=name)
+        if not accepting_work and not body.confirm:
+            audit("node", action, name, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm stopping new work on this machine")
+        row = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        if not row:
+            raise HTTPException(404, "machine is not registered")
+        ctx.db.run("UPDATE nodes SET accepting_work=%s,status=CASE WHEN last_heartbeat > now()-interval '75 seconds'"
+                   " THEN CASE WHEN %s THEN 'online' ELSE 'draining' END ELSE status END WHERE name=%s",
+                   (accepting_work, accepting_work, name))
+        audit("node", action, name, "", None, user.subject, True,
+              "accepting new work" if accepting_work else "stopping new work", {})
+        ctx.events.emit("node.work_acceptance_changed", node=name, outcome=action,
+                        reason="accepting new work" if accepting_work else "new work disabled")
+        return {"node": name, "accepting_work": accepting_work}
+
+    @app.delete("/v1/nodes/{name}")
+    def remove_managed_node(name: str, body: ConfirmBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="node", action="remove", node=name)
+        if not body.confirm:
+            audit("node", "remove", name, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm machine removal")
+        node = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        if not node:
+            raise HTTPException(404, "machine is not registered")
+        active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'", (name,))
+        if active and active["n"]:
+            raise HTTPException(409, "machine has active sessions; wait for them to finish before removing it")
+        with ctx.db.pool.connection() as connection:
+            connection.execute("UPDATE nodes SET removed_at=now(),accepting_work=false,token_hash='',status='offline'"
+                               " WHERE name=%s", (name,))
+            connection.execute("UPDATE managed_ai_accounts SET removed_at=now(),updated_at=now() WHERE node=%s",
+                               (name,))
+            connection.execute("DELETE FROM accounts WHERE node=%s", (name,))
+            connection.execute("UPDATE node_join_tokens SET used_at=now() WHERE node_name=%s AND used_at IS NULL",
+                               (name,))
+            audit_in(connection, "node", "remove", name, "", None, user.subject, True, "machine removed", {})
+        ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
+        return {"node": name, "removed": True}
 
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
@@ -2369,11 +2726,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(account_id)
         if not acc or acc.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if account_master_paused(account_id):
+        if acc.paused or account_master_paused(account_id):
             return []
         if ctx.leases.cooling(account_id):
             return []
-        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
+                              " AND removed_at IS NULL", (node,)) or {}
+        if not node_row.get("accepting_work", True):
+            return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
         running_by_project = {row["project"]: int(row["count"]) for row in
@@ -2503,7 +2863,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         account = repo.account(account_id)
         if not account or account.node != node:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if "master" not in (account.roles or []) or not master_ready(account_id, node):
+        if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
         if (account_id, "master") in role_health.disabled_roles(ctx.db):  # no ticket to try on: probation uses triage
             return None
@@ -2711,6 +3071,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
+        node_row = ctx.db.one("SELECT accepting_work FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
+        if not node_row or not node_row["accepting_work"]:
+            return {"versions": [], "reason": "machine is not accepting new work"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
         return {"versions": version_release.candidates(ctx, account, node)}
@@ -2730,7 +3093,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "project is not enabled for version releases")
         if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
-        node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}
+        if not node_row.get("accepting_work", False):
+            raise HTTPException(409, "machine is not accepting new work")
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
             raise HTTPException(403, "project is not assigned to this node")
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)

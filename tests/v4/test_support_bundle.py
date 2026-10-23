@@ -88,6 +88,25 @@ def test_bundle_omits_untrusted_logger_name_from_timestamped_log(ctx):
     assert not support_bundle.file_findings("logs/control-service.log", log)
 
 
+def test_bundle_does_not_trust_separator_or_arbitrary_log_field_names(ctx):
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord(
+        "aiflow4.test", logging.INFO, __file__, 1,
+        "ordinary message\n--- jane.doe ---\n--- control-log-1 ---\nrequest jane.doe=1", (), None,
+    ))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=logs)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        log = bundle.read("logs/control-service.log").decode("utf-8")
+
+    assert "jane.doe" not in log
+    assert "--- jane.doe ---" not in log
+    assert "--- control-log-1 ---" not in log
+    assert "jane.doe=1" not in log
+    assert inventory["scan"] == "passed"
+    assert not support_bundle.file_findings("logs/control-service.log", log)
+
+
 def test_machine_names_survive_in_structured_files_while_log_names_stay_redacted(ctx):
     for name in ("wsl", "mac-mini", "wsl-1"):
         ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
@@ -418,6 +437,7 @@ def test_persistent_control_logs_are_filtered_to_the_last_24_hours(tmp_path, ctx
         log_text = bundle.read("logs/control-service.log").decode()
     assert "n=2" in log_text
     assert "n=1" not in log_text
+    assert "--- control-log-1 ---" in log_text
 
 
 def test_control_loops_installs_support_log_capture(tmp_path, ctx, monkeypatch):

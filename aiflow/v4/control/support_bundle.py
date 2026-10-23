@@ -265,14 +265,14 @@ def control_log_buffer(log_dir: str = "", source: str = "control") -> SupportLog
     return _control_log_buffer
 
 
-def _persistent_control_logs(directory: str, now: datetime) -> str:
+def _persistent_control_logs(directory: str, now: datetime) -> list[list[str]]:
     if not directory:
-        return ""
+        return []
     root = Path(directory)
     if not root.is_dir():
-        return ""
+        return []
     cutoff = now - RETENTION
-    output: list[str] = []
+    output: list[list[str]] = []
     for path in sorted(root.glob("*.log*")):
         if path.is_symlink() or not path.is_file() or not re.fullmatch(r"[A-Za-z0-9_.-]+\.log(?:\.\d{4}-\d{2}-\d{2})?", path.name):
             continue
@@ -297,9 +297,8 @@ def _persistent_control_logs(directory: str, now: datetime) -> str:
             if current_line_is_recent:
                 recent.append(line)
         if recent:
-            output.append(f"--- {path.name} ---")
-            output.extend(recent)
-    return "\n".join(output) + ("\n" if output else "")
+            output.append(recent)
+    return output
 
 
 def _run_log_key(ctx, run_id: str) -> str:
@@ -334,6 +333,12 @@ _LOG_PREFIX = re.compile(
 _LOG_PAIR = re.compile(
     r"(?<![\w.-])(?P<key>[A-Za-z_][\w.]{0,40})=(?P<value>\d{1,9}(?:\.\d{1,6})?|true|false|True|False|None|"
     r"[A-Z][A-Z0-9_]{1,31}-\d{1,9})(?![\w.@-])")
+# Only export known diagnostic fields from free-form log messages. Arbitrary field names can
+# themselves contain personal data (for example, ``jane.doe=1``).
+_TRUSTED_LOG_KEYS = frozenset({
+    "attempt", "attempts", "bytes", "code", "count", "duration_ms", "elapsed_ms", "fence",
+    "items", "n", "retry", "retries", "run", "status", "status_code", "total", "tries",
+})
 FREEFORM = "[REDACTED_FREEFORM]"
 
 
@@ -347,14 +352,12 @@ def structured_log_text(text: str) -> str:
     for line in text.splitlines():
         if not line.strip():
             continue
-        if re.fullmatch(r"--- [A-Za-z0-9_.-]+ ---", line):
-            out.append(line)
-            continue
         head = _LOG_PREFIX.match(line)
         rest = line[head.end():] if head else line
         parts = [part for part in (head.group("stamp"), head.group("level")) if part] if head else []
         pairs = [f"{m.group('key')}={m.group('value')}" for m in _LOG_PAIR.finditer(rest)
-                 if not re.fullmatch(_SECRET_NAME, m.group("key"), re.I)]
+                 if m.group("key").lower() in _TRUSTED_LOG_KEYS
+                 and not re.fullmatch(_SECRET_NAME, m.group("key"), re.I)]
         out.append(" ".join(parts + [FREEFORM] + pairs))
     return "\n".join(out) + ("\n" if out else "")
 
@@ -362,6 +365,17 @@ def structured_log_text(text: str) -> str:
 def _safe_log(text: str) -> str:
     capped, _ = cap_log_bytes(text)
     return cap_log_bytes(sanitize_text(structured_log_text(capped)))[0]
+
+
+def _safe_persistent_logs(sections: list[list[str]]) -> str:
+    """Reduce persistent logs and add generic separators that cannot contain source data."""
+    output: list[str] = []
+    for index, lines in enumerate(sections, 1):
+        # These headers are generated here; separator-shaped text in a log is always reduced as free form.
+        output.append(f"--- control-log-{index} ---")
+        output.extend(structured_log_text("\n".join(lines)).splitlines())
+    text = "\n".join(output) + ("\n" if output else "")
+    return cap_log_bytes(sanitize_text(text))[0]
 
 
 def _safe_json(value: Any) -> str:
@@ -411,9 +425,12 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         "incidents.json": _safe_json(incident_data).encode("utf-8"),
     }
 
-    log_text = _persistent_control_logs(ctx.settings.support_log_dir, now) or log_buffer.text()
-    log_text = log_text or "No control service log records were captured in the last 24 hours.\n"
-    safe_log = _safe_log(log_text)
+    persistent_logs = _persistent_control_logs(ctx.settings.support_log_dir, now)
+    if persistent_logs:
+        safe_log = _safe_persistent_logs(persistent_logs)
+    else:
+        log_text = log_buffer.text() or "No control service log records were captured in the last 24 hours.\n"
+        safe_log = _safe_log(log_text)
     files["logs/control-service.log"] = safe_log.encode("utf-8")
 
     if ticket_key:

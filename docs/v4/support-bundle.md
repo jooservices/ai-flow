@@ -8,10 +8,11 @@ The general bundle includes the AI Flow, Python and node release versions; selec
 machine and account states; up to 100 incidents opened in the last seven days; and control-service logs from the last
 24 hours. Incident subject, title and detail are free-form text, so they are replaced with redaction markers before
 scanning; the structured incident metadata remains available. Log messages are free text too (a lowercase name such as
-"jane doe called support" cannot be found by patterns), so every log line keeps only its timestamp, level, logger and
-`key=value` pairs whose value is a number, boolean or ticket key; the message is replaced with `[REDACTED_FREEFORM]`.
-The result is still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` style fields) and scanned
-again.
+"jane doe called support" cannot be found by patterns), so every log line keeps only its timestamp, level, and
+allow-listed diagnostic `key=value` pairs whose value is a number, boolean or ticket key. Logger names and message
+text are omitted; free-form message text is replaced with `[REDACTED_FREEFORM]`. Persistent logs use generic section
+separators generated internally, while separator-shaped text from a log message is treated as free form. The result is
+still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` style fields) and scanned again.
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
 bundle is rejected and no download is made available. Secret values and free-form account/provider error state are
 not selected from settings or registry records.

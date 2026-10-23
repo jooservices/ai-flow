@@ -131,6 +131,16 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 .panel-h .hint{color:var(--muted); font-size:13px}
 .grid-2{display:grid; grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); gap:16px; align-items:start}
 .stack{display:flex; flex-direction:column; gap:16px; min-width:0}
+.backup-form{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px}
+.backup-form label,.panel > label{display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:12px; font-weight:600}
+.backup-form .wide,.backup-help{grid-column:1/-1}
+.backup-form input,.backup-form select,.panel > label select{width:100%; min-height:40px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2)}
+.backup-help{color:var(--muted); font-size:12px}
+.backup-command{width:100%; min-height:132px; resize:vertical; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); font:12px/1.45 var(--f-mono); overflow-wrap:anywhere}
+.backup-outcomes{display:grid; gap:8px}
+.backup-outcomes>div{display:grid; grid-template-columns:minmax(140px,1fr) auto; gap:5px 10px; align-items:center}
+.backup-outcomes .small{grid-column:1/-1}
+@media (max-width:640px){.backup-form{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:1000px){ .grid-2{grid-template-columns:minmax(0,1fr)} }
 
 /* chips and pills */
@@ -479,6 +489,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-machines" aria-controls="view-machines" aria-selected="false" data-act="view" data-menu-view data-view="machines">Machines and AI</button>
       <button class="tab" role="tab" id="tab-users" aria-controls="view-users" aria-selected="false" data-act="view" data-menu-view data-view="users">Users and roles</button>
       <button class="tab" role="tab" id="tab-knowledge" aria-controls="view-knowledge" aria-selected="false" data-act="view" data-menu-view data-view="knowledge">Knowledge</button>
+      <button class="tab" role="tab" id="tab-backup" aria-controls="view-backup" aria-selected="false" data-act="view" data-menu-view data-view="backup">Backup &amp; Restore</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
     </div>
@@ -517,6 +528,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div id="sbody" class="view"></div>
   </section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
+  <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
 </main>
@@ -548,7 +560,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 <script>
 (function () {
 'use strict';
-/* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder and Knowledge, rendered from the live registry (/v1/state every 5 s,
+/* AI Flow v4 console: Command Center, Delivery, Business, Human review, Stakeholder, Knowledge and Backup, rendered from the live registry (/v1/state every 5 s,
    /v1/services every 15 s, /v1/tickets/<key> for the ticket drawer). No sample data: what you see is what the
    control plane knows. */
 
@@ -597,6 +609,7 @@ var S = {
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
+  backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', aiFilter: 'all', epic: 'all', accFilter: 'all', starredProjects: [],
   dashboardQuery: '', dashboardSort: 'key', dashboardSortDir: 1, commandSearchOpen: false,
@@ -626,6 +639,7 @@ function viewOf(path) {
   if (path.indexOf('/review') === 0) return 'review';
   if (path.indexOf('/stakeholder') === 0) return 'stakeholder';
   if (path.indexOf('/knowledge') === 0) return 'knowledge';
+  if (path.indexOf('/backup') === 0) return 'backup';
   if (path.indexOf('/integrations') === 0) return 'integrations';
   return 'cc';
 }
@@ -644,6 +658,7 @@ var MENU_ITEMS = [
   { view: 'machines', label: 'Machines and AI', permission: 'node.operations.read' },
   { view: 'users', label: 'Users and roles', permission: 'users.manage' },
   { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
+  { view: 'backup', label: 'Backup & Restore', permission: 'backup.read' },
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
   { view: 'projects', label: 'Projects', permission: 'projects.manage' }
 ];
@@ -775,6 +790,7 @@ function poll() {
     render();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (S.view === 'business' && !S.bizLoading) loadBiz();  // assessments arrive while the page is open
+    if (S.view === 'backup' && consoleCan('backup.read') && Date.now() - S.backup.loadedAt > 30000) loadBackups(true);
   }).catch(function (e) { S.error = String(e.message || e); renderLive(); })
     .then(function () { setTimeout(poll, POLL_MS); });
 }
@@ -790,6 +806,7 @@ function pollConsoleSession() {
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
+    if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
   }).catch(function () { S.consoleUser = null; syncMenuVisibility(); render(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
 }
@@ -2096,6 +2113,105 @@ function renderKnowledge() {
   h += renderLearningKnowledge(k, canManage);
   root.innerHTML = h;
 }
+function loadBackups(force) {
+  if (!consoleCan('backup.read')) return;
+  var b = S.backup;
+  if (b.loading || (!force && b.data)) return;
+  b.loading = true; b.error = '';
+  fetch('/v1/backups', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) {
+    b.data = d; b.form = { schedule: d.schedule, destination_kind: d.destination_kind,
+      destination_path: d.destination_path, s3_endpoint: d.s3_endpoint, s3_bucket: d.s3_bucket,
+      s3_prefix: d.s3_prefix, s3_region: d.s3_region, retention_days: d.retention_days };
+    var list = d.backups || [];
+    if (!list.some(function (x) { return x.source === b.selected; })) b.selected = list.length ? list[0].source : '';
+    b.loading = false; b.loadedAt = Date.now(); if (S.view === 'backup') renderBackup();
+  }).catch(function (e) {
+    b.error = String(e.message || e); b.loading = false; b.loadedAt = Date.now(); if (S.view === 'backup') renderBackup();
+  });
+}
+function backupResultTone(status) { return status === 'success' ? 'ok' : status === 'failed' ? 'crit' : status === 'running' ? 'info' : 'muted'; }
+function backupSourceCommand(source, config) {
+  if (!source) return '';
+  var endpoint = config.destination_kind === 's3' ? config.s3_endpoint || '' : '';
+  var region = config.s3_region || 'us-east-1';
+  function arg(v) { return "'" + String(v || '').replace(/'/g, "'\\''") + "'"; }
+  var script = [
+    'set +e',
+    'IMAGE=$(docker inspect -f "{{.Config.Image}}" aiflow4-control-api-a)',
+    'VERSION=$(docker inspect -f "{{ index .Config.Labels \\"org.opencontainers.image.version\\" }}" aiflow4-control-api-a)',
+    'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION"',
+    'COMPOSE="/srv/aiflow/build/$VERSION/deploy/v4/control/compose.yaml"',
+    'docker compose -f "$COMPOSE" stop control-api-a control-api-b control-loops',
+    'stop_status=$?',
+    'if [ "$stop_status" -ne 0 ]; then AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" up -d --no-deps --force-recreate control-api-a control-api-b control-loops; exit "$stop_status"; fi',
+    'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" run --rm --no-deps -v "$1:/run/aiflow4-backup-key:ro" -v /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control-restore -e AIFLOW4_CONTROL_REPO=/srv/aiflow/control/repos/aiflow-control-restore control-restore backup restore --from "$2" --key-file /run/aiflow4-backup-key --s3-endpoint "$3" --s3-region "$4"',
+    'restore_status=$?',
+    'AIFLOW4_IMAGE_REPOSITORY="${IMAGE%:*}" AIFLOW4_IMAGE_TAG="${IMAGE##*:}" AIFLOW4_VERSION="$VERSION" docker compose -f "$COMPOSE" up -d --no-deps --force-recreate control-api-a control-api-b control-loops',
+    'start_status=$?',
+    'if [ "$restore_status" -ne 0 ]; then exit "$restore_status"; fi',
+    'exit "$start_status"'
+  ].join('; ');
+  return 'sudo bash -c ' + arg(script) + ' _ "$HOME/Downloads/aiflow4-backup-key" ' + arg(source) + ' ' + arg(endpoint) + ' ' + arg(region);
+}
+function renderBackup() {
+  var root = $('#view-backup'); if (!root) return;
+  if (!consoleCan('backup.read')) {
+    root.innerHTML = '<section class="panel"><h1 style="margin:0">Backup &amp; Restore</h1><div class="muted">Sign in as an owner or super administrator to manage Command Center backups.</div></section>';
+    return;
+  }
+  var b = S.backup, d = b.data, f = b.form || {}, canManage = consoleCan('backup.manage');
+  if (!d) {
+    root.innerHTML = '<section class="panel"><div class="panel-h"><h1 style="margin:0">Backup &amp; Restore</h1><span class="spacer"></span><button class="btn" data-act="backup-refresh">Refresh</button></div>' +
+      (b.error ? '<div style="color:var(--crit)">' + esc(b.error) + '</div>' : '<div class="empty">' + (b.loading ? 'Loading backup status…' : 'Backup status is not available yet.') + '</div>') + '</section>';
+    return;
+  }
+  var backups = d.backups || [], selected = backups.filter(function (x) { return x.source === b.selected; })[0];
+  var backupStatus = d.last_backup_status || 'never', testStatus = d.last_test_status || 'never';
+  var h = '<section class="panel"><div class="panel-h"><h1 style="margin:0;font:600 20px var(--f-cond)">Backup &amp; Restore</h1>' +
+    '<span class="hint">Encrypted backups for the database, stored secrets, control repository settings and knowledge.</span><span class="spacer"></span>' +
+    '<button class="btn" data-act="backup-refresh">Refresh</button></div>';
+  if (b.error) h += '<div style="color:var(--crit)">' + esc(b.error) + '</div>';
+  if (d.storage_error) h += '<div style="color:var(--warn)">' + esc(d.storage_error) + '</div>';
+  if (b.notice) h += '<div class="notice">' + esc(b.notice) + '</div>';
+  h += '<div class="grid-2"><div class="stack"><section class="panel"><div class="panel-h"><h2 style="margin:0">Backup schedule and destination</h2></div>' +
+    '<div class="backup-form"><label>Schedule<select data-backup-field="schedule"' + (!canManage ? ' disabled' : '') + '>' +
+    '<option value="daily"' + (f.schedule === 'daily' ? ' selected' : '') + '>Daily</option><option value="weekly"' + (f.schedule === 'weekly' ? ' selected' : '') + '>Weekly</option></select></label>' +
+    '<label>Destination<select data-backup-field="destination_kind"' + (!canManage ? ' disabled' : '') + '>' +
+    [['local','Folder on this machine'],['mounted','Mounted path'],['s3','S3-compatible storage']].map(function (x) { return '<option value="' + x[0] + '"' + (f.destination_kind === x[0] ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select></label>';
+  if (f.destination_kind === 's3') {
+    h += '<label>S3 endpoint<input data-backup-field="s3_endpoint" value="' + esc(f.s3_endpoint || '') + '" placeholder="https://s3.example.com"' + (!canManage ? ' disabled' : '') + '></label>' +
+      '<label>Bucket<input data-backup-field="s3_bucket" value="' + esc(f.s3_bucket || '') + '" placeholder="aiflow-backups"' + (!canManage ? ' disabled' : '') + '></label>' +
+      '<label>Folder prefix<input data-backup-field="s3_prefix" value="' + esc(f.s3_prefix || '') + '" placeholder="command-center"' + (!canManage ? ' disabled' : '') + '></label>' +
+      '<label>Region<input data-backup-field="s3_region" value="' + esc(f.s3_region || 'us-east-1') + '"' + (!canManage ? ' disabled' : '') + '></label>' +
+      '<div class="small backup-help">The control service reads AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and optional AWS_SESSION_TOKEN from its environment. Credentials are not stored in backup settings.</div>';
+  } else {
+    h += '<label class="wide">Folder path<input data-backup-field="destination_path" value="' + esc(f.destination_path || '') + '" placeholder="/srv/aiflow/backups"' + (!canManage ? ' disabled' : '') + '></label>' +
+      (f.destination_kind === 'mounted' ? '<div class="small backup-help">Mount this folder into both control-api containers and control-loops at the same path.</div>' : '');
+  }
+  h += '<label>Keep backups for days<input data-backup-field="retention_days" type="number" min="1" max="3650" value="' + esc(f.retention_days || 30) + '"' + (!canManage ? ' disabled' : '') + '></label></div>' +
+    '<div class="project-actions">' + (canManage ? '<button class="btn primary" data-act="backup-save"' + (b.saving ? ' disabled' : '') + '>Save settings</button><button class="btn" data-act="backup-run">Run backup now</button>' : '') + '</div></section>' +
+    '<section class="panel"><div class="panel-h"><h2 style="margin:0">Encryption key</h2><span class="pill" data-tone="' + (d.key_downloaded ? 'ok' : 'warn') + '">' + (d.key_downloaded ? 'Downloaded once' : 'Not downloaded') + '</span></div>' +
+    '<div class="small">The key is stored privately on this control machine for scheduled encryption and is excluded from every backup. Keep the downloaded copy somewhere separate; it cannot be downloaded again.</div>' +
+    (d.key_downloaded ? '<div class="small">Downloaded: ' + esc(d.key_downloaded_at || 'recorded') + '</div>' : canManage ? '<button class="btn primary" data-act="backup-key">Download encryption key once</button>' : '') + '</section></div>';
+  h += '<div class="stack"><section class="panel"><div class="panel-h"><h2 style="margin:0">Latest backup</h2>' + pill(backupResultTone(backupStatus), backupStatus) + '</div>' +
+    '<div class="small">' + esc(d.last_backup_name || 'No backup has completed') + '</div>' +
+    '<div class="small">' + (d.last_backup_at ? esc(when(d.last_backup_at)) : 'Schedule: ' + (f.schedule === 'weekly' ? 'weekly' : 'daily')) + '</div>' +
+    (d.last_backup_detail ? '<div class="small">' + esc(d.last_backup_detail) + '</div>' : '') + '</section>' +
+    '<section class="panel"><div class="panel-h"><h2 style="margin:0">Weekly restore test</h2>' + pill(backupResultTone(testStatus), testStatus) + '</div>' +
+    '<div class="small">Runs against a scratch database and temporary folder. It never replaces the live installation.</div>' +
+    '<div class="small">' + (d.last_test_at ? 'Latest test: ' + esc(when(d.last_test_at)) : 'No restore test has completed yet') + '</div>' +
+    (d.last_test_detail ? '<div class="small">' + esc(d.last_test_detail) + '</div>' : '') +
+    (d.last_test_components && Object.keys(d.last_test_components).length ? '<div class="backup-outcomes">' + Object.keys(d.last_test_components).map(function (name) {
+      var item = d.last_test_components[name] || {}; return '<div>' + esc({ database: 'Database', stored_secrets: 'Stored secrets', control_repository: 'Control repository settings', knowledge: 'Knowledge' }[name] || name) + ': ' + pill(backupResultTone(item.status), item.status) + (item.detail ? '<span class="small">' + esc(item.detail) + '</span>' : '') + '</div>';
+    }).join('') + '</div>' : '') + '</section>' +
+    '<section class="panel"><div class="panel-h"><h2 style="margin:0">Restore on a new control machine</h2></div>' +
+    '<div class="small">Choose a backup, put the downloaded key at <span class="mono">~/Downloads/aiflow4-backup-key</span> on the new machine, then run this command there. It stops control services, restores the four components, and recreates the services to load restored settings.</div>' +
+    '<label>Backup<select data-backup-select>' + (backups.length ? backups.map(function (x) { return '<option value="' + esc(x.source) + '"' + (x.source === b.selected ? ' selected' : '') + '>' + esc(x.name) + ' · ' + esc(x.created_at || '') + '</option>'; }).join('') : '<option value="">No backups found</option>') + '</select></label>' +
+    (selected ? '<textarea class="backup-command" readonly rows="6" aria-label="Restore command">' + esc(backupSourceCommand(selected.source, d)) + '</textarea><button class="btn" data-act="backup-copy">Copy restore command</button>' : '<div class="empty">A backup will appear here after the first scheduled backup.</div>') + '</section></div></div></section>';
+  root.innerHTML = h;
+}
 function submitKnowledge() {
   var e = S.knowledge.editor;
   if (!e) return;
@@ -3163,6 +3279,7 @@ function render() {
   else if (S.view === 'review') renderReviews();
   else if (S.view === 'stakeholder') renderStakeholder();
   else if (S.view === 'knowledge') renderKnowledge();
+  else if (S.view === 'backup') renderBackup();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
   else { renderDHead(); renderDBody(); }
@@ -3184,7 +3301,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
 }
@@ -3199,6 +3316,7 @@ function setView(v) {
   render();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
+  if (v === 'backup') loadBackups(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
 }
@@ -3291,6 +3409,16 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'knowledge-restore') restoreKnowledge(el.getAttribute('data-kind'), el.getAttribute('data-id'), el.getAttribute('data-version'));
   else if (act === 'knowledge-approve') approveKnowledge(el.getAttribute('data-proposal'));
+  else if (act === 'backup-refresh') loadBackups(true);
+  else if (act === 'backup-save') saveBackupSettings();
+  else if (act === 'backup-run') requestBackupRun();
+  else if (act === 'backup-key') downloadBackupKey();
+  else if (act === 'backup-copy') {
+    var command = backupSourceCommand((S.backup.data.backups || []).filter(function (x) { return x.source === S.backup.selected; })[0].source, S.backup.data);
+    if (!navigator.clipboard || !navigator.clipboard.writeText) { toast('Clipboard unavailable', 'Select and copy the restore command.', 'warn'); }
+    else navigator.clipboard.writeText(command).then(function () { toast('Restore command copied', '', 'ok'); })
+      .catch(function () { toast('Clipboard unavailable', 'Select and copy the restore command.', 'warn'); });
+  }
   else if (act === 'knowledge-search') { S.knowledge.search = ($('[data-knowledge-search]') || {}).value || ''; loadKnowledge(true); }
   else if (act === 'knowledge-item-new') { S.knowledge.itemEditor = { kind: 'convention', scope: 'project', epic: '', title: '', content: '' }; renderKnowledge(); }
   else if (act === 'knowledge-item-cancel') { S.knowledge.itemEditor = null; renderKnowledge(); }
@@ -3359,6 +3487,43 @@ document.addEventListener('click', function (e) {
     try { localStorage.setItem('aiflow4-theme', dark ? 'light' : 'dark'); } catch (x) { /* storage off */ }
   }
 });
+function backupRequestError(response) {
+  return response.json().then(function (data) {
+    if (response.ok) return data;
+    throw new Error(data.detail || ('HTTP ' + response.status));
+  });
+}
+function saveBackupSettings() {
+  var b = S.backup; if (!b.form || b.saving) return;
+  var body = Object.assign({}, b.form);
+  $$('[data-backup-field]').forEach(function (field) {
+    var name = field.getAttribute('data-backup-field');
+    body[name] = name === 'retention_days' ? Number(field.value) : field.value;
+  });
+  b.saving = true; b.error = ''; renderBackup();
+  fetch('/v1/backups/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(backupRequestError).then(function (d) { b.data = d; b.form = { schedule: d.schedule, destination_kind: d.destination_kind,
+      destination_path: d.destination_path, s3_endpoint: d.s3_endpoint, s3_bucket: d.s3_bucket, s3_prefix: d.s3_prefix,
+      s3_region: d.s3_region, retention_days: d.retention_days }; b.notice = 'Backup settings saved.'; b.saving = false; renderBackup(); })
+    .catch(function (e) { b.error = String(e.message || e); b.saving = false; renderBackup(); });
+}
+function requestBackupRun() {
+  fetch('/v1/backups/run', { method: 'POST' }).then(backupRequestError)
+    .then(function () { S.backup.notice = 'Backup queued. The control worker will start it shortly.'; renderBackup(); })
+    .catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
+}
+function downloadBackupKey() {
+  var button = $('[data-act="backup-key"]'); if (button) button.disabled = true;
+  fetch('/v1/backups/key', { method: 'POST' }).then(function (r) {
+    if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail || ('HTTP ' + r.status)); });
+    return r.blob();
+  }).then(function (blob) {
+    var url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href = url; link.download = 'aiflow4-backup-key'; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    S.backup.notice = 'The key was downloaded. Store it outside this machine; it cannot be downloaded again.';
+    loadBackups(true);
+  }).catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
+}
 document.addEventListener('input', function (e) {
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
   if (e.target && e.target.id === 'work-project') {
@@ -3388,12 +3553,19 @@ document.addEventListener('input', function (e) {
   }
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-integ-owner-token]')) S.integ.ownerToken = e.target.value;
+  if (e.target && e.target.matches('[data-backup-field]')) S.backup.form[e.target.getAttribute('data-backup-field')] = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
     S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
+  if (e.target && e.target.matches('[data-backup-field]')) {
+    var backupField = e.target.getAttribute('data-backup-field');
+    S.backup.form[backupField] = e.target.value;
+    if (backupField === 'destination_kind') renderBackup();
+  }
   if (e.target && e.target.id === 'ai-filter') {
     S.aiFilter = e.target.value; savePrefs(); renderDBody(); tick();
   }
@@ -3517,6 +3689,7 @@ syncMenuVisibility();
 showView();
 render();
 if (S.view === 'knowledge') loadKnowledge(true);
+if (S.view === 'backup') loadBackups(true);
 if (S.view === 'projects') loadProjectList();
 if (S.view === 'integrations') {
   var githubResult = new URLSearchParams(location.search).get('github');

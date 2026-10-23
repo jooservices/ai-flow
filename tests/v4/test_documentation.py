@@ -220,6 +220,7 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     routes = {api: {"/v1/knowledge/{kind}", "/v1/cc"}, "aiflow/v4/control/login.py": {"/v1/auth/login"}}
     texts = {"docs/v4/knowledge.md": "Lists items with `GET /v1/knowledge/{kind}`.",
              "docs/v4/other.md": "Nothing about routes.",
+             "docs/v4/console-layouts.md": "Custom layouts for Dashboard, Human review, Machines and AI, Knowledge, Delivery, and Users and roles.",
              "docs/guide/admin/security.md": "Sign in with POST /v1/auth/login."}
 
     def gaps(*files, **kw):
@@ -239,6 +240,9 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     assert gaps(api, "docs/guide/screens/cc.md")
     assert gaps(ui, "docs/guide/screens/cc.md", views={"cc", "sa"})  # sa page missing
     assert gaps(ui, "docs/guide/screens/cc.md", views={"cc"}) == []
+    layout_views = docsite.LAYOUT_SCREEN_VIEWS
+    assert gaps(ui, "docs/v4/console-layouts.md", views=layout_views) == []
+    assert gaps(ui, "docs/v4/console-layouts.md", views={"cc", "sa"})  # layout doc does not cover SA
     # every module that registers routes is watched, not only api.py
     login = "aiflow/v4/control/login.py"
     assert gaps(login, "docs/v4/knowledge.md")

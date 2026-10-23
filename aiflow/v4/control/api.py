@@ -1099,7 +1099,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "owner role required")
         read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
                         "list_import_installations", "open_installation_settings"}
-        if action not in read_actions | {"license_activate", "layout_save", "layout_reset"}:
+        if action not in read_actions | {"license_activate"}:
             try:
                 licensing.require_writable(ctx.db, ctx.settings.license_public_key)
             except licensing.LicenseError as exc:
@@ -1599,7 +1599,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.put("/v1/console/layouts/{page}")
     def console_layout_save(page: str, body: layouts.LayoutBody, request: Request) -> dict:
-        user = console_user(request, None, action="layout_save")
+        # Layouts are personal preferences, like reads, and remain available if the licence expires.
+        user = console_user(request, None)
         try:
             blocks = layouts.normalise(layout_page(page), [b.model_dump() for b in body.blocks])
         except layouts.LayoutError as exc:
@@ -1609,7 +1610,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.delete("/v1/console/layouts/{page}")
     def console_layout_reset(page: str, request: Request) -> dict:
-        user = console_user(request, None, action="layout_reset")
+        user = console_user(request, None)
         layouts.reset(ctx.db, user.subject, layout_page(page))
         return layouts.page_view(page, user.role, None)
 

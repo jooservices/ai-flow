@@ -1936,10 +1936,8 @@ function renderDBody() {
   h += analyticsPanel();
   }
   var target = S.view === 'work' ? $('#work-body') : $('#dbody');
-  if (target) {
-    target.innerHTML = h;
-    if (S.view === 'delivery') applyLayout('delivery', target);
-  }
+  if (target) target.innerHTML = h;
+  if (target && S.view === 'delivery') applyLayout('delivery', target);
 }
 
 /* ---------- Human review ---------- */

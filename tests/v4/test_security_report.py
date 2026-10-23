@@ -75,3 +75,15 @@ def test_the_disclosure_policy_is_published():
     assert "advisories/new" in policy and "coordinated disclosure" in policy.lower()
     readme = (ROOT / "deploy/v4/README.md").read_text()
     assert "docs/v4/security.md" in readme
+
+
+def test_blocking_findings_are_listed_for_the_ci_log(tmp_path, capsys):
+    scan = {"Results": [{"Target": "debian", "Vulnerabilities": [
+        {"Severity": "HIGH", "VulnerabilityID": "CVE-1", "PkgName": "libx", "InstalledVersion": "1"},
+        {"Severity": "LOW", "VulnerabilityID": "CVE-2", "PkgName": "liby"}]}]}
+    assert sr.blocking_findings(scan, "HIGH") == ["HIGH CVE-1 libx installed=1 fixed=none in debian"]
+    path = tmp_path / "image.json"
+    path.write_text(json.dumps(scan))
+    assert sr.main(["findings", "HIGH", str(path)]) == 0
+    assert "CVE-1" in capsys.readouterr().out
+    assert sr.main(["findings", "HIGH", str(tmp_path / "none.json")]) == 0

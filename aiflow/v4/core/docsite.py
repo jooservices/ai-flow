@@ -34,7 +34,7 @@ SITE_ENV = "AIFLOW4_DOCS_SITE"
 API_PAGE = "reference/api.md"
 SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
-# Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
+# Console screens (`id="view-<name>"` in console.html) touched by each named renderer or screen helper.
 SCREEN_PAGE = "screens/{view}.md"
 
 # Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
@@ -42,8 +42,9 @@ SCREEN_PAGE = "screens/{view}.md"
 LAYOUT_SCREEN_VIEWS = frozenset({"cc", "review", "machines", "knowledge", "delivery", "users"})
 CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
 
-# JavaScript renderers run outside the static <section> ranges. Keep this map beside the check so a renderer edit
-# requires the page for the screen it renders. `None` means the renderer is shared by every screen.
+# JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
+# check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
+# unless the changed line names one specific view.
 SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
@@ -74,6 +75,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
+    "renderSupport": ("support",),
+    "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
     "addProjectRepository": ("projects",),
     "saveProjectRepositories": ("projects",),
@@ -96,10 +99,18 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "safeHref": ("security",),  # output-escaping helper shared by every screen; documented in docs/v4/security.md
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
+    "escCall": ("cc", "machines"),
+    "loadEscalations": ("cc", "machines"),
+    "answerDecision": ("cc", "machines"),
+    "retireDecision": ("cc", "machines"),
+    "addDecision": ("cc", "machines"),
+    "escalationsPanel": ("cc", "machines"),
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
     "roleHealthPanel": ("machines",),
     "render": None,
+    "viewOf": None,
+    "setView": None,
     "helpUrl": None,
     "hintSeen": None,
     "renderHelp": None,
@@ -140,11 +151,31 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"\bhint-dismiss\b"),
     # The role-based menu: which view each permission opens, the tabs and the "view as" switch. It shows or hides
     # every screen, so each screen page says which roles can open it.
-    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|autonomy: \{ data"),
+    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|userAdmin:|autonomy: \{ data"),
     re.compile(r"\b(?:VIEW_PERMISSION|VIEW_PATH|VIEW_GROUPS)\b|^\s+(?:lead|review|machines|projects|backup): '"),
     re.compile(r"^\s+\{ view: '[a-z]+', label: '"),
     re.compile(r"^\s+\['machines', 'users'|// Visibility reads the effective"),
     re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
+)
+
+# View-specific navigation, state and event branches live outside the section/render functions. Infer their
+# documentation target from the view name instead of treating them as unmapped shared UI.
+SCREEN_VIEW_UI_PATTERNS = (
+    re.compile(r'\bid="tab-([a-z]+)"'),
+    re.compile(r"\bS\.([a-z]+)\s*=\s*\{"),
+    re.compile(r"\bHINTS\.([a-z]+)\s*="),
+    re.compile(r"\bpath\.indexOf\('/([a-z]+)'"),
+    re.compile(r"\{\s*view:\s*'([a-z]+)'"),
+    re.compile(r",\s*'([a-z]+)'\]\s*\.forEach"),
+    re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z]+)'"),
+    re.compile(r"\bact\s*===\s*'([a-z]+)-[\w-]+'"),
+)
+
+# Small pieces of shared console code live outside named renderers. Keep their screen impact explicit so the UI
+# documentation check can map escalation state and delegated click actions to the panel's screens.
+SCREEN_VIEW_PATTERNS = (
+    (re.compile(r"\besc:\s*\{\s*data:"), ("cc", "machines")),
+    (re.compile(r"\bact\s*===\s*[\"']esc-(?:answer|retire|add)[\"']"), ("cc", "machines")),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -903,13 +934,28 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
         pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
         if "docs/v4/security.md" in docs:  # the Security screen's page ships from the v4 feature docs
             pages.add("docs/guide/screens/security.md")
+        guide_views = {Path(f).stem for f in pages}
+        topic_views: set[str] = set()
+        for doc in docs:
+            if not doc.startswith("docs/v4/"):
+                continue
+            for line in read(doc).splitlines():
+                marker = re.match(r"\s*\*\*Console screens:\*\*\s*(.*?)\s*$", line, re.I)
+                if marker:
+                    topic_views.update(re.findall(r"`([a-z]+)`", marker.group(1), re.I))
         covered = set().union(*(CROSS_SCREEN_DOCS.get(f, frozenset()) for f in docs))
-        wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
-        uncovered = {path for path in wanted if path.removeprefix("docs/guide/screens/").removesuffix(".md")
-                     not in covered}
-        if not (uncovered <= pages if wanted else pages or covered):
+        documented_views = guide_views | topic_views | covered
+        if views is not None:
+            missing_views = set(views) - documented_views
+            complete = not missing_views
+        else:
+            missing_views = set()
+            complete = bool(pages or topic_views or covered)
+        if not complete:
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
-                        + (", ".join(sorted(uncovered - pages)) if wanted else "its page under docs/guide/screens"))
+                        + (", ".join(f"docs/guide/screens/{view}.md" for view in sorted(missing_views))
+                           if views is not None else
+                           "its page under docs/guide/screens or a docs/v4 topic page naming its screen"))
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
     if api_files:
         routes = api_routes_by_module() if routes is None else routes
@@ -948,6 +994,24 @@ def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
     return spans
 
 
+def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str]) -> set[str]:
+    """Map edits to shared navigation tables to the view entries that actually changed."""
+    item = r"([a-z]+)\s*:\s*(['\"])(.*?)\2"
+    old_items = {name: value for name, _, value in re.findall(item, old_line) if name in all_views}
+    new_items = {name: value for name, _, value in re.findall(item, new_line) if name in all_views}
+    changed = {name for name in old_items.keys() | new_items.keys()
+               if old_items.get(name) != new_items.get(name)}
+
+    # VIEW_GROUPS and the renderer list are inline arrays. Compare screen names so adding one
+    # screen does not make every existing screen require an unrelated documentation edit.
+    if old_line.lstrip().startswith("[") and new_line.lstrip().startswith("["):
+        quoted = re.compile(r"['\"]([a-z]+)['\"]")
+        old_names = {name for name in quoted.findall(old_line) if name in all_views}
+        new_names = {name for name in quoted.findall(new_line) if name in all_views}
+        changed |= old_names ^ new_names
+    return changed
+
+
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
@@ -957,6 +1021,9 @@ def changed_views(base: str) -> set[str]:
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
     lines = source.splitlines()
+    base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
+                                 capture_output=True, check=True).stdout
+    base_lines = base_source.splitlines()
     all_views = set(console_views())
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
@@ -986,12 +1053,31 @@ def changed_views(base: str) -> set[str]:
         security_lines |= set(range(sec_start + 1, sec_end + 1))
     touched: set[str] = set()
     unmapped: set[int] = set()
-    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
-        first, count = int(m.group(1)), int(m.group(2) or 1)
+    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
+        old_first, old_count = int(m.group(1)), int(m.group(2) or 1)
+        first, count = int(m.group(3)), int(m.group(4) or 1)
+        if count == 0 and 1 <= old_first <= len(base_lines):
+            removed_section = re.search(r'<section class="view" id="view-([a-z]+)"',
+                                        base_lines[old_first - 1])
+            if removed_section:
+                # Old console snapshots can contain a duplicate empty panel. Removing the duplicate
+                # does not change the screen while its other section remains in the current console.
+                view = removed_section.group(1)
+                if view not in all_views:
+                    touched.add(view)
+                continue
         last = first + max(count, 1) - 1
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
+            specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
+                              if (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            # Navigation objects are kept on one line. Compare the base and current lines so one
+            # added or edited view entry does not make all existing screens require doc changes.
+            if old_count == count and 1 <= old_first <= len(base_lines):
+                old_index = old_first - 1 + (line_no - first)
+                if old_index < len(base_lines):
+                    specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
             layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
@@ -1004,13 +1090,15 @@ def changed_views(base: str) -> set[str]:
                              and layout_start <= line_no <= layout_end)
                             or layout_markup or layout_style)
             hint_view = None
+            unmapped_renderer = False
             for name, (lo, hi) in functions.items():
                 if lo <= line_no <= hi:
                     if name not in SCREEN_RENDERER_VIEWS:
                         line_views = set()
+                        unmapped_renderer = True
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
-                    line_views |= (all_views if mapped is None else set(mapped))
+                    line_views |= ((specific_views or all_views) if mapped is None else set(mapped))
             # Session polling handles every screen, but this guarded request refreshes only the Users page.
             if ("editing: '', temporaryPassword" in changed_line
                     or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
@@ -1029,8 +1117,12 @@ def changed_views(base: str) -> set[str]:
                     line_views |= all_views
             if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
                 line_views |= all_views
-            if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
+            shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
+            if shared_ui_change and not specific_views:
                 line_views |= all_views
+            for pattern, mapped in SCREEN_VIEW_PATTERNS:
+                if pattern.search(changed_line):
+                    line_views |= set(mapped)
             if "rh-form" in changed_line:
                 line_views.add("machines")
             for pattern, view in SCREEN_LINE_VIEWS:
@@ -1040,12 +1132,15 @@ def changed_views(base: str) -> set[str]:
                 line_views.add("review")
             if not changed_line.strip():
                 continue
+            if not unmapped_renderer:
+                line_views |= specific_views
             # Registering the Security screen in the shared menu maps edits those lines; they belong to its own page.
             if line_no in security_lines or "security" in changed_line.lower():
-                line_views = {"security"}
+                # A shared line that also adds another named screen (for example Support) belongs to that screen.
+                line_views = (specific_views - {"security"}) or {"security"}
             if line_views:
                 touched |= line_views
-            else:
+            elif changed_line.strip():
                 unmapped.add(line_no)
     if unmapped:
         lines_text = ", ".join(str(n) for n in sorted(unmapped))

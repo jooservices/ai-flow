@@ -43,6 +43,11 @@ if [ -n "$IMAGE" ]; then
 fi
 
 if [ "$status" -ne 0 ]; then
+  # List what blocks, so the cause is in the log and not only in the JSON files.
+  for result in dependencies repository image; do
+    echo "== blocking findings: $result ==" >&2
+    python3 -m aiflow.v4.core.security_report findings "$THRESHOLD" "$OUT/$result.json" >&2 || true
+  done
   echo "Security scan found issues at or above $THRESHOLD (or a scan could not run)." >&2
 fi
 exit "$status"

@@ -17,6 +17,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..control.support_bundle import MAX_LOG_BYTES, cap_log_bytes
+
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
 from .dev import Claimed, run_dev
@@ -31,6 +33,30 @@ log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
 RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
 PROBE_PROMPT = "This is an availability check. Do not use any tools. Reply with the single word OK."
+
+
+def attach_support_log(result: dict, srv_root: str) -> None:
+    """Attach a bounded copy of this run's log so the control plane can build ticket bundles across nodes."""
+    details = result.get("details")
+    log_path = details.get("log") if isinstance(details, dict) else None
+    if not isinstance(log_path, str) or not log_path:
+        return
+    root = (Path(srv_root) / "logs" / "runs").resolve()
+    try:
+        path = Path(log_path).resolve(strict=True)
+        if not path.is_relative_to(root) or not path.is_file():
+            return
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            if size > MAX_LOG_BYTES:
+                stream.seek(-MAX_LOG_BYTES, 2)
+            raw = stream.read(MAX_LOG_BYTES + 1)
+        truncated = size > MAX_LOG_BYTES or len(raw) > MAX_LOG_BYTES
+        log_text, was_capped = cap_log_bytes(raw.decode("utf-8", errors="replace"))
+        details["support_log_text"] = log_text
+        details["support_log_truncated"] = truncated or was_capped
+    except OSError as exc:
+        log.debug("run log unavailable for support collection: %s", type(exc).__name__)
 
 
 class Worker:
@@ -174,7 +200,8 @@ class Worker:
                         triage_answer=r.get("triage_answer") or "", triage_question=r.get("triage_question") or "",
                         related=r.get("related") or [], project_tickets=r.get("project_tickets") or [],
                         context_pack=r.get("context_pack") or {},
-                        machine_tools=r.get("machine_tools") or {})
+                        machine_tools=r.get("machine_tools") or {}, owner_register=r.get("owner_register") or [],
+                        escalation_class=r.get("escalation_class") or "")
             self.publish(state="working", ticket=c.ticket["key"], run_id=c.run_id, step=step, since=time.time())
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
@@ -189,6 +216,7 @@ class Worker:
                 res = run_impact(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             else:
                 res = run_dev(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
+            attach_support_log(res, self.srv)
             try:
                 self.api.call("POST", f"/v1/runs/{c.run_id}/result", res)
             except Exception as e:  # noqa: BLE001

@@ -146,6 +146,21 @@ console.log(projectsView.innerHTML);
     return result.stdout
 
 
+ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_business_decision"],
+                           "labels": {"missing_tool_or_environment": "Missing tool or environment",
+                                      "new_business_decision": "New business decision"},
+                           "person_classes": ["new_business_decision"], "falling": True,
+                           "this_week": {"total": 3, "share_without_person_pct": 66.7},
+                           "weeks": [{"week_start": "2026-10-19", "total": 3, "share_without_person_pct": 66.7,
+                                      "by_class": {"missing_tool_or_environment": 2, "new_business_decision": 1},
+                                      "by_project": {"JAIF": {"missing_tool_or_environment": 2, "new_business_decision": 1}}}],
+                           "top_causes": [{"label": "Missing tool or environment", "count": 2, "fix": "Provision the tool."}],
+                           "amendments": [{"ticket_key": "JOOWP-301", "title": "AC3 of JOOWP-301 amended", "decision": "AC3 narrowed"}]},
+               "register": {"decisions": [{"id": 1, "title": "No Docker for AI runs", "decision": "No.", "cited_count": 2, "decided_by": "owner"}],
+                            "asked": [{"id": 9, "title": "Default plan", "question": "q", "waiting_tickets": ["JAIF-1"],
+                                       "options": ["Free", "Team"], "recommended": "Free"}], "amendments": []}}
+
+
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
                      weekly_report: dict | None = None) -> str:
     node_js = shutil.which("node")
@@ -164,6 +179,7 @@ S.analytics = {json.dumps(analytics or [])};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
+S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
 console.log(dashboard.innerHTML);
 """
@@ -378,6 +394,21 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
 
 
+def test_support_screen_shows_ticket_picker_and_review_inventory_before_download():
+    rendered = run_script(f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-support' ? root : null; }};
+S.view = 'support'; S.consoleUser = {json.dumps(console_session_user('owner'))};
+S.data = {{tickets: [{{key: 'TESTWP-7', type: 'Bug', summary: 'Example issue'}}]}};
+S.support = {{ticketKey: 'TESTWP-7', busy: false, error: '', bundle: {{download_url: '/v1/support/bundles/random/download',
+  inventory: {{created_at: '2026-10-22T10:00:00+00:00', scan: 'passed', files: [{{name: 'incidents.json', bytes: 90}}]}}}}}};
+renderSupport(); console.log(root.innerHTML);
+""")
+    assert 'id="support-ticket"' in rendered and "TESTWP-7" in rendered
+    assert "Review bundle inventory" in rendered and "Sensitive data scan passed" in rendered
+    assert "Download reviewed bundle" in rendered and "/v1/support/bundles/random/download" in rendered
+
+
 def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring_and_logs():
     root = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
@@ -391,7 +422,8 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
-             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "security", "notifications")
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "security",
+             "notifications", "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -573,9 +605,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -586,10 +618,14 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', "
+            "'notifications', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications']" in page
+    assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications', 'support']") in page
+    assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
+    assert "licensing: 'licensing.manage'" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -1197,7 +1233,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
         ("projects", "Projects"), ("licensing", "Licence"), ("security", "Security"),
-        ("notifications", "Notifications"),
+        ("notifications", "Notifications"), ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
@@ -1207,7 +1243,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
-        "security": "console.read",
+        "security": "console.read", "support": "console.manage",
     }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
@@ -1283,6 +1319,13 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
                  "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
                  "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
                  "Weekly quota and usage", "Largest context run"):
+        assert text in rendered
+    # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
+    for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
+                 "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
+                 "No Docker for AI runs", "Owner decision register", "Default plan", "Free (recommended)",
+                 'data-act="esc-answer" data-id="9" data-choice="Free"', 'data-act="esc-retire" data-id="1"',
+                 "AC3 of JOOWP-301 amended", "Amendments never block", 'data-act="esc-add"'):
         assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
@@ -1389,6 +1432,27 @@ renderDBody(); console.log(body.innerHTML);
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-3"' in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-4"' not in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="BETA-4"' not in result.stdout
+
+
+def test_escalation_project_breakdown_keeps_each_week_separate():
+    rendered = run_script(r"""
+S.consoleUser = {permissions: ['console.read', 'console.write']};
+S.esc.data = {metrics: {classes: ['missing_tool_or_environment', 'policy_message'],
+  labels: {missing_tool_or_environment: 'Missing tool', policy_message: 'Policy message'},
+  person_classes: [], this_week: {total: 4, share_without_person_pct: 100}, falling: true, top_causes: [],
+  weeks: [
+    {week_start: '2026-10-12', total: 3, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 2, policy_message: 0}, BETA: {missing_tool_or_environment: 1, policy_message: 0}}},
+    {week_start: '2026-10-19', total: 4, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 1, policy_message: 2}, BETA: {missing_tool_or_environment: 0, policy_message: 1}}}
+  ]}, register: {asked: [], resuming: [], decisions: [], amendments: []}};
+console.log(escalationsPanel());
+""")
+    assert '<th>Week</th><th>Project</th>' in rendered
+    assert '<td class="mono">2026-10-12</td><td class="mono">ALPHA</td><td>2</td><td>0</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">ALPHA</td><td>1</td><td>2</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">BETA</td><td>0</td><td>1</td>' in rendered
+    assert 'Project (all weeks shown)' not in rendered
 
 
 def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal():

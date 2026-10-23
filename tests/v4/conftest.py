@@ -136,6 +136,7 @@ class FakeJira:
         self.status_of: dict[str, str] = {}
         self.comments: list[tuple[str, str]] = []
         self.recent_comment_data: dict[str, list[dict]] = {}
+        self.jira_account_id = "jira-owner-account"
         self.fields: list[tuple[str, dict]] = []
         self.labels: list[tuple[str, str, str]] = []
         self.attachments: list[tuple[str, str, bytes, str]] = []
@@ -207,6 +208,9 @@ class FakeJira:
 
     def recent_comments(self, key: str, limit: int = 10) -> list[dict]:
         return self.recent_comment_data.get(key, [])[:limit]
+
+    def current_account_id(self) -> str:
+        return self.jira_account_id
 
     def set_fields(self, key: str, values: dict) -> None:
         self.fields.append((key, values))

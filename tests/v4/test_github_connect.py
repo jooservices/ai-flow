@@ -15,7 +15,8 @@ from aiflow.v4.core import secretbox
 SESSION_SECRET = "github-connect-console-session-secret-over-32-bytes"
 PRIVATE_KEY = "-----BEGIN RSA PRIVATE KEY-----\n" + ("x" * 160) + "\n-----END RSA PRIVATE KEY-----\n"
 REQUIRED_PERMISSIONS = {"contents": "write", "pull_requests": "write", "workflows": "write",
-                        "checks": "read", "statuses": "read", "metadata": "read", "administration": "write"}
+                        "actions": "read", "checks": "read", "statuses": "read", "metadata": "read",
+                        "administration": "write"}
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +179,7 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
     assert "https://github.com/organizations/acme/settings/apps/new" in start.text
     assert '&quot;contents&quot;:&quot;write&quot;' in start.text
     assert '&quot;pull_requests&quot;:&quot;write&quot;' in start.text
+    assert '&quot;actions&quot;:&quot;read&quot;' in start.text
     assert '&quot;administration&quot;:&quot;write&quot;' in start.text
     state = re.search(r"\?state=([a-f0-9]{64})", start.text).group(1)
     callback = client.get(f"/v1/integrations/github/manifest/callback?code=oneTimeCode&state={state}",
@@ -203,6 +205,16 @@ def test_new_app_manifest_round_trip_verifies_installation_and_audits_without_cr
     assert PRIVATE_KEY not in encoded_audit and "oneTimeCode" not in encoded_audit
     assert "client-secret-never-save" not in encoded_audit and "hook-secret-never-save" not in encoded_audit
     assert PRIVATE_KEY not in caplog.text
+
+
+def test_github_app_must_have_actions_read_for_ci_job_logs():
+    from aiflow.v4.control.api import validate_github_app_permissions
+
+    validate_github_app_permissions({"permissions": REQUIRED_PERMISSIONS})
+    missing_actions = dict(REQUIRED_PERMISSIONS)
+    del missing_actions["actions"]
+    with pytest.raises(ValueError, match="permissions AI Flow requires"):
+        validate_github_app_permissions({"permissions": missing_actions})
 
 
 def test_github_connect_is_owner_only_and_manifest_requires_public_https_url(client, ctx, tmp_path):

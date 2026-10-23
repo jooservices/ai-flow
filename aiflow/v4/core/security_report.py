@@ -74,6 +74,23 @@ def build_report(version: str, revision: str, threshold: str, checks: list[tuple
     return "\n".join(lines)
 
 
+def blocking_findings(result: dict, threshold: str) -> list[str]:
+    """One line per finding at or above the level (id, package, installed and fixed version, target), for the CI log."""
+    levels = set(severities_at_or_above(threshold))
+    lines = []
+    for target in result.get("Results") or []:
+        for key in ("Vulnerabilities", "Secrets", "Misconfigurations"):
+            for finding in target.get(key) or []:
+                level = str(finding.get("Severity") or "UNKNOWN").upper()
+                if level not in levels:
+                    continue
+                ident = finding.get("VulnerabilityID") or finding.get("ID") or finding.get("RuleID") or "?"
+                package = finding.get("PkgName") or finding.get("Title") or ""
+                lines.append(f"{level} {ident} {package} installed={finding.get('InstalledVersion') or '-'} "
+                             f"fixed={finding.get('FixedVersion') or 'none'} in {target.get('Target', '?')}")
+    return sorted(set(lines))
+
+
 def _load(path: str) -> dict | None:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -87,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sev = sub.add_parser("severities")
     sev.add_argument("threshold")
+    fnd = sub.add_parser("findings")
+    fnd.add_argument("threshold")
+    fnd.add_argument("result", help="trivy-result.json")
     rep = sub.add_parser("report")
     rep.add_argument("--version", required=True)
     rep.add_argument("--revision", default="")
@@ -97,6 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "severities":
             print(",".join(severities_at_or_above(args.threshold)))
+            return 0
+        if args.cmd == "findings":
+            result = _load(args.result)
+            if result is None:
+                print(f"{args.result}: no scan result", file=sys.stderr)
+                return 0
+            print("\n".join(blocking_findings(result, args.threshold)))
             return 0
         checks = [(name, _load(path)) for name, _, path in (c.partition("=") for c in args.check)]
         notes = [(name, outcome) for name, _, outcome in (n.partition("=") for n in args.note)]

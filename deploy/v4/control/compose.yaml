@@ -18,6 +18,7 @@ x-app: &app
     HF_HOME: /var/cache/aiflow4-memory/huggingface
     AIFLOW4_O2_URL: http://aiflow4-openobserve:5080/o2
     AIFLOW4_O2_SOURCE: control
+    AIFLOW4_SUPPORT_LOG_DIR: /var/log/aiflow4
     OTEL_SERVICE_NAME: aiflow4-control
   volumes:
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
@@ -28,6 +29,7 @@ x-app: &app
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
     - /srv/aiflow/control/releases:/srv/aiflow/control/releases:ro
     - /srv/aiflow/control/cache/aiflow4-memory:/var/cache/aiflow4-memory
+    - /srv/aiflow/control/logs:/var/log/aiflow4
   logging: { driver: journald, options: { tag: "{{.Name}}" } }
   networks: [control, services, edge]
 

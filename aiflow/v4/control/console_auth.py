@@ -112,6 +112,7 @@ ROLE_VIEW_IDS = {
     "knowledge": "view.knowledge",
     "integrations": "view.integrations",
     "projects": "projects.manage",
+    "support": "console.manage",
     "licensing": "licensing.manage",
     "backup": "backup.read",
     "notifications": "notifications.manage",
@@ -125,6 +126,7 @@ PAGE_VIEWS = {
     "/machines": "machines_ai", "/projects": "projects", "/users": "users",
     "/licensing": "licensing", "/backup": "backup", "/notifications": "notifications",
     "/security": "security",
+    "/support": "support",
 }
 
 

@@ -80,6 +80,12 @@ key is configured. The key is **not** in the database:
   `SameSite=Strict`.
 - Console text from tickets, projects, nodes and integrations goes through `esc()` before it is put in a page; links are
   limited to `http(s)` and same-site paths. Pages carry a Content-Security-Policy (no foreign scripts, no framing).
+  This escaping and link check was applied to the existing screens as well, and every browser request that changes
+  something now carries the CSRF header.
+
+**Console screens:** `cc`, `work`, `delivery`, `sa`, `lead`, `business`, `review`, `stakeholder`, `machines`, `users`,
+`knowledge`, `backup`, `integrations`, `projects`, `licensing`, `notifications`, `support`, `security`.
+Their text and links are escaped as described above; their behaviour is otherwise unchanged.
 
 ## AC5 Scans on every pull request
 
@@ -142,6 +148,9 @@ the change it describes commit or roll back together. The state-changing routes 
 - `DELETE /v1/accounts/{account_id}`
 - `DELETE /v1/nodes/{name}`
 - `GET /v1/analytics/usage`
+- `PATCH /v1/console/users/{email}/disabled`
+- `PUT /v1/console/users/{email}`
+- `POST /v1/knowledge/items/{item_id}/{action}`
 - `GET /v1/integrations/github/imports/{pending_id}/install`
 - `GET /v1/integrations/github/installation-settings`
 - `GET /v1/integrations/github/manifest/callback`

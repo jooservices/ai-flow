@@ -1,7 +1,11 @@
 """Console views for Dashboard, Work board, Delivery, SA, Machines and AI, Users and roles,
-Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects and Licensing.
+Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, Licensing and Backup.
 
-Views are fed by /v1/state and relevant view APIs. The Business view adds
+Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
+Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
+Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge) and
+Integrations (/integrations, control/jira_connect.py), Projects (/projects), Licensing (/licensing),
+and Backup (/backup), fed by /v1/state and relevant view APIs. The Business view adds
 /v1/business/<project>/change-requests (see control/business.py). Other read-only endpoints give
 the drawers ticket details, runs, events, audited writes and time segments.
 """
@@ -38,6 +42,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/integrations", include_in_schema=False)
     @app.get("/projects", include_in_schema=False)
     @app.get("/licensing", include_in_schema=False)
+    @app.get("/backup", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

@@ -38,6 +38,10 @@ screen mapping is added; an unrelated screen page cannot satisfy it. A change in
 page in `docs/guide/` or `docs/v4/` that names one of that module's routes. An unrelated documentation edit does not
 count.
 
+The cross-screen layout controls are documented as one feature in `docs/v4/console-layouts.md`; the documentation
+check recognizes that file for the Dashboard, Human review, Machines and AI, Knowledge, Delivery, and Users and roles
+screens covered there. Other screen changes still need their own screen page.
+
 The route check also follows shared response helpers. For example, `control/state.py` supplies both
 `GET /v1/state` and `GET /v1/deploy/state`, so changing that snapshot helper requires a page that names both routes.
 The generated API reference lists request and response JSON fields with their types and required status, including

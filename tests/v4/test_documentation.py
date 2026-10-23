@@ -231,6 +231,7 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     routes = {api: {"/v1/knowledge/{kind}", "/v1/cc"}, "aiflow/v4/control/login.py": {"/v1/auth/login"}}
     texts = {"docs/v4/knowledge.md": "Lists items with `GET /v1/knowledge/{kind}`.",
              "docs/v4/other.md": "Nothing about routes.",
+             "docs/v4/console-layouts.md": "Custom layouts for Dashboard, Human review, Machines and AI, Knowledge, Delivery, and Users and roles.",
              "docs/guide/admin/security.md": "Sign in with POST /v1/auth/login."}
 
     def gaps(*files, **kw):
@@ -250,6 +251,9 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     assert gaps(api, "docs/guide/screens/cc.md")
     assert gaps(ui, "docs/guide/screens/cc.md", views={"cc", "sa"})  # sa page missing
     assert gaps(ui, "docs/guide/screens/cc.md", views={"cc"}) == []
+    layout_views = docsite.LAYOUT_SCREEN_VIEWS
+    assert gaps(ui, "docs/v4/console-layouts.md", views=layout_views) == []
+    assert gaps(ui, "docs/v4/console-layouts.md", views={"cc", "sa"})  # layout doc does not cover SA
     # every module that registers routes is watched, not only api.py
     login = "aiflow/v4/control/login.py"
     assert gaps(login, "docs/v4/knowledge.md")
@@ -353,6 +357,32 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
                  *(docsite.screen_doc_source(v).relative_to(ROOT).as_posix() for v in views)]
     assert docsite.documentation_gaps(all_pages, views=views) == []
     assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"], views=views)
+
+    dashboard_layout_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-layout-headings{")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-layout-headings .dash-section-title")),
+    ]
+    current_lines = dashboard_layout_lines
+    layout_views = docsite.changed_views("origin/develop")
+    assert layout_views == set(docsite.LAYOUT_SCREEN_VIEWS)
+    assert docsite.documentation_gaps(
+        [ui, "docs/v4/console-layouts.md"], views=layout_views,
+    ) == []
+
+    user_refresh_line = next(i for i, line in enumerate(source_lines, 1)
+                             if "S.view === 'users'" in line and "loadUsers(" in line)
+    current_lines = [user_refresh_line]
+    assert docsite.changed_views("origin/develop") == {"users"}
+
+    user_state_line = next(i for i, line in enumerate(source_lines, 1)
+                           if "loadedAt: 0" in line and "temporaryPassword" in line)
+    current_lines = [user_state_line]
+    assert docsite.changed_views("origin/develop") == {"users"}
+
+    dashboard_role_line = next(i for i, line in enumerate(source_lines, 1)
+                               if "var canSeeMachines =" in line)
+    current_lines = [dashboard_role_line]
+    assert docsite.changed_views("origin/develop") == {"cc"}
 
     current_lines = [hint_line]
     assert docsite.changed_views("origin/develop") == {"cc"}

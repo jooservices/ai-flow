@@ -44,6 +44,7 @@ _KNOWN_TOKEN = re.compile(
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_DOTTED_NAME = re.compile(r"(?i)(?<![A-Za-z0-9_.-])[a-z][a-z'-]{1,30}\.[a-z][a-z'-]{1,30}(?![A-Za-z0-9_.-])")
 _URL_CREDENTIALS = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 _PHONE = re.compile(
     r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\d{10}|\(\d{2,4}\)[ .-]?\d{3,4}[ .-]?\d{4}|"
@@ -85,13 +86,53 @@ def _redact_ip(match: re.Match[str]) -> str:
 
 
 _IP = re.compile(r"(?<![A-Fa-f0-9])(?:\d{1,3}\.){3}\d{1,3}(?![A-Fa-f0-9])|(?<![A-Fa-f0-9:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])")
+_SAFE_MACHINE_LABEL = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*\Z")
+
+
+def _machine_label_path(file_name: str | None, path: tuple[Any, ...]) -> bool:
+    """Identify the allow-listed paths that carry machine labels in bundle JSON."""
+    if file_name == "versions.json":
+        return len(path) == 3 and path[0] == "nodes" and isinstance(path[1], int) and path[2] == "name"
+    if file_name == "settings.json":
+        return len(path) == 2 and path[0] == "configured_nodes" and isinstance(path[1], int)
+    if file_name == "machine-state.json":
+        return len(path) == 2 and isinstance(path[0], int) and path[1] == "name"
+    if file_name == "account-state.json":
+        return len(path) == 2 and isinstance(path[0], int) and path[1] == "node"
+    return False
+
+
+def _replace_machine_labels(value: Any, file_name: str | None, *, redact_unsafe: bool,
+                            path: tuple[Any, ...] = (), replacements: dict[str, str] | None = None,
+                            unsafe: list[str] | None = None) -> Any:
+    """Protect safe machine labels from person-name heuristics, or redact unsafe labels."""
+    replacements = replacements if replacements is not None else {}
+    unsafe = unsafe if unsafe is not None else []
+    if _machine_label_path(file_name, path) and isinstance(value, str):
+        if value == "[REDACTED_NAME]":
+            return value
+        if _SAFE_MACHINE_LABEL.fullmatch(value):
+            marker = f"AIFLOWMACHINELABEL{len(replacements)}END"
+            replacements[marker] = value
+            return marker
+        unsafe.append(value)
+        return "[REDACTED_NAME]" if redact_unsafe else value
+    if isinstance(value, dict):
+        return {key: _replace_machine_labels(item, file_name, redact_unsafe=redact_unsafe,
+                                               path=(*path, key), replacements=replacements, unsafe=unsafe)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_machine_labels(item, file_name, redact_unsafe=redact_unsafe,
+                                        path=(*path, index), replacements=replacements, unsafe=unsafe)
+                for index, item in enumerate(value)]
+    return value
 
 
 def sanitize_text(text: str, names: bool = True) -> str:
     """Remove recognizable credentials and personal identifiers before writing bundle files.
 
-    ``names=False`` skips the person-name rules; it is for the allow-listed structured JSON files,
-    where ``name`` holds machine names such as ``wsl`` and free-form prose is already replaced.
+    ``names=False`` skips the person-name rules; callers should use it only when they separately
+    screen name-like identifiers in the data they are sanitizing.
     """
     text = _PRIVATE_KEY.sub("[REDACTED_PRIVATE_KEY]", text)
     text = _SECRET_ASSIGNMENT.sub(_redact_secret_assignment, text)
@@ -108,6 +149,7 @@ def sanitize_text(text: str, names: bool = True) -> str:
     text = _HOME_PATH.sub(r"\1[REDACTED_USER]", text)
     if not names:
         return text
+    text = _DOTTED_NAME.sub("[REDACTED_NAME]", text)
     text = _NAME.sub(_redact_name, text)
     text = _PERSON_FIELD.sub(_redact_person_field, text)
     return _PERSON_MENTION.sub(_redact_person_field, text)
@@ -150,7 +192,8 @@ def sensitive_findings(text: str, names: bool = True) -> list[str]:
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    has_name = names and bool(_NAME.search(text) or _PERSON_FIELD.search(text) or _PERSON_MENTION.search(text))
+    has_name = names and bool(_DOTTED_NAME.search(text) or _NAME.search(text)
+                              or _PERSON_FIELD.search(text) or _PERSON_MENTION.search(text))
     if (_EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _DOB_FIELD.search(text)
             or _ADDRESS.search(text) or has_ip or has_name):
         findings.append("personal_data")
@@ -158,7 +201,18 @@ def sensitive_findings(text: str, names: bool = True) -> list[str]:
 
 
 def file_findings(name: str, text: str) -> list[str]:
-    """Scan one bundle file; person-name rules apply only to log text, not to structured JSON."""
+    """Scan one bundle file, protecting only known-safe machine label fields in structured JSON."""
+    if name.endswith(".json"):
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            return sensitive_findings(text)
+        unsafe: list[str] = []
+        protected = _replace_machine_labels(value, name, redact_unsafe=False, unsafe=unsafe)
+        findings = sensitive_findings(json.dumps(protected, ensure_ascii=False), names=True)
+        if unsafe and "personal_data" not in findings:
+            findings.append("personal_data")
+        return findings
     return sensitive_findings(text, names=name.startswith("logs/"))
 
 
@@ -378,9 +432,14 @@ def _safe_persistent_logs(sections: list[list[str]]) -> str:
     return cap_log_bytes(sanitize_text(text))[0]
 
 
-def _safe_json(value: Any) -> str:
-    raw = json.dumps(value, ensure_ascii=False, default=str, indent=2, sort_keys=True)
-    return sanitize_text(raw, names=False) + "\n"
+def _safe_json(value: Any, file_name: str | None = None) -> str:
+    replacements: dict[str, str] = {}
+    protected = _replace_machine_labels(value, file_name, redact_unsafe=True, replacements=replacements)
+    raw = json.dumps(protected, ensure_ascii=False, default=str, indent=2, sort_keys=True)
+    safe = sanitize_text(raw)
+    for marker, label in replacements.items():
+        safe = safe.replace(marker, label)
+    return safe + "\n"
 
 
 def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
@@ -415,14 +474,14 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         "versions.json": _safe_json({"aiflow": version, "python": platform.python_version(),
                                       "platform": platform.system().lower(),
                                       "nodes": [{"name": row["name"], "release": row["release_version"] or "unknown"}
-                                                for row in nodes]}).encode("utf-8"),
+                                                for row in nodes]}, "versions.json").encode("utf-8"),
         "settings.json": _safe_json({"environment": ctx.settings.env, "console_login_enabled": bool(ctx.settings.console_login),
                                       "control_version": version, "projects": sorted(repo.projects),
                                       "configured_nodes": sorted(repo.nodes),
-                                      "configured_account_count": len(repo.accounts)}).encode("utf-8"),
-        "machine-state.json": _safe_json(machines).encode("utf-8"),
-        "account-state.json": _safe_json(account_states).encode("utf-8"),
-        "incidents.json": _safe_json(incident_data).encode("utf-8"),
+                                      "configured_account_count": len(repo.accounts)}, "settings.json").encode("utf-8"),
+        "machine-state.json": _safe_json(machines, "machine-state.json").encode("utf-8"),
+        "account-state.json": _safe_json(account_states, "account-state.json").encode("utf-8"),
+        "incidents.json": _safe_json(incident_data, "incidents.json").encode("utf-8"),
     }
 
     persistent_logs = _persistent_control_logs(ctx.settings.support_log_dir, now)
@@ -441,7 +500,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         # Ticket summaries are free text like incident prose; no pattern screens them reliably.
         ticket_data["summary"] = FREEFORM
         ticket_data["ticket_key"] = ticket_data.pop("key")
-        files["ticket.json"] = _safe_json(ticket_data).encode("utf-8")
+        files["ticket.json"] = _safe_json(ticket_data, "ticket.json").encode("utf-8")
         rows = ctx.db.all("SELECT id,step,started_at FROM runs WHERE ticket_key=%s"
                           " AND started_at >= now() - interval '24 hours' ORDER BY started_at,id", (ticket_key,))
         for row in rows:
@@ -463,7 +522,7 @@ def build_support_bundle(ctx, ticket_key: str | None = None, log_buffer: Support
                  "files": [{"name": name, "bytes": len(content)} for name, content in files.items()],
                  "incident_count": len(json.loads(files["incidents.json"])),
                  "ticket_run_log_count": sum(name.startswith("logs/ticket-runs/") for name in files)}
-    files["inventory.json"] = _safe_json(inventory).encode("utf-8")
+    files["inventory.json"] = _safe_json(inventory, "inventory.json").encode("utf-8")
     findings = [(name, item) for name, content in files.items()
                 for item in file_findings(name, content.decode("utf-8", errors="replace"))]
     if findings:

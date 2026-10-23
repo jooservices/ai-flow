@@ -124,9 +124,44 @@ def test_machine_names_survive_in_structured_files_while_log_names_stay_redacted
     assert "Jane Smith" not in log
 
 
+def test_name_like_node_label_is_redacted_across_structured_bundle_files(ctx):
+    from aiflow.v4.core.controlrepo import Node
+
+    ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
+               " VALUES ('jane.doe','worker','online',2,0,'4.1.0')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+               " VALUES ('jane-doe','claude','jane.doe','middle',%s,'idle')", (["dev"],))
+    ctx.repo().nodes["jane.doe"] = Node(name="jane.doe")
+
+    raw_files = support_bundle._file_payloads(ctx, None, support_bundle.SupportLogBuffer())
+    findings = {}
+    for name, content in raw_files.items():
+        file_scan = support_bundle.file_findings(name, content.decode("utf-8"))
+        if file_scan:
+            findings[name] = file_scan
+    assert not findings, findings
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        contents = {name: bundle.read(name).decode("utf-8") for name in bundle.namelist()}
+        machine_states = json.loads(contents["machine-state.json"])
+        versions = json.loads(contents["versions.json"])
+        settings = json.loads(contents["settings.json"])
+        account_states = json.loads(contents["account-state.json"])
+
+    assert inventory["scan"] == "passed"
+    assert all("jane.doe" not in content for name, content in contents.items() if name.endswith(".json"))
+    assert [row["name"] for row in machine_states if row["status"] == "online" and row["slots_total"] == 2
+            and row["release"] == "4.1.0"] == ["[REDACTED_NAME]"]
+    assert any(row["name"] == "[REDACTED_NAME]" for row in versions["nodes"])
+    assert "[REDACTED_NAME]" in settings["configured_nodes"]
+    assert any(row["node"] == "[REDACTED_NAME]" for row in account_states)
+    assert "personal_data" in support_bundle.file_findings("machine-state.json", '[{"name":"jane.doe"}]')
+
+
 def test_structured_files_still_redact_secrets_and_tokens():
-    raw = json.dumps({"name": "wsl", "token": "abcd1234efgh5678", "note": "ghp_" + "a" * 20})
-    safe = support_bundle._safe_json(json.loads(raw))
+    raw = json.dumps({"nodes": [{"name": "wsl", "release": "4.1.0"}],
+                      "token": "abcd1234efgh5678", "note": "ghp_" + "a" * 20})
+    safe = support_bundle._safe_json(json.loads(raw), "versions.json")
     assert '"name": "wsl"' in safe
     assert "abcd1234efgh5678" not in safe and "ghp_" not in safe
 

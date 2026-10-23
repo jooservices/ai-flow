@@ -14,8 +14,10 @@ text are omitted; free-form message text is replaced with `[REDACTED_FREEFORM]`.
 separators generated internally, while separator-shaped text from a log message is treated as free form. The result is
 still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` style fields) and scanned again.
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
-bundle is rejected and no download is made available. Secret values and free-form account/provider error state are
-not selected from settings or registry records.
+bundle is rejected and no download is made available. Structured JSON is scanned for name-like identifiers too;
+only machine labels made from lowercase letters, digits, hyphens and underscores are retained in the known machine
+label fields. Other machine labels, including dotted labels such as `jane.doe`, are replaced with a redaction marker.
+Secret values and free-form account/provider error state are not selected from settings or registry records.
 
 Control API and loop processes write rotated logs to `/srv/aiflow/control/logs` in the standard Compose deployment.
 Only entries with timestamps in the preceding 24 hours are included. Other deployments retain a bounded in-memory

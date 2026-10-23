@@ -120,11 +120,22 @@ def in_flight_hot_files(db, footprint_of: Callable[[dict], dict], exclude: str =
     return {t["key"]: footprint_of(t)["hot"] for t in rows}
 
 
-def released_by_wait(ready_since: datetime | None, now: datetime | None = None) -> bool:
-    """A ticket that waited longer than MAX_WAIT for a hot file starts anyway."""
-    if ready_since is None:
+def mark_blocked(db, ticket_key: str) -> datetime:
+    """When the ticket was first held back for a hot file; the first call records it, later calls keep it."""
+    db.run("INSERT INTO hot_file_blocked (ticket_key) VALUES (%s) ON CONFLICT (ticket_key) DO NOTHING", (ticket_key,))
+    return db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key=%s", (ticket_key,))["blocked_at"]
+
+
+def clear_blocked(db, ticket_key: str) -> None:
+    """The ticket is not held back any more: a later block starts a new wait."""
+    db.run("DELETE FROM hot_file_blocked WHERE ticket_key=%s", (ticket_key,))
+
+
+def released_by_wait(blocked_since: datetime | None, now: datetime | None = None) -> bool:
+    """A ticket that waited longer than MAX_WAIT since it was first held back starts anyway."""
+    if blocked_since is None:
         return False
     now = now or datetime.now(timezone.utc)
-    if ready_since.tzinfo is None:
-        ready_since = ready_since.replace(tzinfo=timezone.utc)
-    return now - ready_since > MAX_WAIT
+    if blocked_since.tzinfo is None:
+        blocked_since = blocked_since.replace(tzinfo=timezone.utc)
+    return now - blocked_since > MAX_WAIT

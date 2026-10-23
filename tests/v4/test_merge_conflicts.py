@@ -101,14 +101,23 @@ def test_waiting_ticket_is_released_after_the_maximum_wait(client, ctx):
     add_ticket(ctx.db, "TESTWP-2")
     describe(ctx.db, "TESTWP-1", "Card", "Edit " + CONSOLE)
     describe(ctx.db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
-    ctx.db.run("UPDATE tickets SET jira_updated=now() WHERE key='TESTWP-2'")
+    # an old backlog ticket is still held on its first check: the wait counts from the first block, not its age
+    ctx.db.run("UPDATE tickets SET jira_created=now() - interval '3 days', jira_updated=now() - interval '3 days'"
+               " WHERE key='TESTWP-2'")
     keys = lambda: [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
                                                  headers=cc).json()["tickets"]]
     assert "TESTWP-2" not in keys()
-    ctx.db.run("UPDATE tickets SET jira_updated=now() - interval '7 hours' WHERE key='TESTWP-2'")
+    first = ctx.db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key='TESTWP-2'")["blocked_at"]
+    assert "TESTWP-2" not in keys()
+    assert ctx.db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key='TESTWP-2'")["blocked_at"] == first
+    ctx.db.run("UPDATE hot_file_blocked SET blocked_at=now() - interval '7 hours' WHERE ticket_key='TESTWP-2'")
     assert "TESTWP-2" in keys()
     assert hotfiles.released_by_wait(datetime.now(timezone.utc) - timedelta(hours=7))
     assert not hotfiles.released_by_wait(None)
+    # once nothing blocks it, the record goes and a later block starts a new wait
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-1'")
+    assert "TESTWP-2" in keys()
+    assert ctx.db.one("SELECT 1 AS x FROM hot_file_blocked WHERE ticket_key='TESTWP-2'") is None
 
 
 # --- AC2: automatic update ------------------------------------------------------------------------------------------

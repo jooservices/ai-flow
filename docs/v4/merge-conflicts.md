@@ -1,5 +1,7 @@
 # Fewer merge conflicts
 
+**Console screens:** Delivery (`delivery`).
+
 Many tickets run at once and most touch the same few files, so branches conflicted with the base and went back for
 another development run and a new verification. Five measures keep that work from being lost.
 
@@ -18,6 +20,11 @@ A predicted file is *hot* when it matches `HOT_FILES` (the console page, `aiflow
 shares a hot file with it and has a running dev run or an open pull request (In Verify, Human review). The account is
 offered another ticket instead, or waits. The ticket starts when the other one merges, or after it has waited six
 hours (`MAX_WAIT`), so a hot file never starves a ticket.
+
+The wait counts from the moment the ticket was first held back (table `hot_file_blocked`, migration
+`019_hot_file_blocked.sql`), not from the age of the ticket: an old backlog ticket is still held on its first check.
+The record is removed when nothing blocks the ticket any more, so a later block starts a new wait. The ticket list
+`POST /v1/work/claim` accepts and `GET /v1/work/candidates` offers follow this rule.
 
 ## Automatic branch update (`aiflow/v4/worker/verify.py`)
 
@@ -48,7 +55,8 @@ a real conflict and goes to rework. An entry whose run ended, or that was silent
 ## Command Center: work lost to conflicts
 
 The Analytics panel shows, for the last 14 days and the 14 before, with a per-day trend (`GET
-/v1/analytics/conflicts?days=14&bucket=day|week`):
+/v1/analytics/conflicts?days=14&bucket=day|week`; it sits beside the per-account runs of `GET /v1/analytics/daily`
+and has the same access rule, `view.dashboard`):
 
 - **Share lost to conflicts**: verifications with outcome `rework` and reason "conflicts with <base>" divided by all
   completed verifications (merged, handed to a person, reworked, failed). A verification that failed for a conflict

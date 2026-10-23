@@ -4276,11 +4276,14 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if not allowed("dev", t):
                     continue
                 # never start two tickets expected to touch the same hot file (docs/v4/merge-conflicts.md)
-                if not hotfiles.released_by_wait(t.get("jira_updated") or t.get("jira_created")):
-                    if flying is None:
-                        flying = hotfiles.in_flight_hot_files(ctx.db, footprint)
-                    if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]}):
+                if flying is None:
+                    flying = hotfiles.in_flight_hot_files(ctx.db, footprint)
+                if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]}):
+                    # the wait counts from the first time the ticket was held back, not from its age
+                    if not hotfiles.released_by_wait(hotfiles.mark_blocked(ctx.db, t["key"])):
                         continue
+                else:
+                    hotfiles.clear_blocked(ctx.db, t["key"])
                 dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))

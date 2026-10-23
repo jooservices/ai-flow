@@ -3610,8 +3610,8 @@ function analyticsChart(rows) {
   });
   return svg + '</svg>';
 }
-/* Work lost to merge conflicts (/v1/analytics/conflicts): share of verifications, time spent, trend */
 function conflictLossBlock() {
+  /* Work lost to merge conflicts (/v1/analytics/conflicts): share of verifications, time spent, trend */
   var c = S.conflicts;
   var h = '<div id="d-conflicts" class="conflict-loss" aria-label="Work lost to merge conflicts"><h3>Lost to merge conflicts</h3>';
   if (S.conflictsError) return h + '<div class="empty">Conflict numbers unavailable: ' + esc(S.conflictsError) + '</div></div>';

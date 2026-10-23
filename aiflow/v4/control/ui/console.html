@@ -641,7 +641,7 @@ var S = {
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
-  integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
+  integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
     form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
@@ -1032,7 +1032,8 @@ function loadProjectRepositories(key) {
 function addProjectRepository(name) {
   var ed = S.projectAdmin.repositoryEditor, data = ed && ed.data;
   if (!data || !name || (data.repositories || []).some(function (r) { return r.repo === name; })) return;
-  data.repositories.push({ repo: name, base: '', checks: [], stack: '', effective: { base: data.project_defaults.base,
+  var known = (data.github_repos || []).filter(function (g) { return g.full_name === name; })[0] || {};
+  data.repositories.push({ repo: name, base: '', checks: [], stack: '', connection: known.connection || '', connections: known.connections || [], effective: { base: data.project_defaults.base,
     checks: data.project_defaults.checks, stack: data.project_defaults.stack } });
   renderProjects();
 }
@@ -1040,7 +1041,8 @@ function saveProjectRepositories() {
   var ed = S.projectAdmin.repositoryEditor; if (!ed || !ed.data || ed.saving) return;
   ed.saving = true; ed.error = ''; renderProjects();
   var body = { repositories: ed.data.repositories.map(function (r) { return { repo: r.repo, base: r.base || '',
-    checks: r.checks || [], stack: r.stack || '' }; }), epic_repositories: ed.data.epic_repositories || {} };
+    checks: r.checks || [], stack: r.stack || '',
+    connection: (r.connection_picked || r.connection_stale) ? (r.connection || '') : '' }; }), epic_repositories: ed.data.epic_repositories || {} };
   fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/repositories', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function (r) { return projectResponseError(r); })
@@ -1069,10 +1071,48 @@ function githubResponseError(response) {
     return Promise.reject(new Error(typeof detail === 'string' ? detail : 'GitHub connection could not be completed'));
   });
 }
+function githubAppTarget() { return S.integrations.target || ((S.integrations.connections || []).length ? 'new' : 'default'); }
+function addGitHubToken() {
+  var tokenInput = $('[data-github-token]'), token = tokenInput ? tokenInput.value.trim() : '';
+  var account = ($('[data-github-token-account]') || {}).value || '', label = ($('[data-github-token-label]') || {}).value || '';
+  if (!token) { S.integrations.error = 'Paste the access token.'; renderIntegrations(); return; }
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  fetch('/v1/integrations/github/connections/token', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: token, account: account.trim(), label: label.trim() }) })
+    .then(function (r) { return githubResponseError(r); })
+    .then(function () { S.integrations.notice = 'Access token verified with GitHub and stored. It will not be shown again.'; loadGitHubIntegrations(); })
+    .catch(function (e) { S.integrations.error = String(e.message || e); S.integrations.busy = false; renderIntegrations(); });
+}
+function githubConnectionAction(id, method, suffix, body, notice) {
+  S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
+  var options = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (body) options.body = JSON.stringify(body);
+  fetch('/v1/integrations/github/connections/' + encodeURIComponent(id) + suffix, options)
+    .then(function (r) { return githubResponseError(r); })
+    .then(function () { S.integrations.notice = notice; loadGitHubIntegrations(); })
+    .catch(function (e) { S.integrations.error = String(e.message || e); S.integrations.busy = false; renderIntegrations(); });
+}
+function githubManifestStart() {
+  var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
+  if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); return; }
+  window.open('/v1/integrations/github/manifest/start?organization=' + encodeURIComponent(org) + '&connection=' + encodeURIComponent(githubAppTarget()), '_blank', 'noopener');
+}
+function replaceGitHubToken(id) {
+  var field = $('[data-github-replace-token="' + id + '"]'), pasted = field ? field.value.trim() : '';
+  if (!pasted) { S.integrations.error = 'Paste the new token first.'; renderIntegrations(); return; }
+  githubConnectionAction(id, 'PUT', '/token', { token: pasted }, 'Token replaced.');
+}
+function removeGitHubConnection(id) {
+  if (window.confirm('Remove this GitHub connection? Repositories using it must be reassigned first.')) githubConnectionAction(id, 'DELETE', '', null, 'Connection removed.');
+}
 function loadGitHubIntegrations() {
   S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
-  fetch('/v1/integrations/github', { cache: 'no-store' }).then(function (r) { return githubResponseError(r); })
-    .then(function (d) { S.integrations.data = d; S.integrations.error = ''; })
+  fetch('/v1/integrations/github/connections', { cache: 'no-store' }).then(function (r) { return githubResponseError(r); })
+    .then(function (d) {
+      S.integrations.connections = d.connections || []; S.integrations.recommendation = d.recommendation || '';
+      if (!S.integrations.connections.length) S.integrations.target = '';
+      S.integrations.error = '';
+    })
     .catch(function (e) { S.integrations.error = String(e.message || e); })
     .then(function () { S.integrations.busy = false; renderIntegrations(); });
 }
@@ -1097,7 +1137,7 @@ function importGitHubApp() {
   S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
   keyFile.text().then(function (privateKey) {
     return fetch('/v1/integrations/github/imports', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: appId, private_key: privateKey }) });
+      body: JSON.stringify({ app_id: appId, private_key: privateKey, connection: githubAppTarget() }) });
   }).then(function (r) { return githubResponseError(r); })
     .then(function (d) {
       S.integrations.pending = { pending_id: d.pending_id, app: d.app, install_url: d.install_url };
@@ -1115,13 +1155,13 @@ function connectImportedGitHubApp() {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ installation_id: Number(S.integrations.selected) })
   }).then(function (r) { return githubResponseError(r); })
-    .then(function () { S.integrations.pending = null; S.integrations.notice = 'GitHub is connected.'; loadGitHubIntegrations(); })
+    .then(function () { S.integrations.pending = null; S.integrations.target = ''; S.integrations.notice = 'GitHub is connected.'; loadGitHubIntegrations(); })
     .catch(function (e) { S.integrations.error = String(e.message || e); })
     .then(function () { S.integrations.busy = false; renderIntegrations(); });
 }
 function renderGitHubIntegrations() {
   var state = S.integrations, data = state.data || {}, h = '<section class="panel"><div class="panel-h"><h2>Integrations</h2>';
-  h += '<span class="hint">Connect the GitHub App used by workers and project setup.</span><span class="spacer"></span>';
+  h += '<span class="hint">Manage GitHub connections used by workers and project setup.</span><span class="spacer"></span>';
   if (consoleCan('integrations.manage')) h += '<button class="btn sm" data-act="github-refresh">Refresh</button>';
   h += '</div>';
   if (!consoleCan('integrations.manage')) h += '<div class="muted">Only an authenticated user with integration management permission can manage integrations.</div>';
@@ -1129,13 +1169,28 @@ function renderGitHubIntegrations() {
     if (state.notice) h += '<div class="good" role="status">' + esc(state.notice) + '</div>';
     if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
     if (state.busy) h += '<div class="muted">Loading GitHub connection…</div>';
-    if (data.connected) {
-      h += '<div class="project-checks"><strong>GitHub App connected</strong>';
-      h += '<div>' + esc(data.app && data.app.name || 'GitHub App') + ' · ' + esc(data.account && data.account.login || '') + '</div>';
-      h += '<div class="muted">Installation ' + esc(data.installation_id || '—') + ' · ' + esc(data.repository_count || 0) + ' repositories available</div></div>';
-      h += '<div class="project-actions"><a class="btn primary" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repositories on GitHub</a>';
-      h += '<button class="btn" data-act="github-refresh">Refresh connection</button></div>';
-    } else if (!state.pending) {
+    var list = state.connections || [];
+    list.forEach(function (c) {
+      h += '<div class="project-checks" data-github-connection="' + esc(c.id) + '"><div><strong>' + esc(c.label) + '</strong> · <span class="mono">' + esc(c.account) + '</span> (' + esc(c.account_type || 'account') + ')';
+      h += ' · ' + (c.kind === 'app' ? 'GitHub App' : 'Access token') + ' · <span class="' + (c.status === 'connected' ? 'good' : 'stakeholder-error') + '">' + esc(c.status) + '</span></div>';
+      if (c.warning) h += '<div class="stakeholder-error" role="note">' + esc(c.warning) + '</div>';
+      h += '<div class="muted">' + esc((c.repositories || []).length) + ' reachable repositories' + ((c.repositories || []).length ? ': <span class="mono">' + esc((c.repositories || []).join(', ')) + '</span>' : '') + '</div>';
+      h += '<div class="project-actions"><button class="btn sm" data-act="github-test" data-id="' + esc(c.id) + '">Test</button>';
+      if (c.kind === 'token') h += '<input type="password" data-github-replace-token="' + esc(c.id) + '" placeholder="New token" autocomplete="off"><button class="btn sm" data-act="github-replace-token" data-id="' + esc(c.id) + '">Replace token</button>';
+      else {
+        if (c.settings_url) h += '<a class="btn sm" href="' + esc(c.settings_url) + '" target="_blank" rel="noopener">Add repositories on GitHub</a>';
+        h += '<button class="btn sm" data-act="github-replace-app" data-id="' + esc(c.id) + '">Replace App</button>';
+      }
+      h += '<button class="btn sm" data-act="github-remove" data-id="' + esc(c.id) + '">Remove</button></div></div>';
+    });
+    if (!list.length && !state.busy) h += '<div class="muted">No GitHub connection yet.</div>';
+    if (state.target && state.target !== 'new') h += '<div class="muted">The next GitHub App you add replaces connection ' + esc(state.target) + '.</div>';
+    if (!state.pending) {
+      h += '<h3>Add an access token</h3><p class="muted">Paste a personal or fine-grained token. AI Flow verifies it with GitHub, keeps it in the secret store and never shows it again. A GitHub App is recommended: a token reaches more, has no bot identity, and is never handed to a node.</p>';
+      h += '<label>Access token<input type="password" data-github-token autocomplete="off"></label>';
+      h += '<label>Account or organization (blank: the token owner)<input data-github-token-account autocomplete="off"></label>';
+      h += '<label>Label<input data-github-token-label autocomplete="off"></label>';
+      h += '<div class="project-actions"><button class="btn" data-act="github-add-token"' + (state.busy ? ' disabled' : '') + '>Verify and add token</button></div>';
       h += '<h3>Create a GitHub App</h3><p class="muted">GitHub will create an App in the organization you choose, then let you select the installation and repositories.</p>';
       h += '<label>GitHub organization<input data-github-org value="" placeholder="organization-name" autocomplete="off"></label>';
       h += '<div class="project-actions"><button class="btn primary" data-act="github-manifest"' + (state.busy ? ' disabled' : '') + '>Connect GitHub</button></div>';
@@ -3618,9 +3673,10 @@ function renderProjects() {
       h += '<button class="btn" data-act="project-add-cancel">Cancel</button></div>';
     }
     h += '</section>';
+  }
   var editor = state.repositoryEditor;
   if (editor) {
-    h += '<section class="panel"><div class="panel-h"><h2>Repositories · ' + esc(editor.key) + '</h2><span class="hint">Map Jira epics to repositories visible to the connected GitHub App.</span><span class="spacer"></span><button class="btn sm" data-act="project-repositories-close">Close</button></div>';
+    h += '<section class="panel"><div class="panel-h"><h2>Repositories · ' + esc(editor.key) + '</h2><span class="hint">Map Jira epics to repositories reachable through GitHub connections.</span><span class="spacer"></span><button class="btn sm" data-act="project-repositories-close">Close</button></div>';
     if (editor.error) h += '<div class="stakeholder-error">' + esc(editor.error) + '</div>';
     if (editor.busy || !editor.data) h += '<div class="muted">Loading Jira epics and GitHub repositories…</div>';
     else {
@@ -3638,14 +3694,21 @@ function renderProjects() {
       h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
       configured.forEach(function (r) {
         h += '<section class="project-checks"><strong class="mono">' + esc(r.repo) + (r.repo === data.default_repo ? ' · default' : '') + '</strong>';
-        h += '<div class="project-form"><label>Base branch<input data-repository-config="base" data-repo="' + esc(r.repo) + '" value="' + esc(r.base || '') + '" placeholder="Inherit ' + esc(defaults.base || 'develop') + '"></label>';
+        var reach = r.connections || [], conns = data.connections || [];
+        if (r.connection_stale) h += '<div class="bad">Previously assigned to <span class="mono">' + esc(r.assigned_connection) + '</span>, which can no longer reach this repository. The available connection is selected below.</div>';
+        h += '<div class="project-form"><label>GitHub connection<select data-repository-config="connection" data-repo="' + esc(r.repo) + '">';
+        if (!reach.length) h += '<option value="">No connection can reach this repository</option>';
+        conns.filter(function (c) { return reach.indexOf(c.id) >= 0; }).forEach(function (c) {
+          h += '<option value="' + esc(c.id) + '"' + (r.connection === c.id ? ' selected' : '') + '>' + esc(c.label) + ' · ' + esc(c.account) + ' · ' + (c.kind === 'app' ? 'GitHub App' : 'access token') + '</option>';
+        });
+        h += '</select></label>';
+        h += '<label>Base branch<input data-repository-config="base" data-repo="' + esc(r.repo) + '" value="' + esc(r.base || '') + '" placeholder="Inherit ' + esc(defaults.base || 'develop') + '"></label>';
         h += '<label>Stack<select data-repository-config="stack" data-repo="' + esc(r.repo) + '"><option value="">Inherit project stack</option>' + (data.stacks || []).map(function (s) { return '<option value="' + esc(s) + '"' + (r.stack === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>';
         h += '<label class="wide">Checks, one command per line<textarea data-repository-config="checks" data-repo="' + esc(r.repo) + '" placeholder="Inherit project checks">' + esc((r.checks || []).join('\n')) + '</textarea></label></div></section>';
       });
       h += '<div class="project-actions"><select data-repository-add><option value="">Add a repository…</option>' + options.filter(function (r) { return !configured.some(function (c) { return c.repo === r.full_name; }); }).map(function (r) { return '<option value="' + esc(r.full_name) + '">' + esc(r.full_name) + '</option>'; }).join('') + '</select><button class="btn sm" data-act="project-repository-add">Add repository</button><span class="spacer"></span><button class="btn primary" data-act="project-repositories-save"' + (editor.saving ? ' disabled' : '') + '>Save repository settings</button></div>';
     }
     h += '</section>';
-  }
   }
   root.innerHTML = h;
 }
@@ -4128,11 +4191,12 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-repository-add') { var addSelect = $('[data-repository-add]'); addProjectRepository(addSelect ? addSelect.value : ''); }
   else if (act === 'project-repositories-save') saveProjectRepositories();
   else if (act === 'github-refresh') loadGitHubIntegrations();
-  else if (act === 'github-manifest') {
-    var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
-    if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); }
-    else window.open('/v1/integrations/github/manifest/start?organization=' + encodeURIComponent(org), '_blank', 'noopener');
-  }
+  else if (act === 'github-manifest') githubManifestStart();
+  else if (act === 'github-add-token') addGitHubToken();
+  else if (act === 'github-test') githubConnectionAction(el.getAttribute('data-id'), 'POST', '/test', null, 'Connection tested.');
+  else if (act === 'github-replace-token') replaceGitHubToken(el.getAttribute('data-id'));
+  else if (act === 'github-replace-app') { S.integrations.target = el.getAttribute('data-id'); S.integrations.notice = 'Add the replacement GitHub App below; it takes over this connection.'; renderIntegrations(); }
+  else if (act === 'github-remove') removeGitHubConnection(el.getAttribute('data-id'));
   else if (act === 'github-import') importGitHubApp();
   else if (act === 'github-import-refresh') loadImportedInstallations();
   else if (act === 'github-import-connect') connectImportedGitHubApp();
@@ -4304,6 +4368,7 @@ document.addEventListener('input', function (e) {
     if (data) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
+      if (config && fieldName === 'connection') config.connection_picked = true;
       if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
     }
   }
@@ -4362,6 +4427,7 @@ document.addEventListener('change', function (e) {
     if (data) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
+      if (config && fieldName === 'connection') config.connection_picked = true;
       if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
     }
   }

@@ -42,7 +42,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
 - [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
-- [Connect GitHub from the console](../../docs/v4/github-connect.md): create or import a GitHub App, choose its installation and refresh accessible repositories
+- [Connect GitHub from the console](../../docs/v4/github-connect.md): manage several Apps or access tokens and assign each repository a connection
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains

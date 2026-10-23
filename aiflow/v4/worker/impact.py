@@ -100,8 +100,10 @@ def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
     t0 = time.time()
     result: dict = {"fence": c.fence, "outcome": "failed"}
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         wt = Path(srv_root) / "work" / project["key"] / f"{key}--impact"
         head = git.detached(mirror, wt, f"origin/{project['base']}")
         hb.progress = {"phase": "impact", "head": head[:10]}

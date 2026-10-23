@@ -186,8 +186,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
 
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})["token"]
-        mirror = git.mirror(repo, token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})
+        token = credential["token"]
+        mirror = git.mirror(repo, token, credential.get("transport_url", ""))
         wt = Path(srv_root) / "work" / project["key"] / branch
         moved = git.foreign_worktree(mirror, wt, branch)
         if moved:  # the ticket's repository changed since the worktree was made: never reuse it
@@ -286,7 +287,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}
         sha = git.commit_all(wt, commit_message(c, summary), c.identity)
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})["token"]
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": repo, "branch": branch})
+        token = credential["token"]
         git.push(wt, branch, token)
         body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"

@@ -34,7 +34,7 @@ class FakeGit:
         self.ref = ""
         self.removed = False
 
-    def mirror(self, repo, token):
+    def mirror(self, repo, token, _transport_url=""):
         assert repo == "jooservices/test-aiflow-wp" and token == "ghs_fake"
         return Path("/tmp/fake-mirror")
 

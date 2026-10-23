@@ -10,6 +10,8 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from aiflow.v4.control import support_bundle
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import J
@@ -168,6 +170,23 @@ def test_personal_data_scan_redacts_single_name_in_person_field():
     assert clean == "owner=[REDACTED_NAME]"
     assert "Alice" not in clean
     assert not support_bundle.sensitive_findings(clean)
+
+
+def test_lowercase_multiword_customer_name_is_redacted_and_unresolved_value_blocks_bundle(ctx, monkeypatch):
+    raw = "customer name: jane doe"
+    for labeled_name in (raw, "name: jane doe", "CUSTOMER_NAME=jane doe"):
+        clean = support_bundle.sanitize_text(labeled_name)
+
+        assert "personal_data" in support_bundle.sensitive_findings(labeled_name)
+        assert "jane doe" not in clean
+        assert not support_bundle.sensitive_findings(clean)
+    assert support_bundle.sanitize_text(raw) == "customer name: [REDACTED_NAME]"
+
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
+               " VALUES ('test','TESTWP-1','warning','Safe title',%s)", (raw,))
+    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text: text)
+    with pytest.raises(ValueError, match="sensitive content remains"):
+        support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
 
 
 def test_support_sanitizer_redacts_url_and_dsn_userinfo_credentials():
@@ -334,8 +353,24 @@ def test_worker_attaches_only_a_capped_log_within_the_run_log_directory(tmp_path
     assert result["details"]["support_log_truncated"] is True
     assert len(result["details"]["support_log_text"].encode("utf-8")) == support_bundle.MAX_LOG_BYTES
 
+    path.write_text("€" * (support_bundle.MAX_LOG_BYTES // 3 + 1), encoding="utf-8")
+    unicode_result = {"details": {"log": str(path)}}
+    attach_support_log(unicode_result, str(root))
+    unicode_log = unicode_result["details"]["support_log_text"]
+    assert unicode_result["details"]["support_log_truncated"] is True
+    assert len(unicode_log.encode("utf-8")) <= support_bundle.MAX_LOG_BYTES
+    assert unicode_log.encode("utf-8").decode("utf-8") == unicode_log
+
     outside = tmp_path / "private.log"
     outside.write_text("do not collect", encoding="utf-8")
     unsafe = {"details": {"log": str(outside)}}
     attach_support_log(unsafe, str(root))
     assert "support_log_text" not in unsafe["details"]
+
+
+def test_log_cap_drops_partial_utf8_codepoints_without_exceeding_byte_limit():
+    capped, truncated = support_bundle.cap_log_bytes("€" * 3, max_bytes=5)
+
+    assert truncated is True
+    assert capped == "€"
+    assert len(capped.encode("utf-8")) <= 5

@@ -45,11 +45,14 @@ _PHONE = re.compile(
     r"\d{3}[ .-]\d{3}[ .-]\d{4}|\d{2,4}[ .-]\d{3,4}[ .-]\d{4})(?!\w)"
 )
 _SSN = re.compile(r"(?<!\d)\d{3}(?:[- ]?\d{2})(?:[- ]?\d{4})(?!\d)")
+# Unlabeled names use capitalization; labeled person fields below also catch lowercase names.
 _NAME = re.compile(r"\b[A-Z][A-Za-z'-]{1,30}\s+[A-Z][A-Za-z'-]{1,30}(?:\s+[A-Z][A-Za-z'-]{1,30})?\b")
 _PERSON_FIELD = re.compile(
-    r"(?i)(?P<prefix>\b(?:owner|assignee|reporter|contact|person|(?:first|last|full)[ _-]?name|user(?:[ _-]?name)?)"
+    r"(?i)(?P<prefix>\b(?:owner|assignee|reporter|contact|person|name|customer(?:[ _-]?name)?|"
+    r"(?:first|last|full)[ _-]?name|user(?:[ _-]?name)?)"
     r"\b\s*\\?[\"']?\s*[:=]\s*\\?[\"']?)"
-    r"(?P<value>[A-Za-z][A-Za-z'-]{0,30}(?:[._][A-Za-z][A-Za-z'-]{0,30})*)\b(?P<suffix>\\?[\"']?)"
+    r"(?P<value>[A-Za-z][A-Za-z'-]{0,30}(?:[._][A-Za-z][A-Za-z'-]{0,30})*"
+    r"(?:[ \t]+[A-Za-z][A-Za-z'-]{0,30}){0,2})\b(?P<suffix>\\?[\"']?)"
 )
 _ADDRESS = re.compile(r"(?i)\b\d{1,6}\s+(?:[A-Z0-9.'-]+\s+){1,5}(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd|court|ct|way)\b")
 _HOME_PATH = re.compile(r"(?i)(/(?:home|users)/)[^/\s]+")
@@ -151,8 +154,16 @@ def cap_log_bytes(text: str, max_bytes: int = MAX_LOG_BYTES) -> tuple[str, bool]
     """Keep the newest bytes of a log file without cutting a UTF-8 code point."""
     raw = text.encode("utf-8", errors="replace")
     if len(raw) <= max_bytes:
-        return text, False
-    return raw[-max_bytes:].decode("utf-8", errors="replace"), True
+        return raw.decode("utf-8"), False
+    if max_bytes <= 0:
+        return "", True
+    start = len(raw) - max_bytes
+    while True:
+        try:
+            return raw[start:].decode("utf-8"), True
+        except UnicodeDecodeError:
+            # The encoded input is valid UTF-8; only the first code point can be split.
+            start += 1
 
 
 class SupportLogBuffer(logging.Handler):

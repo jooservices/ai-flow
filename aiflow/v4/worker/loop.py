@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..control.support_bundle import MAX_LOG_BYTES
+from ..control.support_bundle import MAX_LOG_BYTES, cap_log_bytes
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
@@ -52,8 +52,9 @@ def attach_support_log(result: dict, srv_root: str) -> None:
                 stream.seek(-MAX_LOG_BYTES, 2)
             raw = stream.read(MAX_LOG_BYTES + 1)
         truncated = size > MAX_LOG_BYTES or len(raw) > MAX_LOG_BYTES
-        details["support_log_text"] = raw[-MAX_LOG_BYTES:].decode("utf-8", errors="replace")
-        details["support_log_truncated"] = truncated
+        log_text, was_capped = cap_log_bytes(raw.decode("utf-8", errors="replace"))
+        details["support_log_text"] = log_text
+        details["support_log_truncated"] = truncated or was_capped
     except OSError as exc:
         log.debug("run log unavailable for support collection: %s", type(exc).__name__)
 

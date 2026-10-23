@@ -16,7 +16,19 @@ class OpenCodeAdapter(Adapter):
     def parse_event(self, ev: dict, res: RunResult) -> None:
         t = ev.get("type")
         part = ev.get("part") or {}
-        if t == "text" and part.get("text"):
+        if t == "tool":
+            tool = str(part.get("tool") or ev.get("tool") or "").lower()
+            state = part.get("state") or ev.get("state") or {}
+            state_input = state.get("input") or part.get("input") or {}
+            command = state_input.get("command") if isinstance(state_input, dict) else ""
+            status = str(state.get("status") or "").lower()
+            exit_code = state.get("exit")
+            if tool in {"bash", "shell"} and isinstance(command, str) and (
+                    status == "error" or (exit_code is not None and exit_code != 0)):
+                res.command_results.append({"command": command,
+                                            "output": state.get("output") or part.get("output") or "",
+                                            "exit_code": exit_code if exit_code is not None else 1})
+        elif t == "text" and part.get("text"):
             res.final_text = part["text"]
         elif t == "error":
             msg = str(ev.get("error") or ev.get("message") or "")

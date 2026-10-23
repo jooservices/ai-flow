@@ -72,6 +72,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderStakeholderBody": ("stakeholder",),
     "renderStakeholder": ("stakeholder",),
     "renderDrawer": None,
+    "drawerInc": ("cc", "machines"),
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),

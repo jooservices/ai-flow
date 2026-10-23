@@ -34,6 +34,12 @@ class CodexAdapter(Adapter):
             item = ev.get("item") or {}
             if item.get("type") in ("agent_message", "assistant_message"):
                 res.final_text = item.get("text") or res.final_text
+            elif item.get("type") == "command_execution":
+                exit_code = item.get("exit_code")
+                if exit_code not in (None, 0):
+                    res.command_results.append({"command": item.get("command") or "",
+                                                "output": item.get("aggregated_output") or item.get("output") or "",
+                                                "exit_code": exit_code})
         elif t == "turn.completed":
             u = ev.get("usage") or {}
             res.tokens_in += int(u.get("input_tokens") or 0)

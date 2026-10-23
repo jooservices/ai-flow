@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control import tooling
-from aiflow.v4.core.toolchains import CATALOG_TOOLS, known_requirements, parse_missing_requirements
+from aiflow.v4.core.toolchains import (CATALOG_TOOLS, known_requirements, parse_command_not_found_requirements,
+                                       parse_missing_requirements)
 from aiflow.v4.node import agent, operations, probes
 from aiflow.v4.worker import dev
 from aiflow.v4.worker.dev import Claimed, build_prompt, machine_block
@@ -43,8 +44,16 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
     assert parse_missing_requirements("MISSING-TOOL: php, composer - phpunit cannot run") == ["php", "composer"]
     assert parse_missing_requirements("MISSING-SERVICE: postgres - tests need a database") == ["postgres"]
     assert parse_missing_requirements("composer is not installed on this machine") == []
-    assert parse_missing_requirements("bash: php: command not found") == ["php"]
-    assert parse_missing_requirements("bash: line 1: docker: command not found") == ["docker"]
+    assert parse_missing_requirements("bash: php: command not found") == []
+    assert parse_missing_requirements("bash: line 1: docker: command not found") == []
+    assert parse_command_not_found_requirements([
+        {"command": "php -v", "output": "bash: php: command not found", "exit_code": 127},
+        {"command": "bash -lc 'docker version'", "output": "bash: line 1: docker: command not found", "failed": True},
+    ]) == ["php", "docker"]
+    assert parse_command_not_found_requirements([
+        {"command": "echo 'bash: php: command not found'", "output": "bash: php: command not found", "exit_code": 1},
+        {"command": "php -v", "output": "bash: php: command not found", "exit_code": 0},
+    ]) == []
     assert parse_missing_requirements("MISSING-TOOL: phpunit - not a catalogue tool") == []
     assert parse_missing_requirements("The summary mentions docker, php, and a missing test fixture") == []
     assert parse_missing_requirements("AC2 contradicts AC4; which one wins?") == []
@@ -80,7 +89,7 @@ def _claimed():
                    project=project, identity=("bot", "bot@example.test"))
 
 
-def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_text=""):
+def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_text="", command_results=None):
     class Git:
         def __init__(self, *_a, **_k):
             pass
@@ -103,7 +112,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
         def run(self, *_a, **_k):
             return SimpleNamespace(tokens_in=1, tokens_out=1, cost_usd=0, quota={}, error_kind="", reset_at=None,
                                    verdict=verdict, verdict_reason=reason, error_message="", final_text=final_text,
-                                   permission_denials=[], exit_code=0, duration_s=1, log_path="")
+                                   permission_denials=[], exit_code=0, duration_s=1, log_path="",
+                                   command_results=command_results or [])
 
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
@@ -130,11 +140,22 @@ def test_summary_naming_docker_or_php_and_missing_is_not_a_missing_tool(monkeypa
     assert not any(call[1] == "/v1/escalations/raise" for call in api.calls)
 
 
-def test_command_not_found_for_catalogue_tool_is_a_missing_tool(monkeypatch, tmp_path):
-    result, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "bash: line 1: php: command not found")
+def test_command_not_found_for_executed_catalogue_command_is_a_missing_tool(monkeypatch, tmp_path):
+    result, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "the check could not run",
+                         command_results=[{"command": "php -v", "output": "bash: line 1: php: command not found",
+                                           "exit_code": 127}])
     assert result["outcome"] == "tool_missing"
     assert result["details"]["missing_tools"] == ["php"]
     assert result["details"]["tool_missing_evidence"] == "command_not_found"
+    assert result["details"]["command_not_found_tools"] == ["php"]
+
+
+def test_quoted_command_error_in_blocked_explanation_is_not_execution_evidence(monkeypatch, tmp_path):
+    reason = 'The docs show the example output "bash: php: command not found", but I did not run php.'
+    result, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", reason)
+    assert result["outcome"] == "blocked"
+    assert result["details"].get("missing_tools", []) == []
+    assert result["details"]["verdict_reason"] == reason
 
 
 def test_unknown_missing_marker_fails_normally_and_keeps_the_ai_reason(monkeypatch, tmp_path):

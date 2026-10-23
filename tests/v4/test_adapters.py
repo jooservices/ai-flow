@@ -26,6 +26,19 @@ def test_claude_events_from_spike_s1():
     assert rejected.error_kind == "quota" and rejected.reset_at.year >= 2026
 
 
+def test_claude_records_only_failed_bash_tool_results_as_executed_commands():
+    adapter, result = ClaudeAdapter(), RunResult()
+    adapter.parse_event({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "php -v"}},
+        {"type": "tool_use", "id": "tool-2", "name": "Read", "input": {"file_path": "README.md"}},
+    ]}}, result)
+    adapter.parse_event({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "tool-1", "content": "bash: php: command not found", "is_error": True},
+        {"type": "tool_result", "tool_use_id": "tool-2", "content": "bash: php: command not found", "is_error": True},
+    ]}}, result)
+    assert result.command_results == [{"command": "php -v", "output": "bash: php: command not found", "failed": True}]
+
+
 def test_codex_argv_disables_chatgpt_apps_and_keeps_options(tmp_path):
     a = CodexAdapter()
     cmd = a.argv(RunSpec(prompt="p", cwd=str(tmp_path), account_home=str(tmp_path), model="gpt-6-luna", effort="high"))
@@ -51,6 +64,17 @@ def test_codex_and_grok_events_from_spikes():
     auth = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "You are not signed in. Please run /login."}, auth)
     assert auth.error_kind == "auth"
+
+
+def test_codex_records_failed_command_execution_output():
+    result = RunResult()
+    CodexAdapter().parse_event({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "php -v", "aggregated_output": "bash: php: command not found",
+        "exit_code": 127}}, result)
+    CodexAdapter().parse_event({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "echo php", "aggregated_output": "bash: php: command not found",
+        "exit_code": 0}}, result)
+    assert result.command_results == [{"command": "php -v", "output": "bash: php: command not found", "exit_code": 127}]
 
 
 def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():

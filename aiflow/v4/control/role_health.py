@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .incidents import close_incident, open_incident
+from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.role_health")
 
@@ -65,14 +66,22 @@ def role_of(step: str) -> str | None:
 def classify(run: dict) -> Scored | None:
     """Score one finished run; None while verification has not yet judged a finished dev run."""
     outcome, kind = run["outcome"], (run.get("error_kind") or "").lower()
-    if outcome == "quota" or kind in UNSCORED_KINDS:
-        return Scored("excluded", None)
-    if outcome == "tool_missing":
-        return Scored("tool_missing", 1.0)
+    summary = (run.get("summary") or "").strip().lower()
     if run.get("step") == "dev" and run.get("pr_url"):
         return Scored("finished", 0.0)
     if outcome == "merged":
         return Scored("merged", 0.0)
+    if outcome == "no_changes" or (run.get("step") == "dev" and outcome in {"failed", "tool_missing"}
+                                    and summary.startswith(("no changes", "nothing to change"))):
+        return Scored("no_changes", 0.0)
+    if outcome == "quota" or kind in UNSCORED_KINDS:
+        return Scored("excluded", None)
+    if outcome == "tool_missing":
+        if not _valid_tool_missing_evidence(run):
+            # Old classifier rows often only stored the AI's prose. With no explicit marker or normalized command
+            # result, they cannot safely remain failures in today's score.
+            return Scored("excluded", None)
+        return Scored("tool_missing", 1.0)
     if outcome == "done" and run["step"] == "dev":
         decision = run.get("decision")
         if decision in ("merged", "human"):
@@ -86,13 +95,27 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0)
     if outcome in STOPPED_OUTCOMES:
         return Scored("stopped", 1.0)
-    if outcome == "no_changes" or (outcome == "failed" and (run.get("summary") or "").lower().startswith("no changes")):
-        return Scored("no_changes", 0.0)
     if outcome == "blocked":
         return Scored("blocked", 1.0)
     if outcome == "failed":
         return Scored("failed", 1.0)
     return Scored("excluded", None)
+
+
+def _valid_tool_missing_evidence(run: dict) -> bool:
+    """Accept current and legacy tool-missing rows only when their stored evidence is verifiable."""
+    details = run.get("details") or {}
+    missing = {str(name).casefold() for name in (details.get("missing_tools") or []) if str(name).strip()}
+    if not missing:
+        return False
+    marker_names = {name.casefold() for name in parse_missing_requirements(str(details.get("verdict_reason") or ""))}
+    if missing & marker_names:
+        return True
+    if details.get("tool_missing_evidence") != "command_not_found":
+        return False
+    executed_names = {str(name).casefold() for name in (details.get("command_not_found_tools") or [])
+                      if str(name).strip()}
+    return bool(missing & executed_names)
 
 
 def get_settings(db) -> dict[str, Any]:

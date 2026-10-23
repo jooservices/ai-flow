@@ -18,6 +18,9 @@ HOOK_TOOLS = "Bash|Read|Glob|Grep|WebFetch|WebSearch|Edit|Write|MultiEdit|Notebo
 class ClaudeAdapter(Adapter):
     provider = "claude"
 
+    def __init__(self) -> None:
+        self._bash_tool_uses: dict[str, str] = {}
+
     def settings_path(self, spec: RunSpec) -> Path:
         return Path(spec.account_home) / ".aiflow" / "claude-run-settings.json"
 
@@ -57,7 +60,28 @@ class ClaudeAdapter(Adapter):
 
     def parse_event(self, ev: dict, res: RunResult) -> None:
         t = ev.get("type")
-        if t == "rate_limit_event":
+        if t == "assistant":
+            message = ev.get("message") or {}
+            for block in message.get("content") or []:
+                if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                    tool_id = block.get("id")
+                    command = (block.get("input") or {}).get("command")
+                    if isinstance(tool_id, str) and isinstance(command, str):
+                        self._bash_tool_uses[tool_id] = command
+        elif t == "user":
+            message = ev.get("message") or {}
+            for block in message.get("content") or []:
+                if block.get("type") != "tool_result":
+                    continue
+                command = self._bash_tool_uses.pop(str(block.get("tool_use_id") or ""), None)
+                if not command or block.get("is_error") is not True:
+                    continue
+                content = block.get("content") or ""
+                if isinstance(content, list):
+                    content = "\n".join(str(part.get("text") or "") if isinstance(part, dict) else str(part)
+                                          for part in content)
+                res.command_results.append({"command": command, "output": str(content), "failed": True})
+        elif t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
             windows = info.get("unifiedWindows") or {}
             res.quota = {"provider": "claude", "status": info.get("status"), "type": info.get("rateLimitType"),

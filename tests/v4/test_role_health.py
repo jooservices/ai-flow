@@ -89,11 +89,16 @@ def ready_enabled_count(ctx, role):
     ({"step": "dev", "outcome": "done", "decision": "human"}, "finished", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "rework"}, "sent_back", 0.5),
     ({"step": "dev", "outcome": "failed", "decision": "rework", "pr_url": "https://example.test/pr/1"}, "finished", 0.0),
+    ({"step": "dev", "outcome": "tool_missing", "pr_url": "https://example.test/pr/2"}, "finished", 0.0),
     ({"step": "dev", "outcome": "no_changes"}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 0.0),
+    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change."}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "blocked"}, "blocked", 1.0),
     ({"step": "dev", "outcome": "failed", "summary": "worker error"}, "failed", 1.0),
-    ({"step": "dev", "outcome": "tool_missing"}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "details": {
+        "missing_tools": ["php"], "tool_missing_evidence": "command_not_found"}}, "excluded", None),
     ({"step": "dev", "outcome": "timeout"}, "stopped", 1.0),
     ({"step": "dev", "outcome": "lost"}, "stopped", 1.0),
     ({"step": "intake", "outcome": "refined"}, "finished", 0.0),
@@ -175,7 +180,9 @@ def test_three_account_role_never_disables_below_two_and_all_bad_keeps_pool_on(c
 
 def test_role_health_incident_lists_failure_kinds_and_tickets(ctx, alerts):
     db = ctx.db
-    _failure_window(db, "claude-01", prefix="801", outcome="tool_missing", details={"missing_tools": ["php"]})
+    _failure_window(db, "claude-01", prefix="801", outcome="tool_missing", details={
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+        "tool_missing_evidence": "explicit_marker"})
     _failure_window(db, "codex-01", prefix="811", outcome="timeout")
     _failure_window(db, "opencode-01", prefix="821")
     for index in range(5):
@@ -205,9 +212,25 @@ def test_fixed_run_history_restores_disabled_role_immediately(ctx, alerts):
     assert ctx.db.one("SELECT 1 AS x FROM incidents WHERE kind='role_health' AND subject='claude-01:dev' AND closed_at IS NOT NULL")
 
 
+def test_legacy_tool_missing_false_positives_without_execution_evidence_restore_role(ctx, alerts):
+    _failure_window(ctx.db, "claude-01", prefix="902", outcome="tool_missing", details={
+        "missing_tools": ["php"], "tool_missing_evidence": "command_not_found",
+        "verdict_reason": 'The summary mentions "bash: php: command not found" as an example.'})
+    ctx.db.run("INSERT INTO nodes (name,status,last_heartbeat,tools) VALUES ('cc','online',now(),%s)"
+               " ON CONFLICT (name) DO UPDATE SET tools=EXCLUDED.tools,last_heartbeat=now()",
+               (J({"php": "missing"}),))
+    role_health.switch_off(ctx, "claude-01", "dev", 1.0, 10,
+                           role_health._history(ctx.db, "claude-01")[("claude-01", "dev")], 60)
+    role_health.evaluate(ctx)
+    assert states(ctx.db)[("claude-01", "dev")]["enabled"] is True
+    history = role_health._history(ctx.db, "claude-01")[("claude-01", "dev")]
+    assert all(score is not None and score.failure is None for _, score in history)
+
+
 def test_installing_recorded_missing_tool_restores_disabled_role(ctx, alerts):
     _failure_window(ctx.db, "claude-01", prefix="901", outcome="tool_missing",
-                    details={"missing_tools": ["php"], "tool_missing_evidence": "explicit_marker"})
+                    details={"missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+                             "tool_missing_evidence": "explicit_marker"})
     ctx.db.run("INSERT INTO nodes (name,status,last_heartbeat,tools) VALUES ('cc','online',now(),%s)"
                " ON CONFLICT (name) DO UPDATE SET status='online',last_heartbeat=now(),tools=EXCLUDED.tools",
                (J({"php": "missing"}),))

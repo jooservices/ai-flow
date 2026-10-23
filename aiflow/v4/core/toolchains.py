@@ -7,6 +7,7 @@ on a pinned-version preflight, and the watchdog warns when one is unhealthy.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Iterable
 
 # Tools every node reports, whatever its projects use (reporting only; requirements are below).
@@ -217,11 +218,10 @@ def has_missing_marker(text: str) -> bool:
 
 
 def parse_missing_requirements(text: str) -> list[str]:
-    """Return only catalog requirements explicitly marked missing or named in a shell error.
+    """Return catalog requirements from the AI's explicit missing-requirement marker only.
 
-    Run summaries and general prose are deliberately not evidence: a completed run can mention a tool or the word
-    "missing" without needing that tool. A `MISSING-TOOL(S)` / `MISSING-SERVICE(S)` marker is an explicit report;
-    otherwise accept only the conventional ``<command>: command not found`` output from a failed command.
+    Command errors are accepted only from normalized results of an executed tool call, via
+    :func:`parse_command_not_found_requirements`. Free-form explanations and summaries are not execution evidence.
     """
     text = text or ""
     known = {name.casefold(): name for name in known_requirements()}
@@ -233,19 +233,78 @@ def parse_missing_requirements(text: str) -> list[str]:
         return list(dict.fromkeys(known[ALIASES.get(name, name)] for name in requested
                                   if ALIASES.get(name, name) in known))
 
-    # Shells commonly emit `bash: php: command not found` or `bash: line 1: php: command not found`.
-    # Keep this limited to catalogue tools; a service name is not a shell command.
+    return []
+
+
+def _executed_programs(command: str) -> set[str]:
+    """Executable names in shell command segments, excluding words printed as arguments (for example by echo)."""
+    try:
+        tokens = list(shlex.shlex(command, posix=True, punctuation_chars=";&|"))
+    except ValueError:
+        return set()
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and all(char in ";&|" for char in token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    found: set[str] = set()
+    for segment in segments:
+        if not segment:
+            continue
+        executable = segment[0]
+        if executable == "env":
+            segment = segment[1:]
+            while segment and (segment[0].startswith("-") or "=" in segment[0]):
+                segment = segment[1:]
+            if not segment:
+                continue
+            executable = segment[0]
+        base = executable.rsplit("/", 1)[-1].casefold()
+        if base in {"bash", "sh", "dash", "zsh"}:
+            for index, token in enumerate(segment[1:], start=1):
+                if token == "-c" or (token.startswith("-") and "c" in token[1:]):
+                    if index + 1 < len(segment):
+                        found.update(_executed_programs(segment[index + 1]))
+                    break
+            continue
+        found.add(base)
+    return found
+
+
+def parse_command_not_found_requirements(command_results: Iterable[dict]) -> list[str]:
+    """Return catalogue tools whose *executed command result* failed with a shell not-found error.
+
+    The normalized records are produced by adapters from completed command-execution events. We also check that the
+    failed command actually invoked the missing executable, so quoted or illustrative output from `echo`/`printf`
+    cannot masquerade as a missing tool.
+    """
     command_tools = {name.casefold(): name for name in NODE_TOOLS + CATALOG_TOOLS}
     command_tools.update({tool.casefold(): tool for stack_tools in STACK_TOOLS.values() for tool in stack_tools})
-    found = []
-    for match in re.finditer(r"(?<![\w.+-])([A-Za-z0-9_.+-]+):\s*command not found\b", text, re.I):
-        name = match.group(1).casefold()
-        if name in command_tools:
-            found.append(command_tools[name])
-    for match in re.finditer(r"\bcommand not found:\s*([A-Za-z0-9_.+-]+)\b", text, re.I):
-        name = match.group(1).casefold()
-        if name in command_tools:
-            found.append(command_tools[name])
+    found: list[str] = []
+    patterns = (r"(?<![\w.+-])([A-Za-z0-9_.+-]+):\s*command not found\b",
+                r"\bcommand not found:\s*([A-Za-z0-9_.+-]+)\b")
+    for result in command_results:
+        if not isinstance(result, dict):
+            continue
+        try:
+            failed = result.get("failed") is True or int(result.get("exit_code")) != 0
+        except (TypeError, ValueError):
+            failed = result.get("failed") is True
+        if not failed:
+            continue
+        command = result.get("command")
+        if isinstance(command, (list, tuple)):
+            command = " ".join(str(part) for part in command)
+        if not isinstance(command, str):
+            continue
+        programs = _executed_programs(command)
+        output = str(result.get("output") or "")
+        for pattern in patterns:
+            for match in re.finditer(pattern, output, re.I):
+                name = match.group(1).casefold()
+                if name in command_tools and name in programs:
+                    found.append(command_tools[name])
     return list(dict.fromkeys(found))
 
 

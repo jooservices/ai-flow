@@ -22,8 +22,12 @@ The role of a run follows its step: `dev` → dev, `verify` → verify, `triage`
 | `quota`, or an error kind of quota, sign-in, infrastructure, network or tool problems | **excluded** |
 
 The dev worker classifies a result as `tool_missing` only when the AI uses the explicit `MISSING-TOOL(S)` or
-`MISSING-SERVICE(S)` marker, or reports a catalogue command with shell output saying `command not found`. General
-summary text is never scanned for tool names or the word "missing".
+`MISSING-SERVICE(S)` marker, or an adapter records a failed command execution whose invoked catalogue tool matches
+the shell's `command not found` output. A sentence that quotes an example error, or output printed by `echo` or
+`printf`, is not execution evidence. General summary text is never scanned for tool names or the word "missing".
+Role health rechecks stored evidence before counting `tool_missing`: legacy rows without an explicit marker or
+normalized failed-command evidence are excluded from the score, so old false positives stop affecting recovery.
+Pull requests and clean `no_changes` results are successes even if an older row has a failure outcome.
 
 ## Switching a role off
 
@@ -69,7 +73,11 @@ The **AI quality by role** panel (Command Center, below *AI accounts*) lists eve
   by the tickets that role finished successfully in that time;
 - **rework rounds** in the last 30 days: dev runs sent back by verification, or verdicts of "send back" by a verifier.
 
-The same data is in `GET /v1/role-health` and under `role_health` in `GET /v1/state`.
+The same data is in `GET /v1/role-health` and under `role_health` in `GET /v1/state`. `POST /v1/work/claim` checks
+whether a role is enabled and offers its work or eligible probation ticket; `POST /v1/runs/{run_id}/result` records
+the fenced result and re-scores the role pool, including evidence-backed tool-missing failures.
+
+**Console screens:** `cc`, `machines`
 
 ## Thresholds
 

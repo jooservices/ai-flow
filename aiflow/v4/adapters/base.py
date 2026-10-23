@@ -67,6 +67,7 @@ class RunResult:
     quota: dict = field(default_factory=dict)
     duration_s: float = 0.0
     log_path: str = ""
+    command_results: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()

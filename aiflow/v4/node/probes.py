@@ -71,11 +71,12 @@ def run_check_probe(api, node: str, item: dict[str, Any], srv_root: str, run_as:
             except (LookupError, PermissionError):
                 pass
         try:
-            token = api.call("POST", f"/v1/nodes/{node}/check-probes/token",
-                             {"project": item["project"], "repo": repo["repo"]})["token"]
+            credential = api.call("POST", f"/v1/nodes/{node}/check-probes/token",
+                                  {"project": item["project"], "repo": repo["repo"]})
             checkout = scratch / "checkout"
             git.run("clone", "--quiet", "--depth", "1", "--branch", repo["base"],
-                    f"https://github.com/{repo['repo']}.git", str(checkout), token=token)
+                    credential.get("transport_url") or f"https://github.com/{repo['repo']}.git",
+                    str(checkout), token=credential["token"])
             env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(scratch),
                    "LANG": "C.UTF-8", "TERM": "dumb", "CI": "1", **project_env(item["project"])}
             for command in repo["checks"]:

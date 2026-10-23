@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 import yaml
 from fastapi import HTTPException
 
-from conftest import FakeGitHub, add_ticket
+from conftest import FakeGitHub, add_ticket, join_node
 from test_projects import owner_sign_in, prepare_project_control, worker_headers
+from test_reviews import add_review_run
 import aiflow.v4.control.api as api
 from aiflow.v4.control.api import github_gateway
 from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.node import probes
 
 TOKEN = "github_pat_" + "p" * 40
 
@@ -144,6 +147,143 @@ def test_repository_uses_its_own_connection_and_unreachable_repository_is_refuse
     assert refused.value.status_code == 409
     registry.assign("person/tool", conn)
     assert github_gateway(ctx, "person/tool").org == "person"
+
+
+def test_review_rejection_comments_and_closes_pr_through_the_assigned_connection(client, ctx, secrets_dir):
+    owner_sign_in(client, ctx)
+    connection = add_token(client).json()["id"]
+    api.github_connections(ctx).assign("person/tool", connection)
+    gateway = github_gateway(ctx, "person/tool")
+    gateway.pr_by_number[42] = {"number": 42, "state": "open", "merged": False}
+
+    key = "TESTWP-220"
+    add_ticket(ctx.db, key, status="Human review", labels=("require-human",))
+    add_review_run(ctx, key, pr_url="https://github.com/person/tool/pull/42",
+                   details={"repository": "person/tool"})
+    response = client.post(f"/v1/reviews/{key}/reject", json={"reason": "Out of scope."},
+                           headers={"Authorization": "Bearer review-secret"})
+
+    assert response.status_code == 200, response.text
+    assert gateway.comments and gateway.comments[-1][0] == 42
+    assert gateway.pr_by_number[42]["state"] == "closed"
+    assert not getattr(ctx.github, "comments", []) and not ctx.github.pr_by_number
+    writes = ctx.db.all("SELECT action,payload FROM write_audit WHERE target='github' AND ticket=%s"
+                        " AND action IN ('comment','close') ORDER BY id", (key,))
+    assert [row["action"] for row in writes] == ["comment", "close"]
+    assert all(row["payload"]["connection"] == connection for row in writes)
+
+
+def test_check_probe_uses_assigned_connection_and_relays_token_credentials_read_only(
+        client, ctx, secrets_dir, monkeypatch):
+    owner_sign_in(client, ctx)
+    connection = add_token(client).json()["id"]
+    project = ctx.repo().projects["TESTWP"]
+    project.repositories = [{"repo": "person/tool", "base": "develop", "checks": ["pytest"]}]
+    api.github_connections(ctx).assign("person/tool", connection)
+    node = join_node(client, "cc")
+    assert node.status_code == 200
+    headers = {"Authorization": f"Bearer {node.json()['node_token']}"}
+
+    issued = client.post("/v1/nodes/cc/check-probes/token",
+                         json={"project": "TESTWP", "repo": "person/tool"}, headers=headers)
+    assert issued.status_code == 200, issued.text
+    credential = issued.json()
+    assert credential["token"] != TOKEN
+    assert credential["transport_url"].endswith("/v1/github/git/person/tool.git")
+    assert ctx.db.one("SELECT payload FROM write_audit WHERE action='check_probe_token' ORDER BY id DESC LIMIT 1"
+                      )["payload"]["connection"] == connection
+
+    upstream_calls = []
+
+    def relay(repository, suffix, method, params, proxy_headers, content, stored_token):
+        upstream_calls.append((repository, suffix, method, stored_token))
+        import httpx
+        return httpx.Response(200, headers={"Content-Type": "application/x-git-upload-pack-result"}, content=b"pack")
+
+    monkeypatch.setattr(api, "_github_git_upstream", relay)
+    basic = "Basic " + base64.b64encode(f"x-access-token:{credential['token']}".encode()).decode()
+    clone = client.get("/v1/github/git/person/tool.git/info/refs", params={"service": "git-upload-pack"},
+                       headers={"Authorization": basic})
+    assert clone.status_code == 200 and clone.content == b"pack"
+    assert upstream_calls == [("person/tool", ".git/info/refs", "GET", TOKEN)]
+    push_refs = client.get("/v1/github/git/person/tool.git/info/refs", params={"service": "git-receive-pack"},
+                           headers={"Authorization": basic})
+    assert push_refs.status_code == 403
+
+
+def test_node_check_probe_clones_from_the_command_center_relay(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeGit:
+        def __init__(self, root, run_as=None):
+            self.root = root
+
+        def mkdirs(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+
+        def run(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    class API:
+        def call(self, method, path, body):
+            assert method == "POST" and path.endswith("/check-probes/token")
+            assert body == {"project": "TESTWP", "repo": "person/tool"}
+            return {"token": "opaque-relay-capability", "transport_url":
+                    "https://control.example.test/v1/github/git/person/tool.git"}
+
+    monkeypatch.setattr(probes, "Git", FakeGit)
+    monkeypatch.setattr(probes, "probe_command", lambda command, cwd, env, run_as:
+                        {"command": command, "status": "ran", "detail": "exit 0"})
+    results = probes.run_check_probe(API(), "cc", {"project": "TESTWP", "repositories": [
+        {"repo": "person/tool", "base": "develop", "checks": ["pytest"]}]}, str(tmp_path), [])
+
+    assert results == [{"repo": "person/tool", "command": "pytest", "status": "ran", "detail": "exit 0"}]
+    clone_args, clone_kwargs = calls[0]
+    assert "https://control.example.test/v1/github/git/person/tool.git" in clone_args
+    assert clone_kwargs["token"] == "opaque-relay-capability"
+
+
+def test_routes_projects_and_github_operations_after_removing_the_default_app(
+        client, ctx, control_repo, secrets_dir):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    connection = add_token(client).json()["id"]
+    config_path = control_repo / "projects/TESTWP.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["repo"] = "person/tool"
+    config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": []}]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    api.github_connections(ctx).assign("person/tool", connection)
+
+    removed = client.delete("/v1/integrations/github/connections/default")
+    assert removed.status_code == 200, removed.text
+    assert ctx.github is None
+    catalog = client.get("/v1/projects/catalog")
+    assert catalog.status_code == 200, catalog.text
+    assert {row["full_name"] for row in catalog.json()["github_repos"]} == {"person/tool"}
+    repositories = client.get("/v1/projects/TESTWP/repositories")
+    assert repositories.status_code == 200, repositories.text
+    assert repositories.json()["repositories"][0]["connection"] == connection
+
+    headers = worker_headers(client)
+    add_ticket(ctx.db, "TESTWP-221")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-221", "account": "codex-01", "step": "dev"},
+                          headers=headers)
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+    run = {"run_id": claimed.json()["run_id"], "fence": claimed.json()["fence"]}
+    token = client.post("/v1/github/token", json={**run, "repo": "person/tool"}, headers=headers)
+    assert token.status_code == 200, token.text
+    assert token.json()["transport_url"].endswith("/v1/github/git/person/tool.git")
+    assert token.json()["token"] != TOKEN
+    pr = client.post("/v1/github/pr", json={**run, "repo": "person/tool", "head": "TESTWP-221-work",
+                                            "base": "develop", "title": "Alternate connection", "body": "",
+                                            "draft": True}, headers=headers)
+    assert pr.status_code == 200, pr.text
+    assert ctx.github is None
+    assert github_gateway(ctx, "person/tool").prs[-1]["repo"] == "tool"
+    write = ctx.db.one("SELECT payload FROM write_audit WHERE target='github' AND action='pr'"
+                       " AND run_id=%s", (run["run_id"],))
+    assert write["payload"]["connection"] == connection
 
 
 def test_projects_screen_shows_and_changes_the_connection_of_each_repository(client, ctx, control_repo, secrets_dir):

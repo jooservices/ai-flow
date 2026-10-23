@@ -110,6 +110,11 @@ can push only the run's branch; Command Center refuses other repositories, stale
 stored access token is never sent to a node. Workers keep the relay capability in the Git process environment and
 do not write it into the remote URL or Git configuration.
 
+Clean-checkout probes use the same repository selection. App connections return a read-only installation token;
+access-token connections return a one-hour read-only relay capability bound to the node, project and repository.
+The node clones through the relay URL, and the relay refuses push requests and repositories no longer configured
+for that probe.
+
 ### Audit
 
 Every GitHub write in `write_audit` (target `github`, and `aiflow-control` for control repository commits)

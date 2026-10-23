@@ -222,6 +222,8 @@ class FakeGitHub:
         self.repositories = [{"full_name": "jooservices/test-aiflow-wp", "name": "test-aiflow-wp",
                               "default_branch": "develop"},
                              {"full_name": "jooservices/new-app", "name": "new-app",
+                              "default_branch": "develop"},
+                             {"full_name": "jooservices/aiflow-control", "name": "aiflow-control",
                               "default_branch": "develop"}]
         self.available_branches: dict[tuple[str, str], bool] = {}
         self.deleted_files: list[tuple[str, str]] = []

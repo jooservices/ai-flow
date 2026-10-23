@@ -904,6 +904,8 @@ class _CheckRunsGitHub(FakeGitHub):
 
     def __init__(self, state):
         super().__init__()
+        self.repositories.append({"full_name": "jooservices/ai-flow", "name": "ai-flow",
+                                  "default_branch": "develop"})
         self.state, self.requests = state, []
 
     def api(self, method, path, body=None, repo=None, permissions=None):

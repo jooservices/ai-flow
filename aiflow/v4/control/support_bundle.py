@@ -102,6 +102,9 @@ _TRUSTED_LABEL_WORDS = frozenset({
 def _is_trusted_label(value: str) -> bool:
     if not _SAFE_MACHINE_LABEL.fullmatch(value):
         return False
+    # Digits make a label trusted, but a number-shaped label ("555-123-4567") is a phone number or ID.
+    if sanitize_text(value, names=False) != value or sensitive_findings(value, names=False):
+        return False
     return all(any(ch.isdigit() for ch in part) or part in _TRUSTED_LABEL_WORDS
                for part in re.split(r"[-_]", value))
 

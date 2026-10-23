@@ -604,3 +604,18 @@ def test_lowercase_name_shaped_labels_are_not_offered_in_a_bundle(ctx):
         everything = " ".join(bundle.read(n).decode() for n in bundle.namelist())
     assert "jane-doe" not in everything and "john-smith" not in everything
     assert "mac-mini" in everything and "claude-01" in everything
+
+
+def test_phone_shaped_labels_are_not_offered_in_a_bundle(ctx):
+    ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
+               " VALUES ('555-123-4567','worker','online',1,0,'4.1.0'), ('mac-mini','worker','online',1,0,'4.1.0')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+               " VALUES ('555-123-4567','claude','mac-mini','middle',%s,'idle'),"
+               " ('claude-01','claude','mac-mini','middle',%s,'idle')", (["dev"], ["dev"]))
+    assert support_bundle.file_findings("account-state.json", '[{"id":"555-123-4567"}]') == ["personal_data"]
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        everything = " ".join(bundle.read(n).decode() for n in bundle.namelist())
+    assert inventory["scan"] == "passed"
+    assert "555-123-4567" not in everything
+    assert "mac-mini" in everything and "claude-01" in everything

@@ -49,6 +49,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "flowDoctorPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
     "dashboardSpark": ("cc",),
@@ -159,6 +160,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "roleChecks": ("users",),
     "reviewByRole": ("review",),
     "submitReview": ("review",),
+    "projectRequestBody": ("projects",),
 }
 
 # These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
@@ -167,7 +169,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
-    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin"), "projects"),
+    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|containers:\s*false|"
+                r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
 )

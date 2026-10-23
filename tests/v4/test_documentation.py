@@ -326,6 +326,31 @@ def test_every_console_renderer_has_a_documentation_mapping():
     assert all(mapped is None or set(mapped) <= views for mapped in docsite.SCREEN_RENDERER_VIEWS.values())
 
 
+def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if "containers: false" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "containers: Boolean(f.containers)" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "config[fieldName]" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "fieldName === 'containers'" in line),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"projects"}
+
+
 def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()

@@ -1255,7 +1255,8 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
          "nodes": [{"name": "node1", "ready": False, "missing_tools": ["python3"]}]})
     for text in ("Projects", "NEWAPP", "jooservices/new-app", "paused", "Priority", "Tickets", "Resume", "Remove",
                  "Jira project key or URL", "Connected Jira site", "GitHub repository", "develop", "python-3.12",
-                 "Merge method", "Checks, one command per line", "Missing Jira workflow statuses:", "Intake",
+                 "Merge method", "Checks, one command per line", "Checks need Docker containers",
+                 "safe rootless runtime", "Missing Jira workflow statuses:", "Intake",
                  "Needs owner", "node1: missing python3", "Run preflight", "Save project"):
         assert text in rendered
     assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
@@ -1264,7 +1265,8 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
 def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     editor = {"key": "JOOWP", "busy": False, "saving": False, "error": "", "data": {
         "default_repo": "jooservices/wordpress-core",
-        "project_defaults": {"base": "develop", "checks": ["composer install"], "stack": "php-8.3"},
+        "project_defaults": {"base": "develop", "checks": ["composer install"], "stack": "php-8.3",
+                             "containers": True},
         "repositories": [
             {"repo": "jooservices/wordpress-core", "base": "main", "checks": ["vendor/bin/phpunit"],
              "stack": "php-8.3"},
@@ -1282,6 +1284,7 @@ def test_projects_editor_renders_live_epics_and_repository_specific_settings():
                               repository_editor=editor)
     assert "JOOWP-306" in rendered and "MCP" in rendered
     assert "jooservices/wordpress-mcp" in rendered and "Inherit develop" in rendered
+    assert "Container runtime" in rendered and "Inherit project setting" in rendered
     assert "Save repository settings" in rendered and "data-epic-repository" in rendered
 
 

@@ -64,6 +64,28 @@ The normal control installer enables audit rules and the regular node, develop, 
 same audit feature. No lab-only control sync command, session patch, node-agent workaround, or database guard is
 required for a fresh install.
 
+## Screens and API routes
+
+**Console screens:** `cc`
+
+The Dashboard (`cc`) shows the Flow doctor panel (ready accounts per role, open findings with the next step, recent
+doctor actions) and the Operator interventions tile (last 24 hours and 7 days).
+
+Routes used by this feature, all on the control API:
+
+- `GET /v1/state` carries `flow_doctor` and `operator_interventions` for the Dashboard; `GET /v1/deploy/state` reports
+  the same deploy facts to the node agent.
+- `POST /v1/nodes/{name}/operator-interventions` records a manual action (who, what, where, why) and opens its bug.
+- `POST /v1/nodes/{name}/release-failures` reports a failed release step from a node.
+- `POST /v1/nodes/{name}/operations` and `POST /v1/nodes/join` let a node install a catalogue tool and join at start-up;
+  `DELETE /v1/nodes/{name}` removes a machine.
+- `POST /v1/work/claim` is the claim the doctor checks when it looks for ready work that nothing takes.
+- Account repair and sign-in again: `POST /v1/machines/{name}/accounts`, `PATCH /v1/accounts/{account_id}`,
+  `DELETE /v1/accounts/{account_id}`, `POST /v1/accounts/{account_id}/sign-in` and
+  `POST /v1/accounts/{account_id}/sign-in/complete`.
+- Console users (behaviour unchanged, listed because the route module changed): `POST /v1/console/users`,
+  `PUT /v1/console/users/{email}` and `PATCH /v1/console/users/{email}/disabled`.
+
 ## Acceptance drill
 
 The 72-hour drill is a post-merge fleet run, as authorized for JAIF-260. Run it on `aiflow4-cc`, `aiflow4-node1`,

@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from .services import normalize_services
-from .toolchains import (BASE_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
+from .toolchains import (BASE_TOOLS, CATALOG_TOOLS, NODE_TOOLS, STACK_TOOLS, missing_tools, tools_for_providers, tools_for_stack,
                          tools_for_stacks, tools_for_stacks_in_project, normalize_stacks)
 
 __all__ = ["Account", "ControlRepo", "Node", "Project", "NODE_TOOLS", "STACK_TOOLS", "missing_tools",
@@ -250,7 +250,7 @@ class ControlRepo:
         """Tools the node needs: the base tools, the CLIs of its accounts' providers and every served stack's tools."""
         out = list(BASE_TOOLS) + tools_for_providers(a.provider for a in self.accounts_on(node))
         n = self.nodes.get(node)
-        installable = set(NODE_TOOLS).union(*(set(tools) for tools in STACK_TOOLS.values()))
+        installable = set(NODE_TOOLS).union(CATALOG_TOOLS, *(set(tools) for tools in STACK_TOOLS.values()))
         for tool in (n.tools if n else []):
             if tool in installable and tool not in out:
                 out.append(tool)

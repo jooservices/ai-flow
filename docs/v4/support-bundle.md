@@ -16,8 +16,9 @@ still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` st
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
 bundle is rejected and no download is made available. Structured JSON is scanned for name-like identifiers too;
 only trusted technical labels are retained in the known machine and account label fields (machine names, node
-references and account ids): every hyphen- or underscore-separated word must contain a digit (`wsl-1`) or be a known
-technical word (`mac-mini`, `claude`). Anything else, such as `jane-doe` or `jane.doe`, is replaced with a redaction
+references and account ids): each hyphen- or underscore-separated segment must be a known technical word or a number
+next to one (`wsl-1`, `claude-01`); a compact digit suffix is trusted only when its full alphabetic stem is a known
+technical word (`node2`). Name-shaped labels such as `jane2`, `jane-doe` or `jane.doe` are replaced with a redaction
 marker, and a label that would be offered unredacted fails the scan.
 Secret values and free-form account/provider error state are not selected from settings or registry records.
 

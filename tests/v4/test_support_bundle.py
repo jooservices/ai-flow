@@ -619,3 +619,25 @@ def test_phone_shaped_labels_are_not_offered_in_a_bundle(ctx):
     assert inventory["scan"] == "passed"
     assert "555-123-4567" not in everything
     assert "mac-mini" in everything and "claude-01" in everything
+
+
+def test_digit_in_a_name_shaped_label_does_not_bypass_bundle_scan(ctx):
+    ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
+               " VALUES ('jane2','worker','online',1,0,'4.1.0'), ('node2','worker','online',1,0,'4.1.0')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+               " VALUES ('jane2','claude','node2','middle',%s,'idle'),"
+               " ('claude-01','claude','node2','middle',%s,'idle')", (["dev"], ["dev"]))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        contents = {name: bundle.read(name).decode("utf-8") for name in bundle.namelist()}
+        machine_states = json.loads(contents["machine-state.json"])
+        account_states = json.loads(contents["account-state.json"])
+
+    assert inventory["scan"] == "passed"
+    assert all(not support_bundle.file_findings(name, content) for name, content in contents.items())
+    assert all("jane2" not in content for name, content in contents.items() if name.endswith(".json"))
+    assert any(row["name"] == "[REDACTED_NAME]" for row in machine_states)
+    assert any(row["id"] == "[REDACTED_NAME]" for row in account_states)
+    assert any(row["name"] == "node2" for row in machine_states)
+    assert any(row["id"] == "claude-01" for row in account_states)

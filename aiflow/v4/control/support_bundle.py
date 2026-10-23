@@ -102,11 +102,30 @@ _TRUSTED_LABEL_WORDS = frozenset({
 def _is_trusted_label(value: str) -> bool:
     if not _SAFE_MACHINE_LABEL.fullmatch(value):
         return False
-    # Digits make a label trusted, but a number-shaped label ("555-123-4567") is a phone number or ID.
     if sanitize_text(value, names=False) != value or sensitive_findings(value, names=False):
         return False
-    return all(any(ch.isdigit() for ch in part) or part in _TRUSTED_LABEL_WORDS
-               for part in re.split(r"[-_]", value))
+    parts = re.split(r"[-_]", value)
+
+    def known_technical_word(part: str) -> bool:
+        if part in _TRUSTED_LABEL_WORDS:
+            return True
+        # Compact identifiers such as node2 and claude01 are trusted only when their
+        # alphabetic stem is a known technical term; an arbitrary name like jane2 is not.
+        match = re.fullmatch(r"([a-z]+)([0-9]+)", part)
+        return bool(match and match.group(1) in _TRUSTED_LABEL_WORDS)
+
+    for index, part in enumerate(parts):
+        if known_technical_word(part):
+            continue
+        # A standalone numeric suffix is allowed only next to an allow-listed technical word,
+        # as in wsl-1 and claude-01.
+        if part.isdigit() and (
+            (index > 0 and known_technical_word(parts[index - 1]))
+            or (index + 1 < len(parts) and known_technical_word(parts[index + 1]))
+        ):
+            continue
+        return False
+    return True
 
 
 def _machine_label_path(file_name: str | None, path: tuple[Any, ...]) -> bool:

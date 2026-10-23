@@ -20,18 +20,17 @@ from aiflow.v4.worker.loop import attach_support_log
 SESSION_SECRET = "test-support-bundle-session-secret-with-32-bytes"
 
 
-def sign_in_owner(client, ctx, role="owner"):
+def sign_in_owner(client, ctx, role="owner", subject="owner@example.test"):
     ctx.settings.console_session_secret = SESSION_SECRET
-    client.cookies.set("aiflow4_session", issue_session("owner@example.test", role, 2_000_000_000,
-                                                         SESSION_SECRET))
+    client.cookies.set("aiflow4_session", issue_session(subject, role, 2_000_000_000, SESSION_SECRET))
 
 
 def add_run(ctx, ticket, log_text, *, age_hours=0, step="dev"):
     run_id = uuid.uuid4()
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,node,fence,details,started_at)"
                " VALUES (%s,%s,%s,%s,%s,%s,1,%s,now()-(%s * interval '1 hour'))",
-               (run_id, ticket, ticket.split("-")[0], step, "codex-01", "node1", J({"support_log_text": log_text}),
-                age_hours))
+               (run_id, ticket, ticket.split("-")[0], step, "codex-01", "node1", J({}), age_hours))
+    support_bundle.store_run_log(ctx, str(run_id), log_text)
     return str(run_id)
 
 
@@ -272,9 +271,30 @@ def test_owner_reviews_inventory_before_download_and_lead_cannot_build(client, c
     sign_in_owner(other_replica, ctx)
     assert other_replica.get(data["download_url"]).status_code == 200
 
+    sign_in_owner(other_replica, ctx, subject="second-admin@example.test")
+    assert other_replica.get(data["download_url"]).status_code == 403
+
     sign_in_owner(client, ctx, "lead")
     assert client.post("/v1/support/bundles", json={}).status_code == 403
 
+
+def test_run_result_keeps_raw_logs_out_of_the_runs_table_and_stores_a_sanitized_copy_with_ttl(client, ctx):
+    from conftest import add_ticket
+    from test_api import join
+
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-240")
+    r = client.post("/v1/work/claim", json={"ticket": "TESTWP-240", "account": "claude-01"}, headers=cc).json()
+    raw = "started\npassword=hunter2hunter2\ncontact alice@example.test\n"
+    res = client.post(f"/v1/runs/{r['run_id']}/result", headers=cc,
+                      json={"fence": r["fence"], "outcome": "done",
+                            "details": {"support_log_text": raw, "support_log_truncated": False, "kept": 1}})
+    assert res.status_code == 200, res.text
+    details = ctx.db.one("SELECT details FROM runs WHERE id=%s", (r["run_id"],))["details"]
+    assert details.get("kept") == 1 and "support_log_text" not in details and "support_log_truncated" not in details
+    stored = support_bundle.load_run_log(ctx, r["run_id"])
+    assert "started" in stored and "hunter2" not in stored and "alice@example.test" not in stored
+    assert 0 < ctx.leases.r.ttl(support_bundle._run_log_key(ctx, r["run_id"])) <= support_bundle.RUN_LOG_TTL_S
 
 def test_persistent_control_logs_are_filtered_to_the_last_24_hours(tmp_path, ctx):
     now = datetime.now(timezone.utc)

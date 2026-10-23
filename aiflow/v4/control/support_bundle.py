@@ -25,6 +25,9 @@ from .. import VERSION
 MAX_LOG_BYTES = 5 * 1024 * 1024
 RETENTION = timedelta(hours=24)
 MAX_INCIDENTS = 100
+RUN_LOG_TTL_S = int(RETENTION.total_seconds()) + 3600
+
+_log = logging.getLogger("aiflow4.support_bundle")
 
 _SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*)"
 _SECRET_ASSIGNMENT = re.compile(
@@ -268,6 +271,27 @@ def _persistent_control_logs(directory: str, now: datetime) -> str:
     return "\n".join(output) + ("\n" if output else "")
 
 
+def _run_log_key(ctx, run_id: str) -> str:
+    return ctx.leases._k("support_run_log", str(run_id))
+
+
+def store_run_log(ctx, run_id: str, text: str) -> bool:
+    """Keep a sanitized, scanned run log in Redis for the 24 hour window; never in the runs table."""
+    safe, _ = cap_log_bytes(sanitize_text(text))
+    if sensitive_findings(safe):
+        _log.warning("run log for %s dropped: sensitive content remained after sanitization", run_id)
+        return False
+    ctx.leases.r.set(_run_log_key(ctx, run_id), safe, ex=RUN_LOG_TTL_S)
+    return True
+
+
+def load_run_log(ctx, run_id: str) -> str | None:
+    value = ctx.leases.r.get(_run_log_key(ctx, run_id))
+    if value is None:
+        return None
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -326,12 +350,11 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         if not ticket:
             raise KeyError(ticket_key)
         files["ticket.json"] = _safe_json(ticket).encode("utf-8")
-        rows = ctx.db.all("SELECT id,step,started_at,details FROM runs WHERE ticket_key=%s"
+        rows = ctx.db.all("SELECT id,step,started_at FROM runs WHERE ticket_key=%s"
                           " AND started_at >= now() - interval '24 hours' ORDER BY started_at,id", (ticket_key,))
         for row in rows:
-            details = row["details"] or {}
-            run_log = details.get("support_log_text")
-            if not isinstance(run_log, str):
+            run_log = load_run_log(ctx, row["id"])
+            if run_log is None:
                 continue
             safe_log, _ = cap_log_bytes(sanitize_text(run_log))
             files[f"logs/ticket-runs/{row['id']}-{row['step']}.log"] = safe_log.encode("utf-8")

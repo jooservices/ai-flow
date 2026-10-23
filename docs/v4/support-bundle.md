@@ -20,6 +20,10 @@ from the preceding 24 hours. Workers attach the newest 5 MiB of a run log to tha
 can collect logs from remote nodes. The completed archive is scanned with the same gate as the general bundle, and
 every log file remains capped at 5 MiB.
 
-Bundles are temporary and belong to the signed-in owner session. Creating a bundle returns its inventory; the archive
+Run logs are sanitized, capped and scanned when a worker reports its result, and kept only in Redis for about 25
+hours; they are never written to the `runs` table or its backups. A log that still fails the scan is dropped.
+
+Bundles are temporary and belong to the console user who created them: the creator is saved with the staged bundle
+and a download by any other user is refused. Creating a bundle returns its inventory; the archive
 is served only by the separate download action after the inventory has been shown in the Support screen. The bundle
 is not uploaded or sent by AI Flow.

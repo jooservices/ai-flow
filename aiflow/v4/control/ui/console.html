@@ -290,6 +290,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .project-form textarea{min-height:82px;resize:vertical;font-family:var(--f-mono);font-size:12px}
 .project-form .wide{grid-column:1/-1}
 .project-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.machine-list{display:grid;gap:14px}.machine-card{border:1px solid var(--line);border-radius:12px;background:var(--surface-2);padding:16px}.machine-head,.machine-actions,.account-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.machine-head h3{margin:0}.machine-facts{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0;color:var(--muted);font-size:13px}.machine-facts strong{color:var(--fg)}.machine-accounts{display:grid;gap:8px;margin-top:12px}.managed-account{border-top:1px solid var(--line);padding:12px 0 0;display:grid;gap:8px}.managed-account h4{margin:0}.signin-result{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.machine-form{margin-top:12px}.job-options{display:flex;gap:12px;flex-wrap:wrap}.job-options label{display:flex;gap:6px;align-items:center}.machine-empty{padding:12px;color:var(--muted)}
 .project-checks{display:grid;gap:7px;border:1px solid var(--line-soft);border-radius:10px;padding:12px;background:var(--surface-2)}
 .project-checks ul{margin:0;padding-left:20px}.project-checks .bad{color:var(--crit)}.project-checks .good{color:var(--good)}
 .project-table{overflow:auto}.project-table table{min-width:720px}
@@ -611,6 +612,8 @@ var S = {
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
+  machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
+    addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', aiFilter: 'all', epic: 'all', accFilter: 'all', starredProjects: [],
@@ -734,14 +737,14 @@ function loadMasterAutonomy(force) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
   }).then(function (d) { S.autonomy.data = d; S.autonomy.error = ''; })
     .catch(function (err) { S.autonomy.error = String(err.message || err); })
-    .then(function () { S.autonomy.busy = false; if (S.view === 'cc') renderCC(); });
+    .then(function () { S.autonomy.busy = false; if (S.view === 'cc') renderDashboard(); });
 }
 function saveMasterBudget() {
   var input = $('[data-master-budget]'), value = input ? Number(input.value) : NaN;
   if (!Number.isInteger(value) || value < 0 || value > 1440) {
-    S.autonomy.error = 'Enter a daily budget from 0 to 1,440 minutes.'; renderCC(); return;
+    S.autonomy.error = 'Enter a daily budget from 0 to 1,440 minutes.'; renderDashboard(); return;
   }
-  S.autonomy.saving = true; S.autonomy.error = ''; renderCC();
+  S.autonomy.saving = true; S.autonomy.error = ''; renderDashboard();
   fetch('/v1/master/autonomy/budget', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ daily_budget_minutes: value }) }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
@@ -1058,7 +1061,7 @@ function copyJoinCommand(name) {
 function pollServices() {
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
     S.services = d.services || []; S.svcError = d.error || '';
-    if (S.view === 'machines' && S.data) renderCC();
+    if (S.view === 'machines' && S.data) renderMachines();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
 }
@@ -1273,6 +1276,8 @@ function renderDashboard() {
     h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next reported reset: ' + esc(reset) + '</span></td></tr>';
   });
   h += '</tbody></table></div></section></section>';
+  h += toolWaitsPanel(d);
+  h += masterAutonomyPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
 }
@@ -3094,6 +3099,190 @@ function renderFooter() {
   [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
 }
 
+function machineRequest(url, options) {
+  return fetch(url, options || {}).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+}
+function openMachineForm() { S.machines.addMachine = !S.machines.addMachine; S.machines.error = ''; renderMachines(); }
+function submitMachineJoin() {
+  var form = $('#machines-join-form'); if (!form || S.machines.join.busy) return;
+  var j = S.machines.join;
+  j.name = $('#machine-name', form).value.trim(); j.role = $('#machine-role', form).value;
+  j.project = $('#machine-project', form).value; j.error = ''; j.busy = true; j.command = '';
+  renderMachines();
+  machineRequest('/v1/nodes/' + encodeURIComponent(j.name) + '/join-command', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: j.name, role: j.role, project: j.project})
+  }).then(function (d) { j.command = d.command; j.expires_at = d.expires_at; j.error = ''; })
+    .catch(function (e) { j.error = String(e.message || e); })
+    .then(function () { j.busy = false; renderMachines(); });
+}
+function copyMachineCommand() {
+  var command = S.machines.join.command; if (!command) return;
+  if (new Date(S.machines.join.expires_at).getTime() <= Date.now()) { toast('Join command expired', 'Create a new command to add this machine.', 'warn'); return; }
+  if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+    window.navigator.clipboard.writeText(command).then(function () { toast('Join command copied', '', 'ok'); })
+      .catch(function () { toast('Select and copy the command', '', 'info'); });
+  } else toast('Select and copy the join command', '', 'info');
+}
+function addMachineAccount(name) {
+  var form = $('#account-add-' + CSS.escape(name)); if (!form) return;
+  var jobs = $$('[data-new-job]:checked', form).map(function (item) { return item.value; });
+  var sessions = Number($('[name="sessions"]', form).value || 0), provider = $('[name="provider"]', form).value;
+  machineRequest('/v1/machines/' + encodeURIComponent(name) + '/accounts', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: provider, sessions: sessions, jobs: jobs})
+  }).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function startAccountSignIn(id) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in', {method: 'POST'})
+    .then(function (d) { S.machines.signIns[id] = d; S.machines.signInRefreshAt[id] = Date.now(); S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function completeAccountSignIn(id) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in/complete', {method: 'POST'})
+    .then(function () { delete S.machines.signIns[id]; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function loadAccountSignIn(id) {
+  if (S.machines.signInLoading[id] || Date.now() - (S.machines.signInRefreshAt[id] || 0) < 2000) return;
+  S.machines.signInLoading[id] = true;
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in')
+    .then(function (d) { S.machines.signIns[id] = d; })
+    .catch(function (e) { S.machines.signIns[id] = {account: id, error: String(e.message || e)}; })
+    .then(function () { S.machines.signInRefreshAt[id] = Date.now(); delete S.machines.signInLoading[id]; if (S.view === 'machines') renderMachines(); });
+}
+function saveAccountSettings(id) {
+  var form = $('#account-edit-' + CSS.escape(id)); if (!form) return;
+  var jobs = $$('[data-edit-job]:checked', form).map(function (item) { return item.value; });
+  var sessions = Number($('[name="sessions"]', form).value || 0);
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sessions: sessions, jobs: jobs})})
+    .then(function () { S.machines.accountEditor = null; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function setAccountPaused(id, paused) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: paused ? 'pause' : 'resume'})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function removeMachineAccount(id) {
+  if (!window.confirm('Remove AI account ' + id + '? Its provider credentials remain on the machine.')) return;
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function toggleMachineWork(name, accepting) {
+  if (!accepting && !window.confirm('Stop ' + name + ' from taking new work? Running sessions can finish.')) return;
+  machineRequest('/v1/nodes/' + encodeURIComponent(name) + '/work-acceptance?accepting_work=' + String(accepting), {
+    method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: !accepting})
+  }).then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function removeMachine(name) {
+  if (!window.confirm('Remove machine ' + name + '? Its node credential will stop working and its AI accounts will be removed from AI Flow.')) return;
+  machineRequest('/v1/nodes/' + encodeURIComponent(name), {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function jobChecks(selected, attr) {
+  return ['develop', 'verify', 'intake', 'master'].map(function (job) {
+    return '<label><input type="checkbox" ' + attr + ' value="' + job + '"' + (selected.indexOf(job) >= 0 ? ' checked' : '') + '> ' + job + '</label>';
+  }).join('');
+}
+function renderMachines() {
+  var root = $('#view-machines'); if (!root) return;
+  var state = S.machines, data = D(), nodes = (data.nodes || []).filter(function (n) { return n.has_agent || n.status !== 'joined'; });
+  var h = '<section class="panel"><div class="panel-h"><h2>Machines and AI</h2><span class="hint">Add machines and manage AI accounts, sessions, jobs and quota.</span><span class="spacer"></span>';
+  if (consoleCan('nodes.manage')) h += '<button class="btn primary" data-act="machine-add-toggle">Add a machine</button>';
+  h += '</div>';
+  if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
+  h += '<div class="machine-list">';
+  if (!nodes.length) h += '<div class="machine-empty">No machine has joined yet.</div>';
+  nodes.forEach(function (n) {
+    var machineAccounts = (data.accounts || []).filter(function (a) { return a.node === n.name; });
+    var pendingAccounts = machineAccounts.filter(function (a) { return a.sign_in_pending; });
+    var accounts = machineAccounts.filter(function (a) { return !a.sign_in_pending; });
+    var assignedSessions = machineAccounts.reduce(function (total, a) { return total + Number(a.parallel || 1); }, 0);
+    var availableSessions = Math.max(0, 8 - assignedSessions);
+    var metrics = n.metrics || {}, editorId = state.accountEditor;
+    h += '<article class="machine-card"><div class="machine-head"><h3>' + esc(n.name) + '</h3>' + pill(nodeTone(n), nodeLabel(n)) +
+      (!n.accepting_work ? pill('warn', 'Not taking new work') : '') + '<span class="spacer"></span>';
+    h += '<button class="btn sm" data-act="open-node" data-id="' + esc(n.name) + '">Machine details</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-add-account" data-name="' + esc(n.name) + '">Add AI account</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-work" data-name="' + esc(n.name) + '" data-accept="' + String(!n.accepting_work) + '">' + (n.accepting_work ? 'Stop new work' : 'Resume work') + '</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="machine-remove" data-name="' + esc(n.name) + '">Remove machine</button>';
+    h += '</div><div class="machine-facts"><span>Memory <strong>' + gib(metrics.mem_used) + ' / ' + gib(metrics.mem_total) + '</strong></span>';
+    h += '<span>Processors <strong>' + esc(metrics.cpus == null ? '—' : metrics.cpus) + '</strong></span>';
+    h += '<span>Sessions busy <strong>' + esc(n.sessions_busy || 0) + ' / ' + esc(n.slots_total || 0) + '</strong></span>';
+    h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
+    h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
+    if (state.addAccount === n.name && consoleCan('nodes.manage')) {
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
+      h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
+      h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
+    }
+    h += '<div class="machine-accounts">';
+    pendingAccounts.forEach(function (a) {
+      var signIn = state.signIns[a.id];
+      if (consoleCan('nodes.manage') && (!signIn || (state.signInRefreshAt[a.id] && Date.now() - state.signInRefreshAt[a.id] >= 2000))) loadAccountSignIn(a.id);
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill('warn', 'Sign-in pending') +
+        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + '</span><span class="spacer"></span>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">Start sign-in again</button>';
+      var signInReady = signIn && signIn.status === 'completed' && (a.status === 'idle' || a.status === 'working');
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm primary" data-act="account-signin-complete" data-id="' + esc(a.id) + '"' + (signInReady ? '' : ' disabled') + '>Finish sign-in</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      h += '</div>';
+      if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
+      else if (signIn && signIn.status === 'failed') h += '<div class="small">' + esc(signIn.error || 'Provider sign-in failed.') + ' · Start sign-in again to retry.</div>';
+      else if (signIn && signIn.sign_in_url) h += '<div class="signin-result"><a href="' + esc(signIn.sign_in_url) + '" target="_blank" rel="noopener">Open provider authorization</a>' +
+        (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
+        (signIn.expires_at ? ' · expires ' + esc(when(signIn.expires_at)) : '') +
+        '<p class="small">Complete the provider authorization for this account on ' + esc(n.name) + '. The machine stores the resulting credentials in this account’s private home. After its check succeeds, choose Finish sign-in.</p></div>';
+      else if (signIn && signIn.status === 'completed') h += '<div class="small">Provider authorization completed. Waiting for the machine to check the account.</div>';
+      else h += '<div class="small">' + (consoleCan('nodes.manage') ? 'Starting provider sign-in on ' + esc(n.name) + '…' : 'Sign-in is pending owner action.') + '</div>';
+      h += '</section>';
+    });
+    if (!accounts.length && !pendingAccounts.length) h += '<div class="machine-empty">No AI accounts on this machine.</div>';
+    accounts.forEach(function (a) {
+      var windows = (a.quota || {}).windows || {}, quota = a.quota_used == null ? '—' : pctText(a.quota_used * 100);
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
+        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
+        ' · ' + esc((a.jobs || []).join(', ') || 'no jobs') + '</span><span class="spacer"></span>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      h += '</div><div class="machine-facts"><span>Quota used <strong>' + quota + '</strong></span><span>Limit resets <strong>' + esc(a.quota_resets_at ? when(typeof a.quota_resets_at === 'number' ? new Date(a.quota_resets_at * 1000).toISOString() : a.quota_resets_at) : '—') + '</strong></span>';
+      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
+      if (state.accountEditor === a.id) {
+        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
+        h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
+      }
+      h += '</section>';
+    });
+    h += '</div></article>';
+  });
+  h += '</div></section>';
+  if (state.addMachine && consoleCan('nodes.manage')) {
+    var j = state.join, projects = data.projects || [];
+    h += '<section class="panel"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
+    h += '<form class="project-form" id="machines-join-form" onsubmit="return false"><label>Machine name<input id="machine-name" required maxlength="63" value="' + esc(j.name) + '"></label>';
+    h += '<label>Role<select id="machine-role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
+    h += '<label>Project<select id="machine-project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
+    h += '<div><button class="btn primary" data-act="machine-join-create"' + (j.busy || !projects.length ? ' disabled' : '') + '>' + (j.busy ? 'Creating…' : 'Show one-time command') + '</button></div>';
+    if (j.error) h += '<div class="err wide" role="alert">' + esc(j.error) + '</div>';
+    if (j.command) h += '<label class="wide">Command expires in <span class="mono" data-countdown="' + esc(j.expires_at) + '"></span><textarea rows="2" readonly onclick="this.select()">' + esc(j.command) + '</textarea></label><div><button class="btn" data-act="machine-copy-join">Copy command</button></div>';
+    h += '<div class="small wide">This screen checks for the machine through live heartbeats. It will appear in the machine list after its agent joins.</div></form></section>';
+  }
+  root.innerHTML = h;
+}
 /* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
 function projectChecksCell(c) {
   if (!c || !c.has_checks) return '<span class="muted">no checks</span>';
@@ -3316,7 +3505,7 @@ function render() {
   renderFooter();
   if (S.view === 'cc') renderDashboard();
   else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
-  else if (S.view === 'machines') renderCC();
+  else if (S.view === 'machines') renderMachines();
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'users') renderUsers();
   else if (S.view === 'lead') renderLead();
@@ -3342,6 +3531,10 @@ function tick() {
   $$('[data-clock]').forEach(function (el) {
     var sec = Number(el.getAttribute('data-clock')) + s, hard = Number(el.getAttribute('data-hard')) || 3600, p = Math.min(100, 100 * sec / hard);
     el.style.width = p.toFixed(1) + '%'; el.setAttribute('data-tone', p >= 75 ? 'crit' : p >= 50 ? 'warn' : 'ok');
+  });
+  $$('[data-countdown]').forEach(function (el) {
+    var left = Math.max(0, Math.ceil((new Date(el.getAttribute('data-countdown')).getTime() - Date.now()) / 1000));
+    el.textContent = left ? mmss(left) + ' remaining' : 'Expired';
   });
   renderLive();
 }
@@ -3382,6 +3575,21 @@ document.addEventListener('click', function (e) {
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'support-build') buildSupportBundle();
   else if (act === 'support-clear') { S.support.bundle = null; S.support.error = ''; renderSupport(); }
+  else if (act === 'machine-add-toggle') openMachineForm();
+  else if (act === 'machine-join-create') submitMachineJoin();
+  else if (act === 'machine-copy-join') copyMachineCommand();
+  else if (act === 'machine-add-account') { S.machines.addAccount = el.getAttribute('data-name'); S.machines.error = ''; renderMachines(); }
+  else if (act === 'machine-account-save') addMachineAccount(el.getAttribute('data-name'));
+  else if (act === 'machine-account-cancel') { S.machines.addAccount = ''; S.machines.error = ''; renderMachines(); }
+  else if (act === 'machine-work') toggleMachineWork(el.getAttribute('data-name'), el.getAttribute('data-accept') === 'true');
+  else if (act === 'machine-remove') removeMachine(el.getAttribute('data-name'));
+  else if (act === 'account-pause') setAccountPaused(el.getAttribute('data-id'), el.getAttribute('data-paused') === 'true');
+  else if (act === 'account-edit') { S.machines.accountEditor = el.getAttribute('data-id'); S.machines.error = ''; renderMachines(); }
+  else if (act === 'account-edit-save') saveAccountSettings(el.getAttribute('data-id'));
+  else if (act === 'account-edit-cancel') { S.machines.accountEditor = null; S.machines.error = ''; renderMachines(); }
+  else if (act === 'account-signin') startAccountSignIn(el.getAttribute('data-id'));
+  else if (act === 'account-signin-complete') completeAccountSignIn(el.getAttribute('data-id'));
+  else if (act === 'account-remove') removeMachineAccount(el.getAttribute('data-id'));
   else if (act === 'search-open') openCommandSearch();
   else if (act === 'search-close') closeCommandSearch();
   else if (act === 'search-result') chooseSearchResult(el.getAttribute('data-kind'), el.getAttribute('data-key'), el);
@@ -3525,7 +3733,7 @@ document.addEventListener('click', function (e) {
     }
   }
   else if (act === 'close') closeAll();
-  else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
+  else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderDashboard(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; S.sh.renderKey = ''; savePrefs(); render(); }
   else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); savePrefs(); renderDHead(); renderDBody(); tick(); }
   else if (act === 'epic') { S.epic = el.getAttribute('data-key'); savePrefs(); renderDHead(); renderDBody(); tick(); flash('d-board'); }

@@ -104,9 +104,10 @@ def run_triage(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
 
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                         "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         head = git.readonly_worktree(mirror, wt, f"origin/{project['base']}")
         hb.progress = {"phase": "triage", "base": project["base"], "head": head[:10]}
         logs = Path(srv_root) / "logs" / "runs"

@@ -421,6 +421,7 @@ def test_review_action_stays_inside_the_project_scope_and_keeps_the_legacy_token
     from test_reviews import add_review_ticket
 
     ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    ctx.github.repositories.append({"full_name": "jooservices/other", "name": "other", "default_branch": "develop"})
     add_review_ticket(ctx, "TESTWP-310")
     add_review_ticket(ctx, "OTHER-310")
     login.seed_user(ctx.db, "scoped-reviewer@example.test", "reviewer")

@@ -328,7 +328,8 @@ def test_deb_packages_install_agent_and_worker_units_user_and_directories(tmp_pa
 HEALTHY = {"status": "online", "heartbeat_age_seconds": 3.0, "preflight_ok": True, "missing_tools": []}
 
 
-def _install(tmp_path, *, inspected_extra=None, health=None, joins=None, control_url="https://control.internal"):
+def _install(tmp_path, *, inspected_extra=None, health=None, joins=None, joined_extra=None,
+             control_url="https://control.internal"):
     """Run the installer against fake system commands and a fake control API; returns (node, calls, joins, root)."""
     bundle = _bundle(tmp_path)
     calls: list[list[str]] = []
@@ -363,7 +364,7 @@ def _install(tmp_path, *, inspected_extra=None, health=None, joins=None, control
             return {"name": "offline-node", "release": "v4.1.0", "stacks": ["python-3.12"],
                     **(inspected_extra or {})}
         return {"node": "offline-node", "release": "v4.1.0", "node_token": "private-node-token",
-                "accounts": ["codex-01"]}
+                "accounts": ["codex-01"], "worker_accounts": ["codex-01"], **(joined_extra or {})}
 
     token_file = tmp_path / "join-token"
     token_file.write_text("single-use-join-token\n", encoding="utf-8")
@@ -398,6 +399,17 @@ def test_offline_bundle_install_succeeds_without_public_network(tmp_path):
     assert any(call[:2] == ["docker", "load"] for call in calls)
     assert any(call[-1:] == ["aiflow4-worker@codex-01.service"] for call in calls)
     assert not any(Path(call[0]).name in {"curl", "npm", "pip", "wget"} for call in calls)
+
+
+def test_offline_install_keeps_paused_account_home_but_does_not_wait_for_its_worker(tmp_path):
+    node, calls, _joins, root, _health = _install(
+        tmp_path, joined_extra={"accounts": ["codex-01", "claude-paused"], "worker_accounts": ["codex-01"]})
+
+    assert node == "offline-node"
+    assert (root / "srv/aiflow/accounts/claude-paused").is_dir()
+    checked_units = [call[-1] for call in calls if call[:2] == ["systemctl", "is-active"]]
+    assert "aiflow4-worker@codex-01.service" in checked_units
+    assert "aiflow4-worker@claude-paused.service" not in checked_units
 
 
 def test_offline_install_smoke_uses_internal_network_live_health_and_worker_units():

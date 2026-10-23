@@ -796,7 +796,11 @@ class OfflineInstaller:
         if not token or "\n" in token or "\r" in token:
             raise OfflineError("control API returned an invalid node token")
         accounts = joined.get("accounts", [])
-        if not isinstance(accounts, list):
+        worker_accounts = joined.get("worker_accounts")
+        if (not isinstance(accounts, list) or any(not isinstance(account, str) for account in accounts)
+                or not isinstance(worker_accounts, list)
+                or any(not isinstance(account, str) for account in worker_accounts)
+                or not set(worker_accounts).issubset(accounts)):
             raise OfflineError("control API returned an invalid account list")
         state_dir = self.path("/srv/aiflow/state")
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -822,7 +826,6 @@ class OfflineInstaller:
         accounts_root = self.path("/srv/aiflow/accounts")
         accounts_root.mkdir(parents=True, exist_ok=True)
         for account in accounts:
-            account = str(account)
             if not SAFE_NODE.fullmatch(account):
                 raise OfflineError("control API returned an invalid account id")
             account_path = accounts_root / account
@@ -844,7 +847,7 @@ class OfflineInstaller:
         for _ in range(max(1, wait_seconds // 2)):
             result = self.runner(["systemctl", "is-active", "--quiet", "aiflow4-node-agent.service"],
                                  capture_output=True, text=True, check=False)
-            worker_units = [f"aiflow4-worker@{account}.service" for account in accounts]
+            worker_units = [f"aiflow4-worker@{account}.service" for account in worker_accounts]
             workers_active = all(
                 self.runner(["systemctl", "is-active", "--quiet", unit],
                             capture_output=True, text=True, check=False).returncode == 0

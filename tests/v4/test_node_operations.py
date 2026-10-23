@@ -15,6 +15,7 @@ import pytest
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.console_auth import ROLE_PERMISSIONS, issue_session
 from aiflow.v4 import cli
+from aiflow.v4.core.controlrepo import Account
 from aiflow.v4.node import agent, operations
 from conftest import join_node as issue_and_join
 
@@ -191,6 +192,19 @@ def test_join_command_uses_a_single_use_token_and_never_accepts_ssh_password(cli
     assert client.post("/v1/nodes/join", json={"name": "fresh-node", "join_token": token}).status_code == 403
     assert ctx.db.one("SELECT used_at IS NOT NULL AS consumed FROM node_join_tokens WHERE node_name='fresh-node'")[
         "consumed"] is True
+
+
+def test_join_returns_assigned_accounts_separately_from_expected_worker_accounts(client, ctx):
+    ctx.repo().accounts.extend([
+        Account(id="codex-active", provider="codex", node="fresh-node"),
+        Account(id="claude-paused", provider="claude", node="fresh-node", paused=True),
+    ])
+
+    joined = issue_and_join(client, "fresh-node")
+
+    assert joined.status_code == 200
+    assert joined.json()["accounts"] == ["codex-active", "claude-paused"]
+    assert joined.json()["worker_accounts"] == ["codex-active"]
 
 
 def test_repair_plan_uses_project_toolchains_versions_lock_and_desired_services(client, ctx):

@@ -2563,9 +2563,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
         repo = ctx.repo()
         project = repo.projects[row["projects"][0]]
+        sign_in_requests = ctx.db.all(
+            "SELECT id FROM managed_ai_accounts"
+            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')",
+            (row["name"],))
+        signing_in = {account["id"] for account in sign_in_requests}
+        accounts = repo.accounts_on(row["name"])
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
                 "stack": project.stack, "stacks": project.stacks, "release": current_release(), "node_token": token,
-                "accounts": [a.id for a in repo.accounts_on(row["name"])]}
+                "accounts": [a.id for a in accounts],
+                "worker_accounts": [a.id for a in accounts if not a.paused and a.id not in signing_in]}
 
     @app.post("/v1/nodes/{name}/heartbeat")
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:

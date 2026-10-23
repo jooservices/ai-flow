@@ -100,7 +100,7 @@ def _credential_condition(account_id: str, status: dict[str, bool | None]) -> di
         return condition(f"credential:{account_id}", name, "ready", "Credential is present and valid.")
     return condition(f"credential:{account_id}", name, "needs_action",
                      "Credential status has not been confirmed.",
-                     f"Sign in to AI account {account_id} on this machine.")
+                     f"Restart the AI account worker {account_id} on this machine and wait for its credential check to finish.")
 
 
 def _account_condition(row: dict | None, account_id: str) -> dict[str, object]:

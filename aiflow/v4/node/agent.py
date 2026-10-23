@@ -310,8 +310,7 @@ def _credential_conditions(states: list[dict]) -> dict[str, dict]:
             primary = workers[0]
         if primary is None:
             # Never infer credential validity from an extra session when the primary state is unavailable.
-            alive = any(worker.get("alive", True) for worker in workers)
-            checks[account] = {"present": True, "valid": None} if alive else {"present": False, "valid": None}
+            checks[account] = {"present": True, "valid": None}
             continue
 
         probe = primary.get("probe") or {}
@@ -321,7 +320,8 @@ def _credential_conditions(states: list[dict]) -> dict[str, dict]:
                                                          probe.get("error_kind") == "auth"):
             status = {"present": True, "valid": False}
         elif not primary.get("alive", True):
-            status = {"present": False, "valid": None}
+            # A stopped process cannot report on its credentials. Do not turn a crash into a sign-in request.
+            status = {"present": True, "valid": None}
         else:
             status = {"present": True, "valid": None}
         checks[account] = status

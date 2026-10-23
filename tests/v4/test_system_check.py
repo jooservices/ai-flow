@@ -600,6 +600,19 @@ def test_primary_credential_probe_is_not_overwritten_by_an_extra_session():
     assert agent._credential_conditions([extra]) == {"codex-01": {"present": True, "valid": None}}
 
 
+def test_dead_primary_worker_does_not_report_credentials_missing():
+    dead_worker = {"account": "codex-01", "instance": "codex-01", "state": "idle", "alive": False}
+
+    checks = agent._credential_conditions([dead_worker])
+
+    assert checks == {"codex-01": {"present": True, "valid": None}}
+    credential = system_check._credential_condition("codex-01", checks["codex-01"])
+    assert credential["detail"] == "Credential status has not been confirmed."
+    assert credential["action"] == (
+        "Restart the AI account worker codex-01 on this machine and wait for its credential check to finish."
+    )
+
+
 def test_workspace_permission_check_reports_a_directory_the_worker_cannot_write(tmp_path, monkeypatch):
     work, state = tmp_path / "locked-work", tmp_path / "state"
     work.mkdir()

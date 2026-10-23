@@ -90,6 +90,267 @@ WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval 
 ORDER BY ticket_key, started_at DESC
 """
 
+# `/v1/state` is consumed by the console and deployment tools. Its implementation is a shared helper in
+# control/state.py, so keep its complete response contract explicit in OpenAPI for generated docs.
+def _state_object(properties: dict, required: tuple[str, ...] = ()) -> dict:
+    return {"type": "object", "properties": properties, "additionalProperties": True,
+            **({"required": list(required)} if required else {})}
+
+
+def _state_array(items: dict) -> dict:
+    return {"type": "array", "items": items}
+
+
+def _state_nullable(value: dict) -> dict:
+    return {"anyOf": [value, {"type": "null"}]}
+
+
+_STATE_STRING = {"type": "string"}
+_STATE_INTEGER = {"type": "integer"}
+_STATE_NUMBER = {"type": "number"}
+_STATE_BOOLEAN = {"type": "boolean"}
+_STATE_DATETIME = {"type": "string", "format": "date-time"}
+_STATE_ANY_OBJECT = _state_object({})
+_STATE_STRING_ARRAY = _state_array(_STATE_STRING)
+_STATE_RATE = _state_object({"tokens_per_hour": _STATE_NUMBER, "cost_usd_per_hour": _STATE_NUMBER,
+                             "runs": _STATE_INTEGER, "steady_runs": _STATE_INTEGER},
+                            ("tokens_per_hour", "cost_usd_per_hour", "runs", "steady_runs"))
+_STATE_RUN = _state_object({
+    "id": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
+    "summary": _state_nullable(_STATE_STRING), "step": _STATE_STRING, "account": _STATE_STRING,
+    "provider": _STATE_STRING, "model": _STATE_STRING, "node": _STATE_STRING, "fence": _STATE_INTEGER,
+    "elapsed_s": _state_nullable(_STATE_INTEGER), "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
+    "lease_ms": _STATE_INTEGER, "progress": _STATE_ANY_OBJECT,
+}, ("id", "ticket", "summary", "project", "step", "account", "provider", "model", "node", "fence",
+    "elapsed_s", "heartbeat_age_s", "lease_ms", "progress"))
+_STATE_RECENT_RUN = _state_object({
+    "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
+    "step": _STATE_STRING, "account": _STATE_STRING, "provider": _STATE_STRING, "model": _STATE_STRING,
+    "node": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
+    "duration_s": _state_nullable(_STATE_INTEGER), "cost_usd": _STATE_NUMBER,
+    "tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER, "pr_url": _STATE_STRING,
+    "ended_age_s": _state_nullable(_STATE_INTEGER),
+}, ("id", "ticket", "summary", "step", "account", "provider", "model", "node", "outcome", "error_kind",
+    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "ended_age_s"))
+_STATE_ACCOUNT = _state_object({
+    "id": _STATE_STRING, "provider": _STATE_STRING, "node": _STATE_STRING, "tier": _STATE_STRING,
+    "roles": _STATE_STRING_ARRAY, "explicit_only": _STATE_BOOLEAN, "paused": _STATE_BOOLEAN,
+    "jobs": _STATE_STRING_ARRAY, "sign_in_pending": _STATE_BOOLEAN, "sign_in_status": _STATE_STRING,
+    "status": _STATE_STRING, "provider_status": _STATE_STRING,
+    "cooldown": _state_nullable(_state_object({"reason": _STATE_STRING, "seconds_left": _STATE_INTEGER},
+                                               ("reason", "seconds_left"))),
+    "cooldown_until": _state_nullable(_STATE_DATETIME), "cooldown_since": _state_nullable(_STATE_DATETIME),
+    "idle_since": _state_nullable(_STATE_DATETIME), "credential_expires_at": _STATE_STRING,
+    "credential_expiry_warning": _STATE_BOOLEAN, "check_failed": _STATE_BOOLEAN,
+    "quota": _STATE_ANY_OBJECT,
+    "quota_awareness": _state_object({
+        "source": _STATE_STRING, "is_estimate": _STATE_BOOLEAN, "runs_24h": _STATE_INTEGER,
+        "confidence": _STATE_STRING, "rate_spread_ratio": _state_nullable(_STATE_NUMBER),
+        "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
+                                     "whole_window": _STATE_RATE},
+                                    ("last_hour", "last_day", "whole_window")),
+        "usage_7d": _state_object({"tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER,
+                                   "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+                                   "runs": _STATE_INTEGER},
+                                  ("tokens_in", "tokens_out", "tokens", "cost_usd", "runs")),
+        "largest_run": _state_nullable(_state_object({"ticket": _state_nullable(_STATE_STRING),
+            "model": _STATE_STRING, "tokens": _STATE_INTEGER, "context_tokens": _STATE_INTEGER,
+            "cost_usd": _STATE_NUMBER, "duration_s": _STATE_NUMBER},
+            ("ticket", "model", "tokens", "context_tokens", "cost_usd", "duration_s"))),
+        "history": _state_array(_state_object({"day": _STATE_STRING, "tokens_in": _STATE_INTEGER,
+            "tokens_out": _STATE_INTEGER, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+            "runs": _STATE_INTEGER}, ("day", "tokens_in", "tokens_out", "tokens", "cost_usd", "runs"))),
+        "windows": _state_array(_state_object({
+            "name": _STATE_STRING, "label": _STATE_STRING, "source": _STATE_STRING,
+            "used_pct": _state_nullable(_STATE_NUMBER), "left_pct": _state_nullable(_STATE_NUMBER),
+            "used_tokens": _STATE_INTEGER, "left_tokens": _state_nullable(_STATE_INTEGER),
+            "quota_tokens": _state_nullable(_STATE_NUMBER), "reset_at": _state_nullable(_STATE_DATETIME),
+            "reset_source": _STATE_STRING, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+            "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
+                                         "whole_window": _STATE_RATE},
+                                        ("last_hour", "last_day", "whole_window")),
+            "prediction": _state_object({"status": _STATE_STRING, "before_reset": _STATE_BOOLEAN,
+                "confidence": _STATE_STRING, "exhaustion_at": _state_nullable(_STATE_DATETIME),
+                "remaining_at_reset_pct": _state_nullable(_STATE_NUMBER),
+                "remaining_now_pct": _state_nullable(_STATE_NUMBER)},
+                ("status", "before_reset", "confidence", "exhaustion_at", "remaining_at_reset_pct",
+                 "remaining_now_pct")),
+        }, ("name", "label", "source", "used_pct", "left_pct", "used_tokens", "left_tokens",
+            "quota_tokens", "reset_at", "reset_source", "tokens", "cost_usd", "burn_rates", "prediction"))),
+        "at_risk": _STATE_BOOLEAN,
+    }, ("source", "is_estimate", "runs_24h", "confidence", "rate_spread_ratio", "burn_rates", "usage_7d",
+        "largest_run", "history", "windows", "at_risk")),
+    "quota_used": _state_nullable(_STATE_NUMBER), "quota_resets_at": _state_nullable(_STATE_DATETIME),
+    "tokens_today": _STATE_INTEGER, "cost_today": _STATE_NUMBER, "last_error": _STATE_STRING,
+    "worker": _STATE_ANY_OBJECT, "model": _STATE_STRING, "effort": _state_nullable(_STATE_STRING),
+    "runs_active": _STATE_INTEGER, "parallel": _STATE_INTEGER,
+    "run": _state_nullable(_state_object({
+        "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
+        "step": _STATE_STRING, "elapsed_s": _state_nullable(_STATE_INTEGER), "fence": _STATE_INTEGER,
+        "progress": _STATE_ANY_OBJECT,
+    }, ("id", "ticket", "step", "elapsed_s", "fence", "progress"))),
+}, ("id", "provider", "node", "tier", "roles", "explicit_only", "paused", "jobs", "sign_in_pending",
+    "sign_in_status", "status", "provider_status", "cooldown", "cooldown_until", "cooldown_since", "idle_since",
+    "credential_expires_at", "credential_expiry_warning", "check_failed", "quota", "quota_awareness", "quota_used",
+    "quota_resets_at", "tokens_today", "cost_today", "last_error", "worker", "model", "effort", "runs_active",
+    "parallel", "run"))
+_STATE_INCIDENT = _state_object({
+    "id": _STATE_INTEGER, "opened_at": _STATE_DATETIME, "closed_at": _state_nullable(_STATE_DATETIME),
+    "severity": _STATE_STRING, "kind": _STATE_STRING, "subject": _STATE_STRING, "title": _STATE_STRING,
+    "detail": _STATE_STRING,
+}, ("id", "opened_at", "severity", "kind", "subject", "title", "detail"))
+_STATE_READINESS_REASON = _state_object({"cause": _STATE_STRING, "ticket": _state_nullable(_STATE_STRING),
+    "summary": _STATE_STRING, "status": _STATE_STRING, "bug": _STATE_STRING, "detail": _STATE_STRING},
+    ("cause", "ticket", "summary"))
+_STATE_RELEASE_STEP = _state_object({"step": _STATE_STRING, "state": _STATE_STRING, "run_id": _STATE_STRING,
+    "node": _STATE_STRING, "detail": _STATE_STRING, "at": _state_nullable(_STATE_DATETIME), "url": _STATE_STRING},
+    ("step", "state", "run_id", "node", "detail", "at"))
+
+STATE_RESPONSE_SCHEMA = _state_object({
+    "generated_at": _STATE_DATETIME, "env": _STATE_STRING, "control_repo": _STATE_STRING,
+    "versions": {"type": "object", "additionalProperties": _STATE_STRING}, "version": _STATE_STRING,
+    "links": _state_object({"o2": _STATE_STRING, "mail": _STATE_STRING, "gatus": _STATE_STRING},
+                            ("o2", "mail", "gatus")),
+    "tool_waits": _state_array(_state_object({
+        "requirement": _STATE_STRING,
+        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+                                               "machine": _STATE_STRING}, ("key", "summary", "machine"))),
+        "projects": _STATE_STRING_ARRAY, "machines": _STATE_STRING_ARRAY, "since": _STATE_DATETIME,
+        "count": _STATE_INTEGER, "maintenance_ticket": _STATE_STRING,
+    }, ("requirement", "tickets", "projects", "machines", "since", "count", "maintenance_ticket"))),
+    "nodes": _state_array(_state_object({
+        "name": _STATE_STRING, "ip": _STATE_STRING, "services": _state_array(_state_object({
+            "name": _STATE_STRING, "projects": _STATE_STRING_ARRAY, "healthy": _STATE_BOOLEAN,
+            "state": _STATE_STRING, "endpoint": _STATE_STRING, "image": _STATE_STRING, "detail": _STATE_STRING,
+        }, ("name", "projects", "healthy", "state", "endpoint", "image", "detail"))),
+        "role": _STATE_STRING, "status": _STATE_STRING, "accepting_work": _STATE_BOOLEAN,
+        "sessions_busy": _STATE_INTEGER, "slots_total": _STATE_INTEGER, "slots_used": _STATE_INTEGER,
+        "release": _STATE_STRING, "metrics": _STATE_ANY_OBJECT, "tools": _STATE_ANY_OBJECT,
+        "has_agent": _STATE_BOOLEAN, "required_tools": _STATE_STRING_ARRAY,
+        "desired_services": _state_array(_state_object({"name": _STATE_STRING, "unit": _STATE_STRING,
+            "healthcheck_configured": _STATE_BOOLEAN}, ("name", "unit", "healthcheck_configured"))),
+        "missing_tools": _STATE_STRING_ARRAY, "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
+        "accounts_assigned": _STATE_INTEGER, "in_control_repo": _STATE_BOOLEAN,
+        "last_heartbeat": _state_nullable(_STATE_DATETIME), "idle_since": _state_nullable(_STATE_DATETIME),
+        "purpose": _STATE_STRING, "notes": _STATE_STRING, "capabilities": _STATE_STRING_ARRAY,
+        "projects": _STATE_STRING_ARRAY,
+        "version_policy": _state_object({"compatible": _STATE_BOOLEAN, "state": _STATE_STRING,
+                                          "reason": _STATE_STRING}, ("compatible", "state", "reason")),
+        "joined_at": _STATE_DATETIME,
+    }, ("name", "ip", "services", "role", "status", "accepting_work", "sessions_busy", "slots_total", "slots_used",
+        "release", "metrics", "tools", "has_agent", "required_tools", "desired_services", "missing_tools",
+        "heartbeat_age_s", "accounts_assigned", "in_control_repo", "last_heartbeat", "idle_since", "purpose", "notes",
+        "capabilities", "projects", "version_policy", "joined_at"))),
+    "accounts": _state_array(_STATE_ACCOUNT),
+    "active_runs": _state_array(_STATE_RUN), "recent_runs": _state_array(_STATE_RECENT_RUN),
+    "projects": _state_array(_state_object({
+        "key": _STATE_STRING, "repo": _STATE_STRING, "repositories": _STATE_STRING_ARRAY,
+        "base": _STATE_STRING, "environments": _STATE_ANY_OBJECT,
+        "work_minutes": _state_object({"target": _STATE_INTEGER, "warn": _STATE_INTEGER, "hard": _STATE_INTEGER},
+                                       ("target", "warn", "hard")),
+        "counts": {"type": "object", "additionalProperties": _STATE_INTEGER},
+        "status": _STATE_STRING, "closed": _STATE_BOOLEAN, "closed_at": _state_nullable(_STATE_DATETIME),
+        "closed_by": _STATE_STRING, "report_version": _STATE_INTEGER, "close_suggested": _STATE_BOOLEAN,
+    }, ("key", "repo", "repositories", "base", "environments", "work_minutes", "counts", "status", "closed",
+        "closed_at", "closed_by", "report_version", "close_suggested"))),
+    "tickets": _state_array(_state_object({
+        "key": _STATE_STRING, "project": _STATE_STRING, "status": _STATE_STRING, "type": _STATE_STRING,
+        "priority": _STATE_STRING, "labels": _STATE_STRING_ARRAY, "summary": _STATE_STRING,
+        "parent_key": _state_nullable(_STATE_STRING), "blocked_by": _STATE_STRING_ARRAY,
+        "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
+        "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
+    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "epic",
+        "repository", "run", "last_run", "updated_age_s"))),
+    "release_readiness": _state_array(_state_object({
+        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
+        "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,
+        "reasons": _state_array(_STATE_READINESS_REASON),
+    }, ("project", "version_id", "version", "ready", "ticket_count", "done_count", "tickets", "reasons"))),
+    "release_progress": _state_array(_state_object({
+        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "released": _STATE_BOOLEAN,
+        "release_date": _state_nullable(_STATE_STRING), "ready": _STATE_BOOLEAN, "ticket_count": _STATE_INTEGER,
+        "done_count": _STATE_INTEGER, "started_at": _state_nullable(_STATE_DATETIME),
+        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "open_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "late_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "reasons": _state_array(_STATE_READINESS_REASON),
+        "release": _state_object({"status": _STATE_STRING, "tracker": _STATE_STRING, "tag": _STATE_STRING,
+            "github_release_url": _STATE_STRING, "detail": _STATE_STRING, "steps": _state_array(_STATE_RELEASE_STEP)},
+            ("status", "tracker", "tag", "github_release_url", "detail", "steps")),
+    }, ("project", "version_id", "version", "released", "release_date", "ready", "ticket_count", "done_count",
+        "started_at", "tickets", "open_tickets", "late_tickets", "reasons", "release"))),
+    "incidents": _state_array(_STATE_INCIDENT), "incidents_recent": _state_array(_STATE_INCIDENT),
+    "events": _state_array(_state_object({
+        "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "account": _STATE_STRING,
+        "node": _STATE_STRING, "outcome": _STATE_STRING, "reason": _STATE_STRING,
+    }, ("ts", "type", "ticket", "account", "node", "outcome", "reason"))),
+    "sa": _state_object({
+        "thresholds": _state_object({"slots_used_percent": _STATE_NUMBER, "slots_duration_minutes": _STATE_NUMBER,
+            "role_cooldown_minutes": _STATE_NUMBER, "idle_days": _STATE_NUMBER,
+            "credential_expiry_days": _STATE_NUMBER},
+            ("slots_used_percent", "slots_duration_minutes", "role_cooldown_minutes", "idle_days", "credential_expiry_days")),
+        "slots": _state_object({"used": _STATE_INTEGER, "total": _STATE_INTEGER,
+            "utilization_percent": _state_nullable(_STATE_NUMBER), "pressure_since": _state_nullable(_STATE_DATETIME)},
+            ("used", "total", "utilization_percent", "pressure_since")),
+        "recommendations": _state_array(_state_object({"kind": _STATE_STRING, "subject": _STATE_STRING,
+            "reason": _STATE_STRING}, ("kind", "subject", "reason"))),
+        "policy_denials": _state_array(_state_object({"id": _STATE_INTEGER, "ts": _STATE_DATETIME,
+            "ticket": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
+            "reason": _STATE_STRING, "command": _state_nullable(_STATE_STRING)},
+            ("id", "ts", "ticket", "account", "node", "run_id",
+                "reason", "command"))),
+        "provider_blocks": _state_array(_STATE_ACCOUNT),
+        "network_issues": _state_array(_state_object({"source": _STATE_STRING,
+            "id": {"anyOf": [_STATE_INTEGER, _STATE_STRING]},
+            "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
+            "step": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
+            "status": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
+            "detail": _STATE_STRING, "attempts": _STATE_INTEGER, "retry": _STATE_BOOLEAN,
+            "reason": _STATE_STRING, "data": _STATE_ANY_OBJECT}, ("source",))),
+    }, ("thresholds", "slots", "recommendations", "policy_denials", "provider_blocks", "network_issues")),
+    "role_health": _state_object({
+        "settings": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_NUMBER,
+            "updated_by": _STATE_STRING, "updated_at": _state_nullable(_STATE_DATETIME),
+            "defaults": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_INTEGER},
+                                       ("window_runs", "failure_percent"))},
+            ("window_runs", "failure_percent", "updated_by", "updated_at", "defaults")),
+        "metrics_days": _STATE_INTEGER,
+        "roles": _state_array(_state_object({
+            "account": _STATE_STRING, "provider": _STATE_STRING, "role": _STATE_STRING, "enabled": _STATE_BOOLEAN,
+            "mode": _STATE_STRING, "note": _STATE_STRING, "disabled_at": _state_nullable(_STATE_DATETIME),
+            "failure_score": _state_nullable(_STATE_NUMBER), "scored_runs": _STATE_INTEGER,
+            "success_rate": _state_nullable(_STATE_NUMBER), "finished_tickets": _STATE_INTEGER,
+            "cost_per_finished_ticket": _state_nullable(_STATE_NUMBER), "rework_rounds": _STATE_INTEGER,
+            "probation": _state_nullable(_state_object({"open_ticket": _STATE_STRING, "streak": _STATE_INTEGER,
+                "needed": _STATE_INTEGER, "results": _STATE_STRING_ARRAY}, ("open_ticket", "streak", "needed", "results"))),
+        }, ("account", "provider", "role", "enabled", "mode", "note", "disabled_at", "failure_score", "scored_runs",
+            "success_rate", "finished_tickets", "cost_per_finished_ticket", "rework_rounds", "probation"))),
+    }, ("settings", "metrics_days", "roles")),
+    "rollout": _state_nullable(_state_object({
+        "id": _STATE_INTEGER, "target": _STATE_STRING, "previous": _STATE_STRING, "status": _STATE_STRING,
+        "wave": _STATE_INTEGER, "batch_size": _STATE_INTEGER, "failed_node": _STATE_STRING,
+        "reason": _STATE_STRING, "rollback": _STATE_STRING, "started_at": _STATE_DATETIME,
+        "nodes": _state_array(_state_object({"node": _STATE_STRING, "wave": _STATE_INTEGER,
+            "status": _STATE_STRING, "from": _STATE_STRING, "detail": _STATE_STRING},
+            ("node", "wave", "status", "from", "detail"))),
+    }, ("id", "target", "previous", "status", "wave", "batch_size", "failed_node", "reason", "rollback",
+        "started_at", "nodes"))),
+    "version_policy": _state_object({"control": _STATE_STRING, "max_minor_lag": _STATE_INTEGER},
+                                     ("control", "max_minor_lag")),
+    "totals": _state_object({"runs_24h": _STATE_INTEGER, "cost_24h": _STATE_NUMBER,
+        "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
+        "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
+        ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
+}, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
+    "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
+    "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
+
 
 def h(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -4848,7 +5109,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                         account=sender, reason=body.environment, data={"related": body.change_key})
         return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}
 
-    @app.get("/v1/state")
+    @app.get("/v1/state", responses={200: {"description": "Command Center, Delivery, and SA snapshot",
+                                            "content": {"application/json": {"schema": STATE_RESPONSE_SCHEMA}}}})
     def state() -> dict:
         from .state import snapshot
         return snapshot(ctx)

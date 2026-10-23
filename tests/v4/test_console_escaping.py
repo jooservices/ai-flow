@@ -13,7 +13,7 @@ CONSOLE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "u
 SRC = CONSOLE.read_text(encoding="utf-8")
 
 
-SAFE_HREF = ("esc(safeHref(", "esc(safeUrl(", "esc(jiraUrl(", "esc(jira)", "esc(leadReportHref(")
+SAFE_HREF = ("esc(safeHref(", "esc(safeUrl(", "esc(jiraUrl(", "esc(jira)", "esc(leadReportHref(", "esc(helpUrl(")
 
 
 def _lines():

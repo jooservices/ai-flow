@@ -122,6 +122,9 @@ jobs:
           mkdir -p dist
           git archive --format=tar.gz --output="dist/aiflow4-$VERSION.tar.gz" "$VERSION" \
             aiflow pyproject.toml uv.lock prompts deploy
+          # the tarball also carries the documentation site (docs-site/) built from docs/guide and the API code
+          pip install uv==0.13.4 && uv sync --frozen
+          PYTHON="uv run --frozen python" bash deploy/v4/ci/add-docs-site.sh "$VERSION" "dist/aiflow4-$VERSION.tar.gz"
           python3 -m aiflow.v4.core.release_notes "$VERSION" --previous "$PREVIOUS" > dist/CHANGELOG.md
           (cd dist && sha256sum "aiflow4-$VERSION.tar.gz" > SHA256SUMS)
 

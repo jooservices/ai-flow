@@ -1,6 +1,6 @@
 # Backup & Restore
 
-**Assumes:** You are signed in to an installed AI Flow v4 control plane as an Owner or Super Administrator. You
+**Assumes:** You are signed in to an installed AI Flow v4 control plane as an Administrator. You
 need `backup.read` to view this screen and `backup.manage` to change settings, run a backup or download its key.
 
 Open **Backup & Restore** from the console menu. The page shows the latest backup, its destination and the result of

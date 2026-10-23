@@ -159,6 +159,32 @@ class _API:
         return response(body) if callable(response) else (response or {})
 
 
+def _fake_container_runtime(monkeypatch, calls, worker_module, url, password):
+    """A stand-in ContainerRuntime that records cleanup; the site start only fills the run spec."""
+    from aiflow.v4.worker import containers, wordpress
+
+    class Runtime:
+        def __init__(self, spec, run_as):
+            self.spec = spec
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            calls["site_cleanup"].append(True)
+            return False
+
+    def site(site_runtime, _wt, _project, _run_id, spec):
+        assert isinstance(site_runtime, Runtime)
+        spec.extra_env.update({"WP_BASE_URL": url, "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": password})
+        notes = wordpress.run_notes(spec.extra_env)
+        spec.prompt += notes
+        return notes
+
+    monkeypatch.setattr(containers, "ContainerRuntime", Runtime)
+    monkeypatch.setattr(worker_module, "start_wordpress_site", site)
+
+
 def _adapter(final_text, on_run=None):
     class Adapter:
         argv = lambda self, _spec: []
@@ -213,15 +239,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
 
-    @contextmanager
-    def run_site(_worktree, _project, _run_id, base_env):
-        try:
-            yield {**base_env, "WP_BASE_URL": "http://127.0.0.1:40123", "WP_ADMIN_USER": "aiflow-admin",
-                   "WP_ADMIN_PASSWORD": "private-to-run"}
-        finally:
-            calls["site_cleanup"].append(True)
-
-    monkeypatch.setattr(dev, "wordpress_run_site", run_site)
+    _fake_container_runtime(monkeypatch, calls, dev, "http://127.0.0.1:40123", "private-to-run")
     monkeypatch.setattr(dev, "get_adapter", lambda _provider: _adapter(
         "SUMMARY: implemented\nTESTS: pytest passed", calls["specs"].append))
     project = {"key": "JOOWP", "repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],
@@ -274,15 +292,7 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
     monkeypatch.setattr(verify, "Git", Git)
     monkeypatch.setattr(verify, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
 
-    @contextmanager
-    def run_site(_worktree, _project, _run_id, base_env):
-        try:
-            yield {**base_env, "WP_BASE_URL": "http://127.0.0.1:40124", "WP_ADMIN_USER": "aiflow-admin",
-                   "WP_ADMIN_PASSWORD": "private-to-verify"}
-        finally:
-            calls["site_cleanup"].append(True)
-
-    monkeypatch.setattr(verify, "wordpress_run_site", run_site)
+    _fake_container_runtime(monkeypatch, calls, verify, "http://127.0.0.1:40124", "private-to-verify")
     monkeypatch.setattr(verify, "get_adapter", lambda _provider: _adapter(
         "VERDICT: PASS\nCHECKS: pytest passed", calls["specs"].append))
     project = {"key": "JOOWP", "repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],

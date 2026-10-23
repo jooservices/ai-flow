@@ -32,17 +32,17 @@ PROVIDER_TOOLS: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode",),
 }
 
+# The rootless, quota-backed broker that safely exposes a Docker-compatible command set to one AI run.
+CONTAINER_RUNTIME_TOOL = "safe-container-runtime"
+
 # Extra tools per project stack. Add a stack here when a project starts using it.
 STACK_TOOLS: dict[str, tuple[str, ...]] = {
     "php-8.3": ("php", "composer", "wp"),
     "python-3.12": ("python3", "uv"),
     "node-24": ("node",),
     "playwright": ("node", "playwright", "chromium", "firefox", "webkit"),
-    "wordpress": ("podman", "node", "playwright", "chromium", "firefox", "webkit"),
+    "wordpress": (CONTAINER_RUNTIME_TOOL, "node", "playwright", "chromium", "firefox", "webkit"),
 }
-
-# The rootless, quota-backed broker that safely exposes a Docker-compatible command set to one AI run.
-CONTAINER_RUNTIME_TOOL = "safe-container-runtime"
 
 # `versions.lock` names used by the control repo. Keep aliases here so installation and verification use the
 # same pins as the console's version display.
@@ -191,7 +191,9 @@ def toolchain_gaps(tools: dict[str, object] | None, required: Iterable[str],
                    stacks: str | Iterable[str] | None = (), *, require_pins: bool = False) -> list[str]:
     """Required tools absent, outside their lock pin, or unpinned for a declared stack."""
     reported = tools or {}
-    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())}
+    # The container runtime is configured on the node, not pinned or installed by version.
+    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())
+                   if tool != CONTAINER_RUNTIME_TOOL}
     gaps = []
     for tool in required:
         if require_pins and tool in stack_tools and not locked_version(versions, tool):

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
@@ -22,7 +23,7 @@ from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
 from .dev import api_node, related_block, with_knowledge_context
 from .gitops import Git
 from .notes import note, project_env
-from .wordpress import run_notes as wordpress_run_notes, run_site as wordpress_run_site
+from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
@@ -95,30 +96,31 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             events["n"] += 1
             hb.progress = {"phase": "verify-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
 
-        if "wordpress" in (project.get("stacks") or project.get("stack") or []):
-            hb.progress = {"phase": "wordpress-site"}
-        with wordpress_run_site(wt, project, c.run_id, project_env(project["key"])) as run_env:
-            site_notes = wordpress_run_notes(run_env)
-            if site_notes:
+        spec = RunSpec(prompt=build_prompt(c, pr), cwd=str(wt),
+                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
+                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       control_url=control_url, run_token=c.run_token,
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=project_env(project["key"]))
+        adapter = get_adapter(c.provider)
+        base_argv = adapter.argv
+        adapter.argv = lambda s: run_as + base_argv(s)
+        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+        if project.get("containers") or wordpress:
+            from .containers import ContainerRuntime
+            runtime = ContainerRuntime(spec, run_as)
+        else:
+            runtime = nullcontext()
+        # The site is started through the container runtime, so its limits and crash cleanup own it.
+        with runtime as containers:
+            if wordpress:
+                hb.progress = {"phase": "wordpress-site"}
+                start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
-                    c, "WordPress test site ready", what=f"Run site: {run_env['WP_BASE_URL']}",
+                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
                     result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
-            spec = RunSpec(prompt=build_prompt(c, pr) + site_notes, cwd=str(wt),
-                           account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
-                           effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
-                           control_url=control_url, run_token=c.run_token,
-                           log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=run_env)
-            adapter = get_adapter(c.provider)
-            base_argv = adapter.argv
-            adapter.argv = lambda s: run_as + base_argv(s)
-            if project.get("containers"):
-                from .containers import ContainerRuntime
-                with ContainerRuntime(spec, run_as):
-                    res = adapter.run(spec, on_progress, stop=hb.lost)
-            else:
-                res = adapter.run(spec, on_progress, stop=hb.lost)
+            res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       head_sha=head)

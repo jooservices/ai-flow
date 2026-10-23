@@ -20,7 +20,7 @@ def test_stack_values_map_to_node_and_project_tools():
     assert tools_for_stacks(["php-8.3", "python-3.12"]) == list(NODE_TOOLS) + list(CATALOG_TOOLS)
     assert tools_for_stack("node-24") == list(BASE_TOOLS) + ["node"]
     assert tools_for_stack("playwright") == list(BASE_TOOLS) + ["node", "playwright", "chromium", "firefox", "webkit"]
-    assert tools_for_stack("wordpress") == list(BASE_TOOLS) + ["podman", "node", "playwright", "chromium", "firefox", "webkit"]
+    assert tools_for_stack("wordpress") == list(BASE_TOOLS) + ["safe-container-runtime", "node", "playwright", "chromium", "firefox", "webkit"]
     # AI CLIs are required by the providers of a node's accounts, not by project stacks
     assert tools_for_providers(["codex", "claude"]) == ["codex", "codex-code-mode-host", "claude"]
 
@@ -31,14 +31,15 @@ def test_project_tools_follow_the_stack_and_missing_is_explicit():
     assert missing_tools({"php": "PHP 8.3.0", "composer": "missing"}, project.tools) == ["git", "uv", "composer", "wp"]
 
 
-def test_wordpress_stack_uses_rootless_podman_and_requires_every_browser_engine():
+def test_wordpress_stack_uses_the_safe_container_runtime_and_requires_every_browser_engine():
     required = tools_for_stack("wordpress")
-    versions = {"tools": {"podman": "4.9", "node": "24.x", "playwright": "1.56"}}
-    healthy = {"git": "git version 2.43.0", "uv": "uv 0.13.4", "podman": "podman version 4.9.3",
+    versions = {"tools": {"node": "24.x", "playwright": "1.56"}}
+    healthy = {"git": "git version 2.43.0", "uv": "uv 0.13.4", "safe-container-runtime": "safe-container-runtime 1",
                "node": "node v24.22.0", "playwright": "Version 1.56.1",
                "chromium": "Chromium Playwright 1.56.1", "firefox": "Firefox Playwright 1.56.1",
                "webkit": "WebKit Playwright 1.56.1"}
-    assert set(required) == {"git", "uv", "podman", "node", "playwright", "chromium", "firefox", "webkit"}
+    assert "podman" not in required
+    assert set(required) == {"git", "uv", "safe-container-runtime", "node", "playwright", "chromium", "firefox", "webkit"}
     assert toolchain_gaps(healthy, required, versions, ["wordpress"], require_pins=True) == []
     healthy["webkit"] = "missing"
     assert toolchain_gaps(healthy, required, versions, ["wordpress"], require_pins=True) == ["webkit"]

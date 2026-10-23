@@ -1,7 +1,8 @@
 # Isolated WordPress test sites
 
-A project opts into a disposable site by declaring the `wordpress` stack. The stack prepares Podman, Node, the pinned
-Playwright package, and Chromium, Firefox and WebKit on each eligible node:
+A project opts into a disposable site by declaring the `wordpress` stack. The stack needs the safe container runtime
+(`safe-container-runtime`, see `container-runtime.md`), Node, the pinned Playwright package, and Chromium, Firefox
+and WebKit on each eligible node:
 
 ```yaml
 key: JOOWP
@@ -9,7 +10,7 @@ repo: jooservices/wordpress-plugin
 stack: wordpress
 ```
 
-Pin Podman, Node and Playwright in `aiflow-control/versions.lock` under `tools`. The three browser requirements use
+Pin Node and Playwright in `aiflow-control/versions.lock` under `tools`. The three browser requirements use
 the Playwright pin; if the repository has a local Playwright dependency, keep its package lock on that same release
 because `npx` uses the project's local package. Set the WordPress core release for this project in the node-local
 `/etc/aiflow/projects/<KEY>.env` file:
@@ -23,11 +24,15 @@ database password are generated for each run and are not written to project file
 
 ## Site lifecycle
 
-Before a dev or verify AI starts, the worker creates a uniquely named Podman network, database container, data volume,
-and WordPress container. The site uses `wordpress:<WP_CORE_VERSION>-php8.3-apache` and `mariadb:11.4`. The web port
-is dynamically published on loopback, so concurrent runs have separate URLs and do not need a host Docker daemon or
-a shared integration site, and Podman does not depend on a host Docker daemon. Setup has an 85-second deadline; a site
-that does not become ready inside that limit is removed and the run fails with the setup reason.
+Before a dev or verify AI starts, the worker starts the run's container runtime (the JAIF-241 broker) and asks it to
+run a small Compose project: `mariadb:11.4`, `wordpress:<WP_CORE_VERSION>-php8.3-apache`, and a one-shot seeding
+service that installs WordPress and seeds content. The worker never calls Podman or a Docker daemon itself, and
+`aiflow-worker` needs no container access. The broker validates the Compose file like any other, applies its storage
+quotas and container limits, and owns the containers, network and volume: it removes them when the run ends and also
+when the worker dies or is killed. The Compose file is written under `.aiflow-wordpress/` in the worktree and deleted
+as soon as the site is seeded. The web port is published on a free loopback port, so concurrent runs have separate
+URLs and need no shared integration site. Setup has an 85-second deadline; a site that does not become ready inside
+that limit fails the run with the setup reason, and the runtime removes what was started.
 
 If the worktree contains a plugin header in a root or immediate child PHP file, that plugin is mounted read-only into
 `wp-content/plugins` and activated. A theme with a `Theme Name` header in its `style.css` is mounted into
@@ -48,8 +53,8 @@ identify Chromium, Firefox and WebKit as installed. The browser folder is
 command. If a browser is absent or cannot launch, the report names Chromium, Firefox or WebKit individually.
 
 The site stays available for the full AI process, including repeated test loops such as JOOWP-243's 20 KernelTest
-runs. When the process exits, the worker removes both containers, the data volume and the network. Projects without
-the `wordpress` stack do not call the site provisioner and incur no site startup cost.
+runs. When the run ends, the runtime removes both containers, the data volume and the network. Projects without
+the `wordpress` stack start no site and no container runtime for it, and incur no site startup cost.
 
 ## Browser reports from a run
 

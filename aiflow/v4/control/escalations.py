@@ -28,6 +28,7 @@ from typing import Any
 from ..core.text import slug
 from . import tooling
 from .db import J
+from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.escalations")
 
@@ -127,7 +128,6 @@ REPOSITORY_FACT_RE = re.compile(
     r"\b(?:endpoint|route|api|function|handler)\b|"
     r"\bwhat\s+(?:value|setting)\b.{0,80}\b(?:existing|current|configured)\b.{0,80}\b(?:use|set|configured)\b",
     re.I | re.S)
-MISSING_MARKER_RE = re.compile(r"\bMISSING-(?:TOOL|SERVICE)\s*:\s*([A-Za-z0-9_.+-]+)", re.I)
 
 
 def _search(pattern: str, text: str) -> bool:
@@ -169,9 +169,9 @@ def classify(db, text: str, project: str = "") -> Classification:
         ac = re.search(r"\bAC\s?(\d+)\b", text, re.I)
         return Classification(UNREACHABLE, "an acceptance criterion that cannot be met in this environment",
                               environment=environment, criterion=f"AC{ac.group(1)}" if ac else "")
-    missing_marker = MISSING_MARKER_RE.search(text)
-    if missing_marker:
-        requirement = missing_marker.group(1).lower().replace("-", "_")
+    missing = parse_missing_requirements(text)
+    if missing:
+        requirement = missing[0]
         return Classification(MISSING, f"the run explicitly reported missing tool or service {requirement.replace('_', ' ')}",
                               environment=requirement)
     if environment and NEED_RE.search(text):

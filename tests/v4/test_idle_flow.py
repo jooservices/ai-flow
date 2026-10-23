@@ -65,6 +65,46 @@ def test_idle_flow_names_the_unpinned_tools_as_the_cause(client, ctx, repo):
         assert tool in found["detail"]
 
 
+def test_idle_flow_names_a_parked_ticket_and_its_missing_requirement(client, ctx, repo):
+    online_node(client)
+    add_ticket(ctx.db, "TESTWP-957")
+    age(ctx, "TESTWP-957", 30)
+    ctx.db.run("INSERT INTO tool_waits (ticket_key,project,requirement,machine,run_id,detail)"
+               " VALUES ('TESTWP-957','TESTWP','gitleaks','cc','run-parked','MISSING-TOOL: gitleaks')")
+    check_idle_flow(ctx)
+    found = incident(ctx, "flow_idle")
+    assert found and "parked tickets TESTWP-957 waiting for gitleaks" in found["detail"]
+    assert "no cause found" not in found["detail"]
+
+
+def test_idle_flow_names_backoff_quota_licence_and_project_pause(client, ctx, repo, monkeypatch):
+    online_node(client)
+    add_ticket(ctx.db, "TESTWP-958")
+    age(ctx, "TESTWP-958", 30)
+    run(ctx, "TESTWP-958", minutes_ago=30)
+    ctx.db.run("UPDATE runs SET outcome='failed',ended_at=now() WHERE ticket_key='TESTWP-958'")
+    ctx.db.run("UPDATE accounts SET status='cooldown',quota_at_risk=true")
+    repo.projects["TESTWP"].paused = True
+    from aiflow.v4.control import licensing
+    monkeypatch.setattr(licensing, "snapshot", lambda *_a, **_k: {"read_only": True, "reason": "expired"})
+    check_idle_flow(ctx)
+    detail = incident(ctx, "flow_idle")["detail"]
+    assert "retry backoff for TESTWP-958" in detail
+    assert "quota cooldown/backoff" in detail and "quota forecast" in detail
+    assert "licence is read-only" in detail and "TESTWP is paused" in detail
+
+
+def test_idle_flow_names_version_skew(client, ctx, repo, monkeypatch):
+    online_node(client)
+    add_ticket(ctx.db, "TESTWP-959")
+    age(ctx, "TESTWP-959", 30)
+    from aiflow.v4.control import rollout
+    monkeypatch.setattr(rollout, "node_compatible", lambda *_a, **_k: {
+        "compatible": False, "reason": "node runs v1.0.0, behind the control plane"})
+    check_idle_flow(ctx)
+    assert "version skew blocks TESTWP" in incident(ctx, "flow_idle")["detail"]
+
+
 def test_idle_flow_closes_when_work_starts_and_master_runs_do_not_count(client, ctx, repo):
     online_node(client)
     add_ticket(ctx.db, "TESTWP-951")

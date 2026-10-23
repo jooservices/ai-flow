@@ -30,6 +30,10 @@ SERVICES: dict[str, dict[str, Any]] = {
 }
 ALIASES = {"postgresql": "postgres", "pg": "postgres", "pgvector": "postgres"}
 
+# Named external environments are reportable requirements too, but unlike the local test services they are not
+# provisioned by the node agent. Their availability is supplied by the node's `tools` heartbeat map.
+EXTERNAL_REQUIREMENTS = ("dev-vm", "sonarqube", "devices")
+
 
 def normalize_services(value: Any) -> list[str]:
     """Canonical names of the declared services (a string or a list), without duplicates or unknown names."""

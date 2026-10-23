@@ -222,10 +222,13 @@ STATE_RESPONSE_SCHEMA = _state_object({
     "tool_waits": _state_array(_state_object({
         "requirement": _STATE_STRING,
         "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
-                                               "machine": _STATE_STRING}, ("key", "summary", "machine"))),
+                                               "machine": _STATE_STRING, "requirement": _STATE_STRING,
+                                               "since": _STATE_DATETIME, "action": _STATE_STRING,
+                                               "detail": _STATE_STRING},
+                                              ("key", "summary", "machine", "requirement", "since", "action", "detail"))),
         "projects": _STATE_STRING_ARRAY, "machines": _STATE_STRING_ARRAY, "since": _STATE_DATETIME,
-        "count": _STATE_INTEGER, "maintenance_ticket": _STATE_STRING,
-    }, ("requirement", "tickets", "projects", "machines", "since", "count", "maintenance_ticket"))),
+        "count": _STATE_INTEGER, "maintenance_ticket": _STATE_STRING, "action": _STATE_STRING,
+    }, ("requirement", "tickets", "projects", "machines", "since", "count", "maintenance_ticket", "action"))),
     "nodes": _state_array(_state_object({
         "name": _STATE_STRING, "ip": _STATE_STRING, "services": _state_array(_state_object({
             "name": _STATE_STRING, "projects": _STATE_STRING_ARRAY, "healthy": _STATE_BOOLEAN,
@@ -3329,6 +3332,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                     J({**body.metrics, "services": body.services}),
                     body.release_protocol, body.slots_used, node))
         repo = ctx.repo()
+        node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+        tooling.resolve_available(ctx, node, node_state)
+        tool_repairs = tooling.install_requests(ctx, node, node_state, repo)
         for account_id, expires_at in body.credential_expiries.items():
             # the account row keeps the earliest expiry of its machines; each machine's own date is kept beside it
             reported = repo.account(account_id)
@@ -3418,6 +3424,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "project_stacks": project_stacks,
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
+                            "tool_repairs": tool_repairs,
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
 
@@ -4753,6 +4760,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 support_bundle.store_run_log(ctx, run_id, run_log)
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
+        outcome = body.outcome
         ctx.db.run("UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
                    " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
                    " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
@@ -4781,7 +4789,17 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
                        " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
         if body.outcome == "tool_missing" and run["step"] == "dev":
-            tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []], body.summary)
+            recorded = tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []],
+                                              body.summary)
+            details["missing_tools"] = recorded
+            if not recorded:
+                outcome = "failed"
+                ctx.db.run("UPDATE runs SET outcome='failed',error_kind=coalesce(nullif(error_kind,''),%s),details=details || %s"
+                           " WHERE id=%s",
+                           ("missing_requirement_unaccepted", J({"missing_tools": [], "missing_requirement_unaccepted": True}),
+                            run_id))
+            else:
+                ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s", (J({"missing_tools": recorded}), run_id))
         try:
             knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
             knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
@@ -4798,7 +4816,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 log.warning("worklog for %s failed: %s", run["ticket_key"], e)
         ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
                         fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"],
-                        node=node, duration_ms=dur, outcome=body.outcome, reason=body.error_kind or body.summary[:200],
+                        node=node, duration_ms=dur, outcome=outcome, reason=body.error_kind or body.summary[:200],
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
         try:  # quality by role: this result may switch the role off or settle a probation ticket

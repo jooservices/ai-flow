@@ -10,9 +10,10 @@ and valid; they never include credential values or provider output. Machine resu
 condition IDs and result states, so node supplied names, details, actions, and extra fields are not stored in the
 readiness snapshot or returned in reports and support bundles.
 
-The node agent checks available disk, writable work and worker-state directories, control API connectivity, tool
-versions, service health, and sanitized credential probe state. The control plane combines these with project
-stack pins, required services, repository and base-branch settings, and the AI accounts assigned to the machine.
+The node agent checks available disk, writable work and worker-state directories, control API connectivity, GitHub
+HTTPS with certificate validation through configured proxy settings, tool versions, service health, and sanitized
+credential probe state. The control plane combines these with project stack pins, required services, repository and
+base-branch settings, and the AI accounts assigned to the machine.
 Known stack tools and declared test services use the existing node preparation routines: pinned tools are installed
 automatically, missing/stopped test services are started or recreated, and stale worktrees are removed only when
 the control plane confirms they belong to completed or spent work. When that cleanup restores the 5 GiB minimum,

@@ -47,6 +47,16 @@ def test_install_smoke_uses_signed_artifact_and_two_systemd_nodes_for_heartbeat_
     assert "node claim smoke passed" in script
 
 
+def test_install_smoke_authenticates_system_check_and_support_bundle_requests():
+    script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
+    assert "--cookie-jar /run/aiflow4-smoke/console-cookies" in script
+    helper = script.split("authenticated_control_get() {", 1)[1].split("\n}", 1)[0]
+    assert "--cookie /run/aiflow4-smoke/console-cookies" in helper
+    system_check = script.split("wait_for_system_check() {", 1)[1].split("\n}", 1)[0]
+    assert "authenticated_control_get /v1/system-check" in system_check
+    assert "authenticated_control_get /v1/support-bundle" in system_check
+
+
 def test_install_smoke_checks_upgrade_and_failed_candidate_rollback_then_finishes_install():
     script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
     assert "AIFLOW4_SELF_UPDATE=1" in script

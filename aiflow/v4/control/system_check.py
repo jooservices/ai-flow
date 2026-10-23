@@ -639,6 +639,13 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
     assigned_accounts = [account.id for account in repo.accounts_on(node)]
     stored = _safe_readiness(row.get("readiness") or {}, assigned_accounts)
     raw_machine = machine_conditions if machine_conditions is not None else stored.get("machine", [])
+    if trigger in {"heartbeat", "upgrade"}:
+        # The heartbeat reaching this handler proves that the node can reach the control API. An older
+        # agent may omit system_conditions, so do not carry a pre-heartbeat join result forward as stale.
+        current_machine = _validated_machine_results(raw_machine)
+        current_machine["control-network"] = "ready"
+        raw_machine = [{"id": condition_id, "result": result}
+                       for condition_id, result in current_machine.items()]
     credential_statuses = _validated_credential_statuses(
         credential_checks if credential_checks is not None else stored.get("credential_statuses"),
         assigned_accounts)
@@ -702,7 +709,7 @@ def refresh_node(ctx, node: str, trigger: str = "heartbeat", machine_conditions:
         scope, condition_id = key
         title = f"System check: {node} · {item.get('name', condition_id)} needs attention"
         detail = str(item.get("action") or item.get("detail") or "Review this condition in System check.")
-        notify.send("warning", title, detail, "/system-check")
+        notify.send("warning", title, detail, "/system-check", ctx=ctx)
         ctx.events.emit("system_check.alert", project=scope if scope != "machine" else "", node=node,
                         outcome=str(item.get("result")), reason=detail,
                         data={"condition": condition_id, "trigger": trigger})

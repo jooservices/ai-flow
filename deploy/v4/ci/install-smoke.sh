@@ -179,10 +179,16 @@ anon=$(curl --silent --output /dev/null --write-out '%{http_code}' "$CONTROL_URL
 docker exec "$CONTROL" bash -se <<'SIGN_IN'
 set -euo pipefail
 body=$(python3 -c 'import json; print(json.dumps({"email": "owner@example.test", "password": open("/run/aiflow4-smoke/admin-password").read().strip()}))')
-code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8080/v1/auth/login <<<"$body")
+code=$(curl -s -o /dev/null -w '%{http_code}' --cookie-jar /run/aiflow4-smoke/console-cookies \
+  -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8080/v1/auth/login <<<"$body")
 [[ $code == 200 ]] || { echo "the Super Administrator could not sign in (HTTP $code)" >&2; exit 1; }
+[[ -s /run/aiflow4-smoke/console-cookies ]] || { echo "console sign-in did not return a session cookie" >&2; exit 1; }
 SIGN_IN
 state_read >/dev/null || { echo "the owner-token state read failed with sign-in on" >&2; exit 1; }
+authenticated_control_get() {
+  docker exec "$CONTROL" curl --silent --show-error --fail \
+    --cookie /run/aiflow4-smoke/console-cookies "http://127.0.0.1:8080$1"
+}
 docker exec "$CONTROL" bash -se <<'SEED_TICKET'
 set -euo pipefail
 /srv/aiflow/control/releases/"$(cat /srv/aiflow/control/releases/CURRENT)"/.venv/bin/python - <<'PY'
@@ -284,14 +290,14 @@ wait_for_release() {
 wait_for_system_check() {
   local node=$1
   for _ in $(seq 1 120); do
-    if curl --silent --show-error --fail http://127.0.0.1:18080/v1/system-check \
+    if authenticated_control_get /v1/system-check \
       | python3 -c 'import json,sys; data=json.load(sys.stdin); node=next((n for n in data.get("nodes",[]) if n.get("name")==sys.argv[1]),{}); result=node.get("readiness",{}); sys.exit(0 if result.get("checked_at") and result.get("machine") and "SMOKE" in result.get("projects",{}) else 1)' \
         "$node"; then
       break
     fi
     sleep 2
   done
-  curl --silent --show-error --fail http://127.0.0.1:18080/v1/support-bundle \
+  authenticated_control_get /v1/support-bundle \
     | python3 -c 'import json,sys; data=json.load(sys.stdin); nodes=data.get("system_check",{}).get("nodes",[]); node=next((n for n in nodes if n.get("name")==sys.argv[1]),{}); result=node.get("readiness",{}); sys.exit(0 if result.get("checked_at") and "SMOKE" in result.get("projects",{}) else 1)' \
       "$node" || { echo "clean-install support bundle omitted the system check for $node" >&2; return 1; }
 }

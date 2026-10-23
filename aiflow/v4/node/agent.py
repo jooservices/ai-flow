@@ -22,6 +22,8 @@ import select
 from urllib.parse import quote
 from pathlib import Path
 
+import httpx
+
 from .. import VERSION
 from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
@@ -62,13 +64,15 @@ _github_network_ok: bool | None = None
 
 
 def _github_network_available() -> bool:
-    """Check the HTTPS route used to clone configured GitHub repositories without logging network details."""
+    """Verify GitHub HTTPS with certificate checks and the node's configured proxy settings."""
     global _network_checked_at, _github_network_ok
     if time.time() - _network_checked_at >= 600 or _github_network_ok is None:
         try:
-            with socket.create_connection(("github.com", 443), timeout=3):
-                _github_network_ok = True
-        except OSError:
+            with httpx.Client(timeout=3, follow_redirects=True, trust_env=True) as client:
+                response = client.get("https://github.com")
+                response.raise_for_status()
+            _github_network_ok = True
+        except (httpx.HTTPError, OSError):
             _github_network_ok = False
         _network_checked_at = time.time()
     return _github_network_ok

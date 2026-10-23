@@ -129,6 +129,22 @@ def test_legacy_heartbeat_marks_unreported_machine_conditions_uncheckable(client
     assert {item["id"] for item in blocked} >= {"workspace-permissions", "repository-network"}
 
 
+def test_legacy_heartbeat_replaces_join_control_network_result(client, ctx):
+    headers = _direct_join(client)
+    joined_readiness = _wait_for_join_readiness(ctx)
+    joined_machine = {item["id"]: item for item in joined_readiness["machine"]}
+    assert joined_machine["control-network"]["result"] == "needs_action"
+
+    response = client.post("/v1/nodes/cc/heartbeat", headers=headers, json={})
+
+    assert response.status_code == 200
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    machine = {item["id"]: item for item in readiness["machine"]}
+    assert machine["control-network"]["result"] == "ready"
+    blocked = system_check.blocking_reasons(readiness, "TESTWP", "claude-01", ["claude-01"])
+    assert "control-network" not in {item["id"] for item in blocked}
+
+
 def test_machine_join_project_add_upgrade_and_hourly_are_check_triggers(client, ctx, control_repo, monkeypatch):
     headers = _direct_join(client)
     assert _wait_for_join_readiness(ctx)["trigger"] == "machine_joined"
@@ -214,8 +230,20 @@ def test_all_four_results_and_action_text_are_reported_per_project(client, ctx):
 
 
 def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition(client, ctx, monkeypatch):
-    notifications = []
-    monkeypatch.setattr(notify, "send", lambda *args, **kwargs: notifications.append((args, kwargs)) or [])
+    deliveries = []
+
+    class Delivered:
+        def raise_for_status(self):
+            return None
+
+    def deliver(url, **kwargs):
+        deliveries.append((url, kwargs))
+        return Delivered()
+
+    monkeypatch.setattr(notify.httpx, "post", deliver)
+    channel = notify.save_channel(ctx.db, {"name": "system check", "kind": "webhook",
+                                           "config": {"url": "https://alerts.example.test/system-check"}})
+    notify.save_preferences(ctx.db, {"routes": {"ticket_needs_person": [channel["id"]]}})
     diagnostic = {"result": "ready"}
     build_project_conditions = system_check._project_conditions
 
@@ -237,10 +265,10 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
                      condition("control-network", "Control API network", "ready", "Heartbeat reached control."),
                      condition("repository-network", "Repository network", "ready", "GitHub is reachable.")]
     client.post("/v1/nodes/cc/heartbeat", json={"system_conditions": machine_ready}, headers=headers)
-    assert notifications == []
+    assert deliveries == []
     diagnostic["result"] = "needs_action"
     client.post("/v1/nodes/cc/heartbeat", json={"system_conditions": machine_ready}, headers=headers)
-    assert notifications == []
+    assert deliveries == []
 
     tools = ctx.db.one("SELECT tools FROM nodes WHERE name='cc'")["tools"]
     tools["composer"] = "missing"
@@ -250,7 +278,9 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
                                          "Only 1 GiB is available.", "Free at least 5 GiB on /srv/aiflow."),
                               *machine_ready[1:]],
     }, headers=headers)
-    assert len(notifications) == 2  # composer and disk now prevent work
+    assert len(deliveries) == 2  # composer and disk now prevent work
+    sent = ctx.db.all("SELECT status, alert_kind FROM notification_deliveries ORDER BY id")
+    assert sent == [{"status": "sent", "alert_kind": "ticket_needs_person"}] * 2
     add_ticket(ctx.db, "TESTWP-249")
     claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-249", "account": "claude-01"}, headers=headers)
     assert claim.status_code == 409
@@ -266,7 +296,7 @@ def test_only_work_affecting_failures_alert_and_work_gate_names_failed_condition
                               *machine_ready[1:]],
         "metrics": {"disk_free": 6 * 1024 ** 3},
     }, headers=headers)
-    assert len(notifications) == 2
+    assert len(deliveries) == 2
 
     from aiflow.v4.control.db import J
     ctx.db.run("UPDATE accounts SET worker_state=%s WHERE id='claude-01'",
@@ -497,6 +527,67 @@ def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, t
     encoded = json.dumps(checks)
     assert checks["codex-01"] == {"present": True, "valid": False}
     assert "SECRET-CREDENTIAL-VALUE" not in encoded
+
+
+def test_repository_network_probe_uses_tls_validation_and_environment_proxy(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        def __init__(self, *, timeout, follow_redirects, trust_env):
+            assert timeout == 3
+            assert follow_redirects is True
+            assert trust_env is True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url):
+            assert url == "https://github.com"
+            return Response()
+
+    monkeypatch.setattr(agent.httpx, "Client", Client)
+    monkeypatch.setattr(agent, "_network_checked_at", 0)
+    monkeypatch.setattr(agent, "_github_network_ok", None)
+
+    assert agent._github_network_available()
+
+
+def test_repository_network_probe_rejects_tls_failure_after_tcp_connect(monkeypatch):
+    tcp_connected = []
+
+    def connect(*_args, **_kwargs):
+        tcp_connected.append(True)
+        return object()
+
+    class Client:
+        def __init__(self, *, timeout, follow_redirects, trust_env):
+            assert timeout == 3
+            assert follow_redirects is True
+            assert trust_env is True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url):
+            # Model a completed TCP connect followed by a certificate-verification failure in TLS.
+            agent.socket.create_connection(("github.com", 443), timeout=3)
+            raise agent.httpx.ConnectError("TLS certificate verification failed")
+
+    monkeypatch.setattr(agent.socket, "create_connection", connect)
+    monkeypatch.setattr(agent.httpx, "Client", Client)
+    monkeypatch.setattr(agent, "_network_checked_at", 0)
+    monkeypatch.setattr(agent, "_github_network_ok", None)
+
+    assert not agent._github_network_available()
+    assert tcp_connected == [True]
 
 
 def test_primary_credential_probe_is_not_overwritten_by_an_extra_session():

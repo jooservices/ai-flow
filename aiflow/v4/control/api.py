@@ -4113,12 +4113,22 @@ def create_app(ctx: Ctx) -> FastAPI:
         node_tools = node_row.get("tools") or {}
         missing_container_runtime = bool(toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], repo.versions))
 
-        def ticket_needs_missing_container_runtime(ticket: dict[str, Any]) -> bool:
+        def ticket_needs_missing_container_runtime(ticket: dict[str, Any], step: str) -> bool:
             project = repo.projects.get(str(ticket.get("project") or ""))
             if not project or not missing_container_runtime:
                 return False
             selected = project.settings_for_ticket({"key": ticket.get("key"), "type": ticket.get("type"),
                                                      "epic": ticket_epic(ticket)})
+            # Verify and rework restore the repository settings captured by the development run. Gate on those
+            # same settings so a later project remap cannot offer container work to a node without the runtime.
+            if step in {"dev", "verify", "qa", "triage"}:
+                prior_dev = last_dev(str(ticket.get("key") or ""), done=True) or last_dev(str(ticket.get("key") or ""))
+                details = (prior_dev or {}).get("details") or {}
+                prior_repository = str(details.get("repository") or "")
+                if prior_repository:
+                    prior_settings = details.get("repository_settings")
+                    selected = (dict(prior_settings) if isinstance(prior_settings, dict)
+                                else project.settings_for_repo(prior_repository))
             return bool(selected.get("containers"))
 
         # A project with a declared stack is offered only after this node reports every pinned tool healthy.
@@ -4151,7 +4161,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             verify_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if ticket_needs_missing_container_runtime(t):
+                if ticket_needs_missing_container_runtime(t, "verify"):
                     continue
                 if t["key"] in held or t["key"] in verify_cooling:
                     continue
@@ -4170,7 +4180,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
                                 " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
                                 (projects,)):
-                if ticket_needs_missing_container_runtime(t):
+                if ticket_needs_missing_container_runtime(t, "triage"):
                     continue
                 if t["key"] in held or t["key"] in triage_cooling:
                     continue
@@ -4191,7 +4201,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
                                 " AND NOT ('aiflow-hold' = ANY(labels))"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
-                if ticket_needs_missing_container_runtime(t):
+                if ticket_needs_missing_container_runtime(t, "intake"):
                     continue
                 if t["key"] in held or t["key"] in waiting:
                     continue
@@ -4207,7 +4217,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                 " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
                                 " AND r.step = 'impact' AND r.outcome = 'assessed')"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
-                if ticket_needs_missing_container_runtime(t):
+                if ticket_needs_missing_container_runtime(t, "impact"):
                     continue
                 if t["key"] in held or t["key"] in waiting:
                     continue
@@ -4224,7 +4234,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             parked = tooling.parked_tickets(ctx, node_row)  # waiting for a tool this machine lacks
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
-                if ticket_needs_missing_container_runtime(t):
+                if ticket_needs_missing_container_runtime(t, "dev"):
                     continue
                 if (t["key"] in held or t["key"] in cooling or t["key"] in parked
                         or any(b not in done for b in t["blocked_by"])):

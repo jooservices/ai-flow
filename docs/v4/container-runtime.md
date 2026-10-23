@@ -10,29 +10,33 @@ The setting is saved as `containers: true` in the project or repository entry in
 
 ## Node requirements
 
-The node must provide rootless Podman, the `podman-compose` provider, and an XFS storage filesystem mounted with
-project quotas (`pquota` or `prjquota`). Podman must belong to a dedicated unprivileged account,
+The node must provide rootless Podman, the `podman-compose` provider, `xfs_quota` from xfsprogs, `setfacl` from
+acl, and XFS filesystems mounted with project quotas (`pquota` or `prjquota`) for both Podman storage and
+`/srv/aiflow/work`. Podman must belong to a dedicated unprivileged account,
 `aiflow-containers`, with a private (mode 0700) home and storage, subuid/subgid ranges, and a Podman binary that
 `aiflow-worker` cannot execute (for example `dpkg-statoverride --update --add root aiflow-containers 0750
 /usr/bin/podman`). The AI run and project checks stay `aiflow-worker`, so even calling the real Podman by absolute
 path fails at the operating-system level. The runtime reports `safe-container-runtime` as missing unless that
-separation, rootless mode, Compose, project quotas, and sufficient filesystem capacity are all verified.
+separation, rootless mode, Compose, both quota-enabled filesystems, successful hard-quota setup, `setfacl`,
+worktree-filesystem ACL support, and sufficient filesystem capacity are all verified. The node preflight places a
+hard 12 GiB project quota on the shared Podman graphroot and probes that a hard per-worktree quota can be assigned.
+Each container-enabled run gets a unique XFS project ID and a hard 4 GiB quota on its checkout.
 Compose volumes may not set a custom `name`; they are always named per run. An opt-in integration test
 (`AIFLOW4_TEST_PODMAN=1`) builds and runs a real container where the runtime exists. There is no automatic fallback to a host Docker daemon. A node without the safe runtime
 reports the missing tool, and work for a project that requires it stays out of that node's candidates.
-Compose named volumes are created in the rootless default store. Podman's per-volume `size=` option needs root, so
-AI Flow does not set it; volume growth is bounded by the same polled storage ceiling as images and layers (below).
-Anonymous Compose volumes are rejected, with at most eight named volumes per project.
+Compose named volumes, downloaded images, and writable container layers all live in the rootless default store;
+the graphroot's 12 GiB XFS project quota is a kernel-enforced hard cap on their combined growth. Podman's per-volume
+`size=` option needs root, so AI Flow does not set it. Anonymous Compose volumes are rejected, with at most eight
+named volumes per project.
 
-Reserve at least 24 GiB on the container storage filesystem. AI Flow caps the rootless image and build cache at
-12 GiB, each writable container layer at 1 GiB, concurrent run containers at eight, and preserves 4 GiB of free
-space before starting container work. Build operations use a 2 GiB storage limit. Writable worktree mounts have
-a separate 4 GiB allocated-storage ceiling per run: the broker refuses a command if the checkout is already at
-the limit, polls while commands or Compose services are active, and stops them when usage reaches the ceiling
-or the filesystem falls to the 4 GiB reserve. When container storage and worktrees share a filesystem, reserve
+Reserve at least 24 GiB on the container storage filesystem. The hard graphroot quota caps shared images, layers,
+and named volumes at 12 GiB. Each writable container layer has an additional 1 GiB Podman limit, build operations
+use a 2 GiB storage limit, and at most eight run containers may be active. The broker also preserves 4 GiB of free
+filesystem space before starting container work. Each worktree has an independent hard 4 GiB project quota, so a
+container write reaches the kernel limit even between broker checks. The broker's storage checks and watchdog
+remain as early refusal and cleanup safeguards. When container storage and worktrees share a filesystem, reserve
 at least 28 GiB total; on separate filesystems, reserve 24 GiB for container storage and 8 GiB for worktrees.
-These limits are enforced by the broker and Podman's quota-backed storage options. The node agent removes unused
-images older than seven days daily; images stay cached on that machine between runs.
+The node agent removes unused images older than seven days daily; images stay cached on that machine between runs.
 After `compose up -d` returns, the broker continues checking the shared container store and worktree until the run
 ends; it stops and removes the run's containers if either storage ceiling or the disk reserve is reached.
 
@@ -45,9 +49,10 @@ unprivileged `aiflow-containers` account. The AI process and project checks rema
 assigns a unique Compose project to the run, and removes that run's containers, networks, and volumes when it
 finishes. Images remain in the node's shared cache.
 At startup, the broker verifies the checkout's device and inode against the identity captured by the supervisor
-and holds the worktree directory open until shutdown. A replaced checkout path fails closed. Worktree bind sources,
-build contexts, Compose files and related paths are passed through the pinned directory descriptor; Compose input
-is snapshotted in broker storage after validation.
+and holds the worktree directory open until shutdown. A replaced checkout path fails closed. Each descendant passed
+to Podman is opened one component at a time from the pinned directory with symlink following disabled; Podman gets
+the stable proc-fd path, not a re-resolved mutable pathname. Compose files and their validated inputs are snapshotted
+in broker storage after validation.
 
 The policy permits builds whose context and Dockerfile resolve inside the worktree, Compose `up` and `run`, and
 direct `docker run` with exactly one bind mount of that worktree. Compose files, build contexts, environment

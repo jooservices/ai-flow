@@ -260,6 +260,41 @@ def test_missing_runtime_gates_only_tickets_mapped_to_container_repository(clien
         "TESTWP-932", "TESTWP-933", "TESTWP-934"}
 
 
+def test_missing_runtime_gates_resumed_work_using_the_previous_dev_repository_settings(client, ctx):
+    import uuid
+
+    from aiflow.v4.control.db import J
+    from tests.v4.conftest import add_ticket
+
+    project = ctx.repo().projects["TESTWP"]
+    current_repository = "jooservices/current-checks"
+    previous_repository = "jooservices/container-checks"
+    project.repo = current_repository
+    project.containers = False
+    project.repositories = [{"repo": current_repository, "containers": False},
+                            {"repo": previous_repository, "containers": True}]
+    headers = join(client, "cc")
+
+    def prior_container_dev(ticket: str) -> None:
+        run_id = str(uuid.uuid4())
+        settings = {"repo": previous_repository, "base": "main", "containers": True}
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+                   "pr_url,details) VALUES (%s,%s,'TESTWP','dev','codex-01','codex','cc',1,'finished','done',%s,%s)",
+                   (run_id, ticket, f"https://github.com/{previous_repository}/pull/7",
+                    J({"repository": previous_repository, "repository_settings": settings})))
+
+    add_ticket(ctx.db, "TESTWP-935", status="In Verify")
+    add_ticket(ctx.db, "TESTWP-936", labels=("aiflow-ready", "rework"))
+    add_ticket(ctx.db, "TESTWP-937")
+    prior_container_dev("TESTWP-935")
+    prior_container_dev("TESTWP-936")
+
+    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "safe-container-runtime": "missing"}
+    client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert [ticket["key"] for ticket in candidates.json()["tickets"]] == ["TESTWP-937"]
+
+
 def test_watchdog_keeps_tool_incident_while_the_node_is_offline(client, ctx):
     from aiflow.v4.control.loops import watchdog
 

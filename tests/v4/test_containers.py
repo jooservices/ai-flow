@@ -233,8 +233,10 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
     monkeypatch.setattr(containers, "_run_as_engine", worker)
     monkeypatch.setattr(containers, "_identity",
                         lambda user: (1001 if user == containers.WORKER_USER else 1002, 1, str(graphroot)))
+    monkeypatch.setattr(containers.os, "geteuid", lambda: 0)
     monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: False)
     monkeypatch.setattr(containers, "_private_to_engine", lambda path: True)
+    monkeypatch.setattr(containers, "_prepare_storage_quotas", lambda *args: True)
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         subprocess.CompletedProcess(argv, 0, "xfs rw,relatime,pquota", ""))
     monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
@@ -258,6 +260,77 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
 
     info_data["host"]["security"]["rootless"] = False
     assert containers.safe_container_runtime_version() == "missing"
+
+
+def test_runtime_preflight_fails_without_setfacl_or_worktree_acl_support(monkeypatch, tmp_path):
+    tmp_path.mkdir(exist_ok=True)
+    monkeypatch.setattr(containers, "_identity",
+                        lambda user: (1001 if user == containers.WORKER_USER else 1002, 1, str(tmp_path)))
+    monkeypatch.setattr(containers.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: False)
+    monkeypatch.setattr(containers, "_engine_container_runtime_version", lambda: "rootless Podman 5; XFS project quota")
+    monkeypatch.setattr(containers, "_run_as_engine", lambda *args, **kwargs:
+                        SimpleNamespace(stdout=json.dumps({"store": {"graphRoot": str(tmp_path)}})))
+    monkeypatch.setattr(containers, "WORKTREE_QUOTA_ROOT", tmp_path)
+    monkeypatch.setattr(containers, "_prepare_storage_quotas", lambda *args: False)
+    assert containers.safe_container_runtime_version() == "missing"
+
+
+def test_acl_preflight_requires_setfacl_and_a_filesystem_that_accepts_default_acls(monkeypatch, tmp_path):
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (1002, 1002, str(tmp_path)))
+    monkeypatch.setattr(containers.shutil, "which", lambda name: None)
+    assert containers._acl_supported(tmp_path) is False
+
+    monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/bin/setfacl" if name == "setfacl" else None)
+    calls = []
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
+                        calls.append(argv) or subprocess.CompletedProcess(argv, 1, b"", b"ACLs unsupported"))
+    assert containers._acl_supported(tmp_path) is False
+    assert calls[0][:2] == ["/usr/bin/setfacl", "-m"]
+    assert "d:u:1002:rwx" in calls[0]
+
+
+def test_storage_preflight_sets_hard_project_quotas_and_fails_closed(monkeypatch, tmp_path):
+    path = tmp_path / "storage"
+    path.mkdir()
+    calls = []
+    monkeypatch.setattr(containers.shutil, "which", lambda name: "/usr/sbin/xfs_quota" if name == "xfs_quota" else None)
+    monkeypatch.setattr(containers, "_project_quota_mount", lambda target: True)
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
+                        calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
+
+    assert containers._configure_project_quota(path, 12345, containers.IMAGE_CACHE_LIMIT)
+    assert calls == [
+        ["xfs_quota", "-x", "-c", f"project -s -p {path} 12345", str(path)],
+        ["xfs_quota", "-x", "-c", "limit -p bhard=12g 12345", str(path)],
+    ]
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 1, "", "quota unavailable"))
+    assert containers._configure_project_quota(path, 12345, containers.IMAGE_CACHE_LIMIT) is False
+    monkeypatch.setattr(containers.shutil, "which", lambda name: None)
+    assert containers._configure_project_quota(path, 12345, containers.IMAGE_CACHE_LIMIT) is False
+
+
+def test_storage_preflight_configures_tree_quotas_once_per_boot(monkeypatch, tmp_path):
+    graphroot, worktree_root, marker = (tmp_path / "storage", tmp_path / "work", tmp_path / "quota.json")
+    graphroot.mkdir()
+    worktree_root.mkdir()
+    monkeypatch.setattr(containers, "QUOTA_MARKER", marker)
+    monkeypatch.setattr(containers, "QUOTA_LOCK", tmp_path / "quota.lock")
+    monkeypatch.setattr(containers.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(containers.shutil, "which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(containers, "_project_quota_mount", lambda path: True)
+    configured, limited, probes, acl = [], [], [], []
+    monkeypatch.setattr(containers, "_configure_project_quota",
+                        lambda *args: configured.append(args) or True)
+    monkeypatch.setattr(containers, "_set_project_limit", lambda *args: limited.append(args) or True)
+    monkeypatch.setattr(containers, "_probe_worktree_quota", lambda *args: probes.append(args) or True)
+    monkeypatch.setattr(containers, "_acl_supported", lambda *args: acl.append(args) or True)
+
+    assert containers._prepare_storage_quotas(graphroot, worktree_root)
+    assert containers._prepare_storage_quotas(graphroot, worktree_root)
+    assert len(configured) == len(probes) == 1
+    assert len(limited) == 1 and len(acl) == 2
 
 
 def test_compose_includes_and_external_volumes_are_denied(tmp_path):
@@ -596,6 +669,28 @@ def test_broker_rejects_checkout_replacement_and_uses_the_pinned_mount_source(mo
         pin.close()
 
 
+def test_pinned_descendant_stays_inside_after_run_swaps_it_for_host_symlink(tmp_path):
+    worktree = tmp_path / "checkout"
+    private = worktree / "src"
+    private.mkdir(parents=True)
+    target = private / "marker"
+    target.write_text("worktree data")
+    outside = tmp_path / "host-secret"
+    outside.write_text("host secret")
+    pin = containers._WorktreePin(worktree)
+    try:
+        mapped = pin.map_path(target)
+        target.unlink()
+        target.symlink_to(outside)
+        # This is the race window before Podman opens the argument. The broker's proc-fd path is already pinned.
+        assert mapped.read_text() == "worktree data"
+        assert target.read_text() == "host secret"
+        with pytest.raises(containers.ContainerPolicyError, match="symlink"):
+            pin.map_path(target)
+    finally:
+        pin.close()
+
+
 def test_broker_start_rejects_checkout_replaced_before_pin(tmp_path):
     worktree = tmp_path / "checkout"
     worktree.mkdir()
@@ -679,6 +774,10 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
     monkeypatch.setattr(containers, "safe_container_runtime_version", lambda: "rootless Podman 5")
     monkeypatch.setattr(containers, "_broker_invocation", lambda root, home: (["broker"], str(tmp_path)))
     monkeypatch.setattr(containers.os, "chown", lambda *a, **k: None)
+    quotas = []
+    monkeypatch.setattr(containers, "_configure_project_quota",
+                        lambda path, project_id, limit: quotas.append((path, project_id, limit)) or True)
+    monkeypatch.setattr(containers, "_clear_project_quota", lambda *args, **kwargs: None)
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -695,6 +794,7 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
         runtime.__enter__()
     assert any(call[:4] == ["setfacl", "-R", "-P", "-m"] for call in calls)
     assert any(call[:4] == ["setfacl", "-R", "-P", "-x"] for call in calls)
+    assert quotas and quotas[0][0] == worktree and quotas[0][2] == containers.WORKTREE_STORAGE_LIMIT
     assert not runtime.public_dir.exists() and not runtime.runtime_dir.exists()
     assert spec.container_start_hook is None
 

@@ -19,12 +19,14 @@ import selectors
 import secrets
 import shutil
 import signal
+import shlex
 import socket
 import socketserver
 import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import AbstractContextManager
@@ -42,6 +44,12 @@ IMAGE_CACHE_LIMIT = 12 * 1024**3
 TOTAL_STORAGE_LIMIT = 20 * 1024**3
 WORKTREE_STORAGE_LIMIT = 4 * 1024**3
 STORAGE_DISK_RESERVE = 4 * 1024**3
+WORKTREE_QUOTA_ROOT = Path("/srv/aiflow/work")
+IMAGE_CACHE_PROJECT_ID = 2_000_000_001
+_RUN_PROJECT_ID_BASE = 1_000_000_000
+_RUN_PROJECT_ID_RANGE = 1_000_000_000
+QUOTA_MARKER = Path("/run/aiflow4-container-quota-preflight.json")
+QUOTA_LOCK = Path("/run/lock/aiflow4-container-quota-preflight.lock")
 ACTIVE_CONTAINER_LIMIT = 8
 CONTAINER_LAYER_LIMIT = "1g"
 BUILD_LIMIT = "2g"
@@ -135,12 +143,7 @@ def _engine_container_runtime_version() -> str:
             return "missing"
         if not _private_to_engine(Path(graphroot)) or not _private_to_engine(Path(_engine_identity()[2])):
             return "missing"
-        quota = subprocess.run(["findmnt", "-T", graphroot, "-n", "-o", "FSTYPE,OPTIONS"], capture_output=True,
-                               text=True, timeout=10)
-        fields = (quota.stdout or "").strip().split(None, 1) if quota.returncode == 0 else []
-        filesystem, options_text = fields if len(fields) == 2 else ("", "")
-        options = set(options_text.split(","))
-        if filesystem != "xfs" or not options.intersection({"pquota", "prjquota"}):
+        if not _project_quota_mount(Path(graphroot)):
             return "missing"
         provider = _run_as_engine(["podman-compose", "--version"], timeout=15)
         if provider.returncode:
@@ -152,7 +155,7 @@ def _engine_container_runtime_version() -> str:
         usage = shutil.disk_usage(graphroot)
         if usage.total < TOTAL_STORAGE_LIMIT + 4 * 1024**3:
             return "missing"
-        return f"rootless Podman {podman_version}; {compose_version[0][:60]}; project quota"
+        return f"rootless Podman {podman_version}; {compose_version[0][:60]}; XFS project quota"
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         return "missing"
 
@@ -164,7 +167,163 @@ def safe_container_runtime_version() -> str:
             return "missing"
     except (OSError, KeyError):
         return "missing"
-    return _engine_container_runtime_version()
+    version = _engine_container_runtime_version()
+    if version == "missing" or os.geteuid() != 0:
+        return "missing"
+    try:
+        data = json.loads(_run_as_engine(["podman", "info", "--format", "json"], timeout=20).stdout)
+        graphroot = Path(str((data.get("store") or {}).get("graphRoot") or ""))
+        if not graphroot.is_dir() or not _prepare_storage_quotas(graphroot, WORKTREE_QUOTA_ROOT):
+            return "missing"
+        return version + "; hard storage quota; ACL"
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return "missing"
+
+
+def _project_quota_mount(path: Path) -> bool:
+    """True only when the path is on XFS with kernel project quotas enabled."""
+    try:
+        quota = subprocess.run(["findmnt", "-T", str(path), "-n", "-o", "FSTYPE,OPTIONS"], capture_output=True,
+                               text=True, timeout=10)
+        fields = (quota.stdout or "").strip().split(None, 1) if quota.returncode == 0 else []
+        filesystem, options_text = fields if len(fields) == 2 else ("", "")
+        return filesystem == "xfs" and bool(set(options_text.split(",")).intersection({"pquota", "prjquota"}))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _quota_limit_arg(limit_bytes: int) -> str:
+    if limit_bytes <= 0 or limit_bytes % 1024**3:
+        raise ValueError("XFS project quota must be a positive whole number of GiB")
+    return f"{limit_bytes // 1024**3}g"
+
+
+def _set_project_limit(path: Path, project_id: int, limit_bytes: int) -> bool:
+    if not path.is_dir() or not _project_quota_mount(path) or not shutil.which("xfs_quota"):
+        return False
+    try:
+        command = f"limit -p bhard={_quota_limit_arg(limit_bytes)} {int(project_id)}"
+        result = subprocess.run(["xfs_quota", "-x", "-c", command, str(path)], capture_output=True,
+                                text=True, timeout=60)
+        return result.returncode == 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def _configure_project_quota(path: Path, project_id: int, limit_bytes: int) -> bool:
+    """Assign a directory tree to an XFS project and apply its kernel-enforced hard block limit."""
+    if not path.is_dir() or not _project_quota_mount(path) or not shutil.which("xfs_quota"):
+        return False
+    try:
+        target = shlex.quote(str(path))
+        command = f"project -s -p {target} {int(project_id)}"
+        result = subprocess.run(["xfs_quota", "-x", "-c", command, str(path)], capture_output=True,
+                                text=True, timeout=60)
+        return result.returncode == 0 and _set_project_limit(path, project_id, limit_bytes)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def _clear_project_quota(path: Path, project_id: int, *, pass_fds: tuple[int, ...] = ()) -> None:
+    """Remove a temporary project assignment and its hard limit after the run has stopped."""
+    if not shutil.which("xfs_quota"):
+        return
+    target = shlex.quote(str(path))
+    for command in (f"project -C -p {target} {int(project_id)}", f"limit -p bhard=0 {int(project_id)}"):
+        try:
+            subprocess.run(["xfs_quota", "-x", "-c", command, str(path)], capture_output=True, text=True,
+                           timeout=60, pass_fds=pass_fds)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+
+def _new_project_id() -> int:
+    return _RUN_PROJECT_ID_BASE + secrets.randbelow(_RUN_PROJECT_ID_RANGE)
+
+
+def _probe_worktree_quota(root: Path) -> bool:
+    """Exercise quota assignment on the worktree filesystem before the node advertises the runtime."""
+    if os.geteuid() != 0 or not shutil.which("xfs_quota") or not _project_quota_mount(root):
+        return False
+    probe = Path(tempfile.mkdtemp(prefix=".aiflow-quota-probe-", dir=root))
+    project_id = _new_project_id()
+    try:
+        return _configure_project_quota(probe, project_id, WORKTREE_STORAGE_LIMIT)
+    finally:
+        _clear_project_quota(probe, project_id)
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+def _acl_supported(root: Path) -> bool:
+    """Exercise setfacl and default ACL support on the filesystem that holds project worktrees."""
+    setfacl = shutil.which("setfacl")
+    if not setfacl or not root.is_dir():
+        return False
+    try:
+        engine_uid = _engine_identity()[0]
+        probe = Path(tempfile.mkdtemp(prefix=".aiflow-acl-probe-", dir=root))
+        try:
+            grant = subprocess.run([setfacl, "-m", f"u:{engine_uid}:rwx", "-m", f"d:u:{engine_uid}:rwx",
+                                    str(probe)], capture_output=True, timeout=15)
+            if grant.returncode:
+                return False
+            revoke = subprocess.run([setfacl, "-x", f"u:{engine_uid}", "-x", f"d:u:{engine_uid}", str(probe)],
+                                    capture_output=True, timeout=15)
+            return revoke.returncode == 0
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
+    except (OSError, KeyError, subprocess.TimeoutExpired):
+        return False
+
+
+def _quota_marker_data(graphroot: Path, worktree_root: Path) -> dict[str, Any] | None:
+    try:
+        graph_info, work_info = graphroot.stat(), worktree_root.stat()
+        return {"version": 1, "graphroot": str(graphroot.resolve(strict=True)),
+                "graphroot_device": graph_info.st_dev, "graphroot_inode": graph_info.st_ino,
+                "worktree_root": str(worktree_root.resolve(strict=True)),
+                "worktree_device": work_info.st_dev, "worktree_inode": work_info.st_ino}
+    except OSError:
+        return None
+
+
+def _prepare_storage_quotas(graphroot: Path, worktree_root: Path) -> bool:
+    """Configure hard quotas once per boot; verify mounts and keep the graphroot limit active on each preflight."""
+    if os.geteuid() != 0 or not shutil.which("xfs_quota") or not shutil.which("setfacl"):
+        return False
+    expected = _quota_marker_data(graphroot, worktree_root)
+    if expected is None or not _project_quota_mount(graphroot) or not _project_quota_mount(worktree_root):
+        return False
+    try:
+        QUOTA_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(QUOTA_LOCK, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        with os.fdopen(lock_fd, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                marker = json.loads(QUOTA_MARKER.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                marker = None
+            if marker == expected:
+                return (_set_project_limit(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT)
+                        and _acl_supported(worktree_root))
+            if not _configure_project_quota(graphroot, IMAGE_CACHE_PROJECT_ID, IMAGE_CACHE_LIMIT):
+                return False
+            if not _probe_worktree_quota(worktree_root) or not _acl_supported(worktree_root):
+                return False
+            fd, temporary = tempfile.mkstemp(prefix=".aiflow-container-quota-", dir=QUOTA_MARKER.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(expected, stream, sort_keys=True)
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(temporary, 0o644)
+                os.replace(temporary, QUOTA_MARKER)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            return True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
 
 
 def prune_image_cache() -> bool:
@@ -822,6 +981,8 @@ class _WorktreePin:
             os.close(self.fd)
             raise ContainerPolicyError("container worktree changed while the broker started")
         self.proc_path = Path(f"/proc/{os.getpid()}/fd/{self.fd}")
+        self._descendant_fds: set[int] = set()
+        self._fd_lock = threading.Lock()
 
     def is_current(self) -> bool:
         try:
@@ -836,18 +997,80 @@ class _WorktreePin:
             raise ContainerPolicyError("container worktree path was replaced during the run")
 
     def map_path(self, path: Path) -> Path:
+        """Pin a descendant without following symlinks and return its stable proc-fd path.
+
+        Validating with ``resolve`` and returning the original pathname leaves a swap window before Podman opens
+        the path. Walk from the open worktree descriptor with O_NOFOLLOW instead; the child process then opens the
+        same inode even if the untrusted run renames or replaces its directory entry.
+        """
         self.assert_current()
-        resolved = Path(path).resolve(strict=True)
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.path / candidate
         try:
-            relative = resolved.relative_to(self.path)
+            relative = candidate.relative_to(self.path)
         except ValueError as exc:
             raise ContainerPolicyError("container paths must stay inside the pinned worktree") from exc
-        return self.proc_path / relative
+        if ".." in relative.parts:
+            raise ContainerPolicyError("container paths must stay inside the pinned worktree")
+        if not relative.parts or relative == Path("."):
+            return self.proc_path
+        parent_fd = self.fd
+        opened: list[int] = []
+        try:
+            for index, part in enumerate(relative.parts):
+                if part in {"", ".", ".."}:
+                    raise ContainerPolicyError("container paths must be literal descendants of the worktree")
+                flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_NOFOLLOW | os.O_CLOEXEC
+                if index < len(relative.parts) - 1:
+                    flags |= os.O_DIRECTORY
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+                opened.append(child_fd)
+                info = os.fstat(child_fd)
+                if stat.S_ISLNK(info.st_mode):
+                    raise ContainerPolicyError("container paths cannot traverse worktree symlinks")
+                if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                    raise ContainerPolicyError("container path parent is not a directory")
+                if index == len(relative.parts) - 1 and not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise ContainerPolicyError("container paths must be regular files or directories")
+                parent_fd = child_fd
+            with self._fd_lock:
+                self._descendant_fds.update(opened)
+            return Path(f"/proc/{os.getpid()}/fd/{opened[-1]}")
+        except OSError as exc:
+            for fd in opened:
+                os.close(fd)
+            raise ContainerPolicyError("container descendant changed or is unavailable") from exc
+        except BaseException:
+            for fd in opened:
+                os.close(fd)
+            raise
 
     def close(self) -> None:
+        with self._fd_lock:
+            for fd in self._descendant_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self._descendant_fds.clear()
         if self.fd >= 0:
             os.close(self.fd)
             self.fd = -1
+
+    def _descendant_snapshot(self) -> set[int]:
+        with self._fd_lock:
+            return set(self._descendant_fds)
+
+    def _close_descendants_after(self, snapshot: set[int]) -> None:
+        with self._fd_lock:
+            new_fds = self._descendant_fds - snapshot
+            self._descendant_fds.difference_update(new_fds)
+            for fd in new_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def _runtime_storage_limit_reached() -> bool:
@@ -891,10 +1114,13 @@ def _execute(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        mapped_fds = worktree_pin._descendant_snapshot() if worktree_pin else set()
         try:
             return _execute_locked(argv, cwd, worktree, runtime_dir=runtime_dir, project_name=project_name,
                                    stop_event=stop_event, worktree_pin=worktree_pin)
         finally:
+            if worktree_pin:
+                worktree_pin._close_descendants_after(mapped_fds)
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
@@ -1326,6 +1552,7 @@ class ContainerRuntime(AbstractContextManager):
         self.previous_env: dict[str, str | None] = {}
         self.acl_root: Path | None = None
         self.acl_fd = -1
+        self.quota_id: int | None = None
 
     def _setfacl(self, *args: str) -> subprocess.CompletedProcess:
         """Run setfacl on the pinned worktree directory only: through its descriptor, never the mutable path.
@@ -1393,6 +1620,9 @@ class ContainerRuntime(AbstractContextManager):
                           encoding="utf-8")
         denied.chmod(0o755)
         self._grant_worktree(root, root_identity)
+        self.quota_id = _new_project_id()
+        if not _configure_project_quota(root, self.quota_id, WORKTREE_STORAGE_LIMIT):
+            raise RuntimeError("could not apply the hard XFS quota to the container worktree")
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
                "USER": ENGINE_USER, "LOGNAME": ENGINE_USER, "LANG": "C.UTF-8",
                "TMPDIR": str(self.runtime_dir), "PODMAN_COMPOSE_PROVIDER": shutil.which("podman-compose") or "podman-compose"}
@@ -1451,6 +1681,9 @@ class ContainerRuntime(AbstractContextManager):
             else:
                 self.spec.extra_env[key] = value
         self.spec.container_start_hook = None
+        if self.quota_id is not None and self.acl_fd >= 0:
+            # Use the already pinned directory descriptor so cleanup cannot be redirected by a path swap.
+            self._clear_run_quota()
         if self.acl_fd >= 0:
             try:
                 # Revoke through the pinned descriptor, so a path swapped for a symlink cannot redirect this.
@@ -1461,6 +1694,12 @@ class ContainerRuntime(AbstractContextManager):
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
         shutil.rmtree(self.public_dir, ignore_errors=True)
         return False
+
+    def _clear_run_quota(self) -> None:
+        assert self.quota_id is not None and self.acl_fd >= 0
+        descriptor_path = Path(f"/proc/self/fd/{self.acl_fd}/.")
+        _clear_project_quota(descriptor_path, self.quota_id, pass_fds=(self.acl_fd,))
+        self.quota_id = None
 
 
 if __name__ == "__main__":

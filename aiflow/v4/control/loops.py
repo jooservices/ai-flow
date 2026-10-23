@@ -465,6 +465,9 @@ def version_release_scan(ctx: Ctx) -> int:
 
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
+    from . import support_bundle
+
+    support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
     ctx.events.start()

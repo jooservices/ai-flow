@@ -528,6 +528,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
+      <button class="tab" role="tab" id="tab-support" aria-controls="view-support" aria-selected="false" data-act="view" data-menu-view data-view="support">Support</button>
     </div>
     <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
     <div class="spacer"></div>
@@ -567,14 +568,13 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
   </section>
-  <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
-  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
+  <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -691,18 +691,20 @@ var S = {
   licensing: { data: null, status: null, usage: [], error: '', busy: false, statusBusy: false,
     loadedAt: 0, statusAt: 0, limitsPlan: '' }
 };
+S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
   lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
   machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage',
-  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage' };
+  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', support: 'console.manage' };
 var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
   review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
-  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications' };
+  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', support: '/support' };
 var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
-  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']];
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];
 function viewOf(path) {
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
+  if (path.indexOf('/support') === 0) return 'support';
   if (path.indexOf('/work') === 0 || path.indexOf('/board') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
@@ -741,6 +743,7 @@ var MENU_ITEMS = [
   { view: 'licensing', label: 'Licence' },
   { view: 'notifications', label: 'Notifications' }
 ];
+MENU_ITEMS.push({ view: 'support', label: 'Support', permission: 'console.manage' });
 // Visibility reads the effective permissions sent from ROLE_PERMISSIONS; the server enforces the same grants.
 function viewAllowed(view) {
   return !S.consoleUser || (!!VIEW_PERMISSION[view] && consoleCan(VIEW_PERMISSION[view]));
@@ -3845,6 +3848,46 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function renderSupport() {
+  var root = $('#view-support'); if (!root) return;
+  if (!consoleCan('console.manage')) {
+    root.innerHTML = '<section class="panel"><div class="panel-h"><h2>Support</h2></div><p class="hint">Owner or Super Administrator access is required to build a support bundle.</p></section>';
+    return;
+  }
+  var support = S.support, tickets = D().tickets || [];
+  var h = '<div class="dhead"><div><div class="eyebrow">Owner tools</div><h1>Support</h1><p class="hint">Build a private diagnostic bundle, review its inventory, then download it to inspect before sharing.</p></div></div>';
+  h += '<section class="panel"><div class="panel-h"><h2>Build a bundle</h2><span class="hint">Logs are capped at 5 MB per file.</span></div>';
+  h += '<div class="project-form"><label>Ticket (optional)<select id="support-ticket"><option value="">All recent incidents and control logs</option>';
+  h += tickets.filter(function (ticket) { return ticket.type !== 'Epic'; }).map(function (ticket) {
+    return '<option value="' + esc(ticket.key) + '"' + (support.ticketKey === ticket.key ? ' selected' : '') + '>' + esc(ticket.key + ' · ' + ticket.summary) + '</option>';
+  }).join('');
+  h += '</select></label><div class="wide project-actions"><button class="btn primary" data-act="support-build"' + (support.busy ? ' disabled' : '') + '>' + (support.busy ? 'Scanning bundle…' : 'Build support bundle') + '</button>';
+  h += '<span class="hint">Includes versions, safe settings, machine and account states, up to 100 incidents from 7 days, and control service logs from 24 hours.</span></div></div>';
+  if (support.error) h += '<p class="error" role="alert">' + esc(support.error) + '</p>';
+  h += '</section>';
+  if (support.bundle) {
+    var inv = support.bundle.inventory || {};
+    h += '<section class="panel" aria-labelledby="support-inventory"><div class="panel-h"><h2 id="support-inventory">Review bundle inventory</h2><span class="badge ok">Sensitive data scan passed</span></div>';
+    h += '<p class="hint">Created ' + esc(when(inv.created_at)) + '. Review these files before you share the downloaded bundle.</p><ul class="plain-list">';
+    h += (inv.files || []).map(function (file) { return '<li><span class="mono">' + esc(file.name) + '</span><span class="hint">' + Number(file.bytes || 0).toLocaleString() + ' bytes</span></li>'; }).join('');
+    h += '</ul><div class="project-actions"><a class="btn primary" href="' + esc(support.bundle.download_url) + '">Download reviewed bundle</a><button class="btn" data-act="support-clear">Build another</button><span class="hint">The download stays available for 10 minutes.</span></div></section>';
+  }
+  root.innerHTML = h;
+}
+
+function buildSupportBundle() {
+  if (S.support.busy || !consoleCan('console.manage')) return;
+  var select = $('#support-ticket');
+  S.support.ticketKey = select ? select.value : S.support.ticketKey;
+  S.support.busy = true; S.support.error = ''; S.support.bundle = null; renderSupport();
+  fetch('/v1/support/bundles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket_key: S.support.ticketKey }) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { S.support.bundle = d; S.support.error = ''; })
+    .catch(function (e) { S.support.error = String(e.message || e); })
+    .then(function () { S.support.busy = false; renderSupport(); });
+}
+
 function licensingResponse(response) {
   return response.json().then(function (data) {
     if (response.ok) return data;
@@ -4139,6 +4182,7 @@ function render() {
   else if (S.view === 'projects') renderProjects();
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
+  else if (S.view === 'support') renderSupport();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -4179,6 +4223,7 @@ var HINTS = {
   integrations: 'Connect Jira and GitHub first. Secrets are stored on the control machine and never shown.',
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
+  support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.',
   notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.'
 };
 function helpUrl(view) { return HELP_BASE + view + '.html'; }
@@ -4194,7 +4239,7 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
@@ -4210,6 +4255,7 @@ function setView(v) {
   showView();
   try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
   render();
+  if (v === 'support') renderSupport();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'backup') loadBackups(true);
@@ -4481,6 +4527,8 @@ document.addEventListener('click', function (e) {
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);
   else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
+  else if (act === 'support-build') buildSupportBundle();
+  else if (act === 'support-clear') { S.support.bundle = null; S.support.error = ''; renderSupport(); }
   else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }
   else if (act === 'license-activate') {
     var licenseKeyField = $('[data-license-key]'), licenseKey = licenseKeyField ? licenseKeyField.value.trim() : '';

@@ -326,6 +326,35 @@ def test_every_console_renderer_has_a_documentation_mapping():
     assert all(mapped is None or set(mapped) <= views for mapped in docsite.SCREEN_RENDERER_VIEWS.values())
 
 
+def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if "addForm: { email:" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "reviewNoteDrafts: {}" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.reviewNoteDrafts[" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.userAdmin.addForm.roles" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.machines.join.name" in line),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    views = docsite.changed_views("origin/develop")
+    assert views == {"machines", "review", "users"}
+    pages = [ui, *(f"docs/guide/screens/{view}.md" for view in views)]
+    assert docsite.documentation_gaps(pages, views=views) == []
+
+
 def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()

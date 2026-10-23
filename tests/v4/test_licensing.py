@@ -153,6 +153,22 @@ def test_invalid_online_key_and_bad_offline_signature_leave_current_license_unch
     assert "never-echo-this-key" not in rejected.text and "never-echo-this-key" not in bad.text
 
 
+def test_oversized_activation_values_are_rejected_without_echoing_input(client, ctx):
+    sign_in(client, ctx)
+    key = "sensitive-oversized-key-" + ("K" * 2000)
+    license_file = "sensitive-oversized-signed-file-" + ("T" * 50000)
+
+    rejected_key = client.post("/v1/licensing/activate", json={"key": key})
+    rejected_file = client.post("/v1/licensing/offline", json={"license_file": license_file})
+
+    assert rejected_key.status_code == 422
+    assert rejected_file.status_code == 422
+    assert "supported size" in rejected_key.json()["detail"]
+    assert "supported size" in rejected_file.json()["detail"]
+    assert key not in rejected_key.text and "sensitive-oversized-key" not in rejected_key.text
+    assert license_file not in rejected_file.text and "sensitive-oversized-signed-file" not in rejected_file.text
+
+
 def test_limits_are_editable_and_project_machine_account_and_user_caps_are_enforced(client, ctx):
     sign_in(client, ctx)
     updated = client.put("/v1/licensing/limits", json={
@@ -204,6 +220,8 @@ def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(c
     assert any("Machines limit of 1 reached" in message and "Licence screen" in message
                for message in warnings)
     assert client.get("/v1/licensing").json()["sync_warnings"] == warnings
+    # The Licence screen reports all configured IDs even when startup skipped one at capacity.
+    assert client.get("/v1/licensing").json()["usage"]["ai_accounts"] == 3
 
     # A configured account omitted from the registry still cannot claim new work by name.
     with pytest.raises(licensing.LicenseError, match="AI accounts limit of 2 reached"):

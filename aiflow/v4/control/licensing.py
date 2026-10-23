@@ -196,9 +196,11 @@ def save_limits(db, plan: str, limits: dict[str, Any], public_key: str) -> dict[
 
 
 def resource_counts(ctx) -> dict[str, int]:
+    registered_account_ids = {str(row["id"]) for row in ctx.db.all("SELECT id FROM accounts")}
+    configured_account_ids = {str(account.id) for account in ctx.repo().accounts}
     return {
         "machines": int(ctx.db.one("SELECT count(*) AS count FROM nodes")["count"]),
-        "ai_accounts": int(ctx.db.one("SELECT count(*) AS count FROM accounts")["count"]),
+        "ai_accounts": len(registered_account_ids | configured_account_ids),
         "projects": len(ctx.repo().projects),
         "users": int(ctx.db.one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"]),
     }

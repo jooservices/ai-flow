@@ -28,6 +28,8 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -595,6 +597,17 @@ def create_app(ctx: Ctx) -> FastAPI:
     app.state.ctx = ctx
     app.state.license_sync_warnings = []
 
+    @app.exception_handler(RequestValidationError)
+    async def safe_license_validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path in {"/v1/licensing/activate", "/v1/licensing/offline"}:
+            # Pydantic's normal error response includes the rejected value. These bodies contain secrets,
+            # including when the value exceeds a field's maximum length, so never return validation details.
+            return JSONResponse(
+                {"detail": "Licence key or signed licence file is invalid or exceeds the supported size."},
+                status_code=422,
+            )
+        return await request_validation_exception_handler(request, exc)
+
     def sync_accounts() -> list[str]:
         """Sync configured accounts and machines that fit the current licence limits."""
         repo = ctx.repo()
@@ -602,7 +615,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         for a in repo.accounts:
             if not ctx.db.one("SELECT 1 FROM accounts WHERE id=%s", (a.id,)):
                 try:
-                    licensing.require_capacity(ctx, "ai_accounts", public_key=ctx.settings.license_public_key)
+                    # Startup admits configured accounts in order; use registered rows for admission because the
+                    # Licence screen's usage count also includes configured accounts that have not synced yet.
+                    registered_count = int(ctx.db.one("SELECT count(*) AS count FROM accounts")["count"])
+                    licensing.require_capacity(ctx, "ai_accounts", count=registered_count,
+                                                public_key=ctx.settings.license_public_key)
                 except licensing.LicenseError as exc:
                     message = f"Configured AI account {a.id} was not synced: {exc}"
                     warnings.append(message)

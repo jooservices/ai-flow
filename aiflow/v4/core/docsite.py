@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import typing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -48,6 +49,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderDBody": ("work", "delivery"),
     "renderReviews": ("review",),
     "renderKnowledge": ("knowledge",),
+    "renderLearningKnowledge": ("knowledge",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),
@@ -354,15 +356,54 @@ def api_route_contract_spans() -> dict[str, dict[str, list[tuple[int, int]]]]:
         if ROOT not in file.parents:
             continue
         try:
-            first, source = inspect.getsourcelines(endpoint)
+            source, first = inspect.getsourcelines(endpoint)
             span = (first, first + len(source) - 1)
         except (OSError, TypeError):
             span = (code.co_firstlineno, code.co_firstlineno)
         module = file.relative_to(ROOT).as_posix()
+        schemas = _schema_spans(route)
         for method in sorted(getattr(route, "methods", ())):
             if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-                found.setdefault(module, {}).setdefault(f"{method} {path}", []).append(span)
+                contract = f"{method} {path}"
+                found.setdefault(module, {}).setdefault(contract, []).append(span)
+                # The request/response models are part of the route's contract: editing one changes the API.
+                for schema_module, schema_span in schemas:
+                    found.setdefault(schema_module, {}).setdefault(contract, []).append(schema_span)
     return found
+
+
+def _schema_spans(route) -> list[tuple[str, tuple[int, int]]]:
+    """(repo-relative module, source span) of each class declared in the repo that a route takes or returns:
+    models in the handler signature and `response_model`."""
+    classes: list[type] = []
+
+    def collect(annotation, depth: int = 0) -> None:
+        if depth > 4 or annotation is None:
+            return
+        if isinstance(annotation, type):
+            classes.append(annotation)
+        for arg in getattr(annotation, "__args__", ()) or ():
+            collect(arg, depth + 1)
+
+    try:
+        hints = typing.get_type_hints(route.endpoint)  # resolves string annotations (`from __future__`)
+    except Exception:  # noqa: BLE001 - unresolved forward reference: fall back to what is declared
+        hints = {k: v for k, v in getattr(route.endpoint, "__annotations__", {}).items() if not isinstance(v, str)}
+    for annotation in hints.values():
+        collect(annotation)
+    collect(getattr(route, "response_model", None))
+    spans = []
+    for cls in classes:
+        if not cls.__module__.startswith("aiflow."):
+            continue
+        try:
+            file = Path(inspect.getsourcefile(cls) or "").resolve()
+            source, first = inspect.getsourcelines(cls)
+        except (OSError, TypeError):
+            continue
+        if ROOT in file.parents:
+            spans.append((file.relative_to(ROOT).as_posix(), (first, first + len(source) - 1)))
+    return spans
 
 
 def api_routes_by_module() -> dict[str, set[str]]:
@@ -434,18 +475,21 @@ def changed_api_routes(base: str, changed: list[str]) -> dict[str, set[str]]:
     """Find the method/path contracts whose handler or registration changed between `base` and HEAD."""
     current = api_route_contract_spans()
     found: dict[str, set[str]] = {}
-    for module in (f for f in changed if f in current):
-        diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", module], cwd=ROOT,
-                              text=True, capture_output=True, check=True).stdout
-        hunks = _diff_hunks(diff)
-        contracts: set[str] = set()
-        # Also map removed routes and edits that delete the old handler body. Literal decorators are enough to
-        # recover their route contracts without importing or executing the base revision.
+    for module in changed:
+        # Literal decorators recover the base revision's route contracts without importing or executing it.
         old_source = subprocess.run(["git", "show", f"{base}:{module}"], cwd=ROOT, text=True,
                                     capture_output=True).stdout
         previous = _literal_route_contract_spans(old_source)
+        now = current.get(module, {})
+        if not now and not previous:
+            continue
+        diff = subprocess.run(["git", "diff", "-U0", f"{base}...HEAD", "--", module], cwd=ROOT,
+                              text=True, capture_output=True, check=True).stdout
+        hunks = _diff_hunks(diff)
+        # A contract present at the base and gone now (even the module's last route) was removed: it needs docs.
+        contracts: set[str] = set(previous) - set(now)
         for old_start, old_count, new_start, new_count in hunks:
-            current_hits = {contract for contract, spans in current[module].items()
+            current_hits = {contract for contract, spans in now.items()
                             if new_count and any(start <= new_start + new_count - 1 and new_start <= end
                                                  for start, end in spans)}
             old_hits = {contract for contract, spans in previous.items()
@@ -455,7 +499,7 @@ def changed_api_routes(base: str, changed: list[str]) -> dict[str, set[str]]:
             for contract in old_hits:
                 # A live route is the contract docs should describe. For a pure route deletion, retain the old
                 # contract so the change still requires an explicit documentation update.
-                if contract in current[module] or not current_hits:
+                if contract in now or not current_hits:
                     contracts.add(contract)
         found[module] = contracts
     return found
@@ -490,9 +534,9 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
         changed_routes = {} if changed_routes is None else changed_routes
         texts = [read(f) for f in docs]
         for f in api_files:
-            if f not in routes:
+            if f not in routes and not changed_routes.get(f):
                 continue
-            expected = changed_routes.get(f, routes[f])
+            expected = changed_routes.get(f, routes.get(f, set()))
             missing = {contract for contract in expected if not any(_mentions(text, {contract}) for text in texts)}
             if missing:
                 gaps.append(f"the control API changed ({f}) without changed documentation naming "

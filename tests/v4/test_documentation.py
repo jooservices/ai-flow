@@ -338,3 +338,40 @@ def test_release_artifact_includes_the_site(tmp_path):
 def test_topic_is_linked_from_deploy_readme():
     readme = (ROOT / "deploy/v4/README.md").read_text().split("## Topics", 1)[1].split("\n## ", 1)[0]
     assert "(../../docs/v4/documentation-site.md)" in readme
+
+
+def test_removing_a_modules_last_route_requires_documentation(monkeypatch):
+    module = "aiflow/v4/control/old_routes.py"
+    monkeypatch.setattr(docsite, "api_route_contract_spans", lambda: {})
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result('@router.get("/v1/old")\ndef old():\n    return 1\n')
+        return Result("@@ -1,3 +0,0 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    removed = docsite.changed_api_routes("origin/develop", [module])
+    assert removed == {module: {"GET /v1/old"}}
+    assert docsite.documentation_gaps([module], routes={}, changed_routes=removed)
+    assert docsite.documentation_gaps([module, "docs/v4/x.md"], routes={}, changed_routes=removed,
+                                      read=lambda name: "GET /v1/old removed") == []
+
+
+def test_route_spans_cover_whole_handlers():
+    spans = docsite.api_route_contract_spans()
+    assert "aiflow/v4/control/api.py" in spans
+    assert any(end > start for contracts in spans.values() for ranges in contracts.values()
+               for start, end in ranges)
+
+
+def test_schema_declarations_belong_to_their_route_contract():
+    api = "aiflow/v4/control/api.py"
+    spans = docsite.api_route_contract_spans()[api]
+    join = next(ranges for contract, ranges in spans.items() if contract == "POST /v1/nodes/join")
+    declared = next(i for i, line in enumerate((ROOT / api).read_text().splitlines(), 1)
+                    if line.startswith("class JoinBody("))
+    assert any(start <= declared <= end for start, end in join)

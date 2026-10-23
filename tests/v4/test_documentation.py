@@ -347,6 +347,32 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
     assert docsite.documentation_gaps(all_pages, views=views) == []
     assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"], views=views)
 
+    dashboard_layout_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-layout-headings{")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-layout-headings .dash-section-title")),
+    ]
+    current_lines = dashboard_layout_lines
+    layout_views = docsite.changed_views("origin/develop")
+    assert layout_views == set(docsite.LAYOUT_SCREEN_VIEWS)
+    assert docsite.documentation_gaps(
+        [ui, "docs/v4/console-layouts.md"], views=layout_views,
+    ) == []
+
+    user_refresh_line = next(i for i, line in enumerate(source_lines, 1)
+                             if "S.view === 'users'" in line and "loadUsers(" in line)
+    current_lines = [user_refresh_line]
+    assert docsite.changed_views("origin/develop") == {"users"}
+
+    user_state_line = next(i for i, line in enumerate(source_lines, 1)
+                           if "loadedAt: 0" in line and "temporaryPassword" in line)
+    current_lines = [user_state_line]
+    assert docsite.changed_views("origin/develop") == {"users"}
+
+    dashboard_role_line = next(i for i, line in enumerate(source_lines, 1)
+                               if "var canSeeMachines =" in line)
+    current_lines = [dashboard_role_line]
+    assert docsite.changed_views("origin/develop") == {"cc"}
+
     current_lines = [hint_line]
     assert docsite.changed_views("origin/develop") == {"cc"}
 

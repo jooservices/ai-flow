@@ -866,7 +866,7 @@ function pollConsoleSession() {
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null; S.consoleSessionLoaded = true;
     document.documentElement.classList.remove('role-loading');
-    syncMenuVisibility();
+    applyRoleNavigation();
     loadLayouts();
     if (S.consoleUser && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
       location.replace(S.consoleUser.landing_page || '/cc'); return;

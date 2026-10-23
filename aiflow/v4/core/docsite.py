@@ -116,10 +116,10 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"\bhint-dismiss\b"),
     # The role-based menu: which view each permission opens, the tabs and the "view as" switch. It shows or hides
     # every screen, so each screen page says which roles can open it.
-    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|consoleUser|userAdmin:|autonomy: \{ data"),
+    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|autonomy: \{ data"),
     re.compile(r"\b(?:VIEW_PERMISSION|VIEW_PATH|VIEW_GROUPS)\b|^\s+(?:lead|review|machines|projects|backup): '"),
     re.compile(r"^\s+\{ view: '[a-z]+', label: '"),
-    re.compile(r"editing: '', temporaryPassword|^\s+\['machines', 'users'|// Visibility reads the effective"),
+    re.compile(r"^\s+\['machines', 'users'|// Visibility reads the effective"),
     re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
 )
 
@@ -933,7 +933,7 @@ def changed_views(base: str) -> set[str]:
                              or re.search(r"\bloadLayouts\(\)", changed_line))
             layout_style = re.search(r"customizable layout|\.blocks|\.block-cell|\.layout-bar|\.layout-hidden|"
                                      r"\.block-tools|\.block-sizes|\.block-handle|\.sr-only|"
-                                     r"@media \(pointer:coarse\)", changed_line)
+                                     r"dashboard-layout-headings|@media \(pointer:coarse\)", changed_line)
             is_layout_ui = ((layout_start is not None and layout_end is not None
                              and layout_start <= line_no <= layout_end)
                             or layout_markup or layout_style)
@@ -945,6 +945,10 @@ def changed_views(base: str) -> set[str]:
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
                     line_views |= (all_views if mapped is None else set(mapped))
+            # Session polling handles every screen, but this guarded request refreshes only the Users page.
+            if ("editing: '', temporaryPassword" in changed_line
+                    or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
+                line_views = {"users"}
             if is_layout_ui:
                 # Even when a shared renderer contains the hook, this particular change belongs to layout mode.
                 line_views = set(LAYOUT_SCREEN_VIEWS)

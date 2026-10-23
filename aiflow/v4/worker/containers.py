@@ -43,6 +43,7 @@ RUNTIME_TOOL = "safe-container-runtime"
 IMAGE_CACHE_LIMIT = 12 * 1024**3
 TOTAL_STORAGE_LIMIT = 20 * 1024**3
 WORKTREE_STORAGE_LIMIT = 4 * 1024**3
+RUNTIME_DIRECTORY_STORAGE_LIMIT = 1 * 1024**3
 STORAGE_DISK_RESERVE = 4 * 1024**3
 WORKTREE_QUOTA_ROOT = Path("/srv/aiflow/work")
 IMAGE_CACHE_PROJECT_ID = 2_000_000_001
@@ -143,7 +144,8 @@ def _engine_container_runtime_version() -> str:
             return "missing"
         if not _private_to_engine(Path(graphroot)) or not _private_to_engine(Path(_engine_identity()[2])):
             return "missing"
-        if not _project_quota_mount(Path(graphroot)):
+        engine_home = Path(_engine_identity()[2])
+        if not _project_quota_mount(Path(graphroot)) or not _project_quota_mount(engine_home):
             return "missing"
         provider = _run_as_engine(["podman-compose", "--version"], timeout=15)
         if provider.returncode:
@@ -153,7 +155,10 @@ def _engine_container_runtime_version() -> str:
         if not podman_version or not compose_version:
             return "missing"
         usage = shutil.disk_usage(graphroot)
-        if usage.total < TOTAL_STORAGE_LIMIT + 4 * 1024**3:
+        runtime_usage = shutil.disk_usage(engine_home)
+        if (usage.total < TOTAL_STORAGE_LIMIT + RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE
+                or runtime_usage.total < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE
+                or runtime_usage.free < RUNTIME_DIRECTORY_STORAGE_LIMIT + STORAGE_DISK_RESERVE):
             return "missing"
         return f"rootless Podman {podman_version}; {compose_version[0][:60]}; XFS project quota"
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
@@ -254,6 +259,19 @@ def _probe_worktree_quota(root: Path) -> bool:
         shutil.rmtree(probe, ignore_errors=True)
 
 
+def _probe_runtime_directory_quota(engine_home: Path) -> bool:
+    """Exercise a per-run quota on the filesystem that will hold engine runtime directories."""
+    if os.geteuid() != 0 or not engine_home.is_dir() or not _project_quota_mount(engine_home):
+        return False
+    probe = Path(tempfile.mkdtemp(prefix=".aiflow-runtime-quota-probe-", dir=engine_home))
+    project_id = _new_project_id()
+    try:
+        return _configure_project_quota(probe, project_id, RUNTIME_DIRECTORY_STORAGE_LIMIT)
+    finally:
+        _clear_project_quota(probe, project_id)
+        shutil.rmtree(probe, ignore_errors=True)
+
+
 def _acl_supported(root: Path) -> bool:
     """Exercise setfacl and default ACL support on the filesystem that holds project worktrees."""
     setfacl = shutil.which("setfacl")
@@ -288,11 +306,15 @@ def _quota_marker_data(graphroot: Path, worktree_root: Path) -> dict[str, Any] |
 
 
 def _prepare_storage_quotas(graphroot: Path, worktree_root: Path) -> bool:
-    """Configure hard quotas once per boot; verify mounts and keep the graphroot limit active on each preflight."""
+    """Configure shared quotas once per boot and probe each filesystem used by a run before advertising support."""
     if os.geteuid() != 0 or not shutil.which("xfs_quota") or not shutil.which("setfacl"):
         return False
+    engine_home = Path(_engine_identity()[2])
     expected = _quota_marker_data(graphroot, worktree_root)
-    if expected is None or not _project_quota_mount(graphroot) or not _project_quota_mount(worktree_root):
+    if (expected is None or not _project_quota_mount(graphroot) or not _project_quota_mount(worktree_root)
+            or not _project_quota_mount(engine_home)):
+        return False
+    if not _probe_runtime_directory_quota(engine_home):
         return False
     try:
         QUOTA_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -738,7 +760,8 @@ def _compose_snapshot(data: dict[str, Any], compose_file: Path, project_dir: Pat
 
 
 def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
-                     project_name: str, *, map_worktree_path=None) -> tuple[list[str], list[Path], str]:
+                     project_name: str, *, map_worktree_path=None,
+                     read_worktree_file=None) -> tuple[list[str], list[Path], str]:
     if not argv or argv[0] != "compose":
         raise ContainerPolicyError("only docker compose up and run are supported")
     i, files, env_files, project_dir, project_args = 1, [], [], None, []
@@ -802,7 +825,9 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
     compose_documents: list[tuple[Path, dict[str, Any]]] = []
     for index, compose_file in enumerate(files):
         try:
-            data = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+            content = (read_worktree_file(compose_file) if read_worktree_file
+                       else compose_file.read_text(encoding="utf-8"))
+            data = yaml.safe_load(content)
         except (OSError, yaml.YAMLError) as exc:
             raise ContainerPolicyError("compose file could not be read") from exc
         count = _validate_compose_document(data, compose_file, project_dir, root, require_services=index == 0)
@@ -856,7 +881,8 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
             raise ContainerPolicyError("docker compose run must name a service in this compose project")
     else:
         if len(tail) > 0 and tail[0].startswith("-"):
-            safe = {"-d", "--detach", "--build", "--no-build", "--pull", "--remove-orphans", "--force-recreate",
+            safe = {"-d", "--detach", "--abort-on-container-exit", "--build", "--no-build", "--pull",
+                    "--remove-orphans", "--force-recreate",
                     "--no-recreate", "--no-deps", "--wait", "--quiet-pull", "--renew-anon-volumes", "--timestamps"}
             i_tail = 0
             while i_tail < len(tail):
@@ -1046,6 +1072,45 @@ class _WorktreePin:
                 os.close(fd)
             raise
 
+    def read_text(self, path: Path, *, encoding: str = "utf-8") -> str:
+        """Read a regular worktree file through descriptors opened from the pinned root without following links."""
+        self.assert_current()
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.path / candidate
+        try:
+            relative = candidate.relative_to(self.path)
+        except ValueError as exc:
+            raise ContainerPolicyError("container files must stay inside the pinned worktree") from exc
+        if not relative.parts or ".." in relative.parts:
+            raise ContainerPolicyError("container files must stay inside the pinned worktree")
+
+        parent_fd = self.fd
+        opened: list[int] = []
+        try:
+            for index, part in enumerate(relative.parts):
+                if part in {"", ".", ".."}:
+                    raise ContainerPolicyError("container files must be literal descendants of the worktree")
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+                if index < len(relative.parts) - 1:
+                    flags |= os.O_DIRECTORY
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+                opened.append(child_fd)
+                info = os.fstat(child_fd)
+                if index < len(relative.parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                    raise ContainerPolicyError("container file parent is not a directory")
+                if index == len(relative.parts) - 1 and not stat.S_ISREG(info.st_mode):
+                    raise ContainerPolicyError("container files must be regular files")
+                parent_fd = child_fd
+            with os.fdopen(opened[-1], "r", encoding=encoding) as stream:
+                opened.pop()
+                return stream.read()
+        except OSError as exc:
+            raise ContainerPolicyError("container file changed or is unavailable") from exc
+        finally:
+            for fd in opened:
+                os.close(fd)
+
     def close(self) -> None:
         with self._fd_lock:
             for fd in self._descendant_fds:
@@ -1119,9 +1184,24 @@ def _execute(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
             return _execute_locked(argv, cwd, worktree, runtime_dir=runtime_dir, project_name=project_name,
                                    stop_event=stop_event, worktree_pin=worktree_pin)
         finally:
-            if worktree_pin:
-                worktree_pin._close_descendants_after(mapped_fds)
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            try:
+                _cleanup_compose_files(runtime_dir)
+            finally:
+                try:
+                    if worktree_pin:
+                        worktree_pin._close_descendants_after(mapped_fds)
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _cleanup_compose_files(runtime_dir: Path) -> None:
+    """Remove broker-owned Compose snapshots and overrides after every command attempt."""
+    try:
+        temporary_files = tuple(runtime_dir.glob("compose-*.yaml"))
+    except OSError:
+        return
+    for path in temporary_files:
+        path.unlink(missing_ok=True)
 
 
 def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: Path,
@@ -1143,7 +1223,8 @@ def _execute_locked(argv: list[str], cwd: Path, worktree: Path, *, runtime_dir: 
         compose_files = []
     elif argv and argv[0] == "compose":
         podman_argv, compose_files, _ = _compose_command(argv, root, run_cwd, runtime_dir, project_name,
-                                                          map_worktree_path=map_worktree_path)
+                                                          map_worktree_path=map_worktree_path,
+                                                          read_worktree_file=worktree_pin.read_text if worktree_pin else None)
         backend = "podman-compose"
     else:
         raise ContainerPolicyError("only docker build, compose up/run, and mounted docker run are supported")
@@ -1553,6 +1634,7 @@ class ContainerRuntime(AbstractContextManager):
         self.acl_root: Path | None = None
         self.acl_fd = -1
         self.quota_id: int | None = None
+        self.runtime_quota_id: int | None = None
 
     def _setfacl(self, *args: str) -> subprocess.CompletedProcess:
         """Run setfacl on the pinned worktree directory only: through its descriptor, never the mutable path.
@@ -1606,6 +1688,10 @@ class ContainerRuntime(AbstractContextManager):
         os.chown(self.runtime_dir.parent, uid, engine_gid)
         os.chown(self.runtime_dir, uid, engine_gid)
         self.runtime_dir.chmod(0o700)
+        self.runtime_quota_id = _new_project_id()
+        if not _configure_project_quota(self.runtime_dir, self.runtime_quota_id,
+                                        RUNTIME_DIRECTORY_STORAGE_LIMIT):
+            raise RuntimeError("could not apply the hard XFS quota to the container runtime directory")
         wrapper_dir = self.public_dir / "bin"
         wrapper_dir.mkdir()
         wrapper_dir.chmod(0o755)
@@ -1691,6 +1777,9 @@ class ContainerRuntime(AbstractContextManager):
             finally:
                 os.close(self.acl_fd)
                 self.acl_fd = -1
+        if self.runtime_quota_id is not None:
+            _clear_project_quota(self.runtime_dir, self.runtime_quota_id)
+            self.runtime_quota_id = None
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
         shutil.rmtree(self.public_dir, ignore_errors=True)
         return False

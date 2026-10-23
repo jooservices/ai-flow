@@ -97,6 +97,9 @@ volumes:
     monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
     up, _, _ = containers._compose_command(["compose", "up", "-d"], worktree, worktree, tmp_path, "aiflow-run")
     assert up[-3:] == ["-p", "aiflow-run", "up", "-d"][-3:]
+    aborting_up, _, _ = containers._compose_command(
+        ["compose", "up", "--abort-on-container-exit"], worktree, worktree, tmp_path, "aiflow-run")
+    assert "--abort-on-container-exit" in aborting_up
     file_flags = [index for index, item in enumerate(up) if item == "-f"]
     override = Path(up[file_flags[-1] + 1])
     override_data = __import__("yaml").safe_load(override.read_text())
@@ -159,6 +162,32 @@ def test_compose_cannot_escalate_or_mount_outside_worktree(tmp_path):
             containers._validate_compose_document(data, compose, worktree, worktree)
 
 
+def test_compose_file_is_read_from_pinned_descriptor_after_path_swap(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    compose = worktree / "compose.yaml"
+    compose.write_text("services:\n  app:\n    image: alpine\n")
+    outside = tmp_path / "outside-compose.yaml"
+    outside.write_text("services:\n  app:\n    image: alpine\n    privileged: true\n")
+    original_inside_file = containers._inside_file
+
+    def resolve_then_swap(path, root, *, base=None):
+        resolved = original_inside_file(path, root, base=base)
+        if resolved == compose.resolve():
+            compose.unlink()
+            compose.symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(containers, "_inside_file", resolve_then_swap)
+    pin = containers._WorktreePin(worktree)
+    try:
+        with pytest.raises(containers.ContainerPolicyError, match="changed or is unavailable"):
+            containers._compose_command(["compose", "up"], worktree, worktree, tmp_path, "aiflow-run",
+                                        map_worktree_path=pin.map_path, read_worktree_file=pin.read_text)
+    finally:
+        pin.close()
+
+
 def test_compose_rejects_anonymous_unbounded_volumes(tmp_path):
     worktree = tmp_path / "checkout"
     worktree.mkdir()
@@ -217,6 +246,49 @@ def test_cache_ceiling_refuses_new_build_and_old_images_are_pruned(monkeypatch, 
                       ["podman", "image", "prune", "--all", "--filter", "until=168h", "--force"]]
 
 
+def test_compose_temporary_files_are_removed_after_each_call(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (worktree / "compose.yaml").write_text("services:\n  app:\n    image: alpine\n")
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.setattr(containers.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
+    monkeypatch.setattr(containers, "_graphroot", lambda: tmp_path)
+    monkeypatch.setattr(containers, "_directory_size", lambda path: 0)
+    monkeypatch.setattr(containers, "_worktree_storage_size", lambda path: 0)
+    monkeypatch.setattr(containers, "_active_containers", lambda: [])
+    monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(free=100 * 1024**3, total=120 * 1024**3))
+    calls = []
+
+    class FinishedProcess:
+        pid = 12345
+        returncode = 0
+
+        def __init__(self):
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def poll(self):
+            return 0
+
+    def fake_popen(argv, **kwargs):
+        generated = [Path(item) for item in argv if str(item).startswith(str(runtime_dir / "compose-"))]
+        assert generated and all(path.is_file() for path in generated)
+        calls.append(generated)
+        return FinishedProcess()
+
+    monkeypatch.setattr(containers.subprocess, "Popen", fake_popen)
+    for _ in range(2):
+        code, _, _ = containers._execute(["compose", "up", "--abort-on-container-exit"], worktree, worktree,
+                                          runtime_dir=runtime_dir, project_name="aiflow-test")
+        assert code == 0
+        assert list(runtime_dir.glob("compose-*.yaml")) == []
+    assert len(calls) == 2
+
+
 def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_capacity(monkeypatch, tmp_path):
     graphroot = tmp_path / "storage"
     graphroot.mkdir()
@@ -242,6 +314,20 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
     monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
                         SimpleNamespace(total=30 * 1024**3, free=10 * 1024**3))
     assert containers.safe_container_runtime_version().startswith("rootless Podman 5.4.0")
+
+    engine_home = tmp_path / "engine-home"
+    engine_home.mkdir()
+    monkeypatch.setattr(containers, "_identity",
+                        lambda user: (1001 if user == containers.WORKER_USER else 1002, 1,
+                                      str(graphroot if user == containers.WORKER_USER else engine_home)))
+    monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(total=30 * 1024**3,
+                                        free=3 * 1024**3 if Path(path) == engine_home else 10 * 1024**3))
+    assert containers.safe_container_runtime_version() == "missing"
+    monkeypatch.setattr(containers, "_identity",
+                        lambda user: (1001 if user == containers.WORKER_USER else 1002, 1, str(graphroot)))
+    monkeypatch.setattr(containers.shutil, "disk_usage", lambda path:
+                        SimpleNamespace(total=30 * 1024**3, free=10 * 1024**3))
 
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         subprocess.CompletedProcess(argv, 0, "xfs rw,relatime", ""))
@@ -319,18 +405,25 @@ def test_storage_preflight_configures_tree_quotas_once_per_boot(monkeypatch, tmp
     monkeypatch.setattr(containers, "QUOTA_LOCK", tmp_path / "quota.lock")
     monkeypatch.setattr(containers.os, "geteuid", lambda: 0)
     monkeypatch.setattr(containers.shutil, "which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (1002, 1002, str(tmp_path)))
     monkeypatch.setattr(containers, "_project_quota_mount", lambda path: True)
     configured, limited, probes, acl = [], [], [], []
     monkeypatch.setattr(containers, "_configure_project_quota",
                         lambda *args: configured.append(args) or True)
     monkeypatch.setattr(containers, "_set_project_limit", lambda *args: limited.append(args) or True)
     monkeypatch.setattr(containers, "_probe_worktree_quota", lambda *args: probes.append(args) or True)
+    runtime_probes = []
+    monkeypatch.setattr(containers, "_probe_runtime_directory_quota",
+                        lambda *args: runtime_probes.append(args) or True)
     monkeypatch.setattr(containers, "_acl_supported", lambda *args: acl.append(args) or True)
 
     assert containers._prepare_storage_quotas(graphroot, worktree_root)
     assert containers._prepare_storage_quotas(graphroot, worktree_root)
     assert len(configured) == len(probes) == 1
     assert len(limited) == 1 and len(acl) == 2
+    assert runtime_probes == [(tmp_path,), (tmp_path,)]
+    monkeypatch.setattr(containers, "_probe_runtime_directory_quota", lambda *args: False)
+    assert not containers._prepare_storage_quotas(graphroot, worktree_root)
 
 
 def test_compose_includes_and_external_volumes_are_denied(tmp_path):
@@ -775,9 +868,11 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
     monkeypatch.setattr(containers, "_broker_invocation", lambda root, home: (["broker"], str(tmp_path)))
     monkeypatch.setattr(containers.os, "chown", lambda *a, **k: None)
     quotas = []
+    cleared_quotas = []
     monkeypatch.setattr(containers, "_configure_project_quota",
                         lambda path, project_id, limit: quotas.append((path, project_id, limit)) or True)
-    monkeypatch.setattr(containers, "_clear_project_quota", lambda *args, **kwargs: None)
+    monkeypatch.setattr(containers, "_clear_project_quota",
+                        lambda *args, **kwargs: cleared_quotas.append(args))
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -794,7 +889,11 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
         runtime.__enter__()
     assert any(call[:4] == ["setfacl", "-R", "-P", "-m"] for call in calls)
     assert any(call[:4] == ["setfacl", "-R", "-P", "-x"] for call in calls)
-    assert quotas and quotas[0][0] == worktree and quotas[0][2] == containers.WORKTREE_STORAGE_LIMIT
+    assert any(path == runtime.runtime_dir and limit == containers.RUNTIME_DIRECTORY_STORAGE_LIMIT
+               for path, _, limit in quotas)
+    assert any(path == worktree and limit == containers.WORKTREE_STORAGE_LIMIT
+               for path, _, limit in quotas)
+    assert any(args[0] == runtime.runtime_dir for args in cleared_quotas)
     assert not runtime.public_dir.exists() and not runtime.runtime_dir.exists()
     assert spec.container_start_hook is None
 

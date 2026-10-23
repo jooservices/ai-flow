@@ -50,7 +50,9 @@ _TOOL_VERSION_PREFIXES = {
     "wp": ("WP-CLI ",),
     "python3": ("Python ",),
     "playwright": ("Version ", "Playwright "),
-    "playwright-browser": ("Playwright Chromium ",),
+    "chromium": ("Chromium Playwright ",),
+    "firefox": ("Firefox Playwright ",),
+    "webkit": ("WebKit Playwright ",),
 }
 _REDACTED = "[REDACTED]"
 _REPORTED_TOOLS = frozenset(tools_for_stacks(STACK_TOOLS))

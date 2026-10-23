@@ -14,6 +14,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from ..core.toolchains import has_missing_marker, parse_missing_requirements
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
+from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -257,15 +259,6 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         ci_log = fetch_ci_log(api, c, branch)
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
-                       extra_env=project_env(project["key"]))
-        adapter = get_adapter(c.provider)
-        adapter_argv = adapter.argv
-        adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
-
         events = {"n": 0}
 
         def on_progress(ev: dict) -> None:
@@ -273,11 +266,30 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        if project.get("containers"):
+        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log), cwd=str(wt),
+                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
+                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       control_url=control_url, run_token=c.run_token,
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=project_env(project["key"]))
+        adapter = get_adapter(c.provider)
+        adapter_argv = adapter.argv
+        adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
+        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+        if project.get("containers") or wordpress:
             from .containers import ContainerRuntime
-            with ContainerRuntime(spec, run_as):
-                res = adapter.run(spec, on_progress, stop=hb.lost)
+            runtime = ContainerRuntime(spec, run_as)
         else:
+            runtime = nullcontext()
+        # The site is started through the container runtime, so its limits and crash cleanup own it.
+        with runtime as containers:
+            if wordpress:
+                hb.progress = {"phase": "wordpress-site"}
+                site_notes = start_wordpress_site(containers, wt, project, c.run_id, spec)
+                jira("comment", body=note(
+                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
+                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
+                    node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,

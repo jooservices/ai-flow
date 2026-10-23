@@ -1,7 +1,10 @@
 """Role health (JAIF-243): outcome scoring, switching a role off per AI account, probation and the owner's thresholds."""
 from __future__ import annotations
 
+import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,20 +13,22 @@ import pytest
 from conftest import add_ticket, join_node
 from aiflow.v4.control import notify, role_health
 from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4.control.db import J
 
 SECRET = "test-console-role-secret-with-at-least-32-bytes"
 EASY = "Fix the rounding.\nAcceptance criteria:\n- AC1: total is rounded\n- AC2: a unit test covers it"
 
 
 def run(db, *, account="claude-01", step="dev", outcome="done", ago=60, ticket=None, kind="", summary="",
-        cost=0.0, status="finished"):
+        cost=0.0, status="finished", details=None, pr_url=""):
     """A finished run that started `ago` minutes ago (the larger, the older)."""
     started = datetime.now(timezone.utc) - timedelta(minutes=ago)
     rid = str(uuid.uuid4())
     db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, node, fence, status, outcome,"
-           " error_kind, summary, started_at, ended_at, cost_usd) VALUES (%s,%s,'TESTWP',%s,%s,'claude','cc',1,%s,%s,%s,%s,%s,%s,%s)",
-           (rid, ticket or f"TESTWP-{uuid.uuid4().hex[:6]}", step, account, status, outcome, kind, summary, started,
-            started + timedelta(minutes=5), cost))
+           " error_kind, summary, details, pr_url, started_at, ended_at, cost_usd)"
+           " VALUES (%s,%s,'TESTWP',%s,%s,'claude','cc',1,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+           (rid, ticket or f"TESTWP-{uuid.uuid4().hex[:6]}", step, account, status, outcome, kind, summary,
+            J(details or {}), pr_url, started, started + timedelta(minutes=5), cost))
     return rid
 
 
@@ -47,8 +52,9 @@ def sign_in(client, ctx, role="owner", subject="owner@example.test"):
     client.cookies.set("aiflow4_session", issue_session(subject, role, 2_000_000_000, SECRET))
 
 
-def cc_headers(client):
+def cc_headers(client, ctx):
     r = join_node(client, "cc")
+    ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now() WHERE name='cc'")
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
 
@@ -59,15 +65,51 @@ def alerts(monkeypatch):
     return sent
 
 
+@pytest.fixture(autouse=True)
+def ready_role_pool(ctx):
+    ctx.db.run("INSERT INTO nodes (name,status,last_heartbeat) VALUES ('cc','online',now()),('node1','online',now())"
+               " ON CONFLICT (name) DO UPDATE SET status='online',last_heartbeat=now()")
+    for account in ctx.repo().accounts:
+        ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status) VALUES (%s,%s,%s,%s,%s,'idle')"
+                   " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider,node=EXCLUDED.node,tier=EXCLUDED.tier,"
+                   " roles=EXCLUDED.roles,status='idle'",
+                   (account.id, account.provider, account.node, account.tier, role_health.account_roles(account)))
+
+
+def ready_enabled_count(ctx, role):
+    disabled = role_health.disabled_roles(ctx.db)
+    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
+    statuses = {row["id"]: row["status"] for row in ctx.db.all("SELECT id,status FROM accounts")}
+    return sum(1 for account in ctx.repo().accounts if role in role_health.account_roles(account)
+               and not account.paused and statuses.get(account.id) in ("idle", "working", "probing")
+               and online.intersection(account.machines) and (account.id, role) not in disabled)
+
+
 # --- AC1: outcome scoring --------------------------------------------------------------------------------------
 @pytest.mark.parametrize("run_, label, failure", [
     ({"step": "verify", "outcome": "merged"}, "merged", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "merged"}, "finished", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "human"}, "finished", 0.0),
     ({"step": "dev", "outcome": "done", "decision": "rework"}, "sent_back", 0.5),
-    ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 1.0),
-    ({"step": "dev", "outcome": "blocked"}, "no_changes", 1.0),
+    ({"step": "dev", "outcome": "failed", "decision": "rework", "pr_url": "https://example.test/pr/1"}, "failed", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "pr_url": "https://example.test/pr/2", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "done", "pr_url": "https://example.test/pr/3", "details": {
+        "pr_url_source": "current"}}, "finished", 0.0),
+    ({"step": "dev", "outcome": "no_changes"}, "no_changes", 0.0),
+    ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 0.0),
+    ({"step": "dev", "outcome": "failed", "error_kind": "tests", "summary": "no changes: test command failed"},
+     "failed", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change."}, "excluded", None),
+    ({"step": "dev", "outcome": "blocked"}, "blocked", 1.0),
     ({"step": "dev", "outcome": "failed", "summary": "worker error"}, "failed", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change.", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+        "tool_missing_evidence": "explicit_marker"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "details": {
+        "missing_tools": ["php"], "tool_missing_evidence": "command_not_found"}}, "excluded", None),
     ({"step": "dev", "outcome": "timeout"}, "stopped", 1.0),
     ({"step": "dev", "outcome": "lost"}, "stopped", 1.0),
     ({"step": "intake", "outcome": "refined"}, "finished", 0.0),
@@ -85,6 +127,13 @@ def test_outcome_scoring(run_, label, failure):
 
 def test_a_finished_dev_run_waits_for_verification():
     assert role_health.classify({"step": "dev", "outcome": "done", "error_kind": "", "summary": ""}) is None
+
+
+def test_a_failing_follow_up_run_with_inherited_pr_is_still_a_failure():
+    scored = role_health.classify({"step": "dev", "outcome": "failed", "error_kind": "",
+                                   "summary": "follow-up failed", "pr_url": "https://example.test/pr/1",
+                                   "details": {"pr_url_source": "inherited"}})
+    assert (scored.label, scored.failure) == ("failed", 1.0)
 
 
 def test_steps_map_to_the_roles_of_the_account():
@@ -123,6 +172,130 @@ def test_threshold_is_strictly_above_sixty_percent(ctx, alerts):
     run(ctx.db, outcome="failed", ago=1)  # 7 failed of the latest 10
     role_health.evaluate(ctx)
     assert states(ctx.db)[("claude-01", "dev")]["enabled"] is False
+
+
+def _failure_window(db, account, *, prefix, outcome="failed", details=None, start=200):
+    for index in range(10):
+        ago = start - index
+        run(db, account=account, outcome=outcome, ago=ago, ticket=f"TESTWP-{prefix}{index}",
+            summary=f"{outcome} run", details=details)
+
+
+def test_three_account_role_never_disables_below_two_and_all_bad_keeps_pool_on(ctx, alerts):
+    db = ctx.db
+    _failure_window(db, "claude-01", prefix="701")
+    _failure_window(db, "codex-01", prefix="711")
+    role_health.evaluate(ctx)
+    assert ready_enabled_count(ctx, "dev") == 2
+
+    _failure_window(db, "opencode-01", prefix="721")
+    role_health.evaluate(ctx)
+    assert ready_enabled_count(ctx, "dev") == 3
+    incident = db.one("SELECT * FROM incidents WHERE kind='role_health' AND subject='dev' AND closed_at IS NULL")
+    assert incident and "most frequent cause: failed" in incident["title"]
+    assert db.one("SELECT count(*) AS n FROM incidents WHERE kind='role_health' AND closed_at IS NULL")["n"] == 1
+
+
+def test_concurrent_role_health_evaluations_serialize_capacity_decisions(ctx, alerts, monkeypatch):
+    _failure_window(ctx.db, "claude-01", prefix="731")
+    _failure_window(ctx.db, "codex-01", prefix="741")
+
+    original_states = role_health._states
+    guard = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def tracked_states(db):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)  # widen the race window between the capacity snapshot and role updates
+            return original_states(db)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(role_health, "_states", tracked_states)
+    start = threading.Barrier(3)
+
+    def evaluate_together():
+        start.wait()
+        role_health.evaluate(ctx)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(evaluate_together)
+        second = pool.submit(evaluate_together)
+        start.wait()
+        first.result(timeout=30)
+        second.result(timeout=30)
+
+    assert max_active == 1
+    assert ready_enabled_count(ctx, "dev") >= 2
+
+
+def test_role_health_incident_lists_failure_kinds_and_tickets(ctx, alerts):
+    db = ctx.db
+    _failure_window(db, "claude-01", prefix="801", outcome="tool_missing", details={
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+        "tool_missing_evidence": "explicit_marker"})
+    _failure_window(db, "codex-01", prefix="811", outcome="timeout")
+    _failure_window(db, "opencode-01", prefix="821")
+    for index in range(5):
+        db.run("UPDATE runs SET outcome='failed' WHERE ticket_key=%s", (f"TESTWP-801{index}",))
+        db.run("UPDATE runs SET outcome='failed' WHERE ticket_key=%s", (f"TESTWP-811{index}",))
+    # Two of opencode's ordinary failures are scored as rework rounds after verification sends them back.
+    for index in range(2):
+        key = f"TESTWP-821{index + 8}"
+        db.run("UPDATE runs SET outcome='done' WHERE ticket_key=%s", (key,))
+        run(db, account="codex-01", step="verify", outcome="rework", ago=180 - index,
+            ticket=key)
+    role_health.evaluate(ctx)
+    incident = db.one("SELECT * FROM incidents WHERE kind='role_health' AND subject='dev' AND closed_at IS NULL")
+    assert incident and "most frequent cause: failed" in incident["title"]
+    assert "failed=18" in incident["detail"]
+    assert "timeout=5" in incident["detail"]
+    assert "tool_missing=5" in incident["detail"]
+    assert "rework=2" in incident["detail"]
+    assert "TESTWP-8010" in incident["detail"] and "Tickets involved:" in incident["detail"]
+
+
+def test_fixed_run_history_restores_disabled_role_immediately(ctx, alerts):
+    switch_off_dev(ctx)
+    ctx.db.run("UPDATE runs SET outcome='merged' WHERE account_id='claude-01' AND step='dev' AND outcome='failed'")
+    role_health.evaluate(ctx)
+    assert states(ctx.db)[("claude-01", "dev")]["enabled"] is True
+    assert ctx.db.one("SELECT 1 AS x FROM incidents WHERE kind='role_health' AND subject='claude-01:dev' AND closed_at IS NOT NULL")
+
+
+def test_legacy_tool_missing_false_positives_without_execution_evidence_restore_role(ctx, alerts):
+    _failure_window(ctx.db, "claude-01", prefix="902", outcome="tool_missing", details={
+        "missing_tools": ["php"], "tool_missing_evidence": "command_not_found",
+        "verdict_reason": 'The summary mentions "bash: php: command not found" as an example.'})
+    ctx.db.run("INSERT INTO nodes (name,status,last_heartbeat,tools) VALUES ('cc','online',now(),%s)"
+               " ON CONFLICT (name) DO UPDATE SET tools=EXCLUDED.tools,last_heartbeat=now()",
+               (J({"php": "missing"}),))
+    role_health.switch_off(ctx, "claude-01", "dev", 1.0, 10,
+                           role_health._history(ctx.db, "claude-01")[("claude-01", "dev")], 60)
+    role_health.evaluate(ctx)
+    assert states(ctx.db)[("claude-01", "dev")]["enabled"] is True
+    history = role_health._history(ctx.db, "claude-01")[("claude-01", "dev")]
+    assert all(score is not None and score.failure is None for _, score in history)
+
+
+def test_installing_recorded_missing_tool_restores_disabled_role(ctx, alerts):
+    _failure_window(ctx.db, "claude-01", prefix="901", outcome="tool_missing",
+                    details={"missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+                             "tool_missing_evidence": "explicit_marker"})
+    ctx.db.run("INSERT INTO nodes (name,status,last_heartbeat,tools) VALUES ('cc','online',now(),%s)"
+               " ON CONFLICT (name) DO UPDATE SET status='online',last_heartbeat=now(),tools=EXCLUDED.tools",
+               (J({"php": "missing"}),))
+    role_health.evaluate(ctx)
+    assert states(ctx.db)[("claude-01", "dev")]["enabled"] is False
+    ctx.db.run("UPDATE nodes SET tools=%s WHERE name='cc'", (J({"php": "PHP 8.3"}),))
+    role_health.evaluate(ctx)
+    assert states(ctx.db)[("claude-01", "dev")]["enabled"] is True
 
 
 def test_only_the_latest_ten_eligible_runs_count(ctx, alerts):
@@ -173,7 +346,7 @@ def test_switching_a_role_off_keeps_the_other_roles_alerts_and_notes_it(client, 
     role_health.evaluate(ctx)  # no second alert while it stays off
     assert len(alerts) == 1
 
-    cc = cc_headers(client)
+    cc = cc_headers(client, ctx)
     add_ticket(ctx.db, "TESTWP-50")
     add_ticket(ctx.db, "TESTWP-51", status="In Verify", labels=())
     run(ctx.db, account="codex-01", step="dev", outcome="done", ago=5, ticket="TESTWP-51")
@@ -188,17 +361,17 @@ def test_switching_a_role_off_keeps_the_other_roles_alerts_and_notes_it(client, 
         "dev": "probation", "verify": "on", "master": "on"}
 
 
-def test_role_result_triggers_the_switch(client, ctx, alerts):
-    cc = cc_headers(client)
+def test_role_result_triggers_the_switch_for_a_real_failure(client, ctx, alerts):
+    cc = cc_headers(client, ctx)
     failures(ctx.db, 9, 0)
     add_ticket(ctx.db, "TESTWP-60")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-60", "account": "claude-01"}, headers=cc).json()
     client.post(f"/v1/runs/{r['run_id']}/result", json={"fence": r["fence"], "outcome": "failed",
-                                                       "summary": "no changes: nothing to commit"}, headers=cc)
+                                                       "summary": "worker error: checkout failed"}, headers=cc)
     assert states(ctx.db)[("claude-01", "dev")]["enabled"] is False
 
 
-def test_role_coverage_does_not_count_a_switched_off_account(client, ctx, alerts):
+def test_role_health_keeps_two_ready_accounts_enabled_when_a_peer_is_unavailable(client, ctx, alerts):
     from aiflow.v4.control.loops import watchdog
     ctx.db.run("UPDATE accounts SET status='idle'")
     ctx.db.run("UPDATE accounts SET status='error' WHERE id='opencode-01'")
@@ -208,7 +381,8 @@ def test_role_coverage_does_not_count_a_switched_off_account(client, ctx, alerts
     assert not ctx.db.one("SELECT 1 AS x FROM incidents WHERE kind='role_coverage' AND subject='dev' AND closed_at IS NULL")
     failures(ctx.db, 10, 0)
     watchdog(ctx)
-    assert ctx.db.one("SELECT 1 AS x FROM incidents WHERE kind='role_coverage' AND subject='dev' AND closed_at IS NULL")
+    assert not ctx.db.one("SELECT 1 AS x FROM incidents WHERE kind='role_coverage' AND subject='dev' AND closed_at IS NULL")
+    assert ready_enabled_count(ctx, "dev") == 2
 
 
 # --- AC3: probation -------------------------------------------------------------------------------------------
@@ -243,8 +417,8 @@ def test_other_tickets_are_not_easy(ticket):
     assert not role_health.probation_ticket({"labels": [], "summary": "Fix rounding", **ticket})
 
 
-def test_a_switched_off_role_gets_one_easy_ticket_a_day(client, ctx, alerts):
-    cc = cc_headers(client)
+def test_a_switched_off_role_can_probe_again_without_a_day_long_wait(client, ctx, alerts):
+    cc = cc_headers(client, ctx)
     switch_off_dev(ctx)
     add_ticket(ctx.db, "TESTWP-70")                       # not easy (no unit test, Task)
     easy(ctx.db, "TESTWP-71")
@@ -259,17 +433,12 @@ def test_a_switched_off_role_gets_one_easy_ticket_a_day(client, ctx, alerts):
     assert (probation["account_id"], probation["role"], probation["ticket_key"], probation["result"]) == (
         "claude-01", "dev", "TESTWP-71", "")
     assert str(probation["run_id"]) == claimed["run_id"]
-    # nothing more today, not even after the run ends
+    # A failed probe frees the slot immediately; the next probe need not wait until tomorrow.
     client.post(f"/v1/runs/{claimed['run_id']}/result", json={"fence": claimed["fence"], "outcome": "failed"}, headers=cc)
-    assert client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"] == []
-    assert client.post("/v1/work/claim", json={"ticket": "TESTWP-72", "account": "claude-01"},
-                       headers=cc).status_code == 409
-    # tomorrow a new probation ticket is offered
-    ctx.db.run("UPDATE role_probation SET assigned_at = assigned_at - interval '1 day'")
-    ctx.db.run("DELETE FROM runs WHERE id=%s", (claimed["run_id"],))
-    ctx.leases.release("TESTWP-71", claimed["run_id"], claimed["fence"])
-    assert "TESTWP-72" in [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
-                                                         headers=cc).json()["tickets"]]
+    offered = [t["key"] for t in client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]]
+    assert "TESTWP-72" in offered
+    next_claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-72", "account": "claude-01"}, headers=cc).json()
+    assert next_claim["claimed"]
 
 
 def probation_round(ctx, key, outcome, day_offset):
@@ -287,7 +456,6 @@ def test_two_successful_probation_tickets_in_a_row_bring_the_role_back(ctx, aler
     role_health.evaluate(ctx)
     assert states(ctx.db)[("claude-01", "dev")]["enabled"] is False        # one success is not enough
     assert ctx.db.one("SELECT count(*) AS n FROM role_probation WHERE result='success'")["n"] == 1
-    ctx.db.run("UPDATE role_probation SET assigned_at = assigned_at - interval '1 day'")
     probation_round(ctx, "TESTWP-81", "human", 0)
     role_health.evaluate(ctx)
     row = states(ctx.db)[("claude-01", "dev")]
@@ -310,7 +478,7 @@ def test_a_failed_probation_ticket_breaks_the_streak(ctx, alerts):
 
 
 def test_a_quota_stopped_probation_run_gives_the_slot_back(client, ctx, alerts):
-    cc = cc_headers(client)
+    cc = cc_headers(client, ctx)
     switch_off_dev(ctx)
     easy(ctx.db, "TESTWP-90")
     claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-90", "account": "claude-01"}, headers=cc).json()
@@ -347,7 +515,8 @@ def test_metrics_per_account_and_role(client, ctx, alerts):
 def test_console_shows_the_role_health_panel_and_form():
     page = (Path(role_health.__file__).parent / "ui" / "console.html").read_text()
     for marker in ("AI quality by role", "roleHealthPanel", "success_rate", "cost_per_finished_ticket", "rework_rounds",
-                   "id=\"rh-window\"", "id=\"rh-percent\"", "/v1/role-health/settings", "Switch the role off above"):
+                   "id=\"rh-window\"", "id=\"rh-percent\"", "/v1/role-health/settings", "Switch the role off above",
+                   "Failure counts and involved tickets appear above", "white-space:pre-wrap"):
         assert marker in page
 
 

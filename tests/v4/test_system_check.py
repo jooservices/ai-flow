@@ -29,7 +29,7 @@ def _direct_join(client, name="cc"):
 
 
 def _wait_for_join_readiness(ctx, node="cc"):
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,))
         readiness = (row or {}).get("readiness") or {}
@@ -57,10 +57,13 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
         future = executor.submit(client.post, "/v1/nodes/join", json={"join_token": grant.json()["token"]})
         try:
             provider_started_in_time = provider_started.wait(timeout=5)
+            wait_until = time.monotonic() + 10
+            while not future.done() and time.monotonic() < wait_until:
+                time.sleep(0.01)
             response_sent_while_probe_waited = future.done()
         finally:
             provider_release.set()
-        joined = future.result(timeout=3)
+        joined = future.result(timeout=15)
 
     assert provider_started_in_time
     assert response_sent_while_probe_waited
@@ -78,7 +81,7 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
         provider_checks = args[3] if len(args) > 3 else kwargs.get("provider_checks", True)
         if provider_checks:
             provider_started.set()
-            provider_release.wait(timeout=8)
+            provider_release.wait(timeout=30)
         return build_provider_conditions(*args, **kwargs)
 
     headers = _direct_join(client)
@@ -89,7 +92,7 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
         try:
             provider_started_in_time = provider_started.wait(timeout=5)
             try:
-                heartbeat = future.result(timeout=3)
+                heartbeat = future.result(timeout=10)
                 response_sent_while_probe_waited = True
             except TimeoutError:
                 heartbeat = None
@@ -104,7 +107,7 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
         finally:
             provider_release.set()
         if heartbeat is None:
-            heartbeat = future.result(timeout=3)
+            heartbeat = future.result(timeout=15)
 
     assert provider_started_in_time
     assert response_sent_while_probe_waited

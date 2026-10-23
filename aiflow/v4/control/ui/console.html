@@ -9,31 +9,6 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700;800&display=swap">
 <style>
 :root{
-  --bg:#f5f1eb; --surface:#fffdf9; --surface-2:#f7f3ed; --line:#ded6cb; --line-soft:#eee7dd;
-  --fg:#292620; --muted:#6d665d; --faint:#9a9185;
-  --accent:#8c5a3b; --accent-weak:rgba(140,90,59,.13); --accent-fg:#fffdf9;
-  --good:#467953; --good-weak:rgba(70,121,83,.13);
-  --warn:#9a6718; --warn-weak:rgba(154,103,24,.14);
-  --crit:#ad493d; --crit-weak:rgba(173,73,61,.13);
-  --track:#e7dfd4; --overlay:rgba(41,38,32,.42); --shadow:0 18px 50px rgba(41,38,32,.18);
-  --provider-claude:#d98b5f; --provider-codex:#58a98b; --provider-grok:#9c83d4; --provider-opencode:#74899a;
-  --f-ui:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --f-cond:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --f-mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#121110; --surface:#1a1917; --surface-2:#201e1b; --line:#2d2a26; --line-soft:#26231f;
-    --fg:#ece7df; --muted:#9a9388; --faint:#6b655c;
-    --accent:#d1a276; --accent-weak:rgba(209,162,118,.16); --accent-fg:#171512;
-    --good:#86c77f; --good-weak:rgba(134,199,127,.14);
-    --warn:#e6bb52; --warn-weak:rgba(230,187,82,.15);
-    --crit:#e46e5e; --crit-weak:rgba(228,110,94,.15);
-    --track:#302c27; --overlay:rgba(0,0,0,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
-    color-scheme:dark;
-  }
-}
-:root[data-theme="dark"]{
   --bg:#121110; --surface:#1a1917; --surface-2:#201e1b; --line:#2d2a26; --line-soft:#26231f;
   --fg:#ece7df; --muted:#9a9388; --faint:#6b655c;
   --accent:#d1a276; --accent-weak:rgba(209,162,118,.16); --accent-fg:#171512;
@@ -41,7 +16,22 @@
   --warn:#e6bb52; --warn-weak:rgba(230,187,82,.15);
   --crit:#e46e5e; --crit-weak:rgba(228,110,94,.15);
   --track:#302c27; --overlay:rgba(0,0,0,.62); --shadow:0 20px 60px rgba(0,0,0,.55);
+  --provider-claude:#d98b5f; --provider-codex:#58c4a3; --provider-grok:#b69df2; --provider-opencode:#8fa3b5;
+  --f-ui:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-cond:"Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --bg:#f5f1eb; --surface:#fffdf9; --surface-2:#f7f3ed; --line:#ded6cb; --line-soft:#eee7dd;
+  --fg:#292620; --muted:#6d665d; --faint:#9a9185;
+  --accent:#8c5a3b; --accent-weak:rgba(140,90,59,.13); --accent-fg:#fffdf9;
+  --good:#467953; --good-weak:rgba(70,121,83,.13);
+  --warn:#9a6718; --warn-weak:rgba(154,103,24,.14);
+  --crit:#ad493d; --crit-weak:rgba(173,73,61,.13);
+  --track:#e7dfd4; --overlay:rgba(41,38,32,.42); --shadow:0 18px 50px rgba(41,38,32,.18);
+  --provider-codex:#58a98b; --provider-grok:#9c83d4; --provider-opencode:#74899a;
+  color-scheme:light;
 }
 *{box-sizing:border-box}
 html{overflow-x:hidden}
@@ -442,20 +432,33 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 /* Command Center V2 warm graphite shell and dashboard */
 .tab[hidden]{display:none}
 .dash-title{margin:4px 0 0;font-size:24px;letter-spacing:-.025em}
+.dashboard-tabs{display:flex;gap:6px;align-self:flex-start;border-bottom:1px solid var(--line);width:100%;margin:2px 0 4px}
+.dashboard-tab{padding:9px 13px;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:transparent;color:var(--muted);font-weight:600;cursor:pointer}
+.dashboard-tab:hover{color:var(--fg)}.dashboard-tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--warn)}
 .dash-section{display:flex;flex-direction:column;gap:12px}
+.dash-section[hidden]{display:none}
 .dash-section-title{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .dashboard-layout-headings{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 8px}
 .dashboard-layout-headings .dash-section-title{flex:1 1 240px}
+.dashboard-layout-headings .dash-section-title[hidden]{display:none}
 .dash-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.dash-kpi{min-width:0;text-align:left;display:flex;flex-direction:column;gap:4px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:13px;cursor:pointer}
+.dash-kpi{min-width:0;text-align:left;display:flex;flex-direction:column;gap:7px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:13px;cursor:pointer}
 .dash-kpi:hover{border-color:var(--accent)}
 .dash-kpi .label{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-.dash-kpi .value{font-size:27px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.dash-kpi .kpi-main{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.dash-kpi .value{font-size:30px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.dash-kpi .value small{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:0}
+.dash-kpi .kpi-trend{width:88px;height:30px;flex:none}
+.dash-kpi .kpi-delta{font-size:11px;color:var(--good);font-weight:600}
 .dash-kpi .detail{font-size:12px;color:var(--muted)}
 .dash-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr);gap:12px;align-items:start}
-.dash-flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px}
-.flow-step{display:grid;gap:5px;padding:10px;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:10px}
-.flow-step b{font-family:var(--f-mono);font-size:20px}.flow-step span{font-size:11px;color:var(--muted)}
+.dash-flow{display:grid;gap:6px}
+.flow-step{display:grid;grid-template-columns:minmax(100px,140px) minmax(0,1fr) 42px;align-items:center;gap:10px;padding:7px 10px;background:transparent;border:1px solid transparent;border-radius:9px;text-align:left;cursor:pointer;color:var(--fg)}
+.flow-step:hover{border-color:var(--accent);background:var(--surface)}
+.flow-step .flow-label{font-size:12px;color:var(--muted)}
+.flow-step .flow-track{height:11px;overflow:hidden;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
+.flow-step .flow-track i{display:block;height:100%;min-width:0;border-radius:inherit;transition:width .2s ease}
+.flow-step b{font-family:var(--f-mono);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
 .dash-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dash-tools input{max-width:320px}
 .sort-btn{display:inline-flex;align-items:center;gap:4px;padding:0;border:0;background:none;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer}
@@ -465,7 +468,17 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .roadmap-row .roadmap-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.roadmap-track{height:12px;border-radius:6px;background:var(--track);overflow:hidden}.roadmap-track i{display:block;height:100%;background:var(--good)}
 .provider-legend{display:flex;gap:8px 14px;flex-wrap:wrap;color:var(--muted);font-size:12px}.provider-legend span{display:inline-flex;align-items:center;gap:6px}.provider-swatch{width:9px;height:9px;border-radius:50%;background:var(--provider-color)}
 .provider-claude{--provider-color:var(--provider-claude)}.provider-codex{--provider-color:var(--provider-codex)}.provider-grok{--provider-color:var(--provider-grok)}.provider-opencode{--provider-color:var(--provider-opencode)}
-.provider-chart{display:block;width:100%;height:auto;min-height:120px}.provider-chart .provider-claude{fill:var(--provider-claude)}.provider-chart .provider-codex{fill:var(--provider-codex)}.provider-chart .provider-grok{fill:var(--provider-grok)}.provider-chart .provider-opencode{fill:var(--provider-opencode)}
+.provider-chart{display:block;width:100%;height:auto;min-height:120px}.provider-chart text{fill:var(--muted);font-family:var(--f-mono);font-size:10px}.provider-chart .provider-claude{fill:var(--provider-claude)}.provider-chart .provider-codex{fill:var(--provider-codex)}.provider-chart .provider-grok{fill:var(--provider-grok)}.provider-chart .provider-opencode{fill:var(--provider-opencode)}
+.usage-share{display:grid;gap:8px;margin-top:16px}.usage-share h3{margin:0;color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+.usage-share .sharebar{display:flex;height:12px;overflow:hidden;border:1px solid var(--line);border-radius:7px;background:var(--bg)}
+.usage-share .sharebar i{display:block;height:100%}.usage-share .share-legend{display:flex;gap:8px 16px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+.usage-share .share-legend span{display:inline-flex;align-items:center;gap:5px}.usage-share .share-legend i{width:8px;height:8px;border-radius:50%}
+.quota-ai-list{display:grid;gap:10px}.quota-ai{border:1px solid var(--line);border-radius:11px;background:var(--surface-2);overflow:hidden}
+.quota-ai-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.quota-ai-head h3{margin:0;font-size:14px}.quota-ai-head .hint{font-size:12px}
+.quota-ai .quota-table{min-width:680px}.quota-ai .tablebox{padding:0 10px 8px}
+.dashboard-empty{padding:14px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
+.work-status-filter{min-width:165px}
 .dhead-tools{display:flex;align-items:end;gap:10px 14px;flex-wrap:wrap}.ai-filter{max-width:190px}.ai-filter select{min-width:150px}
 .project-picker{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 40px;gap:6px;align-items:end;min-width:min(320px,100%);max-width:440px;flex:1 1 320px}
 .project-picker label{grid-column:1/-1;color:var(--muted);font-size:12px}.project-picker input{background:var(--surface);min-width:0}
@@ -658,6 +671,10 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
+  dashboardUsage: [], dashboardUsageError: '', dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
+  dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
+  dashboardTab: 'work', workStatusFilter: 'all',
+  themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
   consoleUser: null, consoleSessionLoaded: false,
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
@@ -777,13 +794,18 @@ function loadPrefs() {
     if (typeof p.typeFilter === 'string') S.typeFilter = p.typeFilter;
     if (typeof p.aiFilter === 'string') S.aiFilter = p.aiFilter;
     if (typeof p.epic === 'string') S.epic = p.epic;
+    if (typeof p.workStatusFilter === 'string') S.workStatusFilter = p.workStatusFilter;
     if (Array.isArray(p.starredProjects)) S.starredProjects = p.starredProjects.filter(function (x) { return typeof x === 'string'; });
+    var urlStatus = new URLSearchParams(location.search || '').get('status');
+    if (urlStatus && ['all', 'done', 'in-flight', 'waiting'].concat(STATUS_COLS.map(function (c) { return c[0]; })).indexOf(urlStatus) >= 0) {
+      S.workStatusFilter = urlStatus;
+    }
   } catch (x) { /* storage off */ }
 }
 function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify({ project: S.project, typeFilter: S.typeFilter,
-      aiFilter: S.aiFilter, epic: S.epic, starredProjects: S.starredProjects }));
+      aiFilter: S.aiFilter, epic: S.epic, workStatusFilter: S.workStatusFilter, starredProjects: S.starredProjects }));
   } catch (x) { /* storage off */ }
 }
 function keyNumber(key) {
@@ -860,7 +882,7 @@ function addDecision() {
 function escalationsPanel() {
   if (!consoleReader()) return '';
   if (!S.esc.data && !S.esc.busy) loadEscalations(false);
-  var data = S.esc.data, h = '<section class="panel" id="p-escalations"><div class="panel-h"><h2>Escalations and owner decisions</h2><span class="hint">Only a new business decision or an irreversible or production action reaches a person</span></div>';
+  var data = S.esc.data, h = '<section class="panel" data-block="escalations" id="p-escalations"><div class="panel-h"><h2>Escalations and owner decisions</h2><span class="hint">Only a new business decision or an irreversible or production action reaches a person</span></div>';
   if (S.esc.error) h += '<div class="stakeholder-error">' + esc(S.esc.error) + '</div>';
   if (!data) return h + '<div class="muted">' + (S.esc.busy ? 'Loading escalations…' : 'Escalations unavailable.') + '</div></section>';
   var m = data.metrics, reg = data.register, labels = m.labels || {}, person = m.person_classes || [];
@@ -955,7 +977,7 @@ function poll() {
     var prevInc = S.seenInc, prevRuns = S.seenRuns;
     S.data = d; S.fetchedAt = Date.now(); S.lastOk = Date.now(); S.error = '';
     var prefsChanged = false;
-    if (d.projects.length && !d.projects.some(function (p) { return p.key === S.project; })) {
+    if (d.projects.length && !(S.view === 'work' && S.project === 'all') && !d.projects.some(function (p) { return p.key === S.project; })) {
       S.project = d.projects[0].key; S.epic = 'all'; prefsChanged = true;
     }
     var tickets = projTickets();
@@ -980,6 +1002,7 @@ function pollConsoleSession() {
     return r.json();
   }).then(function (d) {
     S.consoleUser = d.authenticated ? d : null; S.consoleSessionLoaded = true;
+    loadConsoleThemePreference();
     document.documentElement.classList.remove('role-loading');
     applyRoleNavigation();
     loadLayouts();
@@ -987,6 +1010,7 @@ function pollConsoleSession() {
       location.replace(S.consoleUser.landing_page || '/cc'); return;
     }
     render();
+    if (S.view === 'cc' || S.view === 'work' || S.view === 'delivery') loadDashboardWaiting(true);
     if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
     if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
@@ -999,9 +1023,41 @@ function pollConsoleSession() {
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
   }).catch(function (error) {
     if (error && error.status === 401) { location.replace('/login'); return; }
-    S.consoleUser = null; S.consoleSessionLoaded = true;
+    S.consoleUser = null; S.consoleSessionLoaded = true; loadConsoleThemePreference();
     document.documentElement.classList.remove('role-loading'); applyRoleNavigation(); render(); pollServices(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
+}
+function themeStorageKey(user) { return 'aiflow4-theme:' + encodeURIComponent(user || 'anonymous').toLowerCase(); }
+function applyTheme(theme) {
+  var value = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', value);
+  return value;
+}
+function loadConsoleThemePreference() {
+  var user = S.consoleUser && S.consoleUser.user || 'anonymous';
+  if (S.themePreference.loadedUser === user) return;
+  var key = themeStorageKey(user), local = '';
+  try { local = localStorage.getItem(key) || ''; } catch (x) { /* storage off */ }
+  S.themePreference.user = user;
+  fetch('/v1/console/preferences', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    var theme = applyTheme(d.theme);
+    try { localStorage.setItem(key, theme); } catch (x) { /* storage off */ }
+  }).catch(function () { if (local) applyTheme(local); })
+    .then(function () { S.themePreference.loadedUser = user; });
+}
+function saveConsoleTheme(theme) {
+  var value = applyTheme(theme), user = S.consoleUser && S.consoleUser.user || 'anonymous';
+  S.themePreference.user = user;
+  try { localStorage.setItem(themeStorageKey(user), value); } catch (x) { /* storage off */ }
+  if (!S.consoleUser) return;
+  var request = S.themePreference.chain.then(function () {
+    return fetch('/v1/console/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: value }) }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); });
+  });
+  S.themePreference.chain = request.catch(function () {});
 }
 function applyRoleNavigation() {
   var tabs = $$('.tab[data-view]');
@@ -1532,6 +1588,60 @@ function pollAnalytics() {
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
+function pollDashboardUsage() {
+  fetch('/v1/analytics/usage/daily?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.dashboardUsage = d.rows || []; S.dashboardUsageError = '';
+    if (S.view === 'cc' && S.data) renderDashboard();
+  }).catch(function (e) { S.dashboardUsageError = String(e.message || e); })
+    .then(function () { setTimeout(pollDashboardUsage, ANALYTICS_MS); });
+}
+function loadDashboardWaiting(force) {
+  var waiting = S.dashboardWaiting;
+  if (waiting.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (!force && waiting.keys !== null && Date.now() - waiting.loadedAt < 12000) return;
+  waiting.loading = true;
+  if (waiting.keys === null && S.view === 'cc' && S.data) renderDashboard();
+  fetch('/v1/dashboard/waiting', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    waiting.keys = Array.isArray(d.ticket_keys) ? d.ticket_keys : [];
+    waiting.error = ''; waiting.loadedAt = Date.now();
+  }).catch(function (e) {
+    waiting.keys = null; waiting.error = String(e.message || e); waiting.loadedAt = Date.now();
+  }).then(function () {
+    waiting.loading = false;
+    if (S.view === 'cc' && S.data) renderDashboard();
+    else if ((S.view === 'work' || S.view === 'delivery') && S.data) renderDBody();
+  });
+}
+function loadDashboardQuota(force) {
+  if (!S.consoleUser || !consoleCan('view.dashboard') || consoleCan('view.machines_ai')) return;
+  var quota = S.dashboardQuota, user = S.consoleUser.user || '';
+  if (quota.user !== user) {
+    quota.rows = null; quota.error = ''; quota.loadedAt = 0; quota.user = user;
+  }
+  if (quota.loading || (!force && quota.rows !== null && Date.now() - quota.loadedAt < ANALYTICS_MS)) return;
+  quota.loading = true;
+  fetch('/v1/dashboard/quota', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    quota.rows = Array.isArray(d.rows) ? d.rows : []; quota.error = ''; quota.loadedAt = Date.now();
+  }).catch(function (e) {
+    quota.rows = null; quota.error = String(e.message || e); quota.loadedAt = Date.now();
+  }).then(function () {
+    quota.loading = false;
+    if (S.view === 'cc' && S.data) renderDashboard();
+  });
+}
+function pollDashboardWaiting() {
+  if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) loadDashboardWaiting();
+  setTimeout(pollDashboardWaiting, 15000);
+}
 function loadReviews() {
   fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1654,48 +1764,131 @@ function renderLive() {
 
 /* ---------- Command Center ---------- */
 function dashboardProjectCounts(projectKey) {
-  var rows = D().tickets.filter(function (t) { return t.project === projectKey && t.type !== 'Epic'; });
+  var allTickets = D().tickets;
+  var allRows = allTickets.filter(function (t) { return t.project === projectKey; });
+  var rows = allRows.filter(function (t) { return t.type !== 'Epic'; });
   return { total: rows.length, open: rows.filter(function (t) { return t.status !== 'Done'; }).length,
-    building: rows.filter(function (t) { return t.status === 'In Progress'; }).length,
-    waiting: rows.filter(function (t) { return t.status === 'Needs owner' || t.status === 'Human review'; }).length,
+    building: rows.filter(function (t) { return ['In Progress', 'In Verify', 'Human review'].indexOf(t.status) >= 0; }).length,
+    waiting: dashboardVisibleWaitingTickets(allTickets, S.dashboardWaiting.keys).filter(function (t) { return t.project === projectKey; }).length,
     done: rows.filter(function (t) { return t.status === 'Done'; }).length };
 }
 function providerUsageChart(rows) {
-  var days = utcDays(ANALYTICS_DAYS), providers = {}, accountProvider = {};
-  D().accounts.forEach(function (a) { accountProvider[a.id] = a.provider; providers[a.provider] = true; });
-  var byDay = {};
+  var days = utcDays(ANALYTICS_DAYS), byDay = {}, providers = {};
   days.forEach(function (day) { byDay[day] = {}; });
-  rows.forEach(function (row) {
-    var provider = accountProvider[row.account];
+  (rows || []).forEach(function (row) {
+    var provider = row.key;
     if (!provider || !byDay[row.day]) return;
-    byDay[row.day][provider] = (byDay[row.day][provider] || 0) + Number(row.runs || 0);
+    providers[provider] = true;
+    byDay[row.day][provider] = (byDay[row.day][provider] || 0) + Number(row.tokens || 0);
   });
   var keys = Object.keys(PROVIDER).filter(function (key) { return providers[key]; });
+  Object.keys(providers).forEach(function (key) { if (!PROVIDER[key]) keys.push(key); });
   var max = 1;
   days.forEach(function (day) { max = Math.max(max, keys.reduce(function (n, key) { return n + (byDay[day][key] || 0); }, 0)); });
   var width = 30, gap = 10, height = 112, labelHeight = 18;
-  var svg = '<svg class="provider-chart" viewBox="0 0 ' + (days.length * (width + gap)) + ' ' + (height + labelHeight) + '" role="img" aria-label="AI runs per day by provider over the last ' + days.length + ' days">';
+  var svg = '<svg class="provider-chart" viewBox="0 0 ' + (days.length * (width + gap)) + ' ' + (height + labelHeight) + '" role="img" aria-label="AI tokens per day by provider over the last ' + days.length + ' days">';
   days.forEach(function (day, index) {
     var x = index * (width + gap) + gap / 2, y = height;
     keys.forEach(function (provider) {
-      var count = byDay[day][provider] || 0;
-      if (!count) return;
-      var h = height * count / max; y -= h;
-      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider]) + ': ' + count + ' runs</title></rect>';
+      var tokens = byDay[day][provider] || 0;
+      if (!tokens) return;
+      var h = height * tokens / max; y -= h;
+      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider] || provider) + ': ' + tok(tokens) + ' tokens</title></rect>';
     });
     svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + day.slice(8) + '</text>';
   });
   return svg + '</svg>';
 }
+function dashboardSpark(values, color) {
+  values = (values || []).slice(-7);
+  while (values.length < 7) values.unshift(0);
+  var width = 88, height = 30, max = Math.max.apply(null, values.concat([1]));
+  var points = values.map(function (value, index) {
+    return [index * (width / (values.length - 1)), height - 3 - Number(value || 0) / max * (height - 8)];
+  });
+  var line = points.map(function (point, index) { return (index ? 'L' : 'M') + point[0].toFixed(1) + ' ' + point[1].toFixed(1); }).join(' ');
+  return '<svg class="kpi-trend" viewBox="0 0 ' + width + ' ' + height + '" aria-hidden="true"><path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+}
+function dashboardUsageTotals(rows) {
+  var byProvider = {}, today = new Date().toISOString().slice(0, 10), tokensToday = 0, costToday = 0, tokenDays = {}, runDays = {};
+  (rows || []).forEach(function (row) {
+    var provider = row.key || 'unknown';
+    byProvider[provider] = (byProvider[provider] || 0) + Number(row.tokens || 0);
+    tokenDays[row.day] = (tokenDays[row.day] || 0) + Number(row.tokens || 0);
+    runDays[row.day] = (runDays[row.day] || 0) + Number(row.runs || 0);
+    if (row.day === today) { tokensToday += Number(row.tokens || 0); costToday += Number(row.cost_usd || 0); }
+  });
+  return { byProvider: byProvider, tokenDays: tokenDays, runDays: runDays, tokensToday: tokensToday, costToday: costToday };
+}
+function dashboardUsageShare(rows) {
+  var totals = dashboardUsageTotals(rows), providers = Object.keys(totals.byProvider).sort();
+  var grand = providers.reduce(function (sum, key) { return sum + totals.byProvider[key]; }, 0), h = '<div class="usage-share"><h3>Share of usage · last ' + ANALYTICS_DAYS + ' days</h3>';
+  if (!grand) return h + '<div class="dashboard-empty">No recorded AI usage in this period.</div></div>';
+  h += '<div class="sharebar" role="img" aria-label="Share of recorded tokens by AI provider">';
+  providers.forEach(function (key) { h += '<i class="provider-' + esc(key) + '" style="width:' + (100 * totals.byProvider[key] / grand).toFixed(2) + '%;background:var(--provider-' + esc(key) + ')"></i>'; });
+  h += '</div><div class="share-legend">';
+  providers.forEach(function (key) { h += '<span><i class="provider-' + esc(key) + '" style="background:var(--provider-' + esc(key) + ')"></i>' + esc(PROVIDER[key] || key) + ' · ' + Math.round(100 * totals.byProvider[key] / grand) + '% · ' + tok(totals.byProvider[key]) + ' tokens</span>'; });
+  return h + '</div></div>';
+}
+function dashboardWaitingTickets(tickets, queueKeys) {
+  var allTickets = tickets || [], byKey = {};
+  if (Array.isArray(queueKeys)) {
+    var queue = {}; queueKeys.forEach(function (key) { queue[String(key)] = true; });
+    return allTickets.filter(function (ticket) { return !!queue[ticket.key]; });
+  }
+  allTickets.forEach(function (ticket) { byKey[ticket.key] = ticket; });
+  return allTickets.filter(function (ticket) {
+    if (ticket.status === 'Done' || ticket.status === 'Closed') return false;
+    if (ticket.status === 'Needs owner' || ticket.status === 'Human review') return true;
+    return (ticket.blocked_by || []).some(function (key) {
+      var blocker = byKey[key]; return blocker && blocker.status !== 'Done' && blocker.status !== 'Closed';
+    });
+  });
+}
+function dashboardVisibleWaitingTickets(tickets, queueKeys) {
+  var waiting = dashboardWaitingTickets(tickets, queueKeys);
+  return consoleCan('view.human_review') ? waiting : waiting.filter(function (ticket) { return ticket.type !== 'Epic'; });
+}
+function setDashboardTab(tab) {
+  S.dashboardTab = tab === 'ai' ? 'ai' : 'work';
+  if (S.view === 'cc') {
+    renderDashboard();
+    var button = $('#dashboard-tab-' + S.dashboardTab); if (button) button.focus();
+  }
+}
+function openDashboardWorkFilter(filter) {
+  S.project = 'all';
+  S.workStatusFilter = filter;
+  S.search = ''; S.epic = 'all'; S.typeFilter = 'all'; S.aiFilter = 'all';
+  savePrefs(); setView('work');
+}
+function openDashboardCard(card) {
+  if (card === 'ai-usage') { setDashboardTab('ai'); return; }
+  if (card === 'waiting' && consoleCan('view.human_review')) { S.reviewProject = ''; setView('review'); return; }
+  openDashboardWorkFilter(card === 'done' ? 'done' : card === 'in-flight' ? 'in-flight' : 'waiting');
+}
 function renderDashboard() {
   var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
+  if (!canSeeMachines) loadDashboardQuota(false);
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
-  var openProjects = d.projects.filter(function (p) { return !p.closed; }).length;
-  var inProgress = tickets.filter(function (t) { return t.status === 'In Progress'; }).length;
-  var waiting = tickets.filter(function (t) { return t.status === 'Needs owner' || t.status === 'Human review'; });
+  var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
+  var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
+  var waiting = dashboardVisibleWaitingTickets(d.tickets, S.dashboardWaiting.keys);
+  var waitingCount = waiting.length;
+  var done = tickets.filter(function (t) { return t.status === 'Done'; }), days = utcDays(7), usage = dashboardUsageTotals(S.dashboardUsage);
+  var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
+  var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};
+  days.forEach(function (day, index) { byWaitingDay[day] = index; });
+  (d.events || []).forEach(function (event) {
+    var date = String(event.ts || '').slice(0, 10), index = byWaitingDay[date];
+    if (index == null || ['ticket.status', 'jira.transition'].indexOf(event.type) < 0) return;
+    if (event.outcome === 'Needs owner' || event.outcome === 'Human review') waitingTrend[index] += 1;
+    if (inFlightStatuses.indexOf(event.outcome) >= 0) inFlightTrend[index] += 1;
+  });
+  var doneThisWeek = doneTrend.reduce(function (sum, count) { return sum + count; }, 0);
   var selectedProject = d.projects.filter(function (p) { return p.key === S.project; })[0] || d.projects[0];
   var selectedKey = selectedProject ? selectedProject.key : '';
   var q = S.dashboardQuery.trim().toLowerCase();
@@ -1709,15 +1902,26 @@ function renderDashboard() {
     return (left - right) * S.dashboardSortDir;
   });
   var recentRuns = d.active_runs.slice().sort(function (a, b) { return (a.elapsed_s || 0) - (b.elapsed_s || 0); }).slice(0, 8);
-  var flow = STATUS_COLS.map(function (c) {
-    return '<div class="flow-step"><b>' + tickets.filter(function (t) { return t.status === c[0]; }).length + '</b><span>' + esc(c[1]) + '</span></div>';
+  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return t.status === c[0]; }).length; });
+  var flowMax = Math.max.apply(null, flowCounts.concat([1]));
+  var flow = STATUS_COLS.map(function (c, index) {
+    var count = flowCounts[index], color = c[0] === 'Done' ? 'var(--good)' :
+      (c[0] === 'In Progress' || c[0] === 'In Verify') ? 'var(--provider-codex)' :
+        (c[0] === 'Human review' || c[0] === 'Needs owner') ? 'var(--warn)' : 'var(--muted)';
+    var width = count ? Math.max(3, 100 * count / flowMax) : 0;
+    return '<button type="button" class="flow-step" data-act="flow-step" data-status="' + esc(c[0]) + '" aria-label="Open Work board filtered to ' + esc(c[1]) + ' (' + count + ' tickets)"><span class="flow-label">' + esc(c[1]) + '</span><span class="flow-track" aria-hidden="true"><i style="width:' + width.toFixed(1) + '%;background:' + color + '"></i></span><b>' + count + '</b></button>';
   }).join('');
-  var h = '<h1 class="dash-title">Dashboard</h1><section class="dash-section" aria-labelledby="dashboard-work-title"><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
+  var total = tickets.length, donePct = total ? Math.round(100 * done.length / total) : 0;
+  var h = '<h1 class="dash-title">Dashboard</h1><div class="dashboard-tabs" role="tablist" aria-label="Dashboard sections">';
+  h += '<button type="button" role="tab" class="dashboard-tab" id="dashboard-tab-work" aria-controls="dashboard-panel" aria-selected="' + (S.dashboardTab !== 'ai') + '" data-act="dashboard-tab" data-tab="work">Work</button>';
+  h += '<button type="button" role="tab" class="dashboard-tab" id="dashboard-tab-ai" aria-controls="dashboard-panel" aria-selected="' + (S.dashboardTab === 'ai') + '" data-act="dashboard-tab" data-tab="ai">AI and machines</button></div>';
+  h += '<div id="dashboard-panel" role="tabpanel" aria-labelledby="dashboard-tab-' + (S.dashboardTab === 'ai' ? 'ai' : 'work') + '">';
+  h += '<section class="dash-section" data-dashboard-panel="work"' + (S.dashboardTab === 'ai' ? ' hidden' : '') + '><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
   h += '<div class="dash-kpis" data-block="kpis" aria-label="Work summary">';
-  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Active projects</span><span class="value">' + openProjects + '</span><span class="detail">' + d.projects.length + ' configured projects</span></button>';
-  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">AI working</span><span class="value">' + inProgress + '</span><span class="detail">tickets in progress</span></button>';
-  h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Waiting for you</span><span class="value">' + waiting.length + '</span><span class="detail">human review or owner decision</span></button>';
-  h += '<button class="dash-kpi" data-act="view" data-view="delivery"><span class="label">Runs · 24 h</span><span class="value">' + Number(totals.runs_24h || 0) + '</span><span class="detail">' + Number(totals.done_24h || 0) + ' completed · ' + Number(totals.failed_24h || 0) + ' failed</span></button></div>';
+  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="done"><span class="label">Done</span><span class="kpi-main"><span class="value">' + done.length + '</span>' + dashboardSpark(doneTrend, 'var(--good)') + '</span><span class="kpi-delta">+' + doneThisWeek + ' this week</span><span class="detail">of ' + total + ' tickets · ' + donePct + '% complete</span></button>';
+  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="in-flight"><span class="label">In flight</span><span class="kpi-main"><span class="value">' + inFlight + '</span>' + dashboardSpark(inFlightTrend, 'var(--provider-codex)') + '</span><span class="kpi-delta">' + Number(d.active_runs.length || 0) + ' live runs</span><span class="detail">In progress, verify or human review</span></button>';
+  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
+  h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';
@@ -1747,27 +1951,63 @@ function renderDashboard() {
   h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section></section>';
-  if (canSeeMachines) {
-  var providers = Object.keys(PROVIDER).filter(function (key) { return d.accounts.some(function (a) { return a.provider === key; }); });
-  var tokenTotal = S.analytics.reduce(function (n, row) { return n + Number(row.tokens_in || 0) + Number(row.tokens_out || 0); }, 0);
-  var costTotal = S.analytics.reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
-  h += '<section class="dash-section" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><section class="panel" data-block="usage"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
-  if (S.anError) h += '<div class="empty">Usage chart unavailable: ' + esc(S.anError) + '</div>';
-  h += providerUsageChart(S.analytics);
-  h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + key + '"></i><span class="provider-name">' + esc(PROVIDER[key]) + '</span></span>'; }).join('') + '</div></section>';
-  h += '<section class="panel" data-block="tokens"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Control plane records run usage</span></div><div class="facts"><div class="fact"><span class="fl">Tokens · 24 h</span><span class="fv mono">' + tok((totals.tokens_in_24h || 0) + (totals.tokens_out_24h || 0)) + '</span></div><div class="fact"><span class="fl">Cost · 24 h</span><span class="fv mono">' + usd(totals.cost_24h) + '</span></div><div class="fact"><span class="fl">Tokens · 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section></div>';
-  h += '<section class="panel" data-block="quota"><div class="panel-h"><h2>AI account quota</h2><span class="hint">Quota used and left, reset, burn rate, forecast, and seven-day history per account</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Provider</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
-  if (!d.accounts.length) h += '<tr><td colspan="4" class="empty">No AI accounts are configured.</td></tr>';
-  d.accounts.forEach(function (a) {
-    var reset = quotaResetText(a);
-    h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next quota reset: ' + esc(reset) + '</span></td></tr>';
-  });
-  h += '</tbody></table></div></section></section>';
-  h += toolWaitsPanel(d);
-  if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
+  h += '</div></section>' + escalationsPanel() + '</section>';
+  var tokenTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.tokens || 0); }, 0);
+  var costTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
+  var providers = Object.keys(PROVIDER).filter(function (key) { return (S.dashboardUsage || []).some(function (row) { return row.key === key; }) || d.accounts.some(function (a) { return a.provider === key; }); });
+  h += '<section class="dash-section" data-dashboard-panel="ai"' + (S.dashboardTab !== 'ai' ? ' hidden' : '') + '><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2>';
+  h += '<section class="panel" data-block="usage"><div class="panel-h"><h2>AI usage</h2><span class="hint">Tokens per day by AI · last ' + ANALYTICS_DAYS + ' days</span></div>';
+  if (S.dashboardUsageError) h += '<div class="dashboard-empty">Usage chart unavailable: ' + esc(S.dashboardUsageError) + '</div>';
+  else if (!S.dashboardUsage.length) h += '<div class="dashboard-empty">No recorded AI usage in this period.</div>';
+  h += providerUsageChart(S.dashboardUsage);
+  h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + esc(key) + '"></i><span class="provider-name">' + esc(PROVIDER[key] || key) + '</span></span>'; }).join('') + '</div>' + dashboardUsageShare(S.dashboardUsage) + '</section>';
+  h += '<section class="panel" data-block="tokens"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Recorded run usage · UTC</span></div><div class="facts"><div class="fact"><span class="fl">Tokens today</span><span class="fv mono">' + tok(usage.tokensToday) + '</span></div><div class="fact"><span class="fl">Approximate cost today</span><span class="fv mono">$' + usage.costToday.toFixed(4) + '</span></div><div class="fact"><span class="fl">Tokens · last 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · last 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section>';
+  h += '<section class="panel" data-block="quota"><div class="panel-h"><h2>Quota by AI</h2><span class="hint">Per account · current quota and next reset time</span></div>';
+  if (!canSeeMachines && S.dashboardQuota.error) h += '<div class="dashboard-empty">Quota summary unavailable: ' + esc(S.dashboardQuota.error) + '</div>';
+  else if (!canSeeMachines && S.dashboardQuota.rows === null) h += '<div class="dashboard-empty">' + (S.dashboardQuota.loading ? 'Loading project-scoped quota…' : 'Project-scoped quota is unavailable.') + '</div>';
+  else if (!canSeeMachines && !S.dashboardQuota.rows.length) h += '<div class="dashboard-empty">No AI accounts serve your visible projects.</div>';
+  else if (canSeeMachines && !d.accounts.length) h += '<div class="dashboard-empty">No AI accounts are configured.</div>';
+  else if (canSeeMachines) {
+    h += '<div class="quota-ai-list">';
+    providers.forEach(function (provider) {
+      var accounts = d.accounts.filter(function (account) { return account.provider === provider; });
+      if (!accounts.length) return;
+      h += '<section class="quota-ai"><div class="quota-ai-head"><h3 class="provider-name provider-' + esc(provider) + '">' + esc(PROVIDER[provider] || provider) + '</h3><span class="hint">' + accounts.length + ' account' + (accounts.length === 1 ? '' : 's') + '</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>Account</th><th>Status</th><th>Quota windows</th></tr></thead><tbody>';
+      accounts.forEach(function (account) {
+        h += '<tr><td class="mono">' + esc(account.id) + '<div class="small">' + esc(account.node) + '</div></td><td>' + pill(accTone(account), accLabel(account), account.status === 'working') + '</td><td>' + qwin(account) + '<span class="qnote">Next quota reset: ' + esc(quotaResetText(account)) + '</span></td></tr>';
+      });
+      h += '</tbody></table></div></section>';
+    });
+    h += '</div>';
+  } else {
+    var scopedProviders = {};
+    S.dashboardQuota.rows.forEach(function (account) {
+      (scopedProviders[account.provider] || (scopedProviders[account.provider] = [])).push(account);
+    });
+    h += '<div class="quota-ai-list">';
+    Object.keys(scopedProviders).sort().forEach(function (provider) {
+      var accounts = scopedProviders[provider];
+      h += '<section class="quota-ai"><div class="quota-ai-head"><h3 class="provider-name provider-' + esc(provider) + '">' + esc(PROVIDER[provider] || provider) + '</h3><span class="hint">' + accounts.length + ' account' + (accounts.length === 1 ? '' : 's') + ' in your project scope</span></div><div class="tablebox"><table class="quota-table"><thead><tr><th>AI account</th><th>Quota windows</th></tr></thead><tbody>';
+      accounts.forEach(function (account) {
+        var windows = account.windows || [], resets = [];
+        windows.forEach(function (window) { if (window.reset_at) resets.push(window.reset_at); });
+        resets.sort(function (a, b) { return quotaDateMs(a) - quotaDateMs(b); });
+        var quotaHtml = windows.length ? '<div class="qcell">' : '<div class="qcell"><span class="qnote">Quota not reported</span>';
+        windows.forEach(function (window) {
+          var used = window.used_pct == null ? null : Math.max(0, Math.min(100, Number(window.used_pct)));
+          quotaHtml += '<div class="qrow" title="' + esc(window.label) + '"><span class="ql">' + esc(window.label) + (window.estimated ? ' · estimate' : '') + '</span><span class="track"><i style="width:' + (used == null ? 0 : used).toFixed(1) + '%" data-tone="' + (used == null ? 'muted' : tone(used)) + '"></i></span><span class="qv">' + (used == null ? '—' : Math.round(used) + '%') + '</span></div>';
+        });
+        quotaHtml += '<span class="qnote">Next quota reset: ' + (resets.length ? esc(quotaWhen(resets[0])) : 'Not reported') + '</span></div>';
+        h += '<tr><td>' + esc(account.label || 'AI account') + '</td><td>' + quotaHtml + '</td></tr>';
+      });
+      h += '</tbody></table></div></section>';
+    });
+    h += '</div>';
   }
-  h += escalationsPanel();
+  h += '</section>';
+  if (canSeeMachines) h += toolWaitsPanel(d);
+  if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
+  h += '</section></div>';
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
   applyLayout('cc', root);
@@ -2202,7 +2442,14 @@ function renderSA() {
 }
 
 /* ---------- Delivery ---------- */
-function projTickets() { return D().tickets.filter(function (t) { return t.project === S.project; }); }
+function projTickets() { return D().tickets.filter(function (t) { return S.project === 'all' || t.project === S.project; }); }
+function dashboardWorkStatusMatches(ticket, filter) {
+  if (!filter || filter === 'all') return true;
+  if (filter === 'done') return ticket.status === 'Done';
+  if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review'].indexOf(ticket.status) >= 0;
+  if (filter === 'waiting') return dashboardVisibleWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
+  return ticket.status === filter;
+}
 function projectCloseControl(project) {
   if (!project) return '';
   if (project.closed) return '<span class="pill" data-tone="ok"><span class="dot"></span>Closed · study case v' +
@@ -2221,6 +2468,11 @@ function renderDHead() {
   Object.keys(types).sort().forEach(function (t) { h += '<button data-act="type" data-t="' + esc(t) + '" aria-pressed="' + (S.typeFilter === t) + '">' + esc(t) + '</button>'; });
   h += '</div>';
   h += '<label class="ai-filter" for="ai-filter">AI <select id="ai-filter" aria-label="Filter by AI state"><option value="all"' + (S.aiFilter === 'all' ? ' selected' : '') + '>All AI states</option><option value="ready"' + (S.aiFilter === 'ready' ? ' selected' : '') + '>Ready for AI</option><option value="working"' + (S.aiFilter === 'working' ? ' selected' : '') + '>AI working</option><option value="attention"' + (S.aiFilter === 'attention' ? ' selected' : '') + '>Needs attention</option></select></label>';
+  h += '<label class="ai-filter work-status-filter" for="work-status-filter">Tickets <select id="work-status-filter" aria-label="Filter tickets by status">';
+  [['all', 'All statuses'], ['done', 'Done'], ['in-flight', 'In flight'], ['waiting', 'Waiting for you']].concat(STATUS_COLS.map(function (c) { return [c[0], c[1]]; })).forEach(function (option) {
+    h += '<option value="' + esc(option[0]) + '"' + (S.workStatusFilter === option[0] ? ' selected' : '') + '>' + esc(option[1]) + '</option>';
+  });
+  h += '</select></label>';
   var epics = sortEpics(projTickets().filter(function (t) { return t.type === 'Epic'; }));
   if (epics.length) {
     h += '<label style="flex-direction:row;align-items:center;gap:8px;font-weight:400">Epic <select id="epicSel" style="width:auto;min-width:200px;max-width:340px"><option value="all">All epics</option>';
@@ -2237,10 +2489,10 @@ function renderDHead() {
 }
 function renderProjectPicker() {
   var d = D(), selected = d.projects.filter(function (p) { return p.key === S.project; })[0];
-  var value = S.projectPickerOpen ? S.projectQuery : (selected ? selected.key + ' · ' + selected.repo : '');
+  var value = S.projectPickerOpen ? S.projectQuery : (S.project === 'all' ? 'All projects' : selected ? selected.key + ' · ' + selected.repo : '');
   return '<div class="project-picker" id="project-picker"><label for="work-project">Choose a project</label>' +
     '<input id="work-project" type="search" role="combobox" aria-autocomplete="list" aria-controls="project-options" aria-expanded="' + S.projectPickerOpen + '" autocomplete="off" placeholder="Search projects by name or key" value="' + esc(value) + '">' +
-    '<button type="button" class="star-button" data-act="project-star" aria-pressed="' + (S.project && S.starredProjects.indexOf(S.project) >= 0) + '" aria-label="' + (S.starredProjects.indexOf(S.project) >= 0 ? 'Unstar ' : 'Star ') + esc(S.project || 'selected project') + '">' + (S.starredProjects.indexOf(S.project) >= 0 ? '★' : '☆') + '</button>' +
+    (S.project === 'all' ? '' : '<button type="button" class="star-button" data-act="project-star" aria-pressed="' + (S.project && S.starredProjects.indexOf(S.project) >= 0) + '" aria-label="' + (S.starredProjects.indexOf(S.project) >= 0 ? 'Unstar ' : 'Star ') + esc(S.project || 'selected project') + '">' + (S.starredProjects.indexOf(S.project) >= 0 ? '★' : '☆') + '</button>') +
     '<div class="project-options" id="project-options" role="listbox" aria-label="Projects"' + (S.projectPickerOpen ? '' : ' hidden') + '></div></div>';
 }
 function renderProjectPickerOptions() {
@@ -2255,6 +2507,9 @@ function renderProjectPickerOptions() {
   var stars = matches.filter(function (p) { return S.starredProjects.indexOf(p.key) >= 0; }).slice(0, 20);
   var rest = matches.filter(function (p) { return S.starredProjects.indexOf(p.key) < 0; }).slice(0, Math.max(0, 25 - stars.length));
   var h = '';
+  if (!query || 'all projects'.indexOf(query) >= 0 || 'all'.indexOf(query) >= 0) {
+    h += '<div class="option-group">All projects</div><button type="button" class="project-option" role="option" aria-selected="' + (S.project === 'all') + '" data-act="select-work-project" data-p="all"><span class="key">All projects</span><span class="repo">Tickets across every project visible to you</span></button>';
+  }
   if (stars.length) {
     h += '<div class="option-group">Starred projects</div>';
     stars.forEach(function (p) { h += projectOption(p, true); });
@@ -2307,7 +2562,7 @@ function renderDBody() {
     var aiMatches = S.aiFilter === 'all' || (S.aiFilter === 'ready' && t.status === 'To Do' && (t.labels || []).indexOf('aiflow-ready') >= 0) ||
       (S.aiFilter === 'working' && !!t.run) || (S.aiFilter === 'attention' &&
         (t.status === 'Needs owner' || t.status === 'Human review' || (!t.run && t.last_run && ['failed', 'lost', 'timeout', 'quota'].indexOf(t.last_run.outcome) >= 0)));
-    return aiMatches && (S.typeFilter === 'all' || t.type === S.typeFilter) && (S.epic === 'all' || epicOf(t, byKey) === S.epic) &&
+    return aiMatches && dashboardWorkStatusMatches(t, S.workStatusFilter) && (S.typeFilter === 'all' || t.type === S.typeFilter) && (S.epic === 'all' || epicOf(t, byKey) === S.epic) &&
       (!q || t.key.toLowerCase().indexOf(q) >= 0 || t.summary.toLowerCase().indexOf(q) >= 0);
   });
   var cnt = function (s) { return work.filter(function (t) { return t.status === s; }).length; };
@@ -4387,8 +4642,11 @@ function setView(v) {
   S.layouts.mode = '';
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === v)); });
   showView();
-  try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
+  var viewPath = VIEW_PATH[v] || '/cc';
+  if (v === 'work' && S.workStatusFilter && S.workStatusFilter !== 'all') viewPath += '?status=' + encodeURIComponent(S.workStatusFilter);
+  try { history.pushState(null, '', viewPath); } catch (e) { /* file preview */ }
   render();
+  if (v === 'cc' || v === 'work' || v === 'delivery') loadDashboardWaiting(true);
   if (v === 'support') renderSupport();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
@@ -4440,7 +4698,7 @@ function layoutBlocksIn(container) {
 function layoutHidden(blocks, view) {
   var hidden = (blocks || []).filter(function (b) { return b.hidden; });
   if (view === 'cc' && S.consoleUser && !consoleCan('view.machines_ai')) {
-    var restricted = ['usage', 'tokens', 'quota', 'tool-waits', 'autonomy'];
+    var restricted = ['tool-waits', 'autonomy'];
     hidden = hidden.filter(function (b) { return restricted.indexOf(b.id) < 0; });
   }
   return hidden;
@@ -4457,32 +4715,39 @@ function applyLayout(view, root) {
   var grid = document.createElement('div'), els, byId = {};
   grid.className = 'blocks' + (editing ? ' editing' : ''); grid.setAttribute('data-layout-page', page);
   if (view === 'cc') {
+    var dashboardPanel = root.querySelector('#dashboard-panel') || root, tabById = {};
     var headings = document.createElement('div');
     headings.className = 'dashboard-layout-headings';
     headings.setAttribute('aria-label', 'Dashboard sections');
-    Array.prototype.slice.call(root.querySelectorAll('.dash-section')).forEach(function (section) {
+    Array.prototype.slice.call(dashboardPanel.querySelectorAll('[data-dashboard-panel]')).forEach(function (section) {
       var title = section.querySelector('.dash-section-title');
-      if (title) headings.appendChild(title);
+      var tab = section.getAttribute('data-dashboard-panel');
+      if (title) { title.setAttribute('data-dashboard-tab', tab); title.hidden = !editing && tab !== S.dashboardTab; headings.appendChild(title); }
     });
     els = Array.prototype.slice.call(root.querySelectorAll('[data-block]'));
-    els.forEach(function (el) { byId[el.getAttribute('data-block')] = el; });
+    els.forEach(function (el) {
+      var section = el.closest('[data-dashboard-panel]');
+      byId[el.getAttribute('data-block')] = el;
+      tabById[el.getAttribute('data-block')] = section ? section.getAttribute('data-dashboard-panel') : 'work';
+    });
     var dashboardIds = layoutOrder(model.blocks, Object.keys(byId));
     var dashboardShown = dashboardIds.filter(function (id) { return !(meta[id] && meta[id].hidden); });
-    root.appendChild(bar); root.appendChild(headings); root.appendChild(grid);
+    grid.setAttribute('id', 'dashboard-layout-grid');
+    dashboardPanel.appendChild(bar); dashboardPanel.appendChild(headings); dashboardPanel.appendChild(grid);
     dashboardIds.forEach(function (id) {
       var el = byId[id]; if (!el) return;
       var b = meta[id] || { id: id, title: id, size: 'full', hidden: false };
       var cell = document.createElement('div');
-      cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden;
+      var tab = tabById[id];
+      cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-dashboard-tab', tab);
+      cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden || (!editing && tab !== S.dashboardTab);
       if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, dashboardShown.indexOf(id) + 1, dashboardShown.length));
       cell.appendChild(el); grid.appendChild(cell);
     });
-    Array.prototype.slice.call(root.querySelectorAll('.dash-section')).forEach(function (section) { section.remove(); });
-    var title = root.querySelector('.dash-title');
-    var after = title ? title.nextSibling : root.firstChild;
-    root.insertBefore(bar, after);
-    root.insertBefore(headings, bar.nextSibling);
-    root.insertBefore(grid, headings.nextSibling);
+    Array.prototype.slice.call(dashboardPanel.querySelectorAll('[data-dashboard-panel]')).forEach(function (section) { section.remove(); });
+    dashboardPanel.insertBefore(bar, dashboardPanel.firstChild);
+    dashboardPanel.insertBefore(headings, bar.nextSibling);
+    dashboardPanel.insertBefore(grid, headings.nextSibling);
     return;
   }
   els = layoutBlocksIn(root);
@@ -4659,6 +4924,9 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
+  else if (act === 'dashboard-card') openDashboardCard(el.getAttribute('data-card'));
+  else if (act === 'flow-step') openDashboardWorkFilter(el.getAttribute('data-status'));
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);
   else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
   else if (act === 'support-build') buildSupportBundle();
@@ -4879,9 +5147,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'epic') { S.epic = el.getAttribute('data-key'); savePrefs(); renderDHead(); renderDBody(); tick(); flash('d-board'); }
   else if (act === 'theme') {
     var cur = document.documentElement.getAttribute('data-theme');
-    var dark = cur ? cur === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
-    try { localStorage.setItem('aiflow4-theme', dark ? 'light' : 'dark'); } catch (x) { /* storage off */ }
+    saveConsoleTheme(cur === 'light' ? 'dark' : 'light');
   }
 });
 function backupRequestError(response) {
@@ -4985,6 +5251,14 @@ document.addEventListener('change', function (e) {
   if (e.target && e.target.id === 'ai-filter') {
     S.aiFilter = e.target.value; savePrefs(); renderDBody(); tick();
   }
+  if (e.target && e.target.id === 'work-status-filter') {
+    S.workStatusFilter = e.target.value; savePrefs();
+    if (S.view === 'work') {
+      var boardPath = '/work' + (S.workStatusFilter === 'all' ? '' : '?status=' + encodeURIComponent(S.workStatusFilter));
+      try { history.replaceState(null, '', boardPath); } catch (x) { /* file preview */ }
+    }
+    renderDBody(); tick();
+  }
   if (e.target && e.target.matches('[data-github-installation]')) S.integrations.selected = e.target.value;
   if (e.target && e.target.matches('[data-review-project]')) { S.reviewProject = e.target.value; loadReviews(); }
   if (e.target && e.target.matches('[data-project-field]')) {
@@ -5045,6 +5319,9 @@ document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && S.projectPickerOpen) { S.projectPickerOpen = false; renderProjectPickerOptions(); }
   if (e.key === 'Escape' && S.drawer) closeAll();
   if (e.key === 'Enter' && e.target.matches && e.target.matches('tr[data-act]')) e.target.click();
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.target.matches && e.target.matches('.dashboard-tab')) {
+    e.preventDefault(); setDashboardTab(S.dashboardTab === 'ai' ? 'work' : 'ai');
+  }
   if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.target.matches && e.target.matches('[role="tab"]')) {
     var tabs = $$('.tab').filter(function (tab) { return !tab.hidden; }), here = tabs.indexOf(e.target), delta = e.key === 'ArrowRight' ? 1 : -1;
     if (here >= 0 && tabs.length) { e.preventDefault(); var next = tabs[(here + delta + tabs.length) % tabs.length]; next.focus(); setView(next.getAttribute('data-view')); }
@@ -5100,11 +5377,12 @@ document.addEventListener('submit', function (e) {
 });
 window.addEventListener('popstate', function () {
   S.view = viewOf(location.pathname);
+  var status = new URLSearchParams(location.search || '').get('status');
+  S.workStatusFilter = status || 'all';
   syncMenuVisibility(); showView(); render();
 });
 
 /* ---------- boot ---------- */
-try { var th = localStorage.getItem('aiflow4-theme'); if (th) document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }
 loadPrefs();
 syncMenuVisibility();
 showView();
@@ -5119,7 +5397,7 @@ if (S.view === 'integrations') {
   loadIntegrations();
 }
 if (S.view === 'notifications') loadNotifications();
-poll(); pollServices(); pollAnalytics(); pollConsoleSession(); pollReviews();
+poll(); pollServices(); pollAnalytics(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
 setInterval(tick, 1000);
 })();
 </script>

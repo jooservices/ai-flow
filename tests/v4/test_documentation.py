@@ -344,7 +344,7 @@ def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatc
             self.stdout = stdout
 
     def fake_run(command, **kwargs):
-        if "show" in command:
+        if command[1] == "show":
             return Result("\n".join(source_lines) + "\n")
         return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
 
@@ -353,6 +353,99 @@ def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatc
     assert views == {"machines", "review", "users"}
     pages = [ui, *(f"docs/guide/screens/{view}.md" for view in views)]
     assert docsite.documentation_gaps(pages, views=views) == []
+
+
+def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-tabs{")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(".work-status-filter{")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function dashboardSpark(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function loadDashboardQuota(")),
+        next(i for i, line in enumerate(source_lines, 1) if "dashboardQuota: { rows:" in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function openDashboardCard(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function projTickets(")),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"cc", "work", "review", "delivery"}
+
+
+def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    topic = "docs/v4/dashboard-v2.md"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith(":root{")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function saveConsoleTheme(")),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    views = set(docsite.console_views())
+    assert docsite.changed_views("origin/develop") == views
+    assert docsite.documentation_gaps([ui, topic], views=views) == []
+
+
+def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    old_line = (
+        "try { var th = localStorage.getItem('aiflow4-theme'); if (th) "
+        "document.documentElement.setAttribute('data-theme', th); } catch (x) { /* storage off */ }"
+    )
+    line_no = next(i for i, line in enumerate(source_lines, 1) if line == "loadPrefs();")
+    base_lines = list(source_lines)
+    base_lines[line_no - 1] = old_line
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show" and command[2].startswith("origin/develop:"):
+            return Result("\n".join(base_lines) + "\n")
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result(f"@@ -{line_no} +{line_no},0 @@\n")
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == set(docsite.console_views())
+
+
+def test_dashboard_v2_guide_names_shared_state_routes_and_done_timestamp():
+    topic = "docs/v4/dashboard-v2.md"
+    api = "aiflow/v4/control/api.py"
+    state = "aiflow/v4/control/state.py"
+    routes = {api: {"GET /v1/state"}, state: {"GET /v1/state", "GET /v1/deploy/state"}}
+    changed_routes = {api: {"GET /v1/state"}, state: {"GET /v1/state", "GET /v1/deploy/state"}}
+    assert docsite.documentation_gaps([api, state, topic], routes=routes, changed_routes=changed_routes) == []
+    guide = (ROOT / topic).read_text()
+    assert "`done_at`" in guide
 
 
 def test_escalation_console_changes_map_to_command_center_screens(monkeypatch):

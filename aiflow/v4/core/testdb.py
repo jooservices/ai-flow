@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Collection
 
 log = logging.getLogger("aiflow4.testdb")
 PREFIX = "aiflow4_t_"
@@ -32,8 +33,13 @@ def created_at(name: str) -> int | None:
 
 
 def sweep(admin_url: str, now: float | None = None, stale_after_s: int = STALE_AFTER_S,
-          max_databases: int = MAX_DATABASES) -> list[str]:
-    """Drop test databases nobody uses and return their names. Needs a role that owns them (or a superuser)."""
+          max_databases: int = MAX_DATABASES,
+          protected_databases: Collection[str] = ()) -> list[str]:
+    """Drop idle test databases, except protected ones, and return their names.
+
+    Needs a role that owns the databases (or a superuser). Protected databases still count toward the configured
+    limit but are never dropped by this sweep.
+    """
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
@@ -43,7 +49,8 @@ def sweep(admin_url: str, now: float | None = None, stale_after_s: int = STALE_A
         rows = admin.execute(
             "SELECT d.datname FROM pg_database d WHERE d.datname LIKE %s AND NOT EXISTS"
             " (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)", (PREFIX.replace("_", r"\_") + "%",)).fetchall()
-        idle = [r[0] for r in rows if _NAME.fullmatch(r[0])]
+        protected = set(protected_databases)
+        idle = [r[0] for r in rows if r[0] not in protected and _NAME.fullmatch(r[0])]
         total = admin.execute("SELECT count(*) FROM pg_database WHERE datname LIKE %s",
                               (PREFIX.replace("_", r"\_") + "%",)).fetchone()[0]
         # oldest first; a legacy name has no time and counts as the oldest

@@ -166,7 +166,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                        "outcome": r["outcome"] or r["status"], "error_kind": r["error_kind"], "duration_s": dur,
                        "cost_usd": float(r["cost_usd"]), "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
                        "pr_url": r["pr_url"], "ended_age_s": _age(r["ended_at"])})
-    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, jira_updated"
+    tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at, jira_updated"
                      " FROM tickets ORDER BY project, key")
     ticket_index = {ticket["key"]: ticket for ticket in tickets}
     for ticket in tickets:
@@ -184,6 +184,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     for t in tickets:
         t["run"] = run_by_ticket.get(t["key"])
         t["last_run"] = last_by_ticket.get(t["key"])
+        t["done_at"] = _iso(t["done_at"])
         t["updated_age_s"] = _age(t.pop("jira_updated"))
     today = db.one("SELECT count(*) AS runs, coalesce(sum(cost_usd),0) AS cost, coalesce(sum(tokens_in),0) AS tin,"
                    " coalesce(sum(tokens_out),0) AS tout, count(*) FILTER (WHERE outcome='done') AS done,"

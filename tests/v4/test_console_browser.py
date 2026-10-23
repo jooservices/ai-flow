@@ -25,7 +25,7 @@ import pytest
 from aiflow.v4.control import login
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.api import create_app
-from aiflow.v4.control.console_auth import CANONICAL_ROLES, ROLE_VIEW_IDS, role_satisfies
+from aiflow.v4.control.console_auth import CANONICAL_ROLES
 from aiflow.v4.control.db import J
 from aiflow.v4.control.ui import mount_ui
 from conftest import add_ticket, join_node
@@ -61,6 +61,22 @@ VIEW_LABELS = {
     "backup": "Backup & Restore",
     "notifications": "Notifications",
     "support": "Support",
+}
+
+
+# Written out by hand on purpose: it is the expected policy, so it must not be derived from the production
+# permission tables the console is being tested against.
+_EVERYONE = {"Dashboard", "Work board"}
+EXPECTED_ROLE_VIEWS = {
+    "administrator": set(VIEW_LABELS.values()),
+    "product_owner": _EVERYONE | {"Delivery", "Business", "Team Lead", "Stakeholder", "Human review", "Knowledge"},
+    "delivery": _EVERYONE | {"Delivery", "Human review"},
+    "team_lead": _EVERYONE | {"Delivery", "Team Lead", "Human review", "Knowledge"},
+    "sa": _EVERYONE | {"SA", "Machines and AI", "Integrations", "Knowledge"},
+    "ba": _EVERYONE | {"Business", "Knowledge"},
+    "business": _EVERYONE | {"Business"},
+    "reviewer": _EVERYONE | {"Human review"},
+    "stakeholder": _EVERYONE | {"Stakeholder"},
 }
 
 
@@ -202,8 +218,7 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
                                    ROLE_LABELS[role])
         assert password
         credentials.append(password)
-        allowed = [VIEW_LABELS[view] for view, permission in ROLE_VIEW_IDS.items()
-                   if view in VIEW_LABELS and role_satisfies(role, {permission})]
+        allowed = [label for label in VIEW_LABELS.values() if label in EXPECTED_ROLE_VIEWS[role]]
         user_cases.append({"role": role, "label": ROLE_LABELS[role], "email": email, "password": password,
                            "views": allowed})
 
@@ -214,6 +229,8 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
     add_ticket(ctx.db, "TESTWP-981", status="To Do", labels=("aiflow-ready",))
     ctx.db.run("UPDATE tickets SET type='Story', parent_key='TESTWP-970', summary='Searchable browser sample'"
                " WHERE key='TESTWP-981'")
+    add_ticket(ctx.db, "TESTWP-982", status="To Do", labels=())
+    ctx.db.run("UPDATE tickets SET type='Task', summary='Not ready sample' WHERE key='TESTWP-982'")
     action_keys = {}
     pr_data = {}
     next_pr = 25200

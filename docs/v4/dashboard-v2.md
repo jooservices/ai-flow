@@ -15,17 +15,20 @@ person has that permission; otherwise it opens the Work board filtered to waitin
 count includes only non-epic tickets visible on the Work board. AI usage today opens the AI and machines tab. The
 Work tab's Flow at a glance steps open the Work board with the selected Jira status.
 
-The AI and machines tab charts recorded tokens by AI provider and UTC day over the last 14 days, shows each AI's
-share of those tokens, and shows the existing per-account quota and reset details to people with Machines and AI
-access. The dashboard usage aggregation reads AI provider runs in the `runs` table, excludes human review records,
-and is scoped to the signed-in person's visible projects. The quota panel reuses the account quota and usage data
-already shown on Machines and AI.
+The AI and machines tab charts recorded tokens by AI provider and UTC day over the last 14 days and shows each AI's
+share of those tokens. The dashboard usage aggregation reads AI provider runs in the `runs` table, excludes human
+review records, and is scoped to the signed-in person's visible projects. People with Machines and AI access see
+the existing per-account quota details; other dashboard roles see provider, quota-window percentages, and reset
+times for accounts serving their visible projects, without machine, account, or operational status details. The
+dashboard quota summary reuses the account quota and usage data already shown on Machines and AI.
 
 Dark is the default theme across the console. A person can switch to light from the theme control in the menu. The
 choice is saved against the signed-in account, so it follows that person across browsers; the browser's local
 preference is used as a fallback when the console API is not available.
 
-The per-person theme preference is read with `GET /v1/console/preferences` and saved with
+The dashboard quota summary is returned by `GET /v1/dashboard/quota`, with account records filtered to the nodes
+serving the signed-in person's allowed projects and reduced to quota-only fields. The per-person theme preference
+is read with `GET /v1/console/preferences` and saved with
 `PUT /v1/console/preferences`. Daily AI usage by provider is returned by
 `GET /v1/analytics/usage/daily?days=14`.
 

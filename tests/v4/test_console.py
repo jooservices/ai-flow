@@ -166,7 +166,8 @@ ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_busin
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
                      weekly_report: dict | None = None, dashboard_tab: str = "work",
                      dashboard_waiting_keys: list[str] | None = None,
-                     console_user: dict | None = None) -> str:
+                     console_user: dict | None = None,
+                     dashboard_quotas: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
@@ -185,6 +186,9 @@ S.dashboardTab = {json.dumps(dashboard_tab)};
 S.dashboardWaiting.keys = {json.dumps(dashboard_waiting_keys)};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_user or console_session('owner'))};
+S.dashboardQuota.rows = {json.dumps(dashboard_quotas)};
+S.dashboardQuota.user = S.consoleUser.user || '';
+S.dashboardQuota.loadedAt = {"Date.now()" if dashboard_quotas is not None else "0"};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
 S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
@@ -1515,6 +1519,27 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert "<td>30</td><td>$0.010</td>" in account_detail
 
 
+def test_dashboard_role_without_machines_access_sees_safe_quota_and_reset_summary():
+    state = {"projects": [{"key": "ALPHA", "repo": "jooservices/alpha"}], "tickets": [],
+             "nodes": [], "accounts": [], "active_runs": [], "recent_runs": [], "incidents": [],
+             "events": [], "totals": {}, "versions": {}}
+    reset = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    dashboard_quotas = [
+        {"provider": "codex", "label": "Account 1", "windows": [
+            {"label": "5 hours", "used_pct": 40, "reset_at": reset, "estimated": False}]},
+        {"provider": "claude", "label": "Account 1", "windows": []},
+    ]
+
+    rendered = render_dashboard(state, console_user=console_session("business"), dashboard_quotas=dashboard_quotas)
+
+    assert "Quota by AI" in rendered
+    assert "Codex" in rendered and "Account 1" in rendered and "5 hours" in rendered
+    assert "40%" in rendered and "Next quota reset:" in rendered
+    assert "Quota not reported" in rendered
+    assert "Per-account quota details require Machines and AI access" not in rendered
+    assert "claude-01" not in rendered and "node1" not in rendered
+
+
 def test_dashboard_card_routes_and_funnel_filters_match_board_statuses():
     result = run_script("""
 var selected = '', reviewProjectAtNavigation = null;
@@ -1633,6 +1658,45 @@ console.log(JSON.stringify(projTickets().filter(function (ticket) {{ return tick
     dashboard = render_dashboard(snapshot, dashboard_waiting_keys=dashboard_queue.json()["ticket_keys"])
     waiting_card = re.search(r'data-card="waiting">(.*?)</button>', dashboard).group(1)
     assert '<span class="value">2</span>' in waiting_card
+
+
+def test_dashboard_quota_endpoint_is_safe_and_scoped_for_role_without_machines_access(client, ctx):
+    from aiflow.v4.control import login
+    from aiflow.v4.control.db import J
+
+    assert "view.machines_ai" not in ROLE_PERMISSIONS["business"]
+    ctx.settings.console_login = True
+    ctx.settings.console_session_secret = "dashboard-quota-session-secret-at-least-32-bytes"
+    email = "dashboard-business@example.test"
+    login.seed_user(ctx.db, email, "business", "Dashboard Business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], email))
+    client.cookies.set(COOKIE_NAME, issue_session(email, "business", int(time.time()) + 3600,
+                                                  ctx.settings.console_session_secret))
+
+    reset = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    quota = {"windows": {"five_hour": {"utilization": 0.4, "resets_at": reset}}}
+    for account_id in ("claude-01", "codex-01", "opencode-01"):
+        ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(quota), account_id))
+    # This account is enabled on a machine outside the caller's project scope.
+    outside = next(account for account in ctx._configured_repo().accounts if account.id == "opencode-01")
+    outside.node = "outside-node"
+
+    snapshot = client.get("/v1/state")
+    assert snapshot.status_code == 200 and snapshot.json()["accounts"] == []
+    response = client.get("/v1/dashboard/quota")
+
+    assert response.status_code == 200
+    rows = response.json()["rows"]
+    assert {row["provider"] for row in rows} == {"claude", "codex"}
+    assert all(set(row) == {"provider", "label", "windows"} for row in rows)
+    assert all("opencode-01" not in json.dumps(row) and "node1" not in json.dumps(row) for row in rows)
+    for row in rows:
+        assert row["label"] == "Account 1"
+        assert row["windows"] == [{"label": "Five Hour", "used_pct": 40.0, "reset_at": reset,
+                                   "estimated": False}]
+
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", ([], email))
+    assert client.get("/v1/dashboard/quota").json()["rows"] == []
 
 
 def test_non_reviewer_waiting_card_matches_work_board_when_queue_contains_epic():

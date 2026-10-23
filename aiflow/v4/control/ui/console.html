@@ -759,6 +759,12 @@ function accountAssignedTo(a, node) {
   });
   return !!a && a.node === node;
 }
+function accountPendingOnMachine(a, node) {
+  var machines = a && Array.isArray(a.machines) ? a.machines : [];
+  var machine = machines.filter(function (item) { return item && typeof item === 'object' && item.node === node; })[0];
+  return !!(machine && (machine.sign_in_pending || machine.signed_in === false)) ||
+    !!(a && a.sign_in_pending && (a.node === node || !machine));
+}
 function since() { return (Date.now() - S.fetchedAt) / 1000; }
 function loadPrefs() {
   try {
@@ -3729,8 +3735,8 @@ function renderMachines() {
   if (!nodes.length) h += '<div class="machine-empty">No machine has joined yet.</div>';
   nodes.forEach(function (n) {
     var machineAccounts = (data.accounts || []).filter(function (a) { return accountAssignedTo(a, n.name); });
-    var pendingAccounts = machineAccounts.filter(function (a) { return a.sign_in_pending; });
-    var accounts = machineAccounts.filter(function (a) { return !a.sign_in_pending; });
+    var pendingAccounts = machineAccounts.filter(function (a) { return accountPendingOnMachine(a, n.name); });
+    var accounts = machineAccounts.filter(function (a) { return !accountPendingOnMachine(a, n.name); });
     var assignedSessions = machineAccounts.reduce(function (total, a) { return total + Number(a.parallel || 1); }, 0);
     var availableSessions = Math.max(0, 8 - assignedSessions);
     var metrics = n.metrics || {}, editorId = state.accountEditor;
@@ -3753,18 +3759,28 @@ function renderMachines() {
     }
     h += '<div class="machine-accounts">';
     pendingAccounts.forEach(function (a) {
-      var signIn = state.signIns[a.id];
+      var machineUsage = (a.machines || []).filter(function (m) { return m && m.node === n.name; })[0] || {};
+      var sharedAssignment = !!(a.shared || a.shared_managed || machineUsage.shared_assignment);
+      var signIn = sharedAssignment ? machineUsage.signin : state.signIns[a.id];
       var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
-      if (consoleCan('nodes.manage') && (!signIn || (state.signInRefreshAt[a.id] && Date.now() - state.signInRefreshAt[a.id] >= 2000))) loadAccountSignIn(a.id);
+      if (!sharedAssignment && consoleCan('nodes.manage') &&
+          (!signIn || (state.signInRefreshAt[a.id] && Date.now() - state.signInRefreshAt[a.id] >= 2000))) loadAccountSignIn(a.id);
       h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill('warn', 'Sign-in pending') +
         '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + '</span><span class="spacer"></span>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">Start sign-in again</button>';
-      var signInReady = signIn && signIn.status === 'completed' && (a.status === 'idle' || a.status === 'working');
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm primary" data-act="account-signin-complete" data-id="' + esc(a.id) + '"' + (signInReady ? '' : ' disabled') + '>Finish sign-in</button>';
+      if (consoleCan('nodes.manage') && sharedAssignment) h += '<button class="btn sm" data-act="acc-retry-signin" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '">Retry sign-in</button>';
+      else if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">Start sign-in again</button>';
+      var signInReady = !sharedAssignment && signIn && signIn.status === 'completed' && (a.status === 'idle' || a.status === 'working');
+      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm primary" data-act="account-signin-complete" data-id="' + esc(a.id) + '"' + (signInReady ? '' : ' disabled') + '>Finish sign-in</button>';
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
-      else if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div>';
-      if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
+      if (sharedAssignment && signIn && signIn.link) h += '<div class="signin-result"><a href="' + esc(signIn.link) + '" target="_blank" rel="noopener noreferrer">Open provider authorization</a>' +
+        (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
+        (signIn.expires_at ? ' · expires ' + esc(when(signIn.expires_at)) : '') +
+        '<p class="small">Complete authorization for ' + esc(n.name) + '. Its worker will check the credentials after the provider login finishes.</p></div>';
+      else if (sharedAssignment) h += '<div class="small">Waiting for ' + esc(n.name) + ' to show its sign-in link and code.' +
+        (consoleCan('nodes.manage') ? ' Use Retry sign-in to start a fresh attempt.' : '') + '</div>';
+      else if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
       else if (signIn && signIn.status === 'failed') h += '<div class="small">' + esc(signIn.error || 'Provider sign-in failed.') + ' · Start sign-in again to retry.</div>';
       else if (signIn && signIn.sign_in_url) h += '<div class="signin-result"><a href="' + esc(signIn.sign_in_url) + '" target="_blank" rel="noopener">Open provider authorization</a>' +
         (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
@@ -3777,18 +3793,21 @@ function renderMachines() {
     if (!accounts.length && !pendingAccounts.length) h += '<div class="machine-empty">No AI accounts on this machine.</div>';
     accounts.forEach(function (a) {
       var machineUsage = (a.machines || []).find(function (m) { return m.node === n.name; }) || {};
+      var sharedAssignment = !!(a.shared || a.shared_managed || machineUsage.shared_assignment);
       var removableAssignment = (a.machines || []).some(function (m) { return m.node === n.name && m.removable; });
       h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
-        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
-        ' · ' + esc((a.jobs || []).join(', ') || 'no jobs') + '</span><span class="spacer"></span>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
-      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
+        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + (sharedAssignment
+          ? ' · total limit ' + esc(a.session_limit || a.parallel) + ' sessions'
+          : ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
+            ' · ' + esc((a.jobs || []).join(', ') || 'no jobs')) + '</span><span class="spacer"></span>';
+      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
+      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
-      else if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Tokens today <strong>' + esc(tok(machineUsage.tokens_today || 0)) + '</strong></span>';
       h += '<span>Cost today <strong>' + esc(usd(machineUsage.cost_today || 0)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
-      if (state.accountEditor === a.id) {
+      if (!sharedAssignment && state.accountEditor === a.id) {
         h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
       }

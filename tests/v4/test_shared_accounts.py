@@ -69,6 +69,10 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
         enabled = client.post("/v1/shared-accounts/shared-01/machines", json={"node": name})
         assert enabled.status_code == 201
     assert client.post("/v1/shared-accounts/shared-01/machines", json={"node": "cc"}).status_code == 409
+    state_account = next(a for a in client.get("/v1/state").json()["accounts"] if a["id"] == "shared-01")
+    assert state_account["shared_managed"] is True
+    assert {m["node"]: m["sign_in_pending"] for m in state_account["machines"]} == {"cc": True, "node1": True}
+    assert all(m["shared_assignment"] for m in state_account["machines"])
     desired = beat(client, "node1", node1)
     handoff = desired["signin"][0]
     assert handoff["account"] == "shared-01" and handoff["provider"] == "claude"
@@ -85,7 +89,8 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
     monkeypatch.setattr(agent, "_SIGN_IN_RUN_AS", [])
 
     heartbeat_desired = {}
-    prompt_reported = Event()
+    prompt_reports = []
+    completion_reported = Event()
 
     class NodeAPI:
         def __init__(self, *_args, **_kwargs):
@@ -99,18 +104,19 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
             if path.endswith("/heartbeat"):
                 heartbeat_desired.update(result["desired"])
             if path.endswith("/signin-prompt"):
-                prompt_reported.set()
+                prompt_reports.append(dict(body))
+            if path.endswith("/signin-complete"):
+                completion_reported.set()
             return result
 
-    class StopAfterPrompt:
+    class StopAfterCompletion:
         stopped = False
 
         def is_set(self):
             return self.stopped
 
         def wait(self, _timeout=None):
-            assert prompt_reported.wait(timeout=5), "node agent did not report the provider prompt"
-            time.sleep(0.1)  # let the short provider CLI exit before run_agent cancels its sign-in threads
+            assert completion_reported.wait(timeout=5), "node agent did not report successful provider login"
             self.stopped = True
 
     from aiflow.v4.node import operations
@@ -123,23 +129,20 @@ def test_account_exists_apart_from_machines_and_node_agent_reports_its_provider_
     monkeypatch.setenv("AIFLOW4_POLICY_RELAY", "0")
     monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
     agent.run_agent("https://control.example.test", "node1", "node-token", every_s=1, manage_workers=False,
-                    stop=StopAfterPrompt())
+                    stop=StopAfterCompletion())
     assert heartbeat_desired["signin"][0]["account"] == "shared-01"
     assert heartbeat_desired["signin"][0]["provider"] == "claude"
+    assert prompt_reports == [{"link": "https://claude.example.test/device", "code": "ABCD-2345",
+                               "expires_in_s": 900}]
 
-    machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
-                                             if a["id"] == "shared-01")["machines"]}
-    assert machines["node1"]["signed_in"] is False
-    assert machines["node1"]["signin"]["code"] == "ABCD-2345"
-    assert machines["node1"]["signin"]["link"] == "https://claude.example.test/device"
-
-    # signing in once on the machine (a passing check with its own credentials) completes it
-    assert client.post("/v1/accounts/shared-01/probe", json={"ok": True}, headers=node1).status_code == 200
     machines = {m["node"]: m for m in next(a for a in client.get("/v1/shared-accounts").json()["accounts"]
                                              if a["id"] == "shared-01")["machines"]}
     assert machines["node1"]["signed_in"] is True and machines["node1"]["signin"] is None
     assert machines["cc"]["signed_in"] is False
-    assert beat(client, "node1", node1)["signin"] == []
+    next_heartbeat = beat(client, "node1", node1)
+    assert next_heartbeat["signin"] == []
+    assert "shared-01" in next_heartbeat["accounts"]
+    assert "shared-01" in next_heartbeat["workers"]
 
     # AC6: control keeps no credential, only the prompt (cleared after sign-in)
     stored = ctx.db.all("SELECT * FROM account_machines")

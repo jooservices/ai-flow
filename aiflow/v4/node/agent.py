@@ -266,6 +266,12 @@ def _post_shared_sign_in_prompt(api: ControlClient, account: str, sign_in_url: s
              {"link": sign_in_url, "code": code, "expires_in_s": 900}, retries=1)
 
 
+def _post_shared_sign_in_complete(api: ControlClient, account: str, request_id: str) -> None:
+    """Report the provider CLI's successful login so the node can start its normal credential probe."""
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/signin-complete",
+             {"request_id": request_id}, retries=1)
+
+
 def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: threading.Event,
                          accounts_root: str = "/srv/aiflow/accounts") -> None:
     """Run a provider login inside its private account home and relay its device handoff to the console."""
@@ -355,6 +361,10 @@ def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: t
                     _post_sign_in_status(api, node, account, request_id, "failed",
                                          sign_in_url=last_details[0], code=last_details[1],
                                          error=f"Provider sign-in exited with status {return_code}.")
+            elif return_code == 0:
+                # The next heartbeat starts the worker, whose first action is the usual credential probe. This
+                # completion report breaks the pending-assignment/worker-probe cycle without moving credentials.
+                _post_shared_sign_in_complete(api, account, request_id)
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)

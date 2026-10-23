@@ -10,8 +10,9 @@ its sessions and quota once, across all of them, and never runs more sessions th
 2. Open the account and choose **Enable on** a machine. The machine shows *Sign-in needed*.
 3. The node agent starts the provider's login command in that machine's private account home and reports the
    provider's sign-in **link and code** to Command Center. Open the link and enter the code. The provider CLI stores
-   the credential on that machine. Each machine signs in once. The first passing account check from the machine marks
-   it signed in and removes the link and code.
+   the credential on that machine. When the login command exits successfully, the agent reports completion and
+   releases the assignment so the machine's worker can start its usual credential check. An auth failure returns
+   only that machine to *Sign-in needed*. Each machine signs in once, and the link and code are cleared on completion.
 4. **Total sessions** changes the limit at any time. Accounts defined in `aiflow-control/accounts.yaml` can be shared
    the same way; their first machine stays defined in the repo and keeps its previous capacity as the limit until you
    change it.
@@ -59,6 +60,7 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `DELETE /v1/shared-accounts/{id}/machines/{node}[?confirm=true]` | remove from one machine; `confirm` is required for the last one |
 | `DELETE /v1/shared-accounts/{id}?confirm=true` | remove from all machines |
 | `POST /v1/accounts/{id}/signin-prompt` | node reports link and code (node token) |
+| `POST /v1/accounts/{id}/signin-complete` | node reports successful provider login for the current attempt; its worker then checks credentials (node token) |
 
 ### Other calls that read or enforce the shared account
 

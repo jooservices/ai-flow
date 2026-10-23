@@ -263,6 +263,7 @@ def machines_view(db, acc: Account | None, node_status: dict[str, str], *,
             prompt = {"link": row["signin_link"], "code": row["signin_code"],
                       "expires_at": row["signin_expires_at"].isoformat()}
         out.append({"node": n, "node_status": node_status.get(n, "offline"), "signed_in": not pending,
+                    "sign_in_pending": pending, "shared_assignment": bool(row),
                     "removable": not machine_managed and (n == acc.node or bool(row)),
                     "runs_active": running.get(n, 0), "runs_24h": recent.get(n, 0),
                     "tokens_today": int(usage.get("tokens", 0)), "cost_today": float(usage.get("cost", 0)),
@@ -294,6 +295,10 @@ class SigninPromptBody(BaseModel):
     link: str = Field(max_length=500)
     code: str = Field(max_length=64)
     expires_in_s: int = Field(default=900, ge=60, le=3600)
+
+
+class SigninCompleteBody(BaseModel):
+    request_id: str = Field(min_length=1, max_length=160)
 
 
 def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
@@ -492,3 +497,32 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
             (body.link, body.code, body.expires_in_s, acc.id, node))
         return {"stored": bool(changed),
                 "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_s)).isoformat()}
+
+    @app.post("/v1/accounts/{account_id}/signin-complete")
+    def signin_complete(account_id: str, body: SigninCompleteBody, node: str = Depends(node_auth)) -> dict:
+        """A successful provider login unlocks the local worker's credential probe for this machine."""
+        acc = ctx.repo().account(account_id)
+        if not acc or not acc.runs_on(node):
+            raise HTTPException(403, f"account {account_id} does not run on {node}")
+        row = ctx.db.one("SELECT status,signin_attempt FROM account_machines WHERE account_id=%s AND node=%s",
+                         (acc.id, node))
+        if not row:
+            raise HTTPException(409, f"{acc.id} has no shared sign-in on {node}")
+        expected = f"shared:{node}:{acc.id}:{row['signin_attempt']}"
+        if body.request_id != expected:
+            raise HTTPException(409, "shared sign-in attempt is no longer current")
+        if row["status"] == "pending":
+            changed = ctx.db.run(
+                "UPDATE account_machines SET status='signed_in', signed_in_at=now(), signin_link='', signin_code='',"
+                " signin_expires_at=NULL WHERE account_id=%s AND node=%s AND status='pending' AND signin_attempt=%s",
+                (acc.id, node, row["signin_attempt"]))
+            if not changed:
+                current = ctx.db.one("SELECT status,signin_attempt FROM account_machines"
+                                     " WHERE account_id=%s AND node=%s", (acc.id, node))
+                if not current or current["signin_attempt"] != row["signin_attempt"] or current["status"] != "signed_in":
+                    raise HTTPException(409, "shared sign-in attempt is no longer current")
+            else:
+                ctx.events.emit("account.machine_signed_in", account=acc.id, node=node, outcome="completed")
+        elif row["status"] != "signed_in":
+            raise HTTPException(409, f"{acc.id} is not waiting for sign-in on {node}")
+        return {"completed": True, "account": acc.id, "node": node}

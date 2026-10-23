@@ -100,6 +100,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "GROUP BY account_id")}
     sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
         cool = ctx.leases.cooling(a["id"])
         r = running.get(a["id"])
@@ -124,6 +125,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
             "tier": a["tier"], "roles": acc.roles,
             "machines": machines_view(db, acc, node_status, include_signin=include_signin),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,
+            "shared_managed": a["id"] in shared_managed,
             "explicit_only": bool(acc and acc.explicit_only),
             "paused": bool(acc.paused), "jobs": [job for job, role in
                 (("develop", "dev"), ("verify", "verify"), ("intake", "intake_refiner"), ("master", "master"))

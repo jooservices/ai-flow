@@ -235,6 +235,49 @@ console.log(machines.innerHTML);
     return result.stdout
 
 
+def test_machines_screen_uses_assignment_state_and_shared_actions():
+    account = {"id": "shared-01", "provider": "claude", "node": "node1", "shared": False,
+               "shared_managed": True, "sign_in_pending": False, "status": "signed_out", "paused": False,
+               "session_limit": 2, "parallel": 2, "jobs": ["develop"],
+               "machines": [{"node": "node1", "signed_in": False, "sign_in_pending": True,
+                             "shared_assignment": True, "removable": True,
+                             "signin": {"link": "https://claude.example.test/device", "code": "ABCD-2345",
+                                        "expires_at": "2026-10-23T12:00:00+00:00"}}]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+    rendered_pending = render_machines({"nodes": [machine], "accounts": [account]})
+    assert "Sign-in pending" in rendered_pending
+    assert "ABCD-2345" in rendered_pending
+    assert 'data-act="acc-retry-signin"' in rendered_pending
+    assert 'data-act="acc-remove-machine"' in rendered_pending
+    assert 'data-act="account-pause"' not in rendered_pending
+    assert 'data-act="account-edit"' not in rendered_pending
+    assert 'data-act="account-signin"' not in rendered_pending
+    assert 'data-act="account-signin-complete"' not in rendered_pending
+    assert 'data-act="account-remove"' not in rendered_pending
+
+    signed_in = {**account, "status": "idle", "machines": [{"node": "node1", "signed_in": True,
+                                                                  "sign_in_pending": False, "shared_assignment": True,
+                                                                  "removable": True,
+                                                                  "signin": None}]}
+    rendered_signed_in = render_machines({"nodes": [machine], "accounts": [signed_in]})
+    assert "total limit 2 sessions" in rendered_signed_in
+    assert 'data-act="acc-remove-machine"' in rendered_signed_in
+    assert 'data-act="account-pause"' not in rendered_signed_in
+    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-signin"' not in rendered_signed_in
+    assert 'data-act="account-remove"' not in rendered_signed_in
+
+    assignment_only = {**signed_in, "shared_managed": False,
+                       "machines": [{"node": "node1", "signed_in": True, "sign_in_pending": False,
+                                     "shared_assignment": True, "removable": True, "signin": None}]}
+    rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
+    assert 'data-act="acc-remove-machine"' in rendered_assignment
+    assert 'data-act="account-pause"' not in rendered_assignment
+    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-signin"' not in rendered_assignment
+
+
 def render_integrations(user: dict, jira: dict | None = None) -> str:
     driver = f"""
 var integrationsView = {{innerHTML: ''}};

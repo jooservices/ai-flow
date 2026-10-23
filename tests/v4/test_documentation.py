@@ -333,6 +333,8 @@ def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatc
         next(i for i, line in enumerate(source_lines, 1) if line.startswith(".dashboard-tabs{")),
         next(i for i, line in enumerate(source_lines, 1) if line.startswith(".work-status-filter{")),
         next(i for i, line in enumerate(source_lines, 1) if line.startswith("function dashboardSpark(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function loadDashboardQuota(")),
+        next(i for i, line in enumerate(source_lines, 1) if "dashboardQuota: { rows:" in line),
         next(i for i, line in enumerate(source_lines, 1) if line.startswith("function openDashboardCard(")),
         next(i for i, line in enumerate(source_lines, 1) if line.startswith("function projTickets(")),
     ]

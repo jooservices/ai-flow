@@ -87,8 +87,12 @@ def _redact_ip(match: re.Match[str]) -> str:
 _IP = re.compile(r"(?<![A-Fa-f0-9])(?:\d{1,3}\.){3}\d{1,3}(?![A-Fa-f0-9])|(?<![A-Fa-f0-9:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])")
 
 
-def sanitize_text(text: str) -> str:
-    """Remove recognizable credentials and personal identifiers before writing bundle files."""
+def sanitize_text(text: str, names: bool = True) -> str:
+    """Remove recognizable credentials and personal identifiers before writing bundle files.
+
+    ``names=False`` skips the person-name rules; it is for the allow-listed structured JSON files,
+    where ``name`` holds machine names such as ``wsl`` and free-form prose is already replaced.
+    """
     text = _PRIVATE_KEY.sub("[REDACTED_PRIVATE_KEY]", text)
     text = _SECRET_ASSIGNMENT.sub(_redact_secret_assignment, text)
     text = _BEARER.sub("Bearer [REDACTED]", text)
@@ -102,6 +106,8 @@ def sanitize_text(text: str) -> str:
     text = _ADDRESS.sub("[REDACTED_ADDRESS]", text)
     text = _IP.sub(_redact_ip, text)
     text = _HOME_PATH.sub(r"\1[REDACTED_USER]", text)
+    if not names:
+        return text
     text = _NAME.sub(_redact_name, text)
     text = _PERSON_FIELD.sub(_redact_person_field, text)
     return _PERSON_MENTION.sub(_redact_person_field, text)
@@ -135,7 +141,7 @@ def _redact_secret_assignment(match: re.Match[str]) -> str:
     return match.group("prefix") + redacted + match.group("suffix")
 
 
-def sensitive_findings(text: str) -> list[str]:
+def sensitive_findings(text: str, names: bool = True) -> list[str]:
     """Return names of sensitive-data classes still present after sanitization."""
     findings = []
     if (_PRIVATE_KEY.search(text) or _BEARER.search(text) or _URL_CREDENTIALS.search(text)
@@ -144,11 +150,16 @@ def sensitive_findings(text: str) -> list[str]:
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    has_name = bool(_NAME.search(text) or _PERSON_FIELD.search(text) or _PERSON_MENTION.search(text))
+    has_name = names and bool(_NAME.search(text) or _PERSON_FIELD.search(text) or _PERSON_MENTION.search(text))
     if (_EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _DOB_FIELD.search(text)
             or _ADDRESS.search(text) or has_ip or has_name):
         findings.append("personal_data")
     return findings
+
+
+def file_findings(name: str, text: str) -> list[str]:
+    """Scan one bundle file; person-name rules apply only to log text, not to structured JSON."""
+    return sensitive_findings(text, names=name.startswith("logs/"))
 
 
 _SCAN_SECRET_LINE = re.compile(rf"(?i)\b{_SECRET_NAME}\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*(?P<rest>[^\r\n]*)")
@@ -355,7 +366,7 @@ def _safe_log(text: str) -> str:
 
 def _safe_json(value: Any) -> str:
     raw = json.dumps(value, ensure_ascii=False, default=str, indent=2, sort_keys=True)
-    return sanitize_text(raw) + "\n"
+    return sanitize_text(raw, names=False) + "\n"
 
 
 def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) -> dict[str, bytes]:
@@ -437,7 +448,7 @@ def build_support_bundle(ctx, ticket_key: str | None = None, log_buffer: Support
                  "ticket_run_log_count": sum(name.startswith("logs/ticket-runs/") for name in files)}
     files["inventory.json"] = _safe_json(inventory).encode("utf-8")
     findings = [(name, item) for name, content in files.items()
-                for item in sensitive_findings(content.decode("utf-8", errors="replace"))]
+                for item in file_findings(name, content.decode("utf-8", errors="replace"))]
     if findings:
         raise ValueError("sensitive content remains after sanitization")
 

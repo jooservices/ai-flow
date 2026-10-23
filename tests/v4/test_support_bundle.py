@@ -74,6 +74,30 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
                if item["name"].startswith("logs/"))
 
 
+def test_machine_names_survive_in_structured_files_while_log_names_stay_redacted(ctx):
+    for name in ("wsl", "mac-mini", "wsl-1"):
+        ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
+                   " VALUES (%s,'worker','online',2,0,'4.1.0')", (name,))
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "Jane Smith items=1", (), None))
+    archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=logs)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        machines = json.loads(bundle.read("machine-state.json"))
+        versions = json.loads(bundle.read("versions.json"))
+        log = bundle.read("logs/control-service.log").decode()
+    assert {m["name"] for m in machines} >= {"wsl", "mac-mini", "wsl-1"}
+    assert {n["name"] for n in versions["nodes"]} >= {"wsl", "mac-mini", "wsl-1"}
+    assert "REDACTED_NAME" not in json.dumps(machines)
+    assert "Jane Smith" not in log
+
+
+def test_structured_files_still_redact_secrets_and_tokens():
+    raw = json.dumps({"name": "wsl", "token": "abcd1234efgh5678", "note": "ghp_" + "a" * 20})
+    safe = support_bundle._safe_json(json.loads(raw))
+    assert '"name": "wsl"' in safe
+    assert "abcd1234efgh5678" not in safe and "ghp_" not in safe
+
+
 def test_incident_collection_excludes_incidents_older_than_seven_days(ctx):
     ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail,opened_at)"
                " VALUES ('recent','TESTWP-1','warning','Recent issue','Safe detail',now()-interval '6 days')")
@@ -117,7 +141,7 @@ def test_bundle_scrubs_personal_data_and_credentials_before_archive_is_built(ctx
     joined = "\n".join(contents.values())
     assert token not in joined and email not in joined and "415) 555-0134" not in joined
     assert "Jane Doe" not in joined and "Alice" not in joined
-    assert all(not support_bundle.sensitive_findings(content) for content in contents.values())
+    assert all(not support_bundle.file_findings(name, content) for name, content in contents.items())
 
 
 def test_scanner_detects_secrets_tokens_keys_and_personal_data_and_blocks_offer(client, ctx, monkeypatch):
@@ -133,7 +157,7 @@ def test_scanner_detects_secrets_tokens_keys_and_personal_data_and_blocks_offer(
     assert "randomsecretvalue" not in clean_nested
 
     sign_in_owner(client, ctx)
-    monkeypatch.setattr(support_bundle, "sensitive_findings", lambda _text: ["credential"])
+    monkeypatch.setattr(support_bundle, "sensitive_findings", lambda _text, **_kw: ["credential"])
     blocked = client.post("/v1/support/bundles", json={})
     assert blocked.status_code == 422
     assert "bundle_id" not in blocked.json()
@@ -183,11 +207,12 @@ def test_free_form_name_and_date_of_birth_are_redacted_and_block_if_unsanitized(
     assert raw not in clean
     assert not support_bundle.sensitive_findings(clean)
 
-    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
-               " VALUES ('test','TESTWP-1','warning','Safe title',%s)", (raw,))
-    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text: text)
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, raw, (), None))
+    monkeypatch.setattr(support_bundle, "structured_log_text", lambda text: text)
+    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text, **_kw: text)
     with pytest.raises(ValueError, match="sensitive content remains"):
-        support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+        support_bundle.build_support_bundle(ctx, log_buffer=logs)
 
 
 def test_secret_scanner_redacts_and_rejects_the_full_quoted_value():
@@ -249,11 +274,12 @@ def test_lowercase_multiword_customer_name_is_redacted_and_unresolved_value_bloc
         assert not support_bundle.sensitive_findings(clean)
     assert support_bundle.sanitize_text(raw) == "customer name: [REDACTED_NAME]"
 
-    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
-               " VALUES ('test','TESTWP-1','warning','Safe title',%s)", (raw,))
-    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text: text)
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, raw, (), None))
+    monkeypatch.setattr(support_bundle, "structured_log_text", lambda text: text)
+    monkeypatch.setattr(support_bundle, "sanitize_text", lambda text, **_kw: text)
     with pytest.raises(ValueError, match="sensitive content remains"):
-        support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+        support_bundle.build_support_bundle(ctx, log_buffer=logs)
 
 
 def test_support_sanitizer_redacts_url_and_dsn_userinfo_credentials():

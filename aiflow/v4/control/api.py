@@ -2796,7 +2796,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", release):
             raise HTTPException(503, "no signed AI Flow release is deployed")
         return {"name": row["node_name"], "role": row["role"], "project": row["project"],
-                "stack": project.stack, "release": release}
+                "stack": project.stack, "stacks": project.stacks, "release": release}
 
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
@@ -2827,9 +2827,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         _schedule_join_readiness(ctx, row["name"])
         project = repo.projects[row["projects"][0]]
+        sign_in_requests = ctx.db.all(
+            "SELECT id FROM managed_ai_accounts"
+            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')",
+            (row["name"],))
+        signing_in = {account["id"] for account in sign_in_requests}
+        accounts = repo.accounts_on(row["name"])
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
-                "stack": project.stack, "release": current_release(), "node_token": token,
-                "accounts": [a.id for a in repo.accounts_on(row["name"])]}
+                "stack": project.stack, "stacks": project.stacks, "release": current_release(), "node_token": token,
+                "accounts": [a.id for a in accounts],
+                "worker_accounts": [a.id for a in accounts if not a.paused and a.id not in signing_in]}
 
     @app.post("/v1/nodes/{name}/heartbeat")
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:
@@ -2922,6 +2929,33 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                  if key in repo.projects and repo.projects[key].required_services},
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
+
+    @app.get("/v1/nodes/{name}/health")
+    def node_health(name: str, node: str = Depends(node_auth)) -> dict:
+        """What an installer needs to call a new node healthy: a fresh heartbeat and a green project preflight."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        row = ctx.db.one("SELECT status,tools,projects,dynamic,metrics,"
+                         " extract(epoch FROM now()-last_heartbeat) AS age FROM nodes WHERE name=%s", (node,)) or {}
+        repo = ctx.repo()
+        node_projects = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
+        tools = row.get("tools") or {}
+        gaps = missing_tools(tools, repo.tools_for_node(node, node_projects))
+        for key in node_projects:
+            project = repo.projects.get(key)
+            if project and project.stacks:
+                gaps += toolchain_gaps(tools, project.tools, repo.versions, project.stacks, require_pins=True)
+        gaps = list(dict.fromkeys(gaps))
+        # Declared test services (PostgreSQL, Redis) must be healthy too, or the node can claim no work.
+        needed_services = list(dict.fromkeys(s for key in node_projects if key in repo.projects
+                                             for s in repo.projects[key].required_services))
+        reported_services = (row.get("metrics") or {}).get("services")
+        unhealthy = service_gaps(reported_services, needed_services)
+        age = row.get("age")
+        return {"node": node, "status": row.get("status", "unknown"),
+                "heartbeat_age_seconds": None if age is None else float(age),
+                "projects": node_projects, "missing_tools": gaps, "missing_services": unhealthy,
+                "preflight_ok": not gaps and not unhealthy}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
     def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:

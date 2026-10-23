@@ -87,7 +87,7 @@ def test_plan_defaults_and_console_licence_usage_export_path(client, ctx):
     app = FastAPI()
     mount_ui(app, ctx)
     assert TestClient(app).get("/licensing").status_code == 200
-    assert "PathPrefix(`/licensing`)" in COMPOSE.read_text()
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in COMPOSE.read_text()
 
 
 def test_database_migration_starts_with_the_published_plan_defaults(db):

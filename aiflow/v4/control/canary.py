@@ -231,9 +231,16 @@ def ci_state(github, repo: str, sha: str) -> str:
 
     Reads through the connected GitHub App with an installation token narrowed to read-only permissions."""
     name = repo.split("/", 1)[-1]
-    data = github.api("GET", f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", repo=name,
-                      permissions=CI_READ_ONLY)
-    runs = data.get("check_runs", [])
+    runs = []
+    page = 1
+    while True:
+        data = github.api("GET", f"/repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}", repo=name,
+                          permissions=CI_READ_ONLY)
+        page_runs = data.get("check_runs", [])
+        runs.extend(page_runs)
+        if len(page_runs) < 100:
+            break
+        page += 1
     if any(c.get("status") != "completed" for c in runs):
         return "pending"
     if any(c.get("conclusion") not in ("success", "skipped", "neutral") for c in runs):

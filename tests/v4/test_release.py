@@ -1002,3 +1002,31 @@ def test_ci_state_reads_check_runs_with_read_only_permissions():
         method, path, repo, permissions = app.calls[0]
         assert method == "GET" and "/repos/jooservices/ai-flow/commits/abc/check-runs" in path
         assert repo == "ai-flow" and set(permissions.values()) == {"read"}
+
+
+def test_ci_state_reads_every_check_run_page_before_deciding():
+    from aiflow.v4.control.canary import ci_state
+
+    success = {"status": "completed", "conclusion": "success"}
+    failure = {"status": "completed", "conclusion": "failure"}
+    pending = {"status": "in_progress", "conclusion": None}
+
+    class FakeApp:
+        def __init__(self, pages):
+            self.pages, self.calls = pages, []
+
+        def api(self, method, path, body=None, repo=None, permissions=None):
+            self.calls.append((method, path, repo, permissions))
+            page = int(path.rsplit("page=", 1)[1])
+            return {"check_runs": self.pages.get(page, [])}
+
+    cases = [
+        ({1: [success] * 100, 2: [failure]}, "failed", [1, 2]),
+        ({1: [failure] * 100, 2: [pending]}, "pending", [1, 2]),
+    ]
+    for pages, expected, visited_pages in cases:
+        app = FakeApp(pages)
+        assert ci_state(app, "jooservices/ai-flow", "abc") == expected
+        assert [int(call[1].rsplit("page=", 1)[1]) for call in app.calls] == visited_pages
+        assert all(call[0] == "GET" and call[2] == "ai-flow" and
+                   set(call[3].values()) == {"read"} for call in app.calls)

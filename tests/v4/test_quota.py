@@ -45,6 +45,21 @@ def test_prediction_calls_more_than_twenty_percent_remaining_comfortable():
     assert prediction["remaining_at_reset_pct"] > 20
 
 
+def test_prediction_at_zero_percent_remaining_at_reset_is_tight_not_exhausted_early():
+    runs = [{"ticket_key": f"JAIF-{i + 1}", "started_at": NOW - timedelta(hours=2) + timedelta(minutes=5 * i),
+             "ended_at": NOW - timedelta(hours=2) + timedelta(minutes=5 * i, seconds=60),
+             "duration_s": 60, "tokens_in": 1000, "tokens_out": 0, "cost_usd": .01}
+            for i in range(20)]
+    quota = {"windows": {"five_hour": {"utilization": .5, "quota_tokens": 57000,
+                                         "resets_at": (NOW + timedelta(hours=3)).isoformat()}}}
+
+    prediction = account_awareness("codex", quota, runs, [], NOW)["windows"][0]["prediction"]
+
+    assert prediction["remaining_at_reset_pct"] == 0
+    assert prediction["before_reset"] is False
+    assert prediction["status"] == "tight"
+
+
 def test_prediction_at_exactly_twenty_percent_remaining_is_tight():
     runs = [{"ticket_key": f"JAIF-{i + 1}", "started_at": NOW - timedelta(hours=2) + timedelta(minutes=6 * i),
              "ended_at": NOW - timedelta(hours=2) + timedelta(minutes=6 * i, seconds=60),
@@ -55,6 +70,20 @@ def test_prediction_at_exactly_twenty_percent_remaining_is_tight():
     prediction = account_awareness("codex", quota, runs, [], NOW)["windows"][0]["prediction"]
     assert prediction["status"] == "tight"
     assert prediction["remaining_at_reset_pct"] == 20
+
+
+def test_prediction_above_twenty_percent_remaining_at_reset_is_comfortable():
+    runs = [{"ticket_key": f"JAIF-{i + 1}", "started_at": NOW - timedelta(hours=2) + timedelta(minutes=5 * i),
+             "ended_at": NOW - timedelta(hours=2) + timedelta(minutes=5 * i, seconds=60),
+             "duration_s": 60, "tokens_in": 1000, "tokens_out": 0, "cost_usd": .01}
+            for i in range(20)]
+    quota = {"windows": {"five_hour": {"utilization": .5, "quota_tokens": 95317.73,
+                                         "resets_at": (NOW + timedelta(hours=3)).isoformat()}}}
+
+    prediction = account_awareness("codex", quota, runs, [], NOW)["windows"][0]["prediction"]
+
+    assert prediction["remaining_at_reset_pct"] == 20.1
+    assert prediction["status"] == "comfortable"
 
 
 def test_reported_token_capacity_is_not_replaced_by_usage_derived_capacity():
@@ -69,6 +98,8 @@ def test_reported_token_capacity_is_not_replaced_by_usage_derived_capacity():
 def test_confidence_thresholds_and_uneven_rates():
     assert account_awareness("codex", {}, recorded_runs(7), [], NOW)["confidence"] == "low"
     assert account_awareness("codex", {}, recorded_runs(8), [], NOW)["confidence"] == "medium"
+    assert account_awareness("codex", {}, recorded_runs(19), [], NOW)["confidence"] == "medium"
+    assert account_awareness("codex", {}, recorded_runs(20), [], NOW)["confidence"] == "high"
     uneven = recorded_runs(20)
     uneven[-1]["tokens_in"] = 8000
     uneven[-2]["tokens_in"] = 8000
@@ -80,6 +111,18 @@ def test_zero_usage_runs_count_toward_rate_spread():
     for run in mixed[:10]:
         run["tokens_in"] = 0
     assert account_awareness("codex", {}, mixed, [], NOW)["confidence"] == "low"
+
+
+def test_confidence_counts_measured_runs_when_recent_runs_lack_duration():
+    runs = recorded_runs(10)
+    for run in runs[:2]:
+        run.pop("duration_s")
+        run.pop("ended_at")
+
+    awareness = account_awareness("codex", {}, runs, [], NOW)
+
+    assert awareness["runs_24h"] == 8
+    assert awareness["confidence"] == "medium"
 
 
 def test_reset_is_learned_from_a_recorded_utilization_drop():

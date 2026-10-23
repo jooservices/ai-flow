@@ -24,10 +24,12 @@ a very uneven rate. The forecast compares remaining quota and that steady rate w
 20% projected remaining is “comfortable”, 0–20% is “tight”, and a predicted zero before reset is “will run out
 before reset”.
 
-When a forecast reaches zero before reset, the watchdog opens an owner-notified quota prediction incident and
-the account stops receiving new work. Other accounts of the same provider remain eligible. Existing leases are
-allowed to finish; a quota-stopped ticket returns through the normal work queue, and the account becomes eligible
-again when the next provider report or learned reset clears the forecast.
+When a forecast reaches zero before reset, the watchdog stores the account's at-risk flag and opens an
+owner-notified quota prediction incident. Candidate routing prefers same-provider accounts that can take each
+ticket; if no peer can take a ticket, the at-risk account remains eligible so a sole account cannot starve. An
+exhausted account cools down, its released ticket returns to the normal work queue, and it becomes eligible again
+after a successful post-reset probe clears its cooldown and the watchdog refreshes the forecast. Candidate polls
+read the stored flag rather than rebuilding the account's run and probe history.
 
 Codex and Grok adapters retain normalized quota windows when their JSON event stream provides limits. A provider
 that reports only an exhausted balance continues to use account status and usage-based estimates. No provider

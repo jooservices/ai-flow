@@ -932,10 +932,38 @@ def create_app(ctx: Ctx) -> FastAPI:
         return bool(ctx.db.one("SELECT 1 AS paused FROM master_account_pauses"
                                " WHERE account_id=%s AND paused_until > now()", (account_id,)))
 
-    def account_quota_at_risk(account_id: str) -> bool:
-        account_row = ctx.db.one("SELECT provider, quota FROM accounts WHERE id=%s", (account_id,))
-        return bool(account_row and quota_reporting.account_assessment(
-            ctx.db, account_id, account_row["provider"], account_row["quota"]).get("at_risk"))
+    def quota_forecast_at_risk(account_id: str) -> bool:
+        """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
+        row = ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id=%s", (account_id,))
+        return bool(row and row["quota_at_risk"])
+
+    def quota_peer_accounts(account_id: str, roles: set[str] | None = None) -> list[dict]:
+        """Ready same-provider accounts that can serve at least one of this account's workflow roles."""
+        account_row = ctx.db.one("SELECT provider FROM accounts WHERE id=%s", (account_id,))
+        if not account_row:
+            return []
+        peers = ctx.db.all(
+            "SELECT a.id,a.node,a.roles,a.status,a.quota_at_risk FROM accounts a"
+            " JOIN nodes n ON n.name=a.node WHERE a.provider=%s AND a.id<>%s AND n.status='online'"
+            " AND a.status NOT IN ('cooldown','signed_out','error') ORDER BY a.id",
+            (account_row["provider"], account_id))
+        available: list[dict] = []
+        for peer in peers:
+            peer_roles = set(peer.get("roles") or ["dev", "verify"])
+            if roles and not roles.intersection(peer_roles):
+                continue
+            if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
+                continue
+            if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]) or account_master_paused(peer["id"]):
+                continue
+            available.append(peer)
+        return available
+
+    def account_quota_at_risk(account_id: str, roles: set[str] | None = None) -> bool:
+        """Defer a risky account only while another ready account of the same provider can take its role."""
+        if not quota_forecast_at_risk(account_id):
+            return False
+        return bool(quota_peer_accounts(account_id, roles))
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -2357,8 +2385,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         if ctx.leases.cooling(account_id):
             return []
-        if account_quota_at_risk(account_id):
-            return []
+        quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
@@ -2475,6 +2502,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             out += dev_rows
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
+        if quota_at_risk and out:
+            # Prefer peers only for tickets they can actually claim. A peer on another node, with different
+            # project access or roles, must not leave this account's otherwise-routable tickets waiting.
+            available_elsewhere: set[tuple[str, str]] = set()
+            for peer in quota_peer_accounts(account_id, roles):
+                if not rollout.node_compatible(ctx, peer["node"], RELEASES)["compatible"]:
+                    continue
+                available_elsewhere.update((ticket["key"], ticket["step"])
+                                           for ticket in eligible(peer["id"], peer["node"]))
+            out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         return out
 
     def master_ready(account_id: str, node: str) -> bool:
@@ -2491,7 +2528,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
-        if account_quota_at_risk(account_id) or (account_id, "master") in role_health.disabled_roles(ctx.db):
+        if account_quota_at_risk(account_id, {"master"}) or (account_id, "master") in role_health.disabled_roles(ctx.db):
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -2699,7 +2736,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
-        if ctx.leases.cooling(account) or account_quota_at_risk(account):
+        if ctx.leases.cooling(account) or account_quota_at_risk(account, {"master", "release"}):
             return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
         return {"versions": version_release.candidates(ctx, account, node)}
 
@@ -2713,7 +2750,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(body.account)
         if account_master_paused(body.account):
             raise HTTPException(409, "account is paused by master monitoring")
-        if ctx.leases.cooling(body.account) or account_quota_at_risk(body.account):
+        if ctx.leases.cooling(body.account) or account_quota_at_risk(body.account, {"master", "release"}):
             raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):

@@ -72,16 +72,17 @@ def _confidence(runs: list[dict], now: datetime) -> tuple[str, int, float | None
     ranked = sorted(measured, key=lambda pair: _run_usage(pair[0])[2])
     trim = int(len(ranked) * .05)
     steady_rates = [rate * 3600 for _, rate in ranked[:len(ranked) - trim or None]]
-    if len(recent) < 8 or len(measured) != len(recent) or not steady_rates:
-        return "low", len(recent), None
+    measured_count = len(measured)
+    if measured_count < 8 or not steady_rates:
+        return "low", measured_count, None
     center = mean(steady_rates)
     spread = pstdev(steady_rates) if len(steady_rates) > 1 else 0.0
     ratio = spread / center if center else None
-    if len(recent) >= 20 and ratio is not None and ratio < .5:
-        return "high", len(recent), ratio
-    if len(recent) >= 8 and ratio is not None and ratio < .5:
-        return "medium", len(recent), ratio
-    return "low", len(recent), ratio
+    if measured_count >= 20 and ratio is not None and ratio < .5:
+        return "high", measured_count, ratio
+    if measured_count >= 8 and ratio is not None and ratio < .5:
+        return "medium", measured_count, ratio
+    return "low", measured_count, ratio
 
 
 def _trimmed(runs: list[dict]) -> list[dict]:

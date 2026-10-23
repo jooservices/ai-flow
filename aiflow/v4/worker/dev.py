@@ -14,16 +14,19 @@ import logging
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.environment import items_of, parse_missing_environment
 from ..core.text import slug
-from ..core.toolchains import has_missing_marker, parse_missing_requirements
+from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
+                               parse_missing_requirements)
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import environment_notes, note, project_env
+from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -262,16 +265,6 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         ci_log = fetch_ci_log(api, c, branch)
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        env = project_env(project["key"], project.get("environment"), "dev")
-        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
-                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
-                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60, control_url=control_url,
-                       run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
-                       extra_env=env)
-        adapter = get_adapter(c.provider)
-        adapter_argv = adapter.argv
-        adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
-
         events = {"n": 0}
 
         def on_progress(ev: dict) -> None:
@@ -279,11 +272,31 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        if project.get("containers"):
+        env = project_env(project["key"], project.get("environment"), "dev")
+        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
+                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
+                       timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       control_url=control_url, run_token=c.run_token,
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
+        adapter = get_adapter(c.provider)
+        adapter_argv = adapter.argv
+        adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
+        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+        if project.get("containers") or wordpress:
             from .containers import ContainerRuntime
-            with ContainerRuntime(spec, run_as):
-                res = adapter.run(spec, on_progress, stop=hb.lost)
+            runtime = ContainerRuntime(spec, run_as)
         else:
+            runtime = nullcontext()
+        # The site is started through the container runtime, so its limits and crash cleanup own it.
+        with runtime as containers:
+            if wordpress:
+                hb.progress = {"phase": "wordpress-site"}
+                site_notes = start_wordpress_site(containers, wt, project, c.run_id, spec)
+                jira("comment", body=note(
+                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
+                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
+                    node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
@@ -333,6 +346,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
+        command_missing = (parse_command_not_found_requirements(getattr(res, "command_results", []))
+                           if res.verdict == "BLOCKED" else [])
+        missing = list(dict.fromkeys(missing + command_missing))
         machine = c.machine_tools or {}
         available_tools = set(machine.get("available") or {})
         available_services = set(machine.get("services") or [])
@@ -351,8 +367,13 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         if missing:
             # Record the class through the same fenced path as every other developer stop. The run result below
             # still carries all missing requirements so the normal tool-wait path is preserved.
+            escalation_question = res.verdict_reason
+            if command_missing and not has_missing_marker(res.verdict_reason or ""):
+                # The escalation classifier receives question text, not adapter events. Pass a concise normalized
+                # marker only after the adapter recorded a failed command execution.
+                escalation_question = f"MISSING-TOOL: {', '.join(command_missing)} - executed command returned command not found"
             raised = api.call("POST", "/v1/escalations/raise", {
-                "run_id": c.run_id, "fence": c.fence, "question": res.verdict_reason})
+                "run_id": c.run_id, "fence": c.fence, "question": escalation_question})
             if raised.get("resolved") and raised.get("outcome") == "auto_answered":
                 result["outcome"] = "auto_answered"
                 result["details"]["escalation_class"] = raised.get("class", "")
@@ -369,6 +390,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 return result
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
+            if command_missing:
+                result["details"]["command_not_found_tools"] = command_missing
+            result["details"]["tool_missing_evidence"] = (
+                "explicit_marker" if parse_missing_requirements(res.verdict_reason or "") else "command_not_found")
             result["details"]["escalation_class"] = raised.get("class", "")
             jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
                                       why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
@@ -407,13 +432,21 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         result.setdefault("details", {})["changed_files"] = changed[:100]
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
-        if res.error_kind or not changed:
-            reason = res.error_kind or ("no changes" if not changed else "")
-            result["outcome"] = "failed"
+        failure_verdict = res.verdict == "FAIL"
+        if res.error_kind or failure_verdict or not changed:
+            clean_no_changes = not failure_verdict and not res.error_kind and not changed
+            reason = res.error_kind
+            if not reason:
+                reason = (res.verdict_reason or "AI reported RESULT: FAIL") if failure_verdict else "no changes"
+            result["outcome"] = "no_changes" if clean_no_changes else "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),
-                                      next_="Back to To Do; the next run retries after a short wait", t0=t0, node=api_node(api)))
+                                      next_=("Back to To Do; a clean no-change result does not count against the account's "
+                                             "role score, but the ticket waits a short backoff before the next run"
+                                             if clean_no_changes else
+                                             "Back to To Do; the next run retries after a short wait"),
+                                      t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}

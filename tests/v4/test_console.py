@@ -505,9 +505,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects', '/support']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/lead', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,lead,review,stakeholder,knowledge,integrations,projects,support"
+    assert routes.strip() == "cc,work,delivery,machines,users,lead,review,stakeholder,knowledge,backup,integrations,projects,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -516,7 +516,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects', 'support']" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'support']" in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
 
 
@@ -1000,13 +1000,13 @@ def test_command_center_menu_order_and_role_visibility():
         ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
-        ("knowledge", "Knowledge"), ("integrations", "Integrations"), ("projects", "Projects"),
-        ("support", "Support"),
+        ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
+        ("projects", "Projects"), ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
     required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
-                "knowledge": "knowledge.read", "integrations": "integrations.manage", "projects": "projects.manage",
+                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage", "projects": "projects.manage",
                 "support": "console.manage"}
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,

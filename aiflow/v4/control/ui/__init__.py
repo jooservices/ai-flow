@@ -1,7 +1,7 @@
 """Dashboards: Dashboard (/dashboard, /cc), Work board (/work), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge),
-Integrations (/integrations, control/jira_connect.py), Projects (/projects) and Support (/support),
+Integrations (/integrations, control/jira_connect.py), Backup (/backup), Projects (/projects) and Support (/support),
 fed by /v1/state and relevant view APIs.
 
 All views are fed by the live registry; the Business view adds
@@ -41,6 +41,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
     @app.get("/knowledge", include_in_schema=False)
     @app.get("/integrations", include_in_schema=False)
     @app.get("/projects", include_in_schema=False)
+    @app.get("/backup", include_in_schema=False)
     @app.get("/support", include_in_schema=False)
     def console() -> FileResponse:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})

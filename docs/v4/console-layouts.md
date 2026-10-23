@@ -7,6 +7,11 @@ page the way they work, and the arrangement follows them to another browser or c
 Pages in scope: Dashboard (the "Work" and "AI and machines" sections), Human review, Machines and AI, Knowledge,
 Delivery, and Users and roles.
 
+Dashboard preserves those visible sections while laying them out: blocks can be reordered inside Work, inside AI and
+machines, and inside the additional panels. This keeps each block under its section heading. Owner defaults start the
+AI and machines section with Tokens and cost and AI account quota; other role defaults put that section's priorities
+first as well.
+
 ## Using it
 
 1. Open a page and select **Customize layout**. The page enters layout mode; **Done** leaves it.
@@ -42,7 +47,7 @@ Without a saved layout a person gets the default of their role. The defaults use
 
 | Role | Profile | Dashboard starts with |
 | --- | --- | --- |
-| `owner`, `super_admin` | owner | summary cards, then AI usage, tokens and cost, quota (cost and quota first) |
+| `owner`, `super_admin` | owner | Work starts with summary cards; AI and machines starts with tokens and cost, then quota, then usage |
 | `lead` | lead | summary cards, flow, waiting for you, what is being built (the board first); tokens and autonomy hidden |
 
 Profiles also exist for `business`, `sa` and `reviewer` (Human review first); they apply when a role named `team_lead`,

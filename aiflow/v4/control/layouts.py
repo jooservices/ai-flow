@@ -73,12 +73,23 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
     ]),
 }
 
+# Dashboard keeps its visible sections intact, so each section has its own order. The console applies the page's
+# saved block order within these groups. Keeping this map beside PAGES makes role defaults and UI grouping explicit.
+PAGE_SECTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    "dashboard": {
+        "work": ("kpis", "flow", "projects", "waiting", "building"),
+        "ai": ("usage", "tokens", "quota"),
+        "additional": ("tool-waits", "autonomy"),
+    },
+}
+
 # Default layouts by profile. For each page: "order" lists the blocks that come first (the others follow in the
 # canonical order), "hidden" are hidden by default and "sizes" overrides the canonical sizes.
 PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     # Cost and quota first.
     "owner": {
-        "dashboard": {"order": ["kpis", "usage", "tokens", "quota", "waiting", "flow", "projects", "building"]},
+        # Work stays first as the UI presents it; the AI section opens with cost and quota.
+        "dashboard": {"order": ["kpis", "flow", "projects", "building", "waiting", "tokens", "quota", "usage"]},
         "delivery": {"order": ["kpis", "attention", "board", "epics", "runs", "analytics"]},
     },
     # The board and the people who are blocked first.
@@ -148,8 +159,18 @@ def default_layout(page: str, role: str) -> list[dict]:
     blocks = _blocks(page)
     spec = PROFILES.get(profile_for(role), {}).get(page, {})
     known = {b[0]: b for b in blocks}
-    order = [i for i in spec.get("order", []) if i in known]
-    order += [b[0] for b in blocks if b[0] not in order]
+    requested = [i for i in spec.get("order", []) if i in known]
+    if page in PAGE_SECTIONS:
+        # Keep the visible sections in their UI order and apply each profile's priorities within its section.
+        order, assigned = [], set()
+        for section in PAGE_SECTIONS[page].values():
+            section_order = [i for i in requested if i in section]
+            section_order.extend(i for i in section if i in known and i not in section_order)
+            order.extend(section_order)
+            assigned.update(section_order)
+        order.extend(b[0] for b in blocks if b[0] not in assigned)
+    else:
+        order = requested + [b[0] for b in blocks if b[0] not in requested]
     hidden = set(spec.get("hidden", []))
     sizes = spec.get("sizes", {})
     return [{"id": i, "size": sizes.get(i, known[i][2]), "hidden": i in hidden} for i in order]

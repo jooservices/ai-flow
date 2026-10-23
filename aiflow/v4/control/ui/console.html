@@ -1310,7 +1310,7 @@ function renderDashboard() {
   var flow = STATUS_COLS.map(function (c) {
     return '<div class="flow-step"><b>' + tickets.filter(function (t) { return t.status === c[0]; }).length + '</b><span>' + esc(c[1]) + '</span></div>';
   }).join('');
-  var h = '<h1 class="dash-title">Dashboard</h1><section class="dash-section" aria-labelledby="dashboard-work-title"><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
+  var h = '<h1 class="dash-title">Dashboard</h1><section class="dash-section" data-layout-section="work" aria-labelledby="dashboard-work-title"><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
   h += '<div class="dash-kpis" data-block="kpis" aria-label="Work summary">';
   h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">Active projects</span><span class="value">' + openProjects + '</span><span class="detail">' + d.projects.length + ' configured projects</span></button>';
   h += '<button class="dash-kpi" data-act="view" data-view="work"><span class="label">AI working</span><span class="value">' + inProgress + '</span><span class="detail">tickets in progress</span></button>';
@@ -1349,7 +1349,7 @@ function renderDashboard() {
   var providers = Object.keys(PROVIDER).filter(function (key) { return d.accounts.some(function (a) { return a.provider === key; }); });
   var tokenTotal = S.analytics.reduce(function (n, row) { return n + Number(row.tokens_in || 0) + Number(row.tokens_out || 0); }, 0);
   var costTotal = S.analytics.reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
-  h += '<section class="dash-section" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><section class="panel" data-block="usage"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
+  h += '<section class="dash-section" data-layout-section="ai" aria-labelledby="dashboard-ai-title"><h2 class="dash-section-title" id="dashboard-ai-title">AI and machines</h2><section class="panel" data-block="usage"><div class="panel-h"><h2>AI usage</h2><span class="hint">Runs per day by provider · last ' + ANALYTICS_DAYS + ' days</span></div>';
   if (S.anError) h += '<div class="empty">Usage chart unavailable: ' + esc(S.anError) + '</div>';
   h += providerUsageChart(S.analytics);
   h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + key + '"></i><span class="provider-name">' + esc(PROVIDER[key]) + '</span></span>'; }).join('') + '</div></section>';
@@ -1365,6 +1365,7 @@ function renderDashboard() {
   h += masterAutonomyPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
+  applyLayout('cc', root);
 }
 function projTicketsFor(projectKey) { return D().tickets.filter(function (t) { return t.project === projectKey; }); }
 function quotaResetText(account) {
@@ -1935,7 +1936,10 @@ function renderDBody() {
   h += analyticsPanel();
   }
   var target = S.view === 'work' ? $('#work-body') : $('#dbody');
-  if (target) target.innerHTML = h;
+  if (target) {
+    target.innerHTML = h;
+    if (S.view === 'delivery') applyLayout('delivery', target);
+  }
 }
 
 /* ---------- Human review ---------- */
@@ -1986,6 +1990,7 @@ function renderReviews() {
   }
   h += reviewThreadsPanel(S.reviewThreads || [], rows);
   root.innerHTML = h;
+  applyLayout('review', root);
 }
 function reviewThreadsPanel(threads, waiting) {
   var waitingKeys = {}; (waiting || []).forEach(function (ticket) { waitingKeys[ticket.key] = true; });
@@ -2140,6 +2145,7 @@ function renderKnowledge() {
   var root = $('#view-knowledge'); if (!root) return;
   if (!consoleCan('knowledge.read')) {
     root.innerHTML = '<section class="panel"><h1>Knowledge and Skills</h1><div class="muted">Sign in with a role that can view knowledge resources.</div></section>';
+    applyLayout('knowledge', root);
     return;
   }
   var canManage = consoleCan('knowledge.manage'), canApprove = consoleCan('knowledge.approve');
@@ -2214,6 +2220,7 @@ function renderKnowledge() {
   h += '</section>';
   h += renderLearningKnowledge(k, canManage);
   root.innerHTML = h;
+  applyLayout('knowledge', root);
 }
 function loadBackups(force) {
   if (!consoleCan('backup.read')) return;
@@ -3383,6 +3390,7 @@ function renderMachines() {
     h += '<div class="small wide">This screen checks for the machine through live heartbeats. It will appear in the machine list after its agent joins.</div></form></section>';
   }
   root.innerHTML = h;
+  applyLayout('machines', root);
 }
 /* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
 function projectChecksCell(c) {
@@ -3727,7 +3735,11 @@ function renderUsers() {
   var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
   var role = S.consoleUser && S.consoleUser.role || 'unknown';
   var h = '<h1 class="dash-title">Users and roles</h1><p class="lead">Console access is assigned to signed-in accounts. Dashboard and Work board are open to every console role.</p>';
-  if (!consoleCan('users.manage')) { root.innerHTML = h + '<section class="panel"><div class="muted">User management is available to owners and super administrators.</div></section>'; return; }
+  if (!consoleCan('users.manage')) {
+    root.innerHTML = h + '<section class="panel"><div class="muted">User management is available to owners and super administrators.</div></section>';
+    applyLayout('users', root);
+    return;
+  }
   if (S.users.error) h += '<div class="alert" data-tone="crit" role="alert"><span class="a-detail">' + esc(S.users.error) + '</span></div>';
   var userData = S.users.data || { users: [], count: 0, limit: 0 };
   h += '<section class="panel" data-block="users"><div class="panel-h"><h2>Console users</h2><span class="hint">' + userData.count + ' of ' + userData.limit + ' enabled user slots in use</span></div>';
@@ -3752,6 +3764,7 @@ function renderUsers() {
   });
   h += '</tbody></table></div></section>';
   root.innerHTML = h;
+  applyLayout('users', root);
 }
 function loadUsers() {
   if (S.users.busy || !consoleCan('users.manage')) return;
@@ -3852,7 +3865,6 @@ function render() {
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
   else { renderDHead(); renderDBody(); }
-  applyLayout(S.view, layoutRoot(S.view));
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
 }
@@ -3968,7 +3980,8 @@ function layoutRoot(view) { return view === 'delivery' ? $('#dbody') : $('#view-
 function layoutBlocksIn(container) {
   return Array.prototype.filter.call(container.children, function (el) { return el.hasAttribute && el.hasAttribute('data-block'); });
 }
-/* A page has one group of blocks (the view itself) plus one per .dash-section; blocks are ordered within their group. */
+/* Dashboard keeps independent order groups for Work, AI and machines, and its additional panels. Blocks stay under
+   their section heading; the saved page order is applied within each visible group. Other pages use the view root. */
 function applyLayout(view, root) {
   var page = LAYOUT_PAGES[view], model = layoutModel(view);
   if (!page || !root || !model || !root.children) return;
@@ -3995,9 +4008,10 @@ function applyLayout(view, root) {
     if (!anchor) anchor = group === root ? grid : group;
   });
   if (!anchor) return;
+  if (view === 'cc') anchor = root.querySelector('.dash-section') || anchor;
   var bar = document.createElement('div');
   bar.className = 'layout-bar'; bar.setAttribute('data-layout-bar', page);
-  bar.innerHTML = layoutBarHtml(editing, hidden);
+  bar.innerHTML = layoutBarHtml(editing, hidden, page);
   root.insertBefore(bar, anchor);
 }
 function layoutTools(b, position, total) {
@@ -4011,10 +4025,11 @@ function layoutTools(b, position, total) {
   });
   return h + '</span><button type="button" class="btn sm" data-act="layout-hide" data-id="' + id + '" aria-label="Hide ' + t + '">Hide</button></div>';
 }
-function layoutBarHtml(editing, hidden) {
+function layoutBarHtml(editing, hidden, page) {
   if (!editing) return '<button type="button" class="btn sm" data-act="layout-edit">Customize layout</button>';
   var h = '<button type="button" class="btn sm primary" data-act="layout-done">Done</button><button type="button" class="btn sm" data-act="layout-reset">Reset this page</button>';
-  h += '<span class="small muted">Drag a handle to move a block, or focus it and press the arrow keys. Choose a width or hide a block. Changes are saved for you.</span>';
+  h += '<span class="small muted">' + (page === 'dashboard' ? 'Arrange blocks within Work, AI and machines, or the additional panels. ' : '') +
+    'Drag a handle to move a block, or focus it and press the arrow keys. Choose a width or hide a block. Changes are saved for you.</span>';
   h += '<div class="layout-hidden" role="group" aria-label="Hidden blocks">';
   if (!hidden.length) h += '<span class="small muted">No hidden blocks.</span>';
   else {

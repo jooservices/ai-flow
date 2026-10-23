@@ -70,13 +70,26 @@ def test_every_console_role_has_a_default_layout_for_every_page():
 def test_role_defaults_differ_by_role_and_cover_the_roles_of_the_ticket():
     owner = layouts.default_layout("dashboard", "owner")
     lead = layouts.default_layout("dashboard", "lead")
-    assert ids(owner)[:4] == ["kpis", "usage", "tokens", "quota"]  # cost and quota first
+    owner_ids = ids(owner)
+    ai_blocks = layouts.PAGE_SECTIONS["dashboard"]["ai"]
+    work_blocks = layouts.PAGE_SECTIONS["dashboard"]["work"]
+    assert [block for block in owner_ids if block in ai_blocks] == ["tokens", "quota", "usage"]
+    assert [block for block in owner_ids if block in work_blocks] == ["kpis", "flow", "projects", "building", "waiting"]
     assert ids(lead)[:3] == ["kpis", "flow", "waiting"]  # the board first
     assert layouts.default_layout("dashboard", "super_admin") == owner
     for role in ("team_lead", "business", "sa", "human_reviewer"):  # roles a later release adds to ROLE_PERMISSIONS
         assert layouts.profile_for(role)
     assert ids(layouts.default_layout("dashboard", "human_reviewer"))[0] == "waiting"
     assert layouts.default_layout("dashboard", "unknown-role") == layouts.default_layout("dashboard", "nobody")
+
+
+def test_dashboard_sections_are_independent_layout_groups_that_cover_every_block():
+    groups = layouts.PAGE_SECTIONS["dashboard"]
+    grouped = [block for section in groups.values() for block in section]
+    assert len(grouped) == len(set(grouped))
+    assert set(grouped) == set(layouts.page_ids("dashboard"))
+    html = PAGE.read_text()
+    assert re.findall(r'data-layout-section="([a-z-]+)"', html) == ["work", "ai"]
 
 
 # --- resolve: stale and new blocks -----------------------------------------------------------------------------
@@ -244,8 +257,10 @@ def test_every_layout_page_maps_to_a_known_view_and_container():
 
 # --- a real browser ---------------------------------------------------------------------------------------------
 def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx):
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import Error, sync_playwright
+    try:
+        from playwright.sync_api import Error, sync_playwright
+    except ImportError:
+        Error, sync_playwright = Exception, None
     import socket
     import threading
     import time
@@ -255,15 +270,18 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
     from aiflow.v4.control.api import create_app
     from aiflow.v4.control.ui import mount_ui
 
-    try:
-        playwright = sync_playwright().start()
-    except Error as exc:
-        pytest.skip(f"Playwright cannot start on this node: {exc}")
-    try:
+    playwright = browser = None
+    if sync_playwright is not None:
         try:
-            browser = playwright.chromium.launch(headless=True)
+            playwright = sync_playwright().start()
         except Error as exc:
-            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+            pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        if playwright is not None:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except Error as exc:
+                pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
         ctx.settings.public_url = ""
@@ -285,6 +303,57 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
             while not server.started and thread.is_alive() and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert server.started
+
+            if browser is None:
+                # This machine ships the Node Playwright CLI and Chromium, but not the optional Python binding.
+                # Use that installed browser to cover the direct Dashboard redraw regression in this test run.
+                import os
+
+                cli = shutil.which("playwright")
+                assert cli, "Playwright CLI is required for the browser regression test"
+                env = os.environ.copy()
+                env.update({
+                    "AIFLOW4_LAYOUT_BASE_URL": base_url,
+                    "AIFLOW4_LAYOUT_EMAIL": person,
+                    "AIFLOW4_LAYOUT_PASSWORD": password,
+                    "AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE": str(Path(cli).resolve().parent),
+                })
+                script = r"""
+const assert = require('node:assert/strict');
+const { chromium } = require(process.env.AIFLOW4_LAYOUT_PLAYWRIGHT_MODULE);
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const base = process.env.AIFLOW4_LAYOUT_BASE_URL;
+    await page.goto(base + '/login?next=%2Fdashboard', { waitUntil: 'domcontentloaded' });
+    await page.getByLabel('Email').fill(process.env.AIFLOW4_LAYOUT_EMAIL);
+    await page.getByLabel('Password').fill(process.env.AIFLOW4_LAYOUT_PASSWORD);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.waitForURL(base + '/dashboard');
+    await page.getByRole('button', { name: 'Customize layout' }).waitFor({ state: 'visible', timeout: 10000 });
+    const ai = page.locator('#view-cc .dash-section').nth(1);
+    await page.waitForFunction(() => document.querySelectorAll('#view-cc .dash-section .block-cell').length >= 8);
+    assert.deepEqual(await ai.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId)),
+      ['tokens', 'quota', 'usage']);
+    await page.getByRole('button', { name: 'Customize layout' }).click();
+    const work = page.locator('#view-cc .dash-section').nth(0);
+    const before = await work.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId));
+    assert.match(await page.locator('#view-cc [data-layout-bar]').innerText(), /Arrange blocks within Work, AI and machines/);
+    await page.locator("#view-cc .sort-btn[data-key='open']").click();
+    await page.locator("#view-cc [data-act='layout-done']").waitFor({ state: 'visible' });
+    assert.ok(await page.locator('#view-cc [data-layout-handle]').count() >= 8);
+    assert.deepEqual(await work.locator('.block-cell').evaluateAll(cells => cells.map(cell => cell.dataset.blockId)), before);
+    await page.locator("#view-cc [data-act='layout-done']").click();
+    assert.equal(await page.locator('#view-cc [data-layout-handle]').count(), 0);
+  } finally {
+    await browser.close();
+  }
+})().catch(error => { console.error(error.stack || String(error)); process.exitCode = 1; });
+"""
+                result = subprocess.run(["node", "-e", script], env=env, capture_output=True, text=True, timeout=60)
+                assert result.returncode == 0, result.stderr
+                return
 
             def sign_in_page(context):
                 page = context.new_page()
@@ -349,11 +418,33 @@ def test_layout_mode_in_a_browser_drag_resize_hide_keyboard_reset_and_phone(ctx)
             assert second["y"] >= first["y"] + first["height"] - 1 and abs(first["x"] - second["x"]) < 2
             small.get_by_role("button", name="Customize layout").tap()
             assert small.locator("#view-users [data-layout-handle]").count() == 2
+
+            # The owner sees cost and quota first inside the AI and machines section. Dashboard sorting redraws
+            # content directly, so layout controls and handles must remain available while layout mode is active.
+            page.goto(base_url + "/dashboard", wait_until="domcontentloaded")
+            page.get_by_role("button", name="Customize layout").wait_for(state="visible", timeout=10000)
+            ai_section = page.locator("#view-cc .dash-section").nth(1)
+            assert ai_section.locator(".block-cell").evaluate_all("cells => cells.map(c => c.dataset.blockId)") == [
+                "tokens", "quota", "usage"]
+            page.get_by_role("button", name="Customize layout").click()
+            before = page.locator("#view-cc .dash-section").nth(0).locator(".block-cell").evaluate_all(
+                "cells => cells.map(c => c.dataset.blockId)")
+            assert "Arrange blocks within Work, AI and machines" in page.locator("#view-cc [data-layout-bar]").inner_text()
+            page.locator("#view-cc .sort-btn[data-key='open']").click()
+            assert page.locator("#view-cc [data-act='layout-done']").is_visible()
+            assert page.locator("#view-cc [data-layout-handle]").count() >= 8
+            after = page.locator("#view-cc .dash-section").nth(0).locator(".block-cell").evaluate_all(
+                "cells => cells.map(c => c.dataset.blockId)")
+            assert after == before
+            page.locator("#view-cc [data-act='layout-done']").click()
+            assert page.locator("#view-cc [data-layout-handle]").count() == 0
         finally:
-            browser.close()
+            if browser is not None:
+                browser.close()
             server.should_exit = True
             if thread.is_alive():
                 thread.join(timeout=5)
             server_socket.close()
     finally:
-        playwright.stop()
+        if playwright is not None:
+            playwright.stop()

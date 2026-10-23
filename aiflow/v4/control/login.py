@@ -140,30 +140,40 @@ def write_password_file(path: str, password: str) -> None:
 
 
 def seed_user(db, email: str, role: str | list[str] | tuple[str, ...], display_name: str = "",
-              deliver: Callable[[str], None] | None = None) -> str | None:
+              deliver: Callable[[str], None] | None = None, public_key: str = "") -> str | None:
     """Create the user with a generated password and return it; return None when the user already exists.
 
     `deliver(password)` runs inside the transaction, before the commit: when it fails the user is rolled back, so a
     password nobody received never becomes the account's password."""
     email = normalize_email(email)
     roles = normalize_roles(role)
-    if db.one("SELECT 1 AS x FROM console_users WHERE email=%s", (email,)):
-        return None
+    from . import licensing
     password = generate_password()
+    password_hash = hash_password(password)
     with db.pool.connection() as c:
-        created = c.execute("INSERT INTO console_users (email, display_name, role, roles, password_hash)"
-                            " VALUES (%s,%s,%s,%s,%s)"
-                            " ON CONFLICT (email) DO NOTHING RETURNING email",
-                            (email, display_name.strip(), roles[0], list(roles), hash_password(password))).fetchone()
-        if not created:
-            return None
-        if deliver:
-            deliver(password)
+        with c.transaction():
+            licensing.lock_resource_admission(c)
+            if c.execute("SELECT 1 AS x FROM console_users WHERE email=%s", (email,)).fetchone():
+                return None
+            count = int(c.execute("SELECT count(*) AS count FROM console_users WHERE disabled=false").fetchone()["count"])
+            licensing.require_count_capacity(db, "users", count, public_key=public_key, connection=c)
+            created = c.execute("INSERT INTO console_users (email, display_name, role, roles, password_hash)"
+                                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (email) DO NOTHING RETURNING email",
+                                (email, display_name.strip(), roles[0], list(roles), password_hash)).fetchone()
+            if not created:
+                return None
+            if deliver:
+                deliver(password)
     return password
 
 
-def reset_password(db, email: str, deliver: Callable[[str], None] | None = None) -> str:
+def reset_password(db, email: str, deliver: Callable[[str], None] | None = None, public_key: str = "") -> str:
     """Give an existing user a new generated password and clear any lock; `deliver` runs before the commit."""
+    from . import licensing
+    try:
+        licensing.require_writable(db, public_key)
+    except licensing.LicenseError as exc:
+        raise ValueError(str(exc)) from None
     email = normalize_email(email)
     password = generate_password()
     with db.pool.connection() as c:
@@ -402,6 +412,64 @@ def install_login(app: FastAPI, ctx) -> None:
         data = user_json(user.subject, list(user.assigned_roles), (row or {}).get("display_name", ""))
         data["landing_page"] = landing_page(user.effective_roles)
         return JSONResponse(data)
+
+    def users_manager(request: Request):
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if not user:
+            return JSONResponse({"detail": "authenticated console session required"}, status_code=401)
+        if not has_permission(user.effective_roles, "users.manage"):
+            return JSONResponse({"detail": "owner role required"}, status_code=403)
+        return user
+
+    @app.get("/v1/auth/users")
+    def console_users(request: Request) -> JSONResponse:
+        user = users_manager(request)
+        if isinstance(user, JSONResponse):
+            return user
+        from . import licensing
+        rows = ctx.db.all("SELECT email,display_name,role,disabled,created_at FROM console_users ORDER BY email")
+        state = licensing.snapshot(ctx.db, settings.license_public_key)
+        count = int(ctx.db.one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"])
+        return JSONResponse({"users": [user_json(row["email"], row["role"], row["display_name"])
+                                       | {"disabled": row["disabled"], "created_at": row["created_at"].isoformat()}
+                                       for row in rows],
+                             "count": count,
+                             "limit": state["limits"]["users"]})
+
+    @app.post("/v1/auth/users")
+    async def create_console_user(request: Request) -> JSONResponse:
+        user = users_manager(request)
+        if isinstance(user, JSONResponse):
+            return user
+        try:
+            data = await request.json()
+        except ValueError:
+            data = None
+        if (not isinstance(data, dict) or not isinstance(data.get("email"), str)
+                or not isinstance(data.get("role"), str)):
+            return JSONResponse({"detail": "Enter an email address and choose a role."}, status_code=422)
+        display_name = data.get("display_name", "")
+        if not isinstance(display_name, str) or len(display_name) > 120:
+            return JSONResponse({"detail": "Display name must be 120 characters or fewer."}, status_code=422)
+        try:
+            email = normalize_email(data["email"])
+            password = seed_user(ctx.db, email, data["role"], display_name,
+                                 public_key=settings.license_public_key)
+        except ValueError as exc:
+            from . import licensing
+            if isinstance(exc, licensing.LicenseError):
+                status = 423 if "read-only" in str(exc).lower() else 409
+            else:
+                status = 422
+            return JSONResponse({"detail": str(exc)}, status_code=status)
+        if password is None:
+            return JSONResponse({"detail": "A console user with this email already exists."}, status_code=409)
+        audit("create_user", email, True, "created")
+        return JSONResponse({"email": email, "name": display_name.strip(), "role": data["role"],
+                             "initial_password": password,
+                             "message": "Account created. Copy the initial password and share it securely."},
+                            status_code=201, headers={"Cache-Control": "no-store"})
 
     if not settings.console_login:
         return

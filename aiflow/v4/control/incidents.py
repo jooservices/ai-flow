@@ -11,6 +11,7 @@ import re
 
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, locked_version, normalize_stacks, toolchain_gaps
+from . import knowledge
 from . import notify
 
 
@@ -146,8 +147,27 @@ def open_incident(ctx, kind: str, subject: str, severity: str, title: str, detai
                      (kind, subject, severity, title, detail))
     if row:
         ctx.events.emit("incident.opened", reason=title, outcome=severity, kind=kind, subject=subject, detail=detail)
+        ticket = ctx.db.one("SELECT key,project,parent_key FROM tickets WHERE key=%s", (subject,))
+        latest_run = ctx.db.one("SELECT id FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 1", (subject,)) if ticket else None
+        try:
+            knowledge.write_study_case(
+                ctx.db, project=ticket["project"] if ticket else "", scope="project" if ticket else "general",
+                epic=knowledge._ticket_epic(ctx.db, subject, ticket.get("parent_key") or "") if ticket else "",
+                title=f"Incident: {title[:170]}", situation=detail or title, cause=title,
+                fix="Resolution pending while this incident is open.",
+                prevention="Use the incident trigger and recovery checks when handling a similar condition.",
+                source_type="incident", source_ref=str(row["id"]),
+                source_url=(f"{ctx.settings.jira_site.rstrip('/')}/browse/{subject}"
+                            if ticket and ctx.settings.jira_site else ""),
+                ticket_key=subject if ticket else "", run_id=str(latest_run["id"]) if latest_run else "")
+        except Exception as exc:  # noqa: BLE001 - incident alerts still flow if knowledge storage is unavailable
+            import logging
+            logging.getLogger("aiflow4.incidents").warning("incident knowledge capture failed: %s", type(exc).__name__)
         if severity in ("critical", "warning"):
-            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc")
+            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc", ctx=ctx,
+                                   alert_kind="critical_incident" if severity == "critical" else "ticket_needs_person",
+                                   ticket=subject if _TICKET_KEY.fullmatch(subject or "") else "",
+                                   needed=detail or title)
             ctx.db.run("UPDATE incidents SET notified=%s WHERE id=%s", (bool(channels), row["id"]))
     return bool(row)
 
@@ -156,8 +176,21 @@ def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:
     row = ctx.db.one("UPDATE incidents SET closed_at=now() WHERE kind=%s AND subject=%s AND closed_at IS NULL RETURNING title",
                      (kind, subject))
     if row:
+        incident = ctx.db.one("SELECT id,title,detail,subject FROM incidents WHERE kind=%s AND subject=%s "
+                              "ORDER BY opened_at DESC LIMIT 1", (kind, subject))
+        if incident:
+            item = ctx.db.one("SELECT id FROM knowledge_items WHERE source_type='incident' AND source_ref=%s "
+                              "AND kind='study_case'", (str(incident["id"]),))
+            if item:
+                try:
+                    knowledge.resolve_incident_case(ctx.db, item_id=item["id"], cause=incident["detail"] or incident["title"],
+                                                    resolution=note or "The incident condition cleared.")
+                except Exception as exc:  # noqa: BLE001
+                    import logging
+                    logging.getLogger("aiflow4.incidents").warning("incident resolution capture failed: %s", type(exc).__name__)
         ctx.events.emit("incident.closed", reason=note or row["title"], kind=kind, subject=subject)
-        notify.send("info", f"resolved: {row['title']}", note)
+        notify.send("info", f"resolved: {row['title']}", note, ctx=ctx,
+                    alert_kind="critical_incident", needed=note or "The incident has been resolved.")
 
 
 # --- a flow that stands still -------------------------------------------------------------------------------

@@ -71,6 +71,33 @@ def test_daily_rows_aggregate_runs_per_day_project_and_account(client, ctx):
                      (d3, "TESTWP", "claude-01"), (d13, "TESTWP", "claude-01")]
 
 
+def test_usage_can_be_aggregated_by_account_ai_machine_project_and_ticket(client, ctx):
+    now = datetime.now(timezone.utc)
+    records = [
+        ("ALPHA-1", "ALPHA", "claude-01", "claude", "cc", 100, 20, .01),
+        ("BETA-2", "BETA", "codex-01", "codex", "node1", 300, 40, .03),
+    ]
+    for ticket, project, account, provider, node, tokens_in, tokens_out, cost in records:
+        started, ended = now - timedelta(minutes=20), now - timedelta(minutes=10)
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+                    "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+                    " VALUES (%s,%s,%s,'dev',%s,%s,'model',%s,1,'finished','done',%s,%s,%s,%s,%s)",
+                    (str(uuid.uuid4()), ticket, project, account, provider, node, started, ended,
+                     tokens_in, tokens_out, cost))
+
+    expected = {"account": {"claude-01", "codex-01"}, "ai": {"claude", "codex"},
+                "machine": {"cc", "node1"}, "project": {"ALPHA", "BETA"}, "ticket": {"ALPHA-1", "BETA-2"}}
+    for dimension, keys in expected.items():
+        response = client.get(f"/v1/analytics/usage?days=1&group_by={dimension}")
+        assert response.status_code == 200
+        rows = response.json()["rows"]
+        assert {row["key"] for row in rows} == keys
+        assert sum(row["tokens"] for row in rows) == 460
+        assert sum(row["runs"] for row in rows) == 2
+        assert sum(row["duration_s"] for row in rows) == 1200
+        assert abs(sum(row["cost_usd"] for row in rows) - .04) < 1e-6
+
+
 def test_days_window_project_filter_and_validation(client, ctx):
     add_run(ctx.db, back=0)
     add_run(ctx.db, back=1)

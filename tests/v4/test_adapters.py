@@ -3,6 +3,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from aiflow.v4.adapters.base import RunResult, RunSpec
 from aiflow.v4.adapters.claude import ClaudeAdapter
 from aiflow.v4.adapters.codex import CodexAdapter
@@ -49,6 +51,31 @@ def test_codex_and_grok_events_from_spikes():
     auth = RunResult()
     GrokAdapter().parse_event({"type": "error", "message": "You are not signed in. Please run /login."}, auth)
     assert auth.error_kind == "auth"
+
+
+def test_codex_and_grok_keep_reported_quota_windows_when_cli_exposes_them():
+    codex = RunResult()
+    CodexAdapter().parse_event({"type": "token_count", "info": {"rate_limits": {
+        "primary": {"used_percent": 64, "resets_at": "2026-10-22T16:00:00Z", "window_duration_mins": 300},
+        "secondary": {"used_percent": 20, "resets_at": "2026-10-29T12:00:00Z", "window_duration_mins": 10080},
+    }}}, codex)
+    assert codex.quota["windows"]["five_hour"]["utilization"] == .64
+    assert codex.quota["windows"]["seven_day"]["window_duration_minutes"] == 10080
+    grok = RunResult()
+    GrokAdapter().parse_event({"type": "usage", "quota": {"windows": {
+        "weekly": {"used_percent": 0.3, "resets_at": "2026-10-29T12:00:00Z"}}}}, grok)
+    assert grok.quota["windows"]["seven_day"]["utilization"] == 0.3
+
+
+@pytest.mark.parametrize(("field", "normalized_field"), [("limit", "limit_tokens"), ("total", "total_tokens")])
+def test_quota_windows_preserve_capacity_reported_with_used_tokens(field, normalized_field):
+    result = RunResult()
+    CodexAdapter().parse_event({"type": "token_count", "info": {"rate_limits": {
+        "primary": {"used_tokens": 400, field: 1000}}}}, result)
+
+    window = result.quota["windows"]["five_hour"]
+    assert window["utilization"] == 0.4
+    assert window[normalized_field] == 1000
 
 
 def test_grok_runs_recorded_streaming_json_and_reads_answer_usage_and_cost(tmp_path):

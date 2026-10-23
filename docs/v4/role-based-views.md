@@ -38,6 +38,12 @@ An Administrator can choose **View as** in the console to check one role's exact
 signing out. The view-as state is signed by the server and enforced by API checks; **Return to my role** restores the
 Administrator's full access.
 
+Human review actions (approve, rework, reject, ask the AI, answer, skip the gate) need the `review.actions`
+permission, held by Administrator, Product owner, Delivery, Team Lead and Reviewer. A signed-in person with that
+permission acts with their own session, inside their project limits; the shared reviewer bearer token still works for
+automation. The master autonomy report (`/v1/master/autonomy`, `/v1/master/report`) lists only the tickets of the
+person's projects and omits the shared AI-account quota section for a project-limited person.
+
 The first user installed with the existing Super Administrator assignment is stored as Administrator and shown
 with that name. Existing `owner` assignments migrate to Administrator and `lead` assignments migrate to Team Lead.
 The API accepts `super_admin`, `owner` and `lead` as legacy role names for one release, normalizing them to their

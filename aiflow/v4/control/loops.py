@@ -7,7 +7,8 @@ watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs 
             accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
             alerts people on critical ones.
 fleet       every 15 s: the rolling node upgrade toward CURRENT (canary, waves, halt, rollback; rollout.py).
-memory      every 60 s: tickets, finished run summaries and verify findings into the memory table (memory.index).
+memory      every 60 s: tickets, finished run summaries and verify findings into memory (memory.index); Jira sync
+            also records closed-ticket study cases once their runs finish. Run results capture their own records.
 Each loop runs on one control-plane instance at a time (leader key in Redis).
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, memory, role_health, tooling
+from . import jira_connect, knowledge, memory, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -30,6 +31,8 @@ from .incidents import check_idle_flow, check_stack_pins, close_incident, open_i
 from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
+from .quota import assessments as quota_assessments
+from ..core.quota import as_utc
 
 log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
@@ -202,6 +205,10 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
                             ready=ready, source="jira_sync")
         n += 1
     _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
+    try:
+        knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+    except Exception as exc:  # noqa: BLE001 - knowledge capture must not stop Jira mirroring
+        log.warning("closed ticket knowledge capture failed: %s", type(exc).__name__)
     return n
 
 
@@ -412,7 +419,8 @@ def watchdog(ctx: Ctx) -> None:
                 continue
             u = float(u)
             reset = w.get("resets_at")
-            reset_txt = datetime.fromtimestamp(float(reset), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if reset else "unknown"
+            reset_at = as_utc(reset)
+            reset_txt = reset_at.strftime("%Y-%m-%d %H:%M UTC") if reset_at else "unknown"
             label = {"five_hour": "5-hour", "seven_day": "weekly"}.get(wname, wname)
             subject = f"{a['id']}:{wname}"
             if u >= 0.9:
@@ -424,6 +432,23 @@ def watchdog(ctx: Ctx) -> None:
                               f" its tickets.{tip}")
             elif u < 0.85:
                 close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
+
+    account_rows = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+    account_providers = {str(row["id"]): str(row["provider"]) for row in account_rows}
+    for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
+        at_risk = [w for w in awareness["windows"]
+                   if w["prediction"]["status"] == "will run out before reset"]
+        ctx.db.run("UPDATE accounts SET quota_at_risk=%s WHERE id=%s", (bool(at_risk), account_id))
+        if at_risk:
+            soonest = min((w["prediction"].get("exhaustion_at") or "") for w in at_risk)
+            windows = ", ".join(w["label"] for w in at_risk)
+            open_incident(ctx, "quota_prediction", account_id, "warning",
+                          f"{account_id} may run out before reset",
+                          f"Predicted exhaustion: {soonest or 'before reset'} UTC ({windows}). "
+                          f"Confidence: {awareness['confidence']}. New work is routed to other "
+                          f"{account_providers.get(account_id, 'AI')} accounts first.")
+        else:
+            close_incident(ctx, "quota_prediction", account_id, "quota forecast is no longer before reset")
 
 
 def fleet_rollout(ctx: Ctx) -> dict | None:
@@ -441,7 +466,7 @@ def version_release_scan(ctx: Ctx) -> int:
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -455,6 +480,8 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 last_sync = now
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
+                notify.process_retries(ctx)
+                notify.send_scheduled_summaries(ctx)
                 last_wd = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
@@ -467,6 +494,11 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 if any(written.values()):
                     log.info("memory indexed: %s", written)
                 last_mem = now
+            if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
+                from ..worker import backups as backup_worker
+                backup_worker.scheduled_backup(ctx)
+                backup_worker.weekly_restore_test(ctx)
+                last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])

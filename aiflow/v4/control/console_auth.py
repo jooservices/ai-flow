@@ -112,6 +112,9 @@ ROLE_VIEW_IDS = {
     "knowledge": "view.knowledge",
     "integrations": "view.integrations",
     "projects": "projects.manage",
+    "licensing": "licensing.manage",
+    "backup": "backup.read",
+    "notifications": "notifications.manage",
 }
 PAGE_VIEWS = {
     "/": "dashboard", "/cc": "dashboard", "/dashboard": "dashboard",
@@ -119,6 +122,7 @@ PAGE_VIEWS = {
     "/sa": "sa", "/lead": "team_lead", "/business": "business", "/review": "human_review",
     "/stakeholder": "stakeholder", "/knowledge": "knowledge", "/integrations": "integrations",
     "/machines": "machines_ai", "/projects": "projects", "/users": "users",
+    "/licensing": "licensing", "/backup": "backup", "/notifications": "notifications",
 }
 
 

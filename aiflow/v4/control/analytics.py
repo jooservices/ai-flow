@@ -33,6 +33,28 @@ def daily(db, days: int = 14, project: str = "") -> list[dict[str, Any]]:
     return [_row(r) for r in rows]
 
 
+USAGE_DIMENSIONS = {"account": "account_id", "ai": "provider", "machine": "node", "project": "project",
+                    "ticket": "ticket_key"}
+
+
+def usage(db, days: int = 7, group_by: str = "account", project: str = "", ticket: str = "",
+          account: str = "") -> list[dict[str, Any]]:
+    """Aggregate recorded usage by one supported owner dimension; the column name is allow-listed."""
+    column = USAGE_DIMENSIONS[group_by]
+    rows = db.all(
+        f"SELECT {column} AS key, count(*) AS runs, coalesce(sum(tokens_in),0) AS tokens_in,"
+        " coalesce(sum(tokens_out),0) AS tokens_out, coalesce(sum(cost_usd),0) AS cost_usd,"
+        " coalesce(sum(extract(epoch FROM ended_at-started_at)) FILTER (WHERE ended_at IS NOT NULL),0) AS duration_s"
+        " FROM runs WHERE started_at >= now() - %s * interval '1 day'"
+        " AND (%s='' OR project=%s) AND (%s='' OR ticket_key=%s) AND (%s='' OR account_id=%s)"
+        f" GROUP BY {column} ORDER BY {column}",
+        (days, project, project, ticket, ticket, account, account))
+    return [{"key": row["key"], "runs": int(row["runs"]), "tokens_in": int(row["tokens_in"]),
+             "tokens_out": int(row["tokens_out"]), "tokens": int(row["tokens_in"] + row["tokens_out"]),
+             "cost_usd": round(float(row["cost_usd"]), 6), "duration_s": round(float(row["duration_s"]), 1)}
+            for row in rows]
+
+
 def _row(r: dict) -> dict[str, Any]:
     med = r["median_run_s"]
     return {"day": r["day"].isoformat(), "project": r["project"], "account": r["account"],

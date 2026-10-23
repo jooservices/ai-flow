@@ -283,3 +283,88 @@ def test_legacy_role_migration_maps_existing_owner_lead_and_super_admin_rows(db)
         {"email": "lead@example.test", "role": "team_lead", "roles": ["team_lead"]},
         {"email": "owner@example.test", "role": "administrator", "roles": ["administrator"]},
     ]
+
+
+def test_master_autonomy_and_report_only_cover_the_projects_of_a_limited_person(ctx):
+    import uuid
+
+    from test_reviews import add_review_run
+
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    for key in ("TESTWP-7", "OTHER-7"):
+        add_ticket(ctx.db, key, status="Done", labels=())
+        add_review_run(ctx, key, summary="done")
+        ctx.db.run("UPDATE tickets SET done_at=now() WHERE key=%s", (key,))
+        ctx.db.run("INSERT INTO master_escalations (observation_key, ticket, reason, run_id) VALUES (%s,%s,%s,%s)",
+                   (f"obs-{key}", key, f"{key} needs a decision", str(uuid.uuid4())))
+        ctx.db.run("INSERT INTO flow_bug_tracker (signature, ticket_key, repeat_count) VALUES (%s,%s,2)",
+                   (f"sig-{key}", key))
+    login.seed_user(ctx.db, "scoped@example.test", "business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], "scoped@example.test"))
+    login.seed_user(ctx.db, "everything@example.test", "business")
+
+    limited = role_client(ctx, "business", "scoped@example.test")
+    unrestricted = role_client(ctx, "business", "everything@example.test")
+    for path in ("/v1/master/autonomy", "/v1/master/report"):
+        everyone = unrestricted.get(path)
+        assert everyone.status_code == 200
+        report = everyone.json().get("report", everyone.json())
+        assert {row["ticket"] for row in report["needed_person"]} == {"TESTWP-7", "OTHER-7"}
+        assert {row["key"] for row in report["finished_without_person"]} == {"TESTWP-7", "OTHER-7"}
+
+        scoped = limited.get(path)
+        assert scoped.status_code == 200
+        report = scoped.json().get("report", scoped.json())
+        assert {row["ticket"] for row in report["needed_person"]} == {"TESTWP-7"}
+        assert {row["key"] for row in report["finished_without_person"]} == {"TESTWP-7"}
+        assert {row["ticket_key"] for row in report["repeated_failures"]} == {"TESTWP-7"}
+        assert "OTHER" not in scoped.text
+        assert report["quota_accounts"] == []
+
+
+def test_review_actions_follow_the_review_actions_permission_of_each_role(ctx):
+    from test_reviews import add_review_ticket
+
+    allowed_roles = {role for role in CANONICAL_ROLES if "review.actions" in ROLE_PERMISSIONS[role]
+                     or "*" in ROLE_PERMISSIONS[role]}
+    assert allowed_roles == {"administrator", "product_owner", "delivery", "team_lead", "reviewer"}
+    for number, role in enumerate(CANONICAL_ROLES, start=300):
+        key = f"TESTWP-{number}"
+        add_review_ticket(ctx, key)
+        client = role_client(ctx, role, f"{role}@example.test")
+        response = client.post(f"/v1/reviews/{key}/approve")  # no reviewer bearer token
+        if role in allowed_roles:
+            assert response.status_code == 200 and response.json()["merged"] is True, (role, response.text)
+            assert ctx.jira.status_of[key] == "Done"
+        else:
+            assert response.status_code == 403, (role, response.status_code)
+            assert response.json()["detail"] == "not available for your role"
+            assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Human review"
+            audit = ctx.db.one("SELECT accepted,payload FROM write_audit WHERE action='access_denied'"
+                               " AND actor=%s ORDER BY id DESC LIMIT 1", (f"{role}@example.test",))
+            assert audit and not audit["accepted"] and audit["payload"]["path"].endswith("/approve")
+
+
+def test_review_action_stays_inside_the_project_scope_and_keeps_the_legacy_token(ctx):
+    from test_reviews import add_review_ticket
+
+    ctx.repo().projects["OTHER"] = Project("OTHER", "jooservices/other")
+    add_review_ticket(ctx, "TESTWP-310")
+    add_review_ticket(ctx, "OTHER-310")
+    login.seed_user(ctx.db, "scoped-reviewer@example.test", "reviewer")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], "scoped-reviewer@example.test"))
+    client = role_client(ctx, "reviewer", "scoped-reviewer@example.test")
+
+    refused = client.post("/v1/reviews/OTHER-310/rework", json={"comment": "Please change the tests."})
+    assert refused.status_code == 403 and refused.json()["detail"] == "not available for your role"
+    allowed = client.post("/v1/reviews/TESTWP-310/rework", json={"comment": "Please change the tests."})
+    assert allowed.status_code == 200, allowed.text
+
+    # Without a session the reviewer token still works; a wrong or missing token is refused.
+    legacy = TestClient(create_app(ctx))
+    assert legacy.post("/v1/reviews/OTHER-310/rework", json={"comment": "x"}).status_code == 401
+    bad = legacy.post("/v1/reviews/OTHER-310/rework", json={"comment": "x"}, headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401
+    good = legacy.post("/v1/reviews/OTHER-310/rework", json={"comment": "Please change the tests."},
+                       headers={"Authorization": "Bearer review-secret"})
+    assert good.status_code == 200, good.text

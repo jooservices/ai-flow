@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
 from .intake import read_spec
 from .notes import note
@@ -85,9 +85,10 @@ def board(rows: list[dict]) -> str:
 def build_prompt(c: Claimed, spec: str) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "impact.md").read_text(encoding="utf-8")
     t = c.ticket
-    return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
+    prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
                       description=t["description"] or "(no description)", epic=t.get("parent_key") or "(none)",
                       board=board(c.project_tickets))
+    return with_knowledge_context(prompt, c.context_pack)
 
 
 def run_impact(api: ControlClient, c: Claimed, srv_root: str, control_url: str, heartbeat_s: int,

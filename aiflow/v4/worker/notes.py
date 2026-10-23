@@ -21,4 +21,7 @@ def project_env(project_key: str) -> dict[str, str]:
     """Node-local environment for a project's AI runs (test service URLs and the like), from
     /etc/aiflow/projects/<KEY>.env (root-only on the node, never in the control repo)."""
     from ..core.settings import read_env_file
-    return read_env_file(f"/etc/aiflow/projects/{project_key}.env")
+    from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
+    # the shared browsers folder is part of every run's environment; a project file may override it
+    return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+            **read_env_file(f"/etc/aiflow/projects/{project_key}.env")}

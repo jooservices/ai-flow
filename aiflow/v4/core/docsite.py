@@ -37,6 +37,11 @@ SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 # Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
 SCREEN_PAGE = "screens/{view}.md"
 
+# Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
+# screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
+LAYOUT_SCREEN_VIEWS = frozenset({"cc", "review", "machines", "knowledge", "delivery", "users"})
+CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
+
 # JavaScript renderers run outside the static <section> ranges. Keep this map beside the check so a renderer edit
 # requires the page for the screen it renders. `None` means the renderer is shared by every screen.
 SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
@@ -99,6 +104,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "hintSeen": None,
     "renderHelp": None,
     "showView": None,
+    "analyticsPanel": ("delivery",),
+    "epicsPanel": ("delivery",),
+    "masterAutonomyPanel": ("cc",),
+    "reviewThreadsPanel": ("review",),
+    "reviewMetricsPanel": ("review",),
+    "toolWaitsPanel": ("cc",),
     "setView": None,
     "viewOf": None,
     "viewAllowed": None,
@@ -129,10 +140,10 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"\bhint-dismiss\b"),
     # The role-based menu: which view each permission opens, the tabs and the "view as" switch. It shows or hides
     # every screen, so each screen page says which roles can open it.
-    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|consoleUser|userAdmin:|autonomy: \{ data"),
+    re.compile(r"role-loading|\.tab-divider|data-menu-view|view-as-switch|autonomy: \{ data"),
     re.compile(r"\b(?:VIEW_PERMISSION|VIEW_PATH|VIEW_GROUPS)\b|^\s+(?:lead|review|machines|projects|backup): '"),
     re.compile(r"^\s+\{ view: '[a-z]+', label: '"),
-    re.compile(r"editing: '', temporaryPassword|^\s+\['machines', 'users'|// Visibility reads the effective"),
+    re.compile(r"^\s+\['machines', 'users'|// Visibility reads the effective"),
     re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
 )
 
@@ -892,10 +903,13 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
         pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
         if "docs/v4/security.md" in docs:  # the Security screen's page ships from the v4 feature docs
             pages.add("docs/guide/screens/security.md")
+        covered = set().union(*(CROSS_SCREEN_DOCS.get(f, frozenset()) for f in docs))
         wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
-        if not (wanted <= pages if wanted else pages):
+        uncovered = {path for path in wanted if path.removeprefix("docs/guide/screens/").removesuffix(".md")
+                     not in covered}
+        if not (uncovered <= pages if wanted else pages or covered):
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
-                        + (", ".join(sorted(wanted - pages)) if wanted else "its page under docs/guide/screens"))
+                        + (", ".join(sorted(uncovered - pages)) if wanted else "its page under docs/guide/screens"))
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
     if api_files:
         routes = api_routes_by_module() if routes is None else routes
@@ -953,6 +967,10 @@ def changed_views(base: str) -> set[str]:
             end = next((j for j in range(i, len(lines)) if "</section>" in lines[j]), i)
             spans.append((i + 1, end + 1, m.group(1)))
     functions = _function_spans(lines)
+    layout_start = next((i + 1 for i, line in enumerate(lines)
+                         if line.startswith("/* ---------- customizable layout")), None)
+    layout_end = next((i + 1 for i, line in enumerate(lines)
+                       if line.startswith("/* ---------- interactions")), None)
     help_start = next((i for i, line in enumerate(lines) if line.startswith("/* Help: every screen")), None)
     help_end = functions.get("renderHelp", (0, 0))[1] - 1
     # The security hardening spans the whole console: the cross-site request token wrapper, the Security screen's
@@ -974,6 +992,17 @@ def changed_views(base: str) -> set[str]:
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
+            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
+                             or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
+                             or "S.layouts." in changed_line or "layoutAction(act" in changed_line
+                             or "applyLayout('delivery'" in changed_line
+                             or re.search(r"\bloadLayouts\(\)", changed_line))
+            layout_style = re.search(r"customizable layout|\.blocks|\.block-cell|\.layout-bar|\.layout-hidden|"
+                                     r"\.block-tools|\.block-sizes|\.block-handle|\.sr-only|"
+                                     r"dashboard-layout-headings|@media \(pointer:coarse\)", changed_line)
+            is_layout_ui = ((layout_start is not None and layout_end is not None
+                             and layout_start <= line_no <= layout_end)
+                            or layout_markup or layout_style)
             hint_view = None
             for name, (lo, hi) in functions.items():
                 if lo <= line_no <= hi:
@@ -982,6 +1011,13 @@ def changed_views(base: str) -> set[str]:
                         break
                     mapped = SCREEN_RENDERER_VIEWS[name]
                     line_views |= (all_views if mapped is None else set(mapped))
+            # Session polling handles every screen, but this guarded request refreshes only the Users page.
+            if ("editing: '', temporaryPassword" in changed_line
+                    or ("S.view === 'users'" in changed_line and "loadUsers(" in changed_line)):
+                line_views = {"users"}
+            if is_layout_ui:
+                # Even when a shared renderer contains the hook, this particular change belongs to layout mode.
+                line_views = set(LAYOUT_SCREEN_VIEWS)
             # Keep a hint-text edit local to that screen. The declarations and shared Help plumbing affect every
             # screen, including edits to the top-bar link, first-use container and dismiss behavior.
             if hints_start is not None and hints_end is not None and hints_start <= line_no - 1 <= hints_end:

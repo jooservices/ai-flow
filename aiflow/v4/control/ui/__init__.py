@@ -102,8 +102,10 @@ def mount_ui(app: FastAPI, ctx) -> None:
             r["id"] = str(r["id"])
             r["cost_usd"] = float(r["cost_usd"])
         from ..timeline import timeline
+        from .. import merge_flow
         return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
                 "writes": writes, "timeline": timeline(ctx.db, key),
+                "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
     @app.get("/v1/services")

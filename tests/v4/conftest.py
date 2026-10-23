@@ -319,6 +319,13 @@ class FakeGitHub:
             self.branch_heads[(repo, pr["base"])] = sha
         return {"merged": True, "sha": sha if pr else "abc123", "message": "Pull Request successfully merged"}
 
+    def update_branch(self, repo, number):
+        self.branch_updates = getattr(self, "branch_updates", []) + [(repo, number)]
+        return getattr(self, "update_branch_result", {"ok": True, "message": "202: Updating pull request branch."})
+
+    def checks(self, repo, sha):
+        return list(getattr(self, "check_data", {}).get(sha, []))
+
     def release_pr(self, repo, head, base):
         return next((pr for pr in self.prs if pr["repo"] == repo and pr["head"] == head
                      and pr["base"] == base), None)

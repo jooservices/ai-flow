@@ -7,6 +7,10 @@ watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs 
             accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
             alerts people on critical ones.
 fleet       every 15 s: the rolling node upgrade toward CURRENT (canary, waves, halt, rollback; rollout.py).
+merge_ready every 30 s: tickets in Ready to merge (or approved in Human review) are merged by the flow when their
+            pull request can merge (merge_flow.py).
+pr_reconcile  every 60 s: every ticket with a pull request is compared with GitHub; Jira follows whoever merged,
+            closed or reopened it (merge_flow.py).
 memory      every 60 s: tickets, finished run summaries and verify findings into memory (memory.index); Jira sync
             also records closed-ticket study cases once their runs finish. Run results capture their own records.
 Each loop runs on one control-plane instance at a time (leader key in Redis).
@@ -21,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import escalations, jira_connect, knowledge, memory, notify, role_health, tooling
+from . import escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -197,6 +201,8 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
                 log.warning("could not generate completion report for epic %s: %s", t["key"], e)
         if old and old["status"] != "Human review" and t["status"] == "Human review":
             notify_human_review(ctx, t["key"], t)
+        if old and old["status"] != t["status"]:  # the flow writes its own moves to the mirror first: this one is a person's
+            merge_flow.record_move(ctx, t["key"], old["status"], t["status"], merge_flow.PERSON, "moved in Jira")
         ready = "aiflow-ready" in t["labels"]
         if not old or old["status"] != t["status"] or ("aiflow-ready" in old["labels"]) != ready:
             # a move or a ready label made outside the control API (people, Jira automation): the ticket timeline
@@ -475,6 +481,8 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
+    last_merge = last_reconcile = 0.0
+    from . import api as control_api
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -492,6 +500,15 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 notify.process_retries(ctx)
                 notify.send_scheduled_summaries(ctx)
                 last_wd = now
+            if now - last_merge >= merge_flow.MERGE_EVERY_S and ctx.leases.leader("merge_ready", OWNER, 60_000):
+                control_api.github_gateway(ctx)  # connect GitHub when the secret store has a connection
+                for key in merge_flow.merge_ready(ctx):
+                    log.info("merged %s", key)
+                last_merge = now
+            if now - last_reconcile >= merge_flow.RECONCILE_EVERY_S and ctx.leases.leader("pr_reconcile", OWNER, 120_000):
+                control_api.github_gateway(ctx)
+                merge_flow.reconcile(ctx)
+                last_reconcile = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
                 last_rollout = now

@@ -40,6 +40,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, memory, role_health, rollout, tooling, version_release
 from . import review_metrics
+from . import quota as quota_reporting
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -394,6 +395,7 @@ class ProbeBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    model: str = ""
     credential_expires_at: datetime | None = None
 
 
@@ -1021,6 +1023,52 @@ def create_app(ctx: Ctx) -> FastAPI:
     def account_master_paused(account_id: str) -> bool:
         return bool(ctx.db.one("SELECT 1 AS paused FROM master_account_pauses"
                                " WHERE account_id=%s AND paused_until > now()", (account_id,)))
+
+    def quota_forecast_at_risk(account_id: str) -> bool:
+        """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
+        row = ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id=%s", (account_id,))
+        return bool(row and row["quota_at_risk"])
+
+    def quota_peer_accounts(account_id: str, roles: set[str] | None = None) -> list[dict]:
+        """Ready same-provider accounts that can serve at least one of this account's workflow roles."""
+        account_row = ctx.db.one("SELECT provider FROM accounts WHERE id=%s", (account_id,))
+        if not account_row:
+            return []
+        peers = ctx.db.all(
+            "SELECT a.id,a.node,a.roles,a.status,a.quota_at_risk FROM accounts a"
+            " JOIN nodes n ON n.name=a.node WHERE a.provider=%s AND a.id<>%s AND n.status='online'"
+            " AND a.status NOT IN ('cooldown','signed_out','error') ORDER BY a.id",
+            (account_row["provider"], account_id))
+        available: list[dict] = []
+        for peer in peers:
+            peer_roles = set(peer.get("roles") or ["dev", "verify"])
+            if roles and not roles.intersection(peer_roles):
+                continue
+            if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
+                continue
+            if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]) or account_master_paused(peer["id"]):
+                continue
+            available.append(peer)
+        return available
+
+    def account_quota_at_risk(account_id: str, roles: set[str] | None = None) -> bool:
+        """Defer a risky account only while another ready account of the same provider can take its role."""
+        if not quota_forecast_at_risk(account_id):
+            return False
+        return bool(quota_peer_accounts(account_id, roles))
+
+    def quota_peer_release_candidates(account_id: str) -> set[tuple[str, str, str]]:
+        """Release work a ready peer can actually claim for this quota-risky account."""
+        if not quota_forecast_at_risk(account_id):
+            return set()
+        available: set[tuple[str, str, str]] = set()
+        for peer in quota_peer_accounts(account_id, {"master", "release"}):
+            if not rollout.node_compatible(ctx, peer["node"], RELEASES)["compatible"]:
+                continue
+            for candidate in version_release.candidates(ctx, peer["id"], peer["node"]):
+                available.add((candidate["project"], str(candidate["version_id"]),
+                               str(candidate.get("repository") or "")))
+        return available
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -2782,6 +2830,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         if ctx.leases.cooling(account_id):
             return []
+        quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
                               " AND removed_at IS NULL", (node,)) or {}
         if not node_row.get("accepting_work", True):
@@ -2901,6 +2950,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             out += dev_rows
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
+        if quota_at_risk and out:
+            # Prefer peers only for tickets they can actually claim. A peer on another node, with different
+            # project access or roles, must not leave this account's otherwise-routable tickets waiting.
+            available_elsewhere: set[tuple[str, str]] = set()
+            for peer in quota_peer_accounts(account_id, roles):
+                if not rollout.node_compatible(ctx, peer["node"], RELEASES)["compatible"]:
+                    continue
+                available_elsewhere.update((ticket["key"], ticket["step"])
+                                           for ticket in eligible(peer["id"], peer["node"]))
+            out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         return out
 
     def master_ready(account_id: str, node: str) -> bool:
@@ -2917,7 +2976,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
-        if (account_id, "master") in role_health.disabled_roles(ctx.db):  # no ticket to try on: probation uses triage
+        if account_quota_at_risk(account_id, {"master"}) or (account_id, "master") in role_health.disabled_roles(ctx.db):
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -3128,7 +3187,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"versions": [], "reason": "machine is not accepting new work"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
-        return {"versions": version_release.candidates(ctx, account, node)}
+        if ctx.leases.cooling(account):
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
+        versions = version_release.candidates(ctx, account, node)
+        peer_candidates = quota_peer_release_candidates(account)
+        available = [candidate for candidate in versions
+                     if (candidate["project"], str(candidate["version_id"]),
+                         str(candidate.get("repository") or "")) not in peer_candidates]
+        if versions and not available:
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
+        return {"versions": available}
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
@@ -3140,6 +3208,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(body.account)
         if account_master_paused(body.account):
             raise HTTPException(409, "account is paused by master monitoring")
+        if ctx.leases.cooling(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
@@ -3160,6 +3230,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = version_release.project_for_version(ctx, project, version)
         if not version_release.enabled(project) or project.repo.lower().rstrip("/") == "jooservices/ai-flow":
             raise HTTPException(403, "version release is not enabled for the selected repository")
+        candidate_key = (project.key, str(version["id"]), project.repo)
+        if candidate_key in quota_peer_release_candidates(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
                            (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):
@@ -3307,6 +3380,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                     body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(body.details), run_id))
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
+        sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (run["account_id"], run["provider"], run["model"], J(sample_quota), body.tokens_in,
+                    body.tokens_out, body.cost_usd,
+                    int((utcnow() - run["started_at"]).total_seconds() * 1000)))
         if body.error_kind in ("quota", "auth"):
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
@@ -3451,9 +3530,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
             " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
             " WHERE f.updated_at >= %s ORDER BY f.updated_at DESC LIMIT 50", (week_start,))
+        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+        quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
-                "repeated_failures": current_repeated, "trend": trend}
+                "repeated_failures": current_repeated, "trend": trend,
+                "quota_accounts": [{"id": a["id"], "provider": a["provider"],
+                                    "quota_awareness": quota_state.get(a["id"], {})} for a in quota_accounts]}
 
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
@@ -4259,6 +4342,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (account_id, acc.provider, body.model, J(body.quota), body.tokens_in, body.tokens_out,
+                    body.cost_usd, body.duration_ms))
         ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
         if "credential_expires_at" in body.model_fields_set:
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
@@ -4570,6 +4657,15 @@ def create_app(ctx: Ctx) -> FastAPI:
     def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
         return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
+
+    @app.get("/v1/analytics/usage")
+    def analytics_usage(days: int = Query(7, ge=1, le=90),
+                        group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
+                        project: str = "", ticket: str = "", account: str = "") -> dict:
+        from .analytics import usage
+        return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
+                                                                     "account": account},
+                "rows": usage(ctx.db, days, group_by, project, ticket, account)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")

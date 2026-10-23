@@ -193,9 +193,6 @@ def toolchain_gaps(tools: dict[str, object] | None, required: Iterable[str],
 # --- missing requirements reported by a developer AI (docs/v4/missing-tools.md) ----------------------------------
 MISSING_MARKER = re.compile(
     r"MISSING[-_ ](?:TOOL|SERVICE)S?\s*[:=]?\s*([A-Za-z0-9][\w.+-]*(?:\s*(?:,|\band\b)\s*[A-Za-z0-9][\w.+-]*)*)", re.I)
-_ABSENT = r"(?:not installed|not found|command not found|is missing|missing|unavailable|not available|cannot be found)"
-
-
 def known_requirements() -> list[str]:
     """Tool and service names AI Flow can tell apart in free text (what a node reports, plus test services)."""
     from .services import SERVICES
@@ -204,19 +201,34 @@ def known_requirements() -> list[str]:
 
 
 def parse_missing_requirements(text: str) -> list[str]:
-    """Tools or services a developer AI says it lacks: the `MISSING-TOOL: a, b` marker first, then known names
-    that the text calls missing ("php: command not found", "composer is not installed")."""
-    marker = MISSING_MARKER.search(text or "")
+    """Return only catalog requirements explicitly marked missing or named in a shell error.
+
+    Run summaries and general prose are deliberately not evidence: a completed run can mention a tool or the word
+    "missing" without needing that tool. A `MISSING-TOOL(S)` / `MISSING-SERVICE(S)` marker is an explicit report;
+    otherwise accept only the conventional ``<command>: command not found`` output from a failed command.
+    """
+    text = text or ""
+    known = {name.casefold(): name for name in known_requirements()}
+    marker = MISSING_MARKER.search(text)
     if marker:
-        names = [n.lower() for n in re.split(r"\s*(?:,|\band\b)\s*", marker.group(1).strip(), flags=re.I) if n]
-        return list(dict.fromkeys(names))
+        requested = [name.casefold() for name in re.split(r"\s*(?:,|\band\b)\s*", marker.group(1).strip(), flags=re.I)
+                     if name]
+        return list(dict.fromkeys(known[name] for name in requested if name in known))
+
+    # Shells commonly emit `bash: php: command not found` or `bash: line 1: php: command not found`.
+    # Keep this limited to catalogue tools; a service name is not a shell command.
+    command_tools = {name.casefold(): name for name in NODE_TOOLS}
+    command_tools.update({tool.casefold(): tool for stack_tools in STACK_TOOLS.values() for tool in stack_tools})
     found = []
-    for name in known_requirements():
-        quoted = re.escape(name)
-        if re.search(rf"(?<![\w-]){quoted}(?![\w-])[^.\n]{{0,40}}{_ABSENT}|missing\s+{quoted}(?![\w-])",
-                     text or "", re.I):
-            found.append(name)
-    return found
+    for match in re.finditer(r"(?<![\w.+-])([A-Za-z0-9_.+-]+):\s*command not found\b", text, re.I):
+        name = match.group(1).casefold()
+        if name in command_tools:
+            found.append(command_tools[name])
+    for match in re.finditer(r"\bcommand not found:\s*([A-Za-z0-9_.+-]+)\b", text, re.I):
+        name = match.group(1).casefold()
+        if name in command_tools:
+            found.append(command_tools[name])
+    return list(dict.fromkeys(found))
 
 
 def tool_present(tools: dict[str, object] | None, name: str) -> bool:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
-from ..core.toolchains import parse_missing_requirements
+from ..core.toolchains import MISSING_MARKER, parse_missing_requirements
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
@@ -313,6 +313,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 return result
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
+            result["details"]["tool_missing_evidence"] = (
+                "explicit_marker" if MISSING_MARKER.search(res.verdict_reason or "") else "command_not_found")
             result["details"]["escalation_class"] = raised.get("class", "")
             jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
                                       why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
@@ -352,8 +354,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
         if res.error_kind or not changed:
-            reason = res.error_kind or ("no changes" if not changed else "")
-            result["outcome"] = "failed"
+            clean_no_changes = not res.error_kind and not changed
+            reason = res.error_kind or ("no changes" if clean_no_changes else "")
+            result["outcome"] = "no_changes" if clean_no_changes else "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),

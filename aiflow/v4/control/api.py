@@ -4101,7 +4101,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
         roles = set(acc.roles or ["dev", "verify"])
-        # a role switched off for this account (docs/v4/role-health.md) takes only its daily probation ticket
+        # a role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket
         modes = role_health.modes(ctx.db, acc.id, sorted(roles))
 
         def allowed(role: str, t: dict) -> bool:
@@ -4372,10 +4372,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 triage_context["pr"] = {"url": prior_pr["pr_url"], "number": int(prior_pr_match.group(1))}
         run_id = str(uuid.uuid4())
         probation_id = None
-        if t.get("probation"):  # the one easy ticket a day of a switched-off role
+        if t.get("probation"):  # one easy ticket at a time for a switched-off role
             probation_id = role_health.assign_probation(ctx.db, acc.id, role_health.role_of(body.step) or "", t["key"])
             if probation_id is None:
-                return JSONResponse({"claimed": False, "reason": "today's probation ticket is already assigned"},
+                return JSONResponse({"claimed": False, "reason": "a probation ticket is already running"},
                                     status_code=409)
         c = ctx.leases.claim(t["key"], run_id, ctx.settings.lease_ms)
         if not c.ok:

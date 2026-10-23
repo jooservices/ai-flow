@@ -122,6 +122,9 @@ AIFLOW4_JOIN_CONTROL_URL=http://control:8080
 AIFLOW4_ROLLOUT_SOAK_S=10
 AIFLOW4_ROLLOUT_BATCH_SIZE=1
 AIFLOW4_ROLLOUT_CANARY_NODE=smoke-node-a
+AIFLOW4_CONSOLE_LOGIN=1
+AIFLOW4_CONSOLE_SESSION_SECRET=ci-install-smoke-session-secret-32-bytes
+AIFLOW4_OWNER_TOKEN=ci-install-smoke-owner-token
 ENV
 # control-loops drives the fleet rollout (canary, waves, halt, rollback), so it runs next to the API.
 unit() {
@@ -156,6 +159,30 @@ for _ in $(seq 1 120); do
 done
 curl --silent --show-error --fail http://127.0.0.1:18080/healthz >/dev/null \
   || { echo "control API from the release artifact did not become healthy" >&2; exit 1; }
+
+# Console sign-in is on for the whole run (the clean-install acceptance of docs/v4/clean-install-acceptance.md):
+# anonymous callers are refused, the Super Administrator signs in, and every read below uses the owner token the
+# deploy and canary scripts use. The machines join and heartbeat with their node tokens only.
+CONTROL_URL=http://127.0.0.1:18080
+state_read() { curl --silent --show-error --fail -H "Authorization: Bearer ci-install-smoke-owner-token" "$CONTROL_URL/v1/state"; }
+docker exec "$CONTROL" bash -se <<'SEED_ADMIN'
+set -euo pipefail
+set -a; . /run/aiflow4-smoke/control.env; set +a
+release="/srv/aiflow/control/releases/$(cat /srv/aiflow/control/releases/CURRENT)"
+umask 077
+"$release/.venv/bin/aiflow4" console-user seed --email owner@example.test --password-file /run/aiflow4-smoke/admin-password >/dev/null
+SEED_ADMIN
+anon=$(curl --silent --output /dev/null --write-out '%{http_code}' "$CONTROL_URL/v1/state")
+[[ $anon == 401 ]] || { echo "anonymous /v1/state answered $anon instead of 401 with sign-in on" >&2; exit 1; }
+anon=$(curl --silent --output /dev/null --write-out '%{http_code}' "$CONTROL_URL/cc")
+[[ $anon == 302 ]] || { echo "anonymous /cc answered $anon instead of a redirect to /login" >&2; exit 1; }
+docker exec "$CONTROL" bash -se <<'SIGN_IN'
+set -euo pipefail
+body=$(python3 -c 'import json; print(json.dumps({"email": "owner@example.test", "password": open("/run/aiflow4-smoke/admin-password").read().strip()}))')
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8080/v1/auth/login <<<"$body")
+[[ $code == 200 ]] || { echo "the Super Administrator could not sign in (HTTP $code)" >&2; exit 1; }
+SIGN_IN
+state_read >/dev/null || { echo "the owner-token state read failed with sign-in on" >&2; exit 1; }
 docker exec "$CONTROL" bash -se <<'SEED_TICKET'
 set -euo pipefail
 /srv/aiflow/control/releases/"$(cat /srv/aiflow/control/releases/CURRENT)"/.venv/bin/python - <<'PY'
@@ -243,7 +270,7 @@ bootstrap_nodes "$NODE_B" smoke-node-b smoke-b
 wait_for_release() {
   local node=$1 expected=$2
   for _ in $(seq 1 120); do
-    if curl --silent --show-error --fail http://127.0.0.1:18080/v1/state \
+    if state_read \
       | python3 -c 'import json,sys; state=json.load(sys.stdin); node=next((n for n in state.get("nodes",[]) if n.get("name")==sys.argv[1]),{}); sys.exit(0 if node.get("status")=="online" and node.get("release")==sys.argv[2] else 1)' \
         "$node" "$expected"; then
       return 0
@@ -283,14 +310,14 @@ sys.exit(0 if eval(f"({sys.argv[1]})") else 1)
 wait_for_state() {
   local what=$1 check=$2
   for _ in $(seq 1 150); do
-    if curl --silent --show-error --fail http://127.0.0.1:18080/v1/state \
+    if state_read \
       | python3 -c "$STATE_CHECK" "$check" "$VERSION" "$PREVIOUS_VERSION"; then
       return 0
     fi
     sleep 2
   done
   echo "timed out waiting for control to report $what; latest rollout:" >&2
-  curl --silent http://127.0.0.1:18080/v1/state | python3 -c 'import json,sys; print(json.load(sys.stdin).get("rollout"))' >&2 || true
+  state_read | python3 -c 'import json,sys; print(json.load(sys.stdin).get("rollout"))' >&2 || true
   return 1
 }
 set_current() {

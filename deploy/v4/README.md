@@ -10,6 +10,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
 - [System readiness check](../../docs/v4/system-check.md): check machine and project assumptions after join, project addition, upgrade and hourly; safely repair supported problems, gate work, and include results in the support bundle
+- [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework

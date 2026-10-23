@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from aiflow.v4.control import loops, system_check
 from aiflow.v4.control import notify
 from aiflow.v4.core.system_check import condition
@@ -211,7 +213,8 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
 
 def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx):
     ctx.jira.project_permissions["TESTWP"] = {
-        "EDIT_ISSUES": False, "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
+        "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
+        "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
     }
     joined = join_node(client, "cc").json()
     readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
@@ -230,7 +233,8 @@ def test_jira_browse_access_without_issue_write_permissions_needs_action(client,
 
 def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx):
     ctx.jira.project_permissions["TESTWP"] = {
-        "EDIT_ISSUES": True, "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
+        "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+        "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
     }
     join_node(client, "cc")
     readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
@@ -242,6 +246,43 @@ def test_jira_edit_and_transition_without_comment_permission_needs_action(client
         "The connected Jira account is missing Add Comments permission in project TESTWP.")
     assert permission["action"] == (
         "Grant the connected Jira account Add Comments permission in project TESTWP.")
+
+
+@pytest.mark.parametrize(("missing_permission", "label"), [
+    ("CREATE_ISSUES", "Create Issues"),
+    ("LINK_ISSUES", "Link Issues"),
+])
+def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, missing_permission, label):
+    ctx.jira.project_permissions["TESTWP"] = {
+        "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+        "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
+    }
+    ctx.jira.project_permissions["TESTWP"][missing_permission] = False
+    join_node(client, "cc")
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    permission = next(item for item in readiness["projects"]["TESTWP"]
+                      if item["id"] == "jira-write-permissions")
+
+    assert permission["result"] == "needs_action"
+    assert permission["detail"] == (
+        f"The connected Jira account is missing {label} permission in project TESTWP.")
+    assert permission["action"] == (
+        f"Grant the connected Jira account {label} permission in project TESTWP.")
+
+
+def test_revoked_github_app_permission_is_reported_with_required_action(client, ctx):
+    join_node(client, "cc")
+    ctx.github.app_permissions["workflows"] = "read"
+
+    readiness = system_check.refresh_node(ctx, "cc", "hourly")
+    conditions = {item["id"]: item for item in readiness["projects"]["TESTWP"]}
+    permission = conditions["github-app-permissions"]
+
+    assert permission["result"] == "needs_action"
+    assert permission["detail"] == (
+        "The GitHub App installation is missing these required permissions: Workflows: write.")
+    assert permission["action"] == (
+        "Grant Workflows: write to the GitHub App installation in GitHub settings.")
 
 
 def test_projects_readiness_shows_account_failures_but_blocks_only_without_a_usable_account(client, ctx):

@@ -36,6 +36,9 @@ SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
 # Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
 SCREEN_PAGE = "screens/{view}.md"
+# JAIF-249's required feature document also serves as the System check screen guide, keeping the change in
+# `docs/v4/` while preserving the Console Help target and the documentation-site screen coverage.
+SCREEN_DOC_OVERRIDES = {"system-check": "docs/v4/system-check.md"}
 
 # JavaScript renderers run outside the static <section> ranges. Keep this map beside the check so a renderer edit
 # requires the page for the screen it renders. `None` means the renderer is shared by every screen.
@@ -422,9 +425,22 @@ SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
+    if guide.resolve() == GUIDE.resolve():
+        for view, source in SCREEN_DOC_OVERRIDES.items():
+            path = ROOT / source
+            if path.is_file():
+                pages[SCREEN_PAGE.format(view=view)] = path.read_text(encoding="utf-8")
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages
+
+
+def screen_doc_source(view: str, guide: Path = GUIDE) -> Path:
+    """Return the authored Markdown source used for a screen's Console Help page."""
+    override = SCREEN_DOC_OVERRIDES.get(view)
+    if override and guide.resolve() == GUIDE.resolve() and (ROOT / override).is_file():
+        return ROOT / override
+    return guide / SCREEN_PAGE.format(view=view)
 
 
 def check_links(pages: dict[str, str]) -> list[str]:
@@ -809,7 +825,7 @@ def _read_doc(name: str) -> str:
 def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set[str]] | None = None,
                        views: set[str] | None = None,
                        changed_routes: dict[str, set[str]] | None = None) -> list[str]:
-    """Reasons a change fails the check. A changed screen needs a change to a page of `docs/guide/screens/` (the
+    """Reasons a change fails the check. A changed screen needs a change to its mapped documentation page (the
     page of each changed screen when `views` names them); a changed API route module needs changed documentation
     that names every changed method/path contract. When route-level diff data is unavailable, every registered
     route is required so an unrelated route cannot satisfy the check. Unrelated edits do not count."""
@@ -818,10 +834,11 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     gaps = []
     if any(f.startswith(SCREEN_PATHS) for f in files):
         pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z-]+\.md", f)}
-        wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
+        pages.update(f for f in docs if f in SCREEN_DOC_OVERRIDES.values())
+        wanted = {SCREEN_DOC_OVERRIDES.get(v, f"docs/guide/screens/{v}.md") for v in views or ()}
         if not (wanted <= pages if wanted else pages):
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
-                        + (", ".join(sorted(wanted - pages)) if wanted else "its page under docs/guide/screens"))
+                        + (", ".join(sorted(wanted - pages)) if wanted else "its mapped documentation page"))
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
     if api_files:
         routes = api_routes_by_module() if routes is None else routes

@@ -48,7 +48,7 @@ from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
-from .github import GitHubApp
+from .github import GITHUB_APP_REQUIRED_PERMISSIONS, GitHubApp
 from .github_connect import GitHubSecretStore, app_metadata
 from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only
@@ -468,9 +468,8 @@ def github_gateway(ctx: Ctx) -> GitHubApp | None:
 
 def validate_github_app_permissions(details: dict[str, Any]) -> None:
     permissions = details.get("permissions") or {}
-    required = {"contents": "write", "pull_requests": "write", "workflows": "write",
-                "checks": "read", "statuses": "read", "administration": "write"}
-    missing = [name for name, level in required.items() if permissions.get(name) != level]
+    missing = [name for name, level in GITHUB_APP_REQUIRED_PERMISSIONS.items()
+               if permissions.get(name) != level]
     if missing:
         raise ValueError("GitHub App does not have the permissions AI Flow requires")
 

@@ -137,7 +137,8 @@ class FakeJira:
     def project_write_permissions(self, key: str) -> dict[str, bool]:
         self.project_permission_reads.append(key)
         return self.project_permissions.get(key, {
-            "EDIT_ISSUES": True, "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
+            "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
+            "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
         })
 
     def project_versions(self, key: str) -> list[dict]:
@@ -224,6 +225,11 @@ class FakeJira:
 
 class FakeGitHub:
     def __init__(self) -> None:
+        self.meta = {"installation_id": 77}
+        self.app_permissions = {
+            "contents": "write", "pull_requests": "write", "workflows": "write",
+            "checks": "read", "statuses": "read", "administration": "write",
+        }
         self.prs: list[dict] = []
         self.commits: list[dict] = []
         self.branches: list[tuple[str, str, str]] = []
@@ -250,6 +256,10 @@ class FakeGitHub:
 
     def installation_repositories(self) -> list[dict[str, str]]:
         return list(self.repositories)
+
+    def installation_details(self, installation_id: int) -> dict:
+        assert installation_id == self.meta["installation_id"]
+        return {"id": installation_id, "permissions": dict(self.app_permissions)}
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         self.branches.append((repo, branch, "check"))

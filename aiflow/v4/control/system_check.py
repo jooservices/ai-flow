@@ -10,6 +10,7 @@ from ..core.system_check import condition
 from ..core.toolchains import STACK_TOOLS, toolchain_gaps
 from .db import J
 from . import notify
+from .github import GITHUB_APP_REQUIRED_PERMISSIONS
 
 BLOCKING = {"needs_action", "not_possible_on_this_machine"}
 MACHINE_CONDITION_TEXT = {
@@ -191,6 +192,19 @@ def _github_project_conditions(ctx, project, trigger: str) -> list[dict[str, obj
     meta = getattr(gateway, "meta", None) if gateway else None
     installation = str(meta.get("installation_id") or "") if isinstance(meta, dict) else ""
 
+    def read_installation_permissions() -> dict[str, str] | None:
+        try:
+            if not gateway or not installation:
+                return None
+            details = gateway.installation_details(int(installation))
+            permissions = details.get("permissions") if isinstance(details, dict) else None
+            return permissions if isinstance(permissions, dict) else None
+        except Exception:  # noqa: BLE001 - provider response bodies are not safe readiness output
+            return None
+
+    granted_permissions = _cached_integration_probe(
+        ctx, ("github-permissions", installation), trigger, read_installation_permissions)
+
     def read_installation_repositories() -> set[str] | None:
         try:
             if not gateway:
@@ -211,6 +225,26 @@ def _github_project_conditions(ctx, project, trigger: str) -> list[dict[str, obj
         out = [condition("github-installation", "GitHub installation", "needs_action",
                          "GitHub App access could not be verified.",
                          "Reconnect the GitHub App on the Integrations screen and rerun the System check.")]
+
+    permission_labels = {"contents": "Contents", "pull_requests": "Pull requests", "workflows": "Workflows",
+                         "checks": "Checks", "statuses": "Statuses", "administration": "Administration"}
+    if granted_permissions is None:
+        out.append(condition("github-app-permissions", "GitHub App permissions", "needs_action",
+                             "The GitHub App installation permissions could not be verified.",
+                             "Reconnect the GitHub App on the Integrations screen and rerun the System check."))
+    else:
+        missing = [(permission_labels[permission], level)
+                   for permission, level in GITHUB_APP_REQUIRED_PERMISSIONS.items()
+                   if granted_permissions.get(permission) != level]
+        if missing:
+            requirements = ", ".join(f"{name}: {level}" for name, level in missing)
+            out.append(condition(
+                "github-app-permissions", "GitHub App permissions", "needs_action",
+                f"The GitHub App installation is missing these required permissions: {requirements}.",
+                f"Grant {requirements} to the GitHub App installation in GitHub settings."))
+        else:
+            out.append(condition("github-app-permissions", "GitHub App permissions", "ready",
+                                 "The GitHub App installation has every permission AI Flow requires."))
 
     for repository in repositories:
         access_id = f"repository-access:{repository}"
@@ -337,7 +371,8 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
                          "Jira write permissions could not be verified.",
                          "Restore control-plane access to Jira and rerun the System check.")
 
-    required = {"EDIT_ISSUES": "Edit Issues", "TRANSITION_ISSUES": "Transition Issues",
+    required = {"CREATE_ISSUES": "Create Issues", "EDIT_ISSUES": "Edit Issues",
+                "LINK_ISSUES": "Link Issues", "TRANSITION_ISSUES": "Transition Issues",
                 "ADD_COMMENTS": "Add Comments"}
     missing = [label for permission, label in required.items() if permissions.get(permission) is not True]
     if missing:
@@ -346,8 +381,9 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
         return condition("jira-write-permissions", name, "needs_action",
                          f"The connected Jira account is missing {labels} {permission_word} in project {project_key}.",
                          f"Grant the connected Jira account {labels} {permission_word} in project {project_key}.")
-    return condition("jira-write-permissions", name, "ready",
-                     f"The connected Jira account can edit, transition and comment on issues in project {project_key}.")
+    return condition(
+        "jira-write-permissions", name, "ready",
+        f"The connected Jira account can create, edit, link, transition and comment on issues in project {project_key}.")
 
 
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,

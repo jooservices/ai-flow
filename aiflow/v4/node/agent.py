@@ -286,18 +286,37 @@ def _worker_can_access_directory(path: Path, worker_uid: int) -> bool:
 
 
 def _credential_conditions(states: list[dict]) -> dict[str, dict]:
-    """Publish only validated credential presence/validity state, never provider output or display text."""
-    checks: dict[str, dict] = {}
+    """Publish each account's primary worker probe, never provider output or display text.
+
+    Extra sessions share the account ID but deliberately do not probe credentials. They must not overwrite the
+    primary session's result with an unknown status.
+    """
+    by_account: dict[str, list[dict]] = {}
     for worker in states:
         account = str(worker.get("account") or "")
-        if not account:
+        if account:
+            by_account.setdefault(account, []).append(worker)
+
+    checks: dict[str, dict] = {}
+    for account, workers in by_account.items():
+        # New workers publish their concrete instance name. Treat an unnamed state as primary only when it is the
+        # sole session, so multiple legacy states cannot make the result depend on directory iteration order.
+        primary = next((worker for worker in workers if worker.get("instance") == account), None)
+        if primary is None and len(workers) == 1 and "instance" not in workers[0]:
+            primary = workers[0]
+        if primary is None:
+            # Never infer credential validity from an extra session when the primary state is unavailable.
+            alive = any(worker.get("alive", True) for worker in workers)
+            checks[account] = {"present": True, "valid": None} if alive else {"present": False, "valid": None}
             continue
-        probe = worker.get("probe") or {}
-        if isinstance(probe, dict) and probe.get("ok"):
+
+        probe = primary.get("probe") or {}
+        if isinstance(probe, dict) and probe.get("ok") is True:
             status = {"present": True, "valid": True}
-        elif worker.get("state") == "signed_out" or (isinstance(probe, dict) and probe.get("error_kind") == "auth"):
+        elif primary.get("state") == "signed_out" or (isinstance(probe, dict) and
+                                                         probe.get("error_kind") == "auth"):
             status = {"present": True, "valid": False}
-        elif not worker.get("alive", True):
+        elif not primary.get("alive", True):
             status = {"present": False, "valid": None}
         else:
             status = {"present": True, "valid": None}

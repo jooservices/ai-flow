@@ -322,6 +322,16 @@ def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, t
     assert "SECRET-CREDENTIAL-VALUE" not in encoded
 
 
+def test_primary_credential_probe_is_not_overwritten_by_an_extra_session():
+    primary = {"account": "codex-01", "instance": "codex-01", "state": "idle", "alive": True,
+               "probe": {"ok": True}}
+    extra = {"account": "codex-01", "instance": "codex-01.2", "state": "idle", "alive": True}
+
+    assert agent._credential_conditions([primary, extra]) == {"codex-01": {"present": True, "valid": True}}
+    assert agent._credential_conditions([extra, primary]) == {"codex-01": {"present": True, "valid": True}}
+    assert agent._credential_conditions([extra]) == {"codex-01": {"present": True, "valid": None}}
+
+
 def test_workspace_permission_check_reports_a_directory_the_worker_cannot_write(tmp_path):
     work, state = tmp_path / "locked-work", tmp_path / "state"
     work.mkdir()

@@ -56,7 +56,7 @@ S.machines.signIns['claude-node-ui-01'] = {account:'claude-node-ui-01',sign_in_u
 S.machines.join.command = 'curl example'; S.machines.join.expires_at = new Date(Date.now()+300000).toISOString();
 renderMachines(); console.log(machinesView.innerHTML);
 '''
-    stubs = """var document = {addEventListener:function(){},documentElement:{setAttribute:function(){}},getElementById:function(){return null;},querySelector:function(){return null;},querySelectorAll:function(){return[];}};
+    stubs = """var document = {addEventListener:function(){},documentElement:{setAttribute:function(){},classList:{add:function(){},remove:function(){}}},getElementById:function(){return null;},querySelector:function(){return null;},querySelectorAll:function(){return[];}};
 var window = {matchMedia:function(){return {matches:false};},addEventListener:function(){}};
 var location = {pathname:'/machines',origin:'https://control.example.test'};
 var localStorage = {getItem:function(){return null;},setItem:function(){}}; var fetch=function(){}; var setInterval=function(){};

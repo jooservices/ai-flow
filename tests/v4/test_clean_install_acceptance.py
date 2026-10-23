@@ -102,7 +102,8 @@ class Fresh:
     def sign_in(self):
         r = self.client.post("/v1/auth/login", json={"email": ADMIN, "password": self.password})
         assert r.status_code == 200, r.text
-        assert self.client.get("/v1/auth/me").json()["role"] == "super_admin"
+        user = self.client.get("/v1/auth/me").json()
+        assert user["role"] == "administrator" and user["role_label"] == "Administrator"
 
     def join(self, name):
         """Join a machine with the one-use token Command Center issues; the machine itself never signs in."""

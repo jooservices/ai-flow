@@ -59,11 +59,12 @@ def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
     users = (GUIDE / "screens" / "users.md").read_text()
     sa = (GUIDE / "screens" / "sa.md").read_text()
     console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
-    assert "Super Administrator" in users and "Owners and Leads cannot open" in users
-    assert "does not add, edit, or disable users" in users
-    hint = re.search(r"users: '([^']+)'", console).group(1)
+    assert "Administrator" in users and "Other roles cannot open this screen" in users
+    assert "last administrator cannot be removed or disabled" in users and "View as" in users
+    hints = re.search(r"var HINTS = \{(.*?)\n\};", console, re.S).group(1)
+    hint = re.search(r"users: '([^']+)'", hints).group(1)
     assert "See the role and screen permissions" in hint
-    assert "Owner or Super Administrator" in sa and "console.write" in sa
+    assert "Administrator or SA" in sa
 
 
 def test_help_route_serves_the_screen_pages(monkeypatch, site):

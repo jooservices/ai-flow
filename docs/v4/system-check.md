@@ -36,3 +36,22 @@ that prevents work.
 The support bundle includes the sanitized readiness results and omits raw node heartbeat tool and metric maps. The
 clean-install acceptance test waits for each newly installed node's machine and project result, then confirms that
 the support bundle contains that result.
+
+## API contracts
+
+The readiness gate and trigger points touch these control API routes:
+
+- `GET /v1/system-check` returns the snapshot; `POST /v1/system-check/run` starts a manual check.
+- `POST /v1/nodes/join` returns the node token promptly and schedules the first check; `POST /v1/nodes/{name}/heartbeat`
+  stores the node's reported conditions, schedules provider probes in the background and never waits for them.
+- `POST /v1/projects` schedules a check for the new project; `GET /v1/projects` adds the per-machine readiness
+  and the failed condition that blocks work to each project. `DELETE /v1/projects/{key}`,
+  `GET /v1/projects/{key}/repositories` and `PUT /v1/projects/{key}/repositories` keep their behaviour; repository
+  results feed the repository conditions.
+- `GET /v1/work/candidates` and `POST /v1/work/claim` omit and refuse a project whose machine or account fails a
+  condition it needs. `GET /v1/version-releases/candidates`, `POST /v1/version-releases/claim` and
+  `GET /v1/projects/{key}/versions` apply the same gate to version-release runs.
+- `GET /v1/master/candidate`, `GET /v1/nodes/{name}/operations`, `POST /v1/accounts/{account_id}/probe`,
+  `POST /v1/nodes/{name}/check-probes/token`, `POST /v1/events`, `POST /v1/integrations/github/imports` and
+  `GET /v1/integrations/github/imports/{pending_id}/installations` keep their contracts; they only use the
+  shared readiness helpers.

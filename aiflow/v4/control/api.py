@@ -42,9 +42,11 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
 from . import business, jira_connect, knowledge, licensing, memory, role_health, rollout, system_check, tooling, version_release
+from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
+                           issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
+                           verify_session)
 from . import review_metrics
 from . import quota as quota_reporting
-from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
@@ -816,6 +818,26 @@ class KnowledgeRestoreBody(BaseModel):
     actor: str
 
 
+class ConsoleUserCreateBody(BaseModel):
+    email: str
+    display_name: str = ""
+    roles: list[str]
+    project_keys: list[str] | None = None
+
+
+class ConsoleUserUpdateBody(BaseModel):
+    roles: list[str]
+    project_keys: list[str] | None = None
+
+
+class ConsoleUserDisabledBody(BaseModel):
+    disabled: bool
+
+
+class ViewAsBody(BaseModel):
+    role: str
+
+
 class BackupConfigBody(BaseModel):
     schedule: Literal["daily", "weekly"] = "daily"
     destination_kind: Literal["local", "mounted", "s3"] = "local"
@@ -1075,16 +1097,27 @@ def create_app(ctx: Ctx) -> FastAPI:
                 return row["node_name"]
         return node_auth(authorization)
 
-    def reviewer_auth(authorization: str = Header(default="")) -> str:
+    def reviewer_auth(request: Request, authorization: str = Header(default="")) -> str:
+        """The legacy reviewer bearer token, or a console session whose roles grant `review.actions`."""
         configured = ctx.settings.reviewer_token
-        if not configured:
-            raise HTTPException(503, "reviewer actions are not configured")
         scheme, separator, token = authorization.partition(" ")
-        if (not separator or scheme.lower() != "bearer" or not token.strip()
-                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
-            raise HTTPException(401, "reviewer authorization required",
-                                headers={"WWW-Authenticate": "Bearer"})
-        return "reviewer"
+        if (configured and separator and scheme.lower() == "bearer" and token.strip()
+                and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            return "reviewer"
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user:
+            ticket_key = str(request.path_params.get("key", ""))
+            row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket_key,)) if ticket_key else None
+            in_scope = (user.project_keys is None or not row or row["project"] in user.project_keys)
+            if has_permission(user.effective_roles, "review.actions") and in_scope:
+                return user.subject
+            audit("console", "access_denied", ticket_key, "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        if not configured and not ctx.settings.console_session_secret:
+            raise HTTPException(503, "reviewer actions are not configured")
+        raise HTTPException(401, "reviewer authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     def owner_auth(request: Request, authorization: str = Header(default="")) -> str:
         def writable() -> None:
@@ -1099,14 +1132,17 @@ def create_app(ctx: Ctx) -> FastAPI:
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
             writable()
             return ""
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and has_permission(user.role, "knowledge.approve"):
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user and has_permission(user.effective_roles, "knowledge.approve"):
             writable()
             return user.subject
         if not configured and not ctx.settings.console_session_secret:
             raise HTTPException(503, "owner actions are not configured")
         if user:
-            raise HTTPException(403, "owner role required")
+            audit("aiflow-control", "knowledge_approve", "", "", None, user.subject, False,
+                  "not available for your role")
+            raise HTTPException(403, "not available for your role")
         raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     def deploy_auth(authorization: str = Header(default="")) -> str:
@@ -1140,16 +1176,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "console session signing key is not configured")
             raise HTTPException(503, "console session authentication is not configured")
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
         required = {permissions} if isinstance(permissions, str) else permissions
-        if required is not None and not role_satisfies(user.role, required):
+        if required is not None and not role_satisfies(user.effective_roles, required):
             if action != "read":
-                audit(target, action, node, "", None, user.subject, False, "owner role required")
-            raise HTTPException(403, "owner role required")
+                audit(target, action, node, "", None, user.subject, False, "not available for your role")
+            raise HTTPException(403, "not available for your role")
         read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
                         "list_import_installations", "open_installation_settings"}
         if action not in read_actions | {"license_activate"}:
@@ -1158,6 +1195,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             except licensing.LicenseError as exc:
                 raise HTTPException(423, str(exc)) from None
         return user
+
+    def optional_console_user(request: Request) -> ConsoleUser | None:
+        """Read a session when present without changing the legacy open-console mode."""
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        return resolve_session_user(ctx.db, claims) if claims else None
 
     def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
         try:
@@ -1635,9 +1677,164 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/v1/console/session")
     def console_session(request: Request) -> dict:
-        user = console_user(request, None)
-        return {"authenticated": True, "user": user.subject, "role": user.role,
-                "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
+        user = (console_user(request, None) if ctx.settings.console_login else optional_console_user(request))
+        if user is None:
+            return {"authenticated": False}
+        effective = user.view_as or user.role
+        return {"authenticated": True, "user": user.subject, "role": effective,
+                "role_label": ROLE_LABELS[effective], "roles": list(user.assigned_roles),
+                "role_labels": [ROLE_LABELS[role] for role in user.assigned_roles],
+                "permissions": sorted(user.permissions), "landing_page": landing_page((effective,)),
+                "can_view_as": user.is_administrator, "viewing_as": user.view_as,
+                "role_options": [{"id": role, "label": ROLE_LABELS[role],
+                                  "permissions": sorted(ROLE_PERMISSIONS[role]),
+                                  "landing_page": landing_page((role,))} for role in CANONICAL_ROLES]}
+
+    def validate_project_keys(project_keys: list[str] | None) -> list[str] | None:
+        if project_keys is None:
+            return None
+        selected = list(dict.fromkeys(str(key).strip() for key in project_keys if str(key).strip()))
+        unknown = sorted(set(selected) - set(ctx.repo().projects))
+        if unknown:
+            raise HTTPException(400, "unknown project: " + ", ".join(unknown))
+        return selected
+
+    @app.get("/v1/console/users")
+    def console_users(request: Request) -> dict:
+        console_user(request, "console.manage")
+        rows = ctx.db.all("SELECT email,display_name,roles,project_keys,disabled,last_login_at,created_at"
+                          " FROM console_users ORDER BY lower(display_name),email")
+        audits = ctx.db.all("SELECT ts,actor,action,accepted,result,payload FROM write_audit"
+                            " WHERE target='console' AND action IN ('user_add','user_update','user_disable',"
+                            "'user_enable','view_as','view_as_stop') ORDER BY id DESC LIMIT 100")
+        return {"users": rows, "projects": sorted(ctx.repo().projects), "audit": audits,
+                "role_options": [{"id": role, "label": ROLE_LABELS[role],
+                                  "permissions": sorted(ROLE_PERMISSIONS[role])} for role in CANONICAL_ROLES]}
+
+    @app.post("/v1/console/users")
+    def add_console_user(body: ConsoleUserCreateBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", action="user_add")
+        from .login import generate_password, hash_password, normalize_email
+        try:
+            email = normalize_email(body.email)
+            roles = normalize_roles(body.roles)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        project_keys = validate_project_keys(body.project_keys)
+        password = generate_password()
+        try:
+            with ctx.db.pool.connection() as connection:
+                with connection.transaction():
+                    licensing.lock_resource_admission(connection)
+                    people = connection.execute(
+                        "SELECT count(*) AS n FROM console_users WHERE disabled=false").fetchone()["n"]
+                    require_capacity("users", int(people), connection=connection)
+                    created = connection.execute(
+                        "INSERT INTO console_users (email,display_name,role,roles,project_keys,password_hash)"
+                        " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (email) DO NOTHING RETURNING email",
+                        (email, body.display_name.strip()[:200], roles[0], list(roles), project_keys,
+                         hash_password(password))).fetchone()
+                    if not created:
+                        raise HTTPException(409, "a console user with that email already exists")
+                    audit_in(connection, "console", "user_add", "", "", None, user.subject, True, "Person added",
+                             {"email": email, "roles": list(roles), "project_keys": project_keys})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("console user could not be added")
+            raise HTTPException(500, "person could not be added") from exc
+        return {"email": email, "temporary_password": password}
+
+    @app.put("/v1/console/users/{email}")
+    def update_console_user(email: str, body: ConsoleUserUpdateBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="console", action="user_update")
+        from .login import normalize_email
+        try:
+            email = normalize_email(email)
+            roles = normalize_roles(body.roles)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        project_keys = validate_project_keys(body.project_keys)
+        with ctx.db.pool.connection() as connection:
+            connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
+            current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
+                                         (email,)).fetchone()
+            if not current:
+                raise HTTPException(404, "console user not found")
+            current_roles = normalize_roles(current["roles"])
+            if not current["disabled"] and "administrator" in current_roles and "administrator" not in roles:
+                others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
+                                            " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
+                if int(others) == 0:
+                    raise HTTPException(409, "the last administrator cannot be removed")
+            connection.execute("UPDATE console_users SET role=%s,roles=%s,project_keys=%s,updated_at=now() WHERE email=%s",
+                               (roles[0], list(roles), project_keys, email))
+            audit_in(connection, "console", "user_update", "", "", None, user.subject, True, "Person updated",
+                     {"email": email, "roles": list(roles), "project_keys": project_keys})
+        return {"updated": True}
+
+    @app.patch("/v1/console/users/{email}/disabled")
+    def set_console_user_disabled(email: str, body: ConsoleUserDisabledBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="console",
+                            action="user_disable" if body.disabled else "user_enable")
+        from .login import normalize_email
+        try:
+            email = normalize_email(email)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        with ctx.db.pool.connection() as connection:
+            connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
+            current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
+                                         (email,)).fetchone()
+            if not current:
+                raise HTTPException(404, "console user not found")
+            roles = normalize_roles(current["roles"])
+            if body.disabled and not current["disabled"] and "administrator" in roles:
+                others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
+                                            " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
+                if int(others) == 0:
+                    raise HTTPException(409, "the last administrator cannot be disabled")
+            connection.execute("UPDATE console_users SET disabled=%s,updated_at=now() WHERE email=%s",
+                               (body.disabled, email))
+            action = "user_disable" if body.disabled else "user_enable"
+            audit_in(connection, "console", action, "", "", None, user.subject, True,
+                     "Person disabled" if body.disabled else "Person enabled", {"email": email})
+        return {"disabled": body.disabled}
+
+    @app.post("/v1/console/view-as")
+    def console_view_as(body: ViewAsBody, request: Request) -> JSONResponse:
+        user = console_user(request, "console.manage", target="console", action="view_as")
+        try:
+            role = normalize_role(body.role)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        from .login import SESSION_TTL_S
+        token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
+                              ctx.settings.console_session_secret, view_as=role)
+        audit("console", "view_as", "", "", None, user.subject, True, "Administrator viewing as role",
+              {"role": role})
+        response = JSONResponse({"viewing_as": role, "role_label": ROLE_LABELS[role]})
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
+                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
+                            samesite="strict", path="/")
+        return response
+
+    @app.post("/v1/console/view-as/stop")
+    def console_stop_view_as(request: Request) -> JSONResponse:
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if not user or not user.is_administrator:
+            raise HTTPException(403, "not available for your role")
+        from .login import SESSION_TTL_S
+        token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
+                              ctx.settings.console_session_secret)
+        audit("console", "view_as_stop", "", "", None, user.subject, True, "Administrator returned to own role",
+              {"previous_role": user.view_as or ""})
+        response = JSONResponse({"viewing_as": None})
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
+                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
+                            samesite="strict", path="/")
+        return response
 
     def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
         return console_user(request, {"notifications.manage"}, target="notifications", action=action)
@@ -2205,13 +2402,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ""
 
     @app.get("/v1/projects")
-    def managed_projects() -> dict:
+    def managed_projects(request: Request) -> dict:
+        user = (console_user(request, "projects.manage") if ctx.settings.console_login
+                else optional_console_user(request))
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
         nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
         probes = tooling.probe_report(ctx)
-        return {"projects": [{"key": project.key, "repo": project.repo,
+        projects = [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
@@ -2223,7 +2422,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                                   for node in nodes if project.key in repo.projects_for_node(
                                       node["name"], node.get("projects") or [], node.get("dynamic", False))],
                               "checks": probes.get(project.key, {})}
-                             for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
+                    for project in sorted(repo.projects.values(), key=lambda item: item.key)]
+        if user and user.project_keys is not None:
+            projects = [project for project in projects if project["key"] in user.project_keys]
+        return {"projects": projects}
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:
@@ -4086,7 +4288,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"valid": valid, "invalid_streak": streak, "invalid_last_hour": last_hour,
                 "incident_opened": incident_open}
 
-    def autonomy_report(weeks: int = 8) -> dict[str, Any]:
+    def autonomy_report(weeks: int = 8, scope: tuple[str, ...] | None = None) -> dict[str, Any]:
         now = utcnow()
         this_monday = now.date() - timedelta(days=now.weekday())
         first_monday = this_monday - timedelta(days=(weeks - 1) * 7)
@@ -4102,26 +4304,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             offset = (date - first_monday).days // 7
             return offset if 0 <= offset < weeks else None
 
+        # A person limited to some projects gets the report of those projects only.
+        ticket_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))" if scope is not None else ""
+        scope_params: tuple = (list(scope),) if scope is not None else ()
         finished = ctx.db.all(
             "SELECT DISTINCT t.key, t.summary, t.done_at FROM tickets t WHERE t.status='Done'"
+            + (" AND t.project=ANY(%s)" if scope is not None else "") +
             " AND t.done_at >= %s AND t.done_at <= %s AND EXISTS (SELECT 1 FROM runs r"
             " WHERE r.ticket_key=t.key AND r.status<>'running' AND lower(r.outcome) IN ('done','pass','passed')"
             " AND r.started_at <= t.done_at AND NOT EXISTS (SELECT 1 FROM runs later"
             " WHERE later.ticket_key=t.key AND later.started_at > r.started_at AND later.started_at <= t.done_at))"
             " AND NOT EXISTS (SELECT 1 FROM write_audit w WHERE w.ticket=t.key AND w.action='transition'"
-            " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", (start, end))
+            " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", scope_params + (start, end))
         for item in finished:
             i = trend_index(item["done_at"])
             if i is not None:
                 trend[i]["finished_without_person"] += 1
         needed = ctx.db.all("SELECT observation_key, ticket, reason, options, sent_at FROM master_escalations"
-                            " WHERE sent_at >= %s AND sent_at <= %s ORDER BY sent_at DESC", (start, end))
+                            " WHERE sent_at >= %s AND sent_at <= %s" + ticket_filter + " ORDER BY sent_at DESC",
+                            (start, end) + scope_params)
         for item in needed:
             i = trend_index(item["sent_at"])
             if i is not None:
                 trend[i]["needed_person"] += 1
         repeated = ctx.db.all("SELECT ts, type FROM events WHERE type IN ('flow_bug.created','flow_bug.repeated')"
-                              " AND ts >= %s AND ts <= %s", (start, end))
+                              " AND ts >= %s AND ts <= %s" + ticket_filter, (start, end) + scope_params)
         for item in repeated:
             i = trend_index(item["ts"])
             if i is not None:
@@ -4132,8 +4339,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         current_repeated = ctx.db.all(
             "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
             " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
-            " WHERE f.updated_at >= %s ORDER BY f.updated_at DESC LIMIT 50", (week_start,))
-        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+            " WHERE f.updated_at >= %s" + (" AND t.project=ANY(%s)" if scope is not None else "") +
+            " ORDER BY f.updated_at DESC LIMIT 50", (week_start,) + scope_params)
+        # Accounts are shared infrastructure, not project data.
+        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id") if scope is None else []
         quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
@@ -4143,8 +4352,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
-        console_user(request, "console.read")
-        return {"budget": master_budget_state(), "report": autonomy_report()}
+        user = console_user(request, "console.read")
+        return {"budget": master_budget_state(), "report": autonomy_report(scope=user.project_keys)}
 
     @app.put("/v1/master/autonomy/budget")
     def master_budget_update(body: MasterBudgetBody, request: Request) -> dict:
@@ -4160,8 +4369,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/master/report")
     def master_report(request: Request, weeks: int = Query(8, ge=1, le=52)) -> dict:
-        console_user(request, "console.read")
-        return autonomy_report(weeks)
+        user = console_user(request, "console.read")
+        return autonomy_report(weeks, scope=user.project_keys)
 
     @app.post("/v1/master/actions")
     def master_action(body: MasterActionBody, node: str = Depends(node_auth)) -> dict:
@@ -4521,37 +4730,57 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "only a verify run can merge")
         return merge_command(run, body.number, body.title, body.method, node)
 
-    def review_data(project_filter: str = "") -> dict:
+    def review_data(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> dict:
         repo = ctx.repo()
         configured = sorted(repo.projects)
+        if project_scope is not None:
+            configured = [key for key in configured if key in project_scope]
         if project_filter and project_filter not in configured:
             raise HTTPException(400, "unknown project filter")
-        where = " WHERE project=%s" if project_filter else ""
-        params = (project_filter,) if project_filter else ()
+        if project_filter:
+            where, params = " WHERE project=%s", (project_filter,)
+            project_where, project_params = " AND project=%s", (project_filter,)
+            ticket_filter, ticket_params = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)", (project_filter,)
+        elif project_scope is not None:
+            where, params = " WHERE project=ANY(%s)", (list(project_scope),)
+            project_where, project_params = " AND project=ANY(%s)", (list(project_scope),)
+            ticket_filter, ticket_params = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))", (list(project_scope),)
+        else:
+            where, params = "", ()
+            project_where, project_params = "", ()
+            ticket_filter, ticket_params = "", ()
         metrics_tickets = ctx.db.all("SELECT key, project, status, labels, blocked_by, done_at, jira_updated, synced_at"
                                      " FROM tickets" + where, params)
-        project_where = " AND project=%s" if project_filter else ""
-        project_params = (project_filter,) if project_filter else ()
-        event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
         events = ctx.db.all("SELECT ts,type,ticket,project,outcome,reason,data FROM events"
-                            " WHERE type IN ('jira.transition','review.action')" + event_filter + " ORDER BY ts",
-                            project_params)
+                            " WHERE type IN ('jira.transition','review.action')" + ticket_filter + " ORDER BY ts",
+                            ticket_params)
         runs = ctx.db.all("SELECT ticket_key,project,step,account_id,outcome,summary,details,started_at,ended_at FROM runs"
                           " WHERE 1=1" + project_where + " ORDER BY started_at", project_params)
-        audit_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
         audits = ctx.db.all("SELECT ts,ticket,action,target,accepted,result,payload FROM write_audit"
                             " WHERE (target='human-review' OR (target='jira' AND action='transition'))"
-                            + audit_filter + " ORDER BY ts", project_params)
+                            + ticket_filter + " ORDER BY ts", ticket_params)
         metrics = review_metrics.calculate_review_metrics(metrics_tickets, events, runs, audits)
         return {"metrics": metrics, "projects": configured}
 
     @app.get("/v1/reviews")
-    def human_reviews(project: str = Query(default="")) -> dict:
+    def human_reviews(request: Request, project: str = Query(default="")) -> dict:
         """Queue waiting items with their action set and project-filtered human-review metrics."""
+        user = (console_user(request, "view.human_review") if ctx.settings.console_login
+                else optional_console_user(request))
         repo = ctx.repo()
-        metrics_data = review_data(project)
-        where = " AND project=%s" if project else ""
-        params = (project,) if project else ()
+        scope = user.project_keys if user and user.project_keys is not None else None
+        if project and scope is not None and project not in scope:
+            audit("console", "access_denied", "", "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "project": project,
+                                                    "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        metrics_data = review_data(project, scope)
+        if project:
+            where, params = " AND project=%s", (project,)
+        elif scope is not None:
+            where, params = " AND project=ANY(%s)", (list(scope),)
+        else:
+            where, params = "", ()
         tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
                              " FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
                              " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where
@@ -4623,16 +4852,27 @@ def create_app(ctx: Ctx) -> FastAPI:
                            "findings": details.get("findings", "")},
                 "preview_url": preview_url,
             })
-        thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project else ""
-        thread_run_filter = " AND project=%s" if project else ""
+        if project:
+            thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)"
+            thread_event_params = (project,)
+            thread_run_filter = " AND project=%s"
+            thread_run_params = (project,)
+        elif scope is not None:
+            thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))"
+            thread_event_params = (list(scope),)
+            thread_run_filter = " AND project=ANY(%s)"
+            thread_run_params = (list(scope),)
+        else:
+            thread_event_filter, thread_event_params = "", ()
+            thread_run_filter, thread_run_params = "", ()
         thread_dates: dict[str, Any] = {}
         for row in ctx.db.all("SELECT ticket,max(ts) AS latest FROM events WHERE type='review.action'"
                               " AND data->>'action'='ask-ai'" + thread_event_filter + " GROUP BY ticket",
-                              (project,) if project else ()):
+                              thread_event_params):
             thread_dates[str(row["ticket"])] = row["latest"]
         for row in ctx.db.all("SELECT ticket_key AS ticket,max(started_at) AS latest FROM runs"
                               " WHERE step IN ('dev','triage') AND outcome IN ('blocked','answered','escalated')"
-                              + thread_run_filter + " GROUP BY ticket_key", (project,) if project else ()):
+                              + thread_run_filter + " GROUP BY ticket_key", thread_run_params):
             key = str(row["ticket"])
             thread_dates[key] = max(thread_dates.get(key, row["latest"]), row["latest"])
         threads = []
@@ -4644,8 +4884,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"tickets": out, "threads": threads, **metrics_data}
 
     @app.get("/v1/reviews/export.csv")
-    def export_review_metrics(project: str = Query(default="")) -> PlainTextResponse:
-        metrics = review_data(project)["metrics"]
+    def export_review_metrics(request: Request, project: str = Query(default="")) -> PlainTextResponse:
+        user = (console_user(request, "view.human_review") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = user.project_keys if user and user.project_keys is not None else None
+        if project and scope is not None and project not in scope:
+            audit("console", "access_denied", "", "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "project": project,
+                                                    "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        metrics = review_data(project, scope)["metrics"]
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(("metric", "value", "project"))
@@ -5215,7 +5463,77 @@ def create_app(ctx: Ctx) -> FastAPI:
         if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
             owner_auth(request, authorization)
         from .state import snapshot
-        return snapshot(ctx)
+        # The login middleware authenticates console sessions and permits this legacy owner-token route;
+        # resolving the cookie here keeps scoped session data filtered while allowing the owner token alone.
+        user = optional_console_user(request)
+        data = snapshot(ctx)
+        all_tickets = data["tickets"]
+        if user and user.project_keys is not None:
+            visible = set(user.project_keys)
+            data["projects"] = [project for project in data["projects"] if project["key"] in visible]
+            data["tickets"] = [ticket for ticket in all_tickets if ticket["project"] in visible]
+            ticket_keys = {ticket["key"] for ticket in data["tickets"]}
+            data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
+            data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
+            data["events"] = [event for event in data["events"] if event.get("ticket") in ticket_keys]
+            # Project level artifacts carry different shapes across releases; omit aggregates for restricted users.
+            data["release_readiness"] = []
+            data["release_progress"] = []
+            data["rollout"] = {}
+            data["totals"] = ctx.db.one(
+                "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
+                " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
+                " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
+                " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
+                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
+                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
+                " FROM runs WHERE project=ANY(%s)",
+                (["failed", "blocked", "timeout", "lost"], list(visible)))
+            data["totals"] = {key: int(value) if key in {"runs_24h", "tokens_in_24h", "tokens_out_24h",
+                                                               "done_24h", "failed_24h"} else float(value)
+                              for key, value in data["totals"].items()}
+            visible_nodes = {node["name"] for node in data["nodes"] if visible.intersection(node.get("projects") or [])}
+            data["nodes"] = [node for node in data["nodes"] if node["name"] in visible_nodes]
+            data["accounts"] = [account for account in data["accounts"] if account["node"] in visible_nodes]
+            data["incidents"] = [item for item in data["incidents"]
+                                 if item.get("subject") in visible or item.get("subject") in visible_nodes]
+            data["incidents_recent"] = [item for item in data["incidents_recent"]
+                                         if item.get("subject") in visible or item.get("subject") in visible_nodes]
+            data["sa"] = {}
+            data["version_policy"] = {}
+        if user and not has_permission(user.effective_roles, "view.machines_ai"):
+            data["nodes"] = []
+            data["accounts"] = []
+            data["sa"] = {}
+            data["role_health"] = {"roles": [], "settings": {}}
+            data["version_policy"] = {}
+            data["incidents"] = []
+            data["incidents_recent"] = []
+            data["events"] = [{key: event.get(key) for key in ("ts", "type", "ticket", "outcome", "reason")}
+                               for event in data["events"]]
+            for ticket in data["tickets"]:
+                if ticket.get("run"):
+                    ticket["run"] = {key: ticket["run"].get(key) for key in
+                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
+                if ticket.get("last_run"):
+                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
+                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
+                                           "duration_s", "pr_url", "ended_age_s")}
+            data["active_runs"] = [{key: run[key] for key in ("id", "ticket", "project", "summary", "step",
+                                                                  "elapsed_s", "heartbeat_age_s", "lease_ms", "progress")}
+                                    for run in data["active_runs"]]
+            data["recent_runs"] = [{key: run[key] for key in ("id", "ticket", "summary", "step", "outcome",
+                                                                  "error_kind", "duration_s", "pr_url", "ended_age_s")}
+                                    for run in data["recent_runs"]]
+            for ticket in data["tickets"]:
+                if ticket.get("run"):
+                    ticket["run"] = {key: ticket["run"].get(key) for key in
+                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
+                if ticket.get("last_run"):
+                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
+                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
+                                           "duration_s", "pr_url", "ended_age_s")}
+        return data
 
     @app.get("/v1/system-check")
     def system_check_report() -> dict:
@@ -5282,26 +5600,88 @@ def create_app(ctx: Ctx) -> FastAPI:
         return role_health.summary(ctx)
 
     @app.get("/v1/analytics/daily")
-    def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
+    def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
-        return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                projects = [project]
+            else:
+                projects = list(user.project_keys)
+            rows = [row for key in projects for row in daily(ctx.db, days, key)]
+        else:
+            rows = daily(ctx.db, days, project)
+        return {"days": days, "project": project, "rows": rows}
 
     @app.get("/v1/analytics/usage")
-    def analytics_usage(days: int = Query(7, ge=1, le=90),
+    def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),
                         group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
                         project: str = "", ticket: str = "", account: str = "") -> dict:
         from .analytics import usage
+        user = (console_user(request, None) if ctx.settings.console_login
+                else optional_console_user(request))
+
+        def refuse() -> None:
+            if user:
+                audit("console", "access_denied", "", "", None, user.subject, False,
+                      "not available for your role", {"path": request.url.path, "method": request.method,
+                                                       "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+
+        needs_machine_access = group_by in {"account", "machine"}
+        if user and needs_machine_access and not has_permission(user.effective_roles, "view.machines_ai"):
+            refuse()
+
+        project_keys = None
+        if user and user.project_keys is not None:
+            project_keys = user.project_keys
+            if project and project not in project_keys:
+                refuse()
+            if ticket:
+                ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,))
+                projects = ({ticket_row["project"]} if ticket_row else set())
+                if not projects:
+                    projects = {row["project"] for row in ctx.db.all(
+                        "SELECT DISTINCT project FROM runs WHERE ticket_key=%s AND project<>''", (ticket,))}
+                if projects and not projects.issubset(set(project_keys)):
+                    refuse()
+
         return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
                                                                      "account": account},
-                "rows": usage(ctx.db, days, group_by, project, ticket, account)}
+                "rows": usage(ctx.db, days, group_by, project, ticket, account, project_keys=project_keys)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")
-    def memory_search(q: str = "", project: str = "", limit: int = 10) -> dict:
+    def memory_search(request: Request, q: str = "", project: str = "", limit: int = 10) -> dict:
+        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                keys = [project]
+            else:
+                keys = list(user.project_keys)
+            hits = [hit for key in keys for hit in memory.search(ctx.db, key, q, limit)]
+            return {"project": project, "q": q, "hits": hits[:limit]}
         return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
 
     @app.get("/v1/memory/study-cases")
-    def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+    def memory_study_cases(request: Request, project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                keys = [project]
+            else:
+                keys = list(user.project_keys)
+            cases = [case for key in keys for case in project_lifecycle.study_cases(ctx.db, key, limit)]
+            return {"project": project, "study_cases": cases[:limit]}
         return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
 
     # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------

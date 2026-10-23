@@ -44,7 +44,6 @@ WORKTREE_STORAGE_LIMIT = 4 * 1024**3
 STORAGE_DISK_RESERVE = 4 * 1024**3
 ACTIVE_CONTAINER_LIMIT = 8
 CONTAINER_LAYER_LIMIT = "1g"
-CONTAINER_VOLUME_LIMIT = "1g"
 BUILD_LIMIT = "2g"
 IMAGE_PRUNE_AGE = "168h"
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
@@ -511,19 +510,6 @@ def _validate_compose_document(data: Any, compose_file: Path, project_dir: Path,
     return len(services)
 
 
-def _volume_quota_supported() -> bool:
-    """Podman volume size quotas require its volume store to be on XFS with project quotas enabled."""
-    try:
-        graphroot = _graphroot()
-        result = subprocess.run(["findmnt", "-T", str(graphroot), "-n", "-o", "FSTYPE,OPTIONS"],
-                                capture_output=True, text=True, timeout=10)
-        fields = (result.stdout or "").strip().split(None, 1) if result.returncode == 0 else []
-        filesystem, options_text = fields if len(fields) == 2 else ("", "")
-        return filesystem == "xfs" and bool({"pquota", "prjquota"} & set(options_text.split(",")))
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return False
-
-
 def _compose_snapshot(data: dict[str, Any], compose_file: Path, project_dir: Path, root: Path,
                      runtime_dir: Path, map_worktree_path=None) -> Path:
     """Write the validated compose model to broker storage with all worktree paths pinned to the open directory."""
@@ -672,8 +658,6 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
         raise ContainerPolicyError(f"compose may define at most {ACTIVE_CONTAINER_LIMIT} services")
     if len(all_volumes) > ACTIVE_CONTAINER_LIMIT:
         raise ContainerPolicyError(f"compose may declare at most {ACTIVE_CONTAINER_LIMIT} named volumes")
-    if all_volumes and not _volume_quota_supported():
-        raise ContainerPolicyError("compose named volumes require an XFS container store with project quotas")
     if len(_active_containers()) + service_count > ACTIVE_CONTAINER_LIMIT:
         raise ContainerPolicyError("the node container limit is full; retry after a run cleans up")
     if i >= len(argv) or argv[i] not in {"up", "run"}:
@@ -753,11 +737,8 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
         if service.get("build"):
             services_override[name]["build"] = {"storage_opt": {"size": BUILD_LIMIT}}
     override_data: dict[str, Any] = {"services": services_override}
-    if all_volumes:
-        override_data["volumes"] = {
-            name: {"driver_opts": {"o": f"size={CONTAINER_VOLUME_LIMIT}"}}
-            for name in sorted(all_volumes)
-        }
+    # Named volumes live in the rootless default store. Podman's size= mount option needs root, so their growth is
+    # bounded by the polled graphroot ceiling (_runtime_storage_limit_reached) instead of a per-volume quota.
     override.write_text(yaml.safe_dump(override_data, sort_keys=False), encoding="utf-8")
     uid, gid, _ = _engine_identity()
     os.chown(override, uid, gid)
@@ -1344,11 +1325,25 @@ class ContainerRuntime(AbstractContextManager):
         self.process: subprocess.Popen | None = None
         self.previous_env: dict[str, str | None] = {}
         self.acl_root: Path | None = None
+        self.acl_fd = -1
 
-    def _grant_worktree(self, root: Path) -> None:
+    def _setfacl(self, *args: str) -> subprocess.CompletedProcess:
+        """Run setfacl on the pinned worktree directory only: through its descriptor, never the mutable path.
+
+        `-P` keeps the recursive walk from following symlinks the run may have planted inside the tree.
+        """
+        return subprocess.run(["setfacl", "-R", "-P", *args, f"/proc/self/fd/{self.acl_fd}/."],
+                              capture_output=True, timeout=120, pass_fds=[self.acl_fd])
+
+    def _grant_worktree(self, root: Path, identity: tuple[int, int]) -> None:
         """Let the engine account bind-mount this one worktree; revoked again on exit."""
-        result = subprocess.run(["setfacl", "-R", "-m", f"u:{ENGINE_USER}:rwX", "-m", f"d:u:{ENGINE_USER}:rwX",
-                                 str(root)], capture_output=True, timeout=120)
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != identity:
+            os.close(fd)
+            raise RuntimeError("container worktree changed while the runtime started")
+        self.acl_fd = fd
+        result = self._setfacl("-m", f"u:{ENGINE_USER}:rwX", "-m", f"d:u:{ENGINE_USER}:rwX")
         if result.returncode:
             raise RuntimeError("could not grant the container engine access to the worktree")
         self.acl_root = root
@@ -1397,7 +1392,7 @@ class ContainerRuntime(AbstractContextManager):
         denied.write_text(f"#!{sys.executable}\nimport sys\nprint('direct Podman access is disabled for AI runs', file=sys.stderr)\nraise SystemExit(125)\n",
                           encoding="utf-8")
         denied.chmod(0o755)
-        self._grant_worktree(root)
+        self._grant_worktree(root, root_identity)
         env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
                "USER": ENGINE_USER, "LOGNAME": ENGINE_USER, "LANG": "C.UTF-8",
                "TMPDIR": str(self.runtime_dir), "PODMAN_COMPOSE_PROVIDER": shutil.which("podman-compose") or "podman-compose"}
@@ -1456,9 +1451,13 @@ class ContainerRuntime(AbstractContextManager):
             else:
                 self.spec.extra_env[key] = value
         self.spec.container_start_hook = None
-        if self.acl_root is not None:
-            subprocess.run(["setfacl", "-R", "-x", f"u:{ENGINE_USER}", "-x", f"d:u:{ENGINE_USER}",
-                            str(self.acl_root)], capture_output=True, timeout=120)
+        if self.acl_fd >= 0:
+            try:
+                # Revoke through the pinned descriptor, so a path swapped for a symlink cannot redirect this.
+                self._setfacl("-x", f"u:{ENGINE_USER}", "-x", f"d:u:{ENGINE_USER}")
+            finally:
+                os.close(self.acl_fd)
+                self.acl_fd = -1
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
         shutil.rmtree(self.public_dir, ignore_errors=True)
         return False

@@ -164,7 +164,10 @@ def open_incident(ctx, kind: str, subject: str, severity: str, title: str, detai
             import logging
             logging.getLogger("aiflow4.incidents").warning("incident knowledge capture failed: %s", type(exc).__name__)
         if severity in ("critical", "warning"):
-            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc")
+            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc", ctx=ctx,
+                                   alert_kind="critical_incident" if severity == "critical" else "ticket_needs_person",
+                                   ticket=subject if _TICKET_KEY.fullmatch(subject or "") else "",
+                                   needed=detail or title)
             ctx.db.run("UPDATE incidents SET notified=%s WHERE id=%s", (bool(channels), row["id"]))
     return bool(row)
 
@@ -186,7 +189,8 @@ def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:
                     import logging
                     logging.getLogger("aiflow4.incidents").warning("incident resolution capture failed: %s", type(exc).__name__)
         ctx.events.emit("incident.closed", reason=note or row["title"], kind=kind, subject=subject)
-        notify.send("info", f"resolved: {row['title']}", note)
+        notify.send("info", f"resolved: {row['title']}", note, ctx=ctx,
+                    alert_kind="critical_incident", needed=note or "The incident has been resolved.")
 
 
 # --- a flow that stands still -------------------------------------------------------------------------------
@@ -257,8 +261,18 @@ def idle_reasons(ctx, projects: set[str]) -> list[str]:
         if len(blocked) == len(serving):
             reasons.append(f"{key} is gated on every node that serves it: " + "; ".join(blocked))
     accounts = ctx.db.all("SELECT a.id, a.status, a.node FROM accounts a")
+    online_names = {n["name"] for n in online}
+    # a shared account is enabled per machine (its own `node` may be empty): count every signed-in assignment
+    signed_in: dict[str, set[str]] = {}
+    pending: set[tuple[str, str]] = set()
+    for m in ctx.db.all("SELECT account_id, node, status FROM account_machines"):
+        if m["status"] == "signed_in":
+            signed_in.setdefault(m["account_id"], set()).add(m["node"])
+        else:
+            pending.add((m["account_id"], m["node"]))
     ready = [a for a in accounts if a["status"] in ("idle", "working", "probing")
-             and any(n["name"] == a["node"] for n in online) and not ctx.leases.cooling(a["id"])]
+             and ((a["node"] in online_names and (a["id"], a["node"]) not in pending)
+                  or signed_in.get(a["id"], set()) & online_names) and not ctx.leases.cooling(a["id"])]
     if not ready:
         states = ", ".join(f"{a['id']}={a['status']}" for a in accounts) or "no accounts"
         reasons.append(f"no AI account is ready ({states})")

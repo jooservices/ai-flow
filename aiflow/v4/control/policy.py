@@ -476,8 +476,8 @@ def _invokes(segment: str, name: str) -> bool:
     return False
 
 
-def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
-           *, containers: bool = False) -> Decision:
+def _decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
+            *, containers: bool = False) -> Decision:
     cmds = policy.get("commands") or {}
     allow = list(cmds.get("allow") or [])
     deny = list(cmds.get("deny") or [])
@@ -535,7 +535,7 @@ def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktr
     return Decision("deny", f"tool {tool} is not used by AI Flow runs")
 
 
-def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
+def _decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
                      why: str) -> Decision:
     """Read-only AI work cannot write, read outside the checkout, or access the network.
 
@@ -581,4 +581,68 @@ def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, An
         except ValueError as e:
             return Decision("deny", f"{why} ({e})")
         policy = {**policy, "commands": {**(policy.get("commands") or {}), "allow": []}}
-    return decide(policy, tool, tool_input, worktree)
+    return _decide(policy, tool, tool_input, worktree)
+
+
+# --- refusals that explain themselves (docs/v4/escalations.md) --------------------------------------------------
+# A refused call must tell the AI why and what is allowed instead, so that a policy message is never taken for a
+# restriction that needs a person (JOOWP-308 asked the owner about a refused `p='src/auth/provider.ts'`).
+NOT_A_RESTRICTION = ("This is a policy message about this one call, not a restriction that needs a person: do not "
+                     "ask the owner about it; use the allowed alternative.")
+POLICY_MESSAGE_HELP = (
+    "A refused command or write is a policy message about that one call, not a restriction that needs a person. "
+    "Commands must start with an allowed program (the project's allowed commands, or a read-only one such as ls, "
+    "cat, grep, git status, git diff, git log); a command cannot start with a variable assignment such as "
+    "p='src/auth/provider.ts'. Use the Edit or Write tool to change files inside the worktree and the Read tool to "
+    "read them. AI Flow commits and pushes your work, so do not run git commit or git push. Run an allowed command "
+    "or use the file tools instead of asking the owner.")
+ASSIGNMENT = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def alternative(reason: str, tool: str, tool_input: dict[str, Any]) -> str:
+    """The allowed way to do what a refused call was trying to do."""
+    command = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
+    if reason.startswith("not in the project's command policy") or "not a read-only command" in reason:
+        if ASSIGNMENT.match(reason.split(": ", 1)[-1]) or ASSIGNMENT.match(command):
+            return ("a command cannot start with a variable assignment such as p='src/auth/provider.ts'; give the "
+                    "value directly to an allowed program, and use the Edit tool to change files")
+        return ("commands must start with an allowed program (the project's allowed commands, or a read-only one such "
+                "as ls, cat, grep, git status, git diff, git log); use the Edit or Write tool to change files and the "
+                "Read tool to read them")
+    if reason.startswith("policy denies"):
+        if re.search(r"git (?:commit|push)", reason + " " + command):
+            return "leave your changes uncommitted: AI Flow commits and pushes the work after you finish"
+        return "this command is blocked on purpose; reach the same result with an allowed program or the file tools"
+    if reason.startswith("writes are allowed only inside the worktree"):
+        return "use the Edit or Write tool with a path inside the worktree"
+    if reason.startswith("reading ") and "not allowed" in reason:
+        return "protected files such as secrets are never available to AI runs; work from the repository files"
+    if reason.startswith("invalid shell quoting"):
+        return "fix the quoting, or run one simple command at a time"
+    if reason.startswith("tool "):
+        return "use Bash for allowed commands and Read, Edit or Write for files"
+    if ("read-only" in reason or "cannot edit files" in reason or "does not change files" in reason
+            or "does not edit code" in reason or "reviews and tests" in reason):
+        return ("inspect with Read, Glob, Grep or read-only commands (ls, cat, grep, git log); describe any change in "
+                "your answer instead of making it")
+    if "master" in reason:
+        return "return an action plan; the control plane performs the actions"
+    return "use an allowed command or the Read, Edit and Write tools inside the worktree"
+
+
+def explain(decision: Decision, tool: str, tool_input: dict[str, Any]) -> Decision:
+    """Add the allowed alternative to every refusal; allowed calls are unchanged."""
+    if decision.decision != "deny" or NOT_A_RESTRICTION in decision.reason:
+        return decision
+    return Decision("deny", f"{decision.reason.rstrip('.')}. Allowed instead: "
+                            f"{alternative(decision.reason, tool, tool_input)}. {NOT_A_RESTRICTION}")
+
+
+def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
+           *, containers: bool = False) -> Decision:
+    return explain(_decide(policy, tool, tool_input, worktree, containers=containers), tool, tool_input)
+
+
+def decide_read_only(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
+                     why: str) -> Decision:
+    return explain(_decide_read_only(policy, tool, tool_input, worktree, why), tool, tool_input)

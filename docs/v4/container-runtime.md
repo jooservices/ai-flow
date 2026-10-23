@@ -18,9 +18,9 @@ separation, rootless mode, Compose, project quotas, and sufficient filesystem ca
 Compose volumes may not set a custom `name`; they are always named per run. An opt-in integration test
 (`AIFLOW4_TEST_PODMAN=1`) builds and runs a real container where the runtime exists. There is no automatic fallback to a host Docker daemon. A node without the safe runtime
 reports the missing tool, and work for a project that requires it stays out of that node's candidates.
-Compose projects that declare named volumes additionally require the container store to use XFS with project
-quotas, because Podman applies volume size limits through XFS project quotas. Anonymous Compose volumes are
-rejected; every declared named volume is assigned a 1 GiB quota, with at most eight named volumes per project.
+Compose named volumes are created in the rootless default store. Podman's per-volume `size=` option needs root, so
+AI Flow does not set it; volume growth is bounded by the same polled storage ceiling as images and layers (below).
+Anonymous Compose volumes are rejected, with at most eight named volumes per project.
 
 Reserve at least 24 GiB on the container storage filesystem. AI Flow caps the rootless image and build cache at
 12 GiB, each writable container layer at 1 GiB, concurrent run containers at eight, and preserves 4 GiB of free

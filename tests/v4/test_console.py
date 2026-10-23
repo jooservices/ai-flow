@@ -10,21 +10,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aiflow.v4 import VERSION
-from aiflow.v4.control.console_auth import ROLE_PERMISSIONS
+from aiflow.v4.control.console_auth import COOKIE_NAME, ROLE_PERMISSIONS, issue_session
+from aiflow.v4.control.ui import CONSOLE_PAGE_PATHS
 from aiflow.v4.core.settings import Settings
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
-var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {}},
+var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
+  classList: {add: function () {}, remove: function () {}}},
   getElementById: function () { return null; }, querySelector: function () { return null; },
   querySelectorAll: function () { return []; }};
 var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
 var location = {pathname: '/cc'};
 var localStorage = {getItem: function () { return null; }, setItem: function () {}};
-var fetch = function () {};
+var fetch = function () { return new Promise(function () {}); };
 var setInterval = function () {};
 """
 OWNER_PERMISSIONS = sorted(ROLE_PERMISSIONS["owner"])
@@ -53,7 +56,8 @@ def console_session(role: str) -> dict:
             "permissions": sorted(ROLE_PERMISSIONS[role])}
 
 
-def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
+def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None,
+                 accounts: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
@@ -64,7 +68,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
                         else OWNER_PERMISSIONS}
     driver = f"""
 var node = {json.dumps(node)};
-S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
+S.data = {{nodes: [node], accounts: {json.dumps(accounts or [])}, active_runs: [], recent_runs: [], projects: [], tickets: [],
           incidents: [], events: [], totals: {{}}, versions: {{}}}};
 S.consoleUser = {json.dumps(console_user)};
 S.nodeOperations = {{[node.name]: {json.dumps(operations or [])}}};
@@ -143,13 +147,31 @@ console.log(projectsView.innerHTML);
     return result.stdout
 
 
-def render_dashboard(state: dict, analytics: list[dict] | None = None) -> str:
+ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_business_decision"],
+                           "labels": {"missing_tool_or_environment": "Missing tool or environment",
+                                      "new_business_decision": "New business decision"},
+                           "person_classes": ["new_business_decision"], "falling": True,
+                           "this_week": {"total": 3, "share_without_person_pct": 66.7},
+                           "weeks": [{"week_start": "2026-10-19", "total": 3, "share_without_person_pct": 66.7,
+                                      "by_class": {"missing_tool_or_environment": 2, "new_business_decision": 1},
+                                      "by_project": {"JAIF": {"missing_tool_or_environment": 2, "new_business_decision": 1}}}],
+                           "top_causes": [{"label": "Missing tool or environment", "count": 2, "fix": "Provision the tool."}],
+                           "amendments": [{"ticket_key": "JOOWP-301", "title": "AC3 of JOOWP-301 amended", "decision": "AC3 narrowed"}]},
+               "register": {"decisions": [{"id": 1, "title": "No Docker for AI runs", "decision": "No.", "cited_count": 2, "decided_by": "owner"}],
+                            "asked": [{"id": 9, "title": "Default plan", "question": "q", "waiting_tickets": ["JAIF-1"],
+                                       "options": ["Free", "Team"], "recommended": "Free"}], "amendments": []}}
+
+
+def render_dashboard(state: dict, analytics: list[dict] | None = None,
+                     weekly_report: dict | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console Dashboard")
     script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
     script = script[:script.index(BOOT)]
     project_key = (state.get("projects") or [{}])[0].get("key")
+    report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
+                               "needed_person": [], "repeated_failures": []}
     driver = f"""
 var dashboard = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-cc' ? dashboard : null; }};
@@ -157,6 +179,8 @@ S.data = {json.dumps(state)};
 S.analytics = {json.dumps(analytics or [])};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
+S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
+S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
 console.log(dashboard.innerHTML);
 """
@@ -164,6 +188,141 @@ console.log(dashboard.innerHTML);
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def render_machine_overview(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Command Center")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machineOverview = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
+S.data = {json.dumps(state)};
+S.consoleUser = {json.dumps(console_session('owner'))};
+S.services = []; S.analytics = [];
+S.autonomy.data = {{budget: {{used_minutes: 0, daily_budget_minutes: 60, remaining_minutes: 60}}, report: {{
+  week_start: '2026-10-19', trend: [], finished_without_person: [], needed_person: [], repeated_failures: [], quota_accounts: []}}}};
+renderCC();
+console.log(machineOverview.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def render_machines(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Machines and AI view")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machines = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
+S.data = {json.dumps(state)};
+S.services = [];
+S.view = 'machines';
+S.consoleUser = {json.dumps(console_session('owner'))};
+renderMachines();
+console.log(machines.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def render_account(account: dict) -> str:
+    driver = f"""
+S.data = {{nodes: [], accounts: [{json.dumps(account)}], active_runs: [], recent_runs: [], incidents: [], events: [],
+          totals: {{}}, versions: {{}}}};
+S.consoleUser = {json.dumps(console_session('owner'))};
+console.log(drawerAcc({json.dumps(account['id'])}));
+"""
+    return run_script(driver)
+
+
+def test_machines_screen_uses_assignment_state_and_shared_actions():
+    account = {"id": "shared-01", "provider": "claude", "node": "node1", "shared": False,
+               "shared_managed": True, "sign_in_pending": False, "status": "signed_out", "paused": False,
+               "session_limit": 2, "parallel": 2, "jobs": ["develop"],
+               "machines": [{"node": "node1", "signed_in": False, "sign_in_pending": True,
+                             "shared_assignment": True, "removable": True,
+                             "signin": {"link": "https://claude.example.test/device", "code": "ABCD-2345",
+                                        "expires_at": "2026-10-23T12:00:00+00:00"}}]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+    rendered_pending = render_machines({"nodes": [machine], "accounts": [account]})
+    assert "Sign-in pending" in rendered_pending
+    assert "ABCD-2345" in rendered_pending
+    assert 'data-act="acc-retry-signin"' in rendered_pending
+    assert 'data-act="acc-remove-machine"' in rendered_pending
+    assert 'data-act="account-pause"' not in rendered_pending
+    assert 'data-act="account-edit"' not in rendered_pending
+    assert 'data-act="account-signin"' not in rendered_pending
+    assert 'data-act="account-signin-complete"' not in rendered_pending
+    assert 'data-act="account-remove"' not in rendered_pending
+
+    signed_in = {**account, "status": "idle", "machines": [{"node": "node1", "signed_in": True,
+                                                                  "sign_in_pending": False, "shared_assignment": True,
+                                                                  "removable": True,
+                                                                  "signin": None}]}
+    rendered_signed_in = render_machines({"nodes": [machine], "accounts": [signed_in]})
+    assert "total limit 2 sessions" in rendered_signed_in
+    assert 'data-act="acc-remove-machine"' in rendered_signed_in
+    assert 'data-act="account-pause"' not in rendered_signed_in
+    assert 'data-act="account-edit"' not in rendered_signed_in
+    assert 'data-act="account-signin"' not in rendered_signed_in
+    assert 'data-act="account-remove"' not in rendered_signed_in
+
+    assignment_only = {**signed_in, "shared_managed": False,
+                       "machines": [{"node": "node1", "signed_in": True, "sign_in_pending": False,
+                                     "shared_assignment": True, "removable": True, "signin": None}]}
+    rendered_assignment = render_machines({"nodes": [machine], "accounts": [assignment_only]})
+    assert 'data-act="acc-remove-machine"' in rendered_assignment
+    assert 'data-act="account-pause"' not in rendered_assignment
+    assert 'data-act="account-edit"' not in rendered_assignment
+    assert 'data-act="account-signin"' not in rendered_assignment
+
+
+def test_unassigned_shared_account_does_not_reappear_on_its_original_machine():
+    account = {"id": "claude-01", "provider": "claude", "node": "node1", "machines": [],
+               "shared": False, "shared_managed": False, "sign_in_pending": True, "status": "signed_out",
+               "paused": False, "session_limit": 1, "parallel": 1, "jobs": ["develop"]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+
+    rendered = render_machines({"nodes": [machine], "accounts": [account]})
+
+    assert "No AI accounts on this machine." in rendered
+    assert "claude-01" not in rendered
+    assert 'data-act="account-signin"' not in rendered
+    assert 'data-act="account-remove"' not in rendered
+
+
+def test_unassigned_shared_account_has_a_confirmed_remove_action():
+    account = {"id": "new-account", "provider": "claude", "node": "", "machines": [],
+               "shared": False, "shared_managed": True, "status": "signed_out", "provider_status": "signed_out",
+               "paused": False, "session_limit": 2, "parallel": 2, "runs_active": 0, "jobs": [], "roles": [],
+               "tier": "middle", "explicit_only": False, "quota": {}, "quota_awareness": {}, "worker": {},
+               "recent_runs": []}
+    rendered = render_account(account)
+
+    assert 'data-act="acc-remove-all" data-account="new-account" data-count="0">Remove account</button>' in rendered
+    outcome = run_script("""
+var prompt = '';
+var request = null;
+window.confirm = function (text) { prompt = text; return true; };
+fetch = function (url, options) { request = {url: url, method: options.method}; return new Promise(function () {}); };
+removeAccountEverywhere('new-account', 0);
+console.log(JSON.stringify({prompt: prompt, request: request}));
+""")
+    result = json.loads(outcome)
+    assert "not enabled on any machine" in result["prompt"]
+    assert result["request"] == {"url": "/v1/shared-accounts/new-account?confirm=true", "method": "DELETE"}
 
 
 def render_integrations(user: dict, jira: dict | None = None) -> str:
@@ -317,19 +476,29 @@ def test_console_page_and_state_feed_the_footer(ctx):
     from fastapi.testclient import TestClient
     from aiflow.v4.control.api import create_app
     from aiflow.v4.control.ui import mount_ui
+
+    ctx.settings.console_login = True
+    ctx.settings.console_session_secret = "console-page-test-secret-at-least-32-bytes"
     app = create_app(ctx)
     mount_ui(app, ctx)  # as the control-api CLI does
     app.state.sync_accounts()
-    client = TestClient(app)
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set(COOKIE_NAME, issue_session("console@example.test", "owner", 2_000_000_000,
+                                                   ctx.settings.console_session_secret))
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
-    assert client.get("/dashboard").status_code == 200
-    assert client.get("/work").status_code == 200
-    assert client.get("/machines").status_code == 200
-    assert client.get("/users").status_code == 200
-    assert client.get("/sa").status_code == 200
-    for path in ("/delivery", "/business", "/review", "/stakeholder", "/knowledge", "/integrations", "/projects"):
-        assert client.get(path).status_code == 200
+    for path in CONSOLE_PAGE_PATHS:
+        response = client.get(path)
+        assert response.status_code != 404, f"{path} returned 404"
+        if path == "/":
+            assert (response.status_code, response.headers["location"]) in {
+                (302, "/cc"), (307, "/dashboard")
+            }
+        elif path == "/help":
+            assert response.status_code == 307 and response.headers["location"] == "/help/"
+        else:
+            assert response.status_code == 200, f"{path} did not load the console"
+    assert client.get("/help", follow_redirects=True).status_code == 200
     assert 'id="view-sa"' in page.text and 'data-view="sa"' in page.text
     lead = client.get("/lead")
     assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
@@ -337,6 +506,66 @@ def test_console_page_and_state_feed_the_footer(ctx):
     assert s["version"] == VERSION
     assert s["env"] and "control_repo" in s and "versions" in s
     assert s["links"] == {"o2": "/o2/", "mail": "/mail/", "gatus": "/gatus/"}
+
+
+def test_support_screen_shows_ticket_picker_and_review_inventory_before_download():
+    rendered = run_script(f"""
+var root = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-support' ? root : null; }};
+S.view = 'support'; S.consoleUser = {json.dumps(console_session_user('owner'))};
+S.data = {{tickets: [{{key: 'TESTWP-7', type: 'Bug', summary: 'Example issue'}}]}};
+S.support = {{ticketKey: 'TESTWP-7', busy: false, error: '', bundle: {{download_url: '/v1/support/bundles/random/download',
+  inventory: {{created_at: '2026-10-22T10:00:00+00:00', scan: 'passed', files: [{{name: 'incidents.json', bytes: 90}}]}}}}}};
+renderSupport(); console.log(root.innerHTML);
+""")
+    assert 'id="support-ticket"' in rendered and "TESTWP-7" in rendered
+    assert "Review bundle inventory" in rendered and "Sensitive data scan passed" in rendered
+    assert "Download reviewed bundle" in rendered and "/v1/support/bundles/random/download" in rendered
+
+
+def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring_and_logs():
+    root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((root / "deploy/v4/control/compose.yaml").read_text(encoding="utf-8"))
+    rule = compose["services"]["control-api-a"]["labels"]["traefik.http.routers.api.rule"]
+    assert rule == "PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)"
+    assert "PathPrefix(`/v1`)" not in rule  # the broad rule also carries the control API
+    for path in CONSOLE_PAGE_PATHS:
+        if path not in {"/", "/help", "/notifications"}:
+            assert f"PathPrefix(`{path}`)" not in rule and f"Path(`{path}`)" not in rule
+
+
+def test_console_reload_selects_the_view_from_each_existing_address():
+    views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
+             "support")
+    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
+    for path in page_paths:
+        expected_view = ("cc" if path in {"/cc", "/dashboard"} else
+                         "work" if path == "/board" else path.removeprefix("/"))
+        prelude = STUBS.replace("pathname: '/cc'", f"pathname: {json.dumps(path)}") + f"""
+var viewNames = {json.dumps(views)};
+var tabs = viewNames.map(function (view) {{
+  var attrs = {{'data-view': view}};
+  return {{setAttribute: function (key, value) {{ attrs[key] = value; }},
+           getAttribute: function (key) {{ return attrs[key]; }}}};
+}});
+var panels = {{}};
+viewNames.forEach(function (view) {{ panels[view] = {{hidden: true}}; }});
+document.querySelectorAll = function (selector) {{ return selector === '.tab' ? tabs : []; }};
+document.querySelector = function (selector) {{
+  var match = /^#view-(.+)$/.exec(selector);
+  return match ? panels[match[1]] : null;
+}};
+"""
+        state = json.loads(run_script(
+            "showView(); console.log(JSON.stringify({path: location.pathname, view: S.view, "
+            "selected: tabs.filter(function (tab) { return tab.getAttribute('aria-selected') === 'true'; })[0] "
+            "&& tabs.filter(function (tab) { return tab.getAttribute('aria-selected') === 'true'; })[0]"
+            ".getAttribute('data-view'), visible: Object.keys(panels).filter(function (view) { return !panels[view].hidden; })}));",
+            prelude=prelude,
+        ))
+        assert state == {"path": path, "view": expected_view, "selected": expected_view,
+                         "visible": [expected_view]}, f"{path} did not select its view after a page reload"
 
 
 def test_sa_dashboard_renders_thresholds_incidents_expiry_blocks_and_openobserve_link():
@@ -490,18 +719,26 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/lead', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,lead,review,stakeholder,knowledge,backup,integrations,projects"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
+    assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects']" in page
+    assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];"
+            ) in page
+    assert "else if (S.view === 'notifications') renderNotifications();" in page
+    assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']") in page
+    assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
+    assert "licensing: 'licensing.manage'" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -564,7 +801,7 @@ def test_super_admin_session_shows_github_connect_and_project_resume_controls(ct
     session = client.get("/v1/console/session")
     assert session.status_code == 200
     user = session.json()
-    assert user["role"] == "super_admin"
+    assert user["role"] == "administrator"
     assert "*" in user["permissions"]
 
     jira = {"connected": False, "source": "none", "state": "disconnected", "needs_reconnect": False,
@@ -602,6 +839,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
 
     from aiflow.v4.control import login
     from aiflow.v4.control.api import create_app
+    from aiflow.v4.control.ui import mount_ui
 
     try:
         playwright = sync_playwright().start()
@@ -619,6 +857,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
         app = create_app(ctx)
+        mount_ui(app, ctx)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(("127.0.0.1", 0))
@@ -638,15 +877,103 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
             page.get_by_label("Email").fill("browser-admin@example.test")
             page.get_by_label("Password").fill(password)
             page.get_by_role("button", name="Sign in").click()
-            page.wait_for_url("**/integrations")
-            page.get_by_role("button", name="Connect GitHub").wait_for(state="visible", timeout=10000)
+            page.wait_for_url("**/cc")
+            page.get_by_role("tab", name="Integrations").click()
+            github_app_setup = page.locator(
+                "#view-integrations summary, #view-integrations a[href*='installation-settings']")
+            github_app_setup.first.wait_for(state="visible", timeout=10000)
             existing_app = page.locator("#view-integrations summary").filter(has_text="Use an existing GitHub App")
-            existing_app.click()
-            page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
-            page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            if existing_app.count():
+                existing_app.click()
+                page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
+                page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            else:
+                page.get_by_role("link", name="Add repositories on GitHub").wait_for(state="visible", timeout=10000)
 
             page.get_by_role("tab", name="Projects").click()
             page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+
+            # Direct navigation and reload must leave each existing view selected at the same address.
+            for path in (p for p in CONSOLE_PAGE_PATHS if p not in {"/", "/help"}):
+                view = ("cc" if path in {"/cc", "/dashboard"} else
+                        "work" if path == "/board" else path.removeprefix("/"))
+                page.goto(base_url + path, wait_until="domcontentloaded")
+                for action in ("load", "reload"):
+                    assert page.url == base_url + path
+                    selected = page.evaluate("""view => {
+                      const tab = document.querySelector('#tab-' + view);
+                      const panel = document.querySelector('#view-' + view);
+                      return !!tab && tab.getAttribute('aria-selected') === 'true' && !!panel && !panel.hidden;
+                    }""", view)
+                    assert selected, f"{path} did not keep the {view} view selected after {action}"
+                    if action == "load":
+                        page.reload(wait_until="domcontentloaded")
+        finally:
+            browser.close()
+            server.should_exit = True
+            if server_thread.is_alive():
+                server_thread.join(timeout=5)
+            server_socket.close()
+    finally:
+        playwright.stop()
+
+
+def test_role_navigation_and_forbidden_pages_in_a_browser_for_three_roles(ctx):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error, sync_playwright
+    import uvicorn
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.api import create_app
+
+    try:
+        playwright = sync_playwright().start()
+    except Error as exc:
+        pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Error as exc:
+            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+        ctx.settings.console_login = True
+        ctx.settings.console_session_secret = "browser-role-test-secret-at-least-32-bytes"
+        people = [
+            ("delivery@example.test", "delivery", "/delivery", ["Dashboard", "Work board", "Delivery", "Human review"], "/sa"),
+            ("ba@example.test", "ba", "/business", ["Dashboard", "Work board", "Business", "Knowledge"], "/review"),
+            ("stakeholder@example.test", "stakeholder", "/stakeholder",
+             ["Dashboard", "Work board", "Stakeholder"], "/integrations"),
+        ]
+        passwords = {email: login.seed_user(ctx.db, email, role, role.title()) for email, role, *_ in people}
+        app = create_app(ctx)
+        from aiflow.v4.control.ui import mount_ui
+        mount_ui(app, ctx)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("127.0.0.1", 0))
+        server_socket.listen(128)
+        base_url = f"http://127.0.0.1:{server_socket.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
+        server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
+        try:
+            server_thread.start()
+            deadline = time.monotonic() + 10
+            while not server.started and server_thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert server.started, "console test server did not start"
+            for email, _role, landing, visible, forbidden in people:
+                page = browser.new_page()
+                page.goto(base_url + "/login", wait_until="domcontentloaded")
+                page.get_by_label("Email").fill(email)
+                page.get_by_label("Password").fill(passwords[email])
+                page.get_by_role("button", name="Sign in").click()
+                page.wait_for_url("**" + landing)
+                for label in visible:
+                    page.get_by_role("tab", name=label).wait_for(state="visible", timeout=10000)
+                for label in ("SA", "Machines and AI", "Integrations", "Projects", "Users and roles"):
+                    assert page.get_by_role("tab", name=label).count() == 0 or not page.get_by_role("tab", name=label).is_visible()
+                page.goto(base_url + forbidden, wait_until="domcontentloaded")
+                assert "This view is not available for your role." in page.locator("body").inner_text()
+                page.close()
         finally:
             browser.close()
             server.should_exit = True
@@ -949,6 +1276,38 @@ def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     assert "Save repository settings" in rendered and "data-epic-repository" in rendered
 
 
+def test_projects_editor_submits_the_displayed_connection_for_a_stale_assignment():
+    repo = {"repo": "person/tool", "base": "develop", "checks": [], "stack": "",
+            "connection": "personal", "assigned_connection": "default", "connection_stale": True,
+            "connections": ["personal"]}
+    editor = {"key": "TESTWP", "busy": False, "saving": False, "error": "", "data": {
+        "default_repo": "person/tool", "project_defaults": {"base": "develop", "checks": [], "stack": ""},
+        "repositories": [repo], "epic_repositories": {}, "epics": [], "github_repos": [], "stacks": [],
+        "connections": [{"id": "default", "label": "App", "account": "jooservices", "kind": "app"},
+                        {"id": "personal", "label": "Personal", "account": "person", "kind": "token"}],
+    }}
+    rendered = render_projects([], {}, repository_editor=editor)
+    assert "Previously assigned to <span class=\"mono\">default</span>" in rendered
+    assert '<option value="personal" selected>Personal · person · access token</option>' in rendered
+
+    driver = f"""
+render = function () {{}};
+toast = function () {{}};
+loadProjectList = function () {{}};
+poll = function () {{}};
+var sent = null;
+fetch = function (url, options) {{
+  sent = JSON.parse(options.body);
+  return Promise.resolve({{ok: true, json: function () {{ return Promise.resolve({{saved: true, commit: 'commit-1'}}); }}}});
+}};
+S.projectAdmin.repositoryEditor = {json.dumps(editor)};
+saveProjectRepositories();
+setTimeout(function () {{ console.log(JSON.stringify(sent)); }}, 0);
+"""
+    submitted = json.loads(run_script(driver))
+    assert submitted["repositories"][0]["connection"] == "personal"
+
+
 def test_ticket_cards_business_change_requests_and_drawer_show_selected_repository():
     node_js = shutil.which("node")
     if not node_js:
@@ -988,12 +1347,19 @@ def test_command_center_menu_order_and_role_visibility():
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
+        ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
-    required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
-                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage", "projects": "projects.manage"}
+    permission_for_view = {
+        "cc": "view.dashboard", "work": "view.work_board", "delivery": "view.delivery", "sa": "view.sa",
+        "lead": "view.team_lead", "business": "view.business", "review": "view.human_review",
+        "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
+        "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
+        "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
+        "support": "console.manage",
+    }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
   getAttribute: function () { return item.view; }, setAttribute: function () {}}; });
@@ -1006,18 +1372,31 @@ Object.keys(sessions).forEach(function (role) {
 console.log(JSON.stringify(roles));
 """ % json.dumps({role: console_session(role) for role in ROLE_PERMISSIONS})))
     for role, granted in ROLE_PERMISSIONS.items():
-        expected = [view for view, _label in tabs
-                    if view not in required or "*" in granted or required[view] in granted]
+        expected = [view for view, _label in tabs if "*" in granted or permission_for_view[view] in granted]
         assert visible[role] == expected, role
         assert visible[role][:2] == ["cc", "work"]
-    # A lead keeps the read-only views it could open before.
-    assert {"knowledge", "machines"} <= set(visible["lead"])
-    assert "users" in visible["super_admin"] and "users" not in visible["owner"] and "sa" not in visible["lead"]
+    assert {"knowledge", "delivery", "lead", "review"} <= set(visible["team_lead"])
+    assert "users" in visible["super_admin"] and "users" in visible["owner"]
+    assert "machines" not in visible["team_lead"] and "sa" not in visible["lead"]
 
 
 def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     day = datetime.now(timezone.utc).date().isoformat()
     reset = int(datetime.now(timezone.utc).timestamp()) + 3600
+    awareness = {"source": "reported", "is_estimate": False, "runs_24h": 20, "confidence": "high",
+                 "rate_spread_ratio": .1, "usage_7d": {"tokens_in": 6000, "tokens_out": 1000,
+                                                          "tokens": 7000, "cost_usd": .07},
+                 "largest_run": {"ticket": "ALPHA-3", "tokens": 4000, "cost_usd": .04},
+                 "history": [{"day": day, "tokens": 7000, "cost_usd": .07, "runs": 20}],
+                 "windows": [{"name": "five_hour", "label": "Five hour", "source": "reported",
+                              "used_pct": 40, "left_pct": 60, "used_tokens": 3000, "left_tokens": 4500,
+                              "tokens": 3000, "cost_usd": .03,
+                              "reset_at": datetime.fromtimestamp(reset, timezone.utc).isoformat(),
+                              "reset_source": "reported", "burn_rates": {
+                                  "last_hour": {"tokens_per_hour": 1000}, "last_day": {"tokens_per_hour": 800},
+                                  "whole_window": {"tokens_per_hour": 700}},
+                              "prediction": {"status": "comfortable", "confidence": "high",
+                                             "remaining_at_reset_pct": 50}}]}
     state = {
         "projects": [{"key": "ALPHA", "repo": "jooservices/alpha", "closed": False}],
         "tickets": [
@@ -1030,9 +1409,18 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
             {"key": "ALPHA-5", "project": "ALPHA", "type": "Story", "summary": "Review this",
              "status": "Human review", "labels": [], "parent_key": "ALPHA-2", "run": None},
         ],
-        "nodes": [],
+        "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
+                   "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}},
+                  {"name": "worker-2", "ip": "192.0.2.56", "role": "worker", "status": "online",
+                   "has_agent": True, "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 0, "mem_total": 8589934592, "cpus": 8}}],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
-                      "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}}}],
+                      "machines": [{"node": "worker-1", "tokens_today": 120, "cost_today": .03},
+                                   {"node": "worker-2", "tokens_today": 30, "cost_today": .01}], "parallel": 4,
+                      "tokens_today": 999, "cost_today": .99,
+                      "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
+                      "quota_awareness": awareness}],
         "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
                          "provider": "codex", "step": "dev", "elapsed_s": 120}],
         "recent_runs": [], "incidents": [], "events": [],
@@ -1041,16 +1429,71 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     }
     analytics = [{"day": day, "account": "codex-alpha", "runs": 3, "done": 2, "merged": 0,
                   "rework": 0, "failed": 1, "tokens_in": 1200, "tokens_out": 800, "cost_usd": 0.12}]
-    rendered = render_dashboard(state, analytics)
+    weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
+              "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
+                                                               "quota_awareness": awareness}]}
+    rendered = render_dashboard(state, analytics, weekly)
     assert rendered.count('class="dash-kpi"') == 4
     for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
-                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next reported reset:",
+                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next quota reset:",
+                 "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
                  "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
-                 "Needs owner", "Human review", "ALPHA-2", "provider-codex"):
+                 "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
+                 "Weekly quota and usage", "Largest context run"):
+        assert text in rendered
+    # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
+    for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
+                 "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
+                 "No Docker for AI runs", "Owner decision register", "Default plan", "Free (recommended)",
+                 'data-act="esc-answer" data-id="9" data-choice="Free"', 'data-act="esc-retire" data-id="1"',
+                 "AC3 of JOOWP-301 amended", "Amendments never block", 'data-act="esc-add"'):
         assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
+    overview = render_machine_overview(state)
+    second_card_start = overview.index('data-id="worker-2"')
+    second_card = overview[second_card_start:overview.index("</button>", second_card_start)]
+    assert "codex-alpha" in second_card
+
+    machines = render_machines(state)
+    assert "codex-alpha" in machines and "quota-history" not in machines and "comfortable" not in machines
+    assert "used 40% quota" not in machines and "left 60%" not in machines
+    second_machine_start = machines.index('<article class="machine-card"><div class="machine-head"><h3>worker-2')
+    second_machine = machines[second_machine_start:machines.index("</article>", second_machine_start)]
+    assert "codex-alpha" in second_machine and "Configured AI sessions <strong>4 / 8</strong>" in second_machine
+    assert "Tokens today <strong>30</strong>" in second_machine and "Cost today <strong>$0.010</strong>" in second_machine
+    drawer = render_drawer(state["nodes"][1], console_session("owner"), accounts=state["accounts"])
+    assert "aiflow4-worker@codex-alpha" in drawer
+
+    account = {**state["accounts"][0], "tier": "middle", "roles": ["dev"], "runs_active": 2,
+               "session_limit": 4, "shared": True,
+               "machines": [{"node": "worker-1", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 4,
+                             "tokens_today": 120, "cost_today": .03},
+                            {"node": "worker-2", "node_status": "online", "signed_in": True,
+                             "removable": True, "runs_active": 1, "runs_24h": 2,
+                             "tokens_today": 30, "cost_today": .01}]}
+    account_detail = run_script(f"S.data = {json.dumps({'accounts': [account], 'nodes': state['nodes'], 'recent_runs': []})};"
+                                "S.consoleUser = " + json.dumps(console_session_user()) + ";"
+                                "console.log(drawerAcc('codex-alpha'));")
+    assert account_detail.count('class="quota-history"') == 1
+    assert "Tokens · today" in account_detail and "Cost · today" in account_detail
+    assert "<td>120</td><td>$0.030</td>" in account_detail
+    assert "<td>30</td><td>$0.010</td>" in account_detail
+
+
+def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():
+    estimate = {"id": "grok-estimate", "provider": "grok", "quota": {}, "quota_awareness": {
+        "is_estimate": True, "confidence": "low", "runs_24h": 0,
+        "usage_7d": {"tokens": 500, "cost_usd": .01}, "history": [], "largest_run": None,
+        "windows": [{"label": "Estimated weekly", "source": "estimate", "used_pct": 20, "left_pct": 80,
+                     "used_tokens": 500, "left_tokens": 2000, "tokens": 500, "cost_usd": .01,
+                     "reset_at": "2026-10-26T00:00:00+00:00", "reset_source": "estimate",
+                     "burn_rates": {}, "prediction": {"status": "comfortable", "confidence": "low"}}]}}
+    rendered = run_script(f"console.log(qwin({json.dumps(estimate)}));")
+    for label in ("Provider quota not reported", "Usage estimate", "Estimated weekly", "80%", "quota-history"):
+        assert label in rendered
 
 
 def test_search_and_work_board_picker_scale_star_and_filter_results():
@@ -1135,6 +1578,27 @@ renderDBody(); console.log(body.innerHTML);
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-3"' in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-4"' not in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="BETA-4"' not in result.stdout
+
+
+def test_escalation_project_breakdown_keeps_each_week_separate():
+    rendered = run_script(r"""
+S.consoleUser = {permissions: ['console.read', 'console.write']};
+S.esc.data = {metrics: {classes: ['missing_tool_or_environment', 'policy_message'],
+  labels: {missing_tool_or_environment: 'Missing tool', policy_message: 'Policy message'},
+  person_classes: [], this_week: {total: 4, share_without_person_pct: 100}, falling: true, top_causes: [],
+  weeks: [
+    {week_start: '2026-10-12', total: 3, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 2, policy_message: 0}, BETA: {missing_tool_or_environment: 1, policy_message: 0}}},
+    {week_start: '2026-10-19', total: 4, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 1, policy_message: 2}, BETA: {missing_tool_or_environment: 0, policy_message: 1}}}
+  ]}, register: {asked: [], resuming: [], decisions: [], amendments: []}};
+console.log(escalationsPanel());
+""")
+    assert '<th>Week</th><th>Project</th>' in rendered
+    assert '<td class="mono">2026-10-12</td><td class="mono">ALPHA</td><td>2</td><td>0</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">ALPHA</td><td>1</td><td>2</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">BETA</td><td>0</td><td>1</td>' in rendered
+    assert 'Project (all weeks shown)' not in rendered
 
 
 def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal():

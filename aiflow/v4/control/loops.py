@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, knowledge, memory, role_health, tooling
+from . import escalations, jira_connect, knowledge, memory, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -31,6 +31,8 @@ from .incidents import check_idle_flow, check_stack_pins, close_incident, open_i
 from .api import Ctx, notify_human_review
 from .db import J
 from .state import NODE_OFFLINE_S
+from .quota import assessments as quota_assessments
+from ..core.quota import as_utc
 
 log = logging.getLogger("aiflow4.loops")
 OWNER = f"{socket.gethostname()}:{os.getpid()}"
@@ -282,7 +284,7 @@ def watchdog(ctx: Ctx) -> None:
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
     tooling.sweep(ctx)
     # nodes that joined but have no AI account: they add slots, never work
-    with_accounts = {a.node for a in repo.accounts}
+    with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):
         if n["status"] == "online" and n["name"] not in with_accounts:
             where = "" if n["name"] in repo.nodes else " and is not described in aiflow-control/nodes/"
@@ -390,8 +392,10 @@ def watchdog(ctx: Ctx) -> None:
     for a in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working')"):
         close_incident(ctx, "account_quota", a["id"], "account works again")
     # every role the flow needs must have at least two ready accounts (no single AI the flow depends on)
-    ready = {r["id"] for r in ctx.db.all("SELECT a.id FROM accounts a JOIN nodes n ON n.name = a.node"
-                                         " WHERE a.status IN ('idle','working','probing') AND n.status = 'online'")}
+    online = {r["name"] for r in ctx.db.all("SELECT name FROM nodes WHERE status = 'online'")}
+    by_id = {a.id: a for a in repo.accounts}
+    ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")
+             if r["id"] in by_id and online.intersection(by_id[r["id"]].machines)}
     try:  # quality by role: switch roles off and back on, settle probation tickets (role_health.py)
         role_health.evaluate(ctx)
     except Exception as e:  # noqa: BLE001
@@ -417,7 +421,8 @@ def watchdog(ctx: Ctx) -> None:
                 continue
             u = float(u)
             reset = w.get("resets_at")
-            reset_txt = datetime.fromtimestamp(float(reset), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if reset else "unknown"
+            reset_at = as_utc(reset)
+            reset_txt = reset_at.strftime("%Y-%m-%d %H:%M UTC") if reset_at else "unknown"
             label = {"five_hour": "5-hour", "seven_day": "weekly"}.get(wname, wname)
             subject = f"{a['id']}:{wname}"
             if u >= 0.9:
@@ -429,6 +434,23 @@ def watchdog(ctx: Ctx) -> None:
                               f" its tickets.{tip}")
             elif u < 0.85:
                 close_incident(ctx, "quota_high", subject, f"{label} usage back to {round(u * 100)}%")
+
+    account_rows = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id")
+    account_providers = {str(row["id"]): str(row["provider"]) for row in account_rows}
+    for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
+        at_risk = [w for w in awareness["windows"]
+                   if w["prediction"]["status"] == "will run out before reset"]
+        ctx.db.run("UPDATE accounts SET quota_at_risk=%s WHERE id=%s", (bool(at_risk), account_id))
+        if at_risk:
+            soonest = min((w["prediction"].get("exhaustion_at") or "") for w in at_risk)
+            windows = ", ".join(w["label"] for w in at_risk)
+            open_incident(ctx, "quota_prediction", account_id, "warning",
+                          f"{account_id} may run out before reset",
+                          f"Predicted exhaustion: {soonest or 'before reset'} UTC ({windows}). "
+                          f"Confidence: {awareness['confidence']}. New work is routed to other "
+                          f"{account_providers.get(account_id, 'AI')} accounts first.")
+        else:
+            close_incident(ctx, "quota_prediction", account_id, "quota forecast is no longer before reset")
 
 
 def fleet_rollout(ctx: Ctx) -> dict | None:
@@ -445,6 +467,9 @@ def version_release_scan(ctx: Ctx) -> int:
 
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
+    from . import support_bundle
+
+    support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
     ctx.events.start()
@@ -460,6 +485,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 last_sync = now
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
+                escalations.retry_resumptions(ctx)
+                notify.process_retries(ctx)
+                notify.send_scheduled_summaries(ctx)
                 last_wd = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)

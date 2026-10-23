@@ -16,19 +16,31 @@ CANARY_FAILURE_RATIO=${AIFLOW4_CANARY_FAILURE_RATIO:-2}
 CANARY_MIN_INFRA_FAILURES=${AIFLOW4_CANARY_MIN_INFRA_FAILURES:-3}
 CANARY_INSTALL_TIMEOUT_S=${AIFLOW4_CANARY_INSTALL_TIMEOUT_S:-$(( CANARY_MAX_AGE_S < 1800 ? CANARY_MAX_AGE_S : 1800 ))}
 AIFLOW4_CANARY_NODE=${AIFLOW4_CANARY_NODE:-}
+# the acceptance test points these at a mock control endpoint (docs/v4/clean-install-acceptance.md)
+CONTROL_URL=${AIFLOW4_CONTROL_URL:-http://127.0.0.1}
+CONTROL_ENV=${AIFLOW4_CONTROL_ENV:-${AIFLOW4_SECRETS_DIR:-/etc/aiflow/secrets/control}/aiflow4.env}
 
 mkdir -p "$RELEASES"
 exec 8>"$RELEASES/autodeploy.lock"
 flock -n 8 || { echo "another auto-deploy pass is running"; exit 0; }
 
-alert() { python3 - "$1" "$2" <<'P' || true
-import smtplib, sys
-from email.message import EmailMessage
-m = EmailMessage(); m["From"] = "aiflow4@aiflow4.local"; m["To"] = "owner@aiflow4.local"; m["Subject"] = sys.argv[1]; m.set_content(sys.argv[2])
-with smtplib.SMTP("10.44.0.10", 11025, timeout=10) as s: s.send_message(m)
-P
+alert() {
+  local severity=info
+  case "$1" in
+    '[CRITICAL]'*) severity=critical ;;
+    '[WARNING]'*) severity=warning ;;
+  esac
+  docker exec aiflow4-control-api-a aiflow4 notify --severity "$severity" --title "$1" --detail "$2" >/dev/null 2>&1 || \
+    echo "stored-channel notification could not be sent" >&2
 }
-control_state() { curl -fsS http://127.0.0.1/v1/state; }
+# /v1/state needs a console session when sign-in is on. These scripts sign in to the token routes of the control API
+# (/v1/deploy/*) with the owner token from the root-only secret file; it goes to curl on stdin, not on a command line.
+owner_token() {
+  [ -n "${AIFLOW4_OWNER_TOKEN:-}" ] && { printf '%s' "$AIFLOW4_OWNER_TOKEN"; return; }
+  sed -n 's/^AIFLOW4_OWNER_TOKEN=//p' "$CONTROL_ENV" 2>/dev/null | tail -1
+}
+control_get() { printf 'Authorization: Bearer %s\n' "$(owner_token)" | curl -fsS -H @- "${CONTROL_URL}$1"; }
+control_state() { control_get /v1/deploy/state; }
 canary_cli() { docker exec aiflow4-control-api-a aiflow4 canary "$@"; }
 now_utc() { python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).isoformat())'; }
 write_canary() {
@@ -124,8 +136,8 @@ P
       echo "develop canary $TARGET on $NODE is stable; promoting to the control plane and remaining nodes"
       if aiflow4-deploy-develop "" "$TARGET"; then
         sleep 20
-        if curl -fsS http://127.0.0.1/healthz >/dev/null && curl -fsS http://127.0.0.1/v1/state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
-           && curl -fsS -o /dev/null http://127.0.0.1/cc; then
+        if curl -fsS "$CONTROL_URL/healthz" >/dev/null && control_state | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["nodes"]' \
+           && curl -fsS -o /dev/null "$CONTROL_URL/cc"; then
           echo "deployed develop $TARGET to the control plane; remaining nodes will update from CURRENT"
           alert "[INFO] AI Flow: deployed develop $TARGET" "Canary on $NODE passed; develop release $TARGET is now desired by the fleet (previous $PREVIOUS)."
           exit 0
@@ -151,11 +163,9 @@ if [ "$TARGET" = "$REJECTED" ]; then
   echo "develop $TARGET already failed its canary; waiting for a newer commit"
   exit 0
 fi
-CI=$(aiflow4-gh api GET "/repos/jooservices/ai-flow/commits/$FULL/check-runs" | python3 -c '
-import json,sys; d=json.load(sys.stdin); b=d.get("body") or d; cs=b.get("check_runs",[])
-if any(c["status"]!="completed" for c in cs): print("pending")
-elif any(c["conclusion"] not in ("success","skipped","neutral") for c in cs): print("failed")
-else: print("ok" if cs else "none")' 2>/dev/null || echo error)
+CI=$(control_get "/v1/deploy/ci-state?repo=jooservices/ai-flow&sha=$FULL" 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' 2>/dev/null || echo error)
+[ -n "$CI" ] || CI=error
 AGE=$(( $(date +%s) - $(git -C "$R" log -1 --format=%ct "$FULL") ))
 case "$CI" in
   ok) ;;

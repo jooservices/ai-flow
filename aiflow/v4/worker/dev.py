@@ -3,6 +3,7 @@
 Outcomes:
   done     changes committed and pushed, draft PR open, ticket in In Verify
   blocked  the AI reported a requirement conflict: ticket to Needs owner with the question
+  auto_answered  the question was classified as one that never needs a person (docs/v4/escalations.md): ticket back to To Do with the answer
   tool_missing  a tool or service is missing on this machine: ticket back to To Do, parked for a capable machine
   quota    the account cannot work now: ticket back to To Do, account cooling down (control API)
   failed   anything else: ticket back to To Do with the reason (the branch keeps the work for the next run)
@@ -57,6 +58,8 @@ class Claimed:
     project_tickets: list[dict] = field(default_factory=list)
     context_pack: dict = field(default_factory=dict)
     machine_tools: dict = field(default_factory=dict)
+    owner_register: list[dict] = field(default_factory=list)
+    escalation_class: str = ""
 
 
 class LeaseLost(Exception):
@@ -83,7 +86,7 @@ class Heartbeat(threading.Thread):
                 log.warning("heartbeat failed: %s", e)
 
 
-def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) -> str:
+def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "") -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "dev.md").read_text(encoding="utf-8")
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     if c.project.get("containers"):
@@ -98,6 +101,9 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                    " answer and continue; do not stop on the same question again.\n"
                    + (f"Question:\n{c.triage_question.strip()}\n" if c.triage_question else "")
                    + "Answer:\n" + c.triage_answer.strip() + "\n")
+    if ci_log:
+        rework += ("\nThe CI of this branch's pull request failed. This is the tail of the failing job's log, read through"
+                   " the control API; never ask for the CI log:\n" + ci_log.strip() + "\n")
     if conflicts:
         rework += ("\nThe latest " + c.project["base"] + " was merged into the branch and these files have conflict"
                    " markers (<<<<<<<, =======, >>>>>>>): " + ", ".join(conflicts) + ". Resolve them so both sides'"
@@ -106,6 +112,36 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
                       rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools))
     return with_knowledge_context(prompt, c.context_pack)
+
+
+def fetch_ci_log(api: ControlClient, c: Claimed, branch: str, lines: int = 120) -> str:
+    """Tail of the failing CI job log of this branch's pull request, through the control API ("" when there is none)."""
+    if not (c.branch or c.findings):
+        return ""  # a first run has no pull request yet
+    try:
+        r = api.call("GET", "/v1/github/ci-log", params={"run_id": c.run_id, "fence": c.fence, "branch": branch,
+                                                          "lines": lines})
+    except Conflict:
+        raise
+    except Exception as e:  # noqa: BLE001 - the log is a help, never a reason to stop the run
+        log.warning("CI log of %s unavailable: %s", c.ticket["key"], e)
+        return ""
+    if not r or not r.get("found"):
+        return ""
+    steps = f" (failed step: {', '.join(r['failed_steps'])})" if r.get("failed_steps") else ""
+    return f"Job: {r.get('job', '')}{steps} {r.get('url', '')}\n```\n{r.get('tail', '')}\n```"
+
+
+def classify_question(api: ControlClient, c: Claimed, question: str) -> dict | None:
+    """Ask the control plane to classify the question the AI stopped on (docs/v4/escalations.md); None when it
+    cannot, so the old path (Needs owner and triage) still works."""
+    try:
+        return api.call("POST", "/v1/escalations/raise", {"run_id": c.run_id, "fence": c.fence, "question": question})
+    except Conflict:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning("classification of the question of %s failed: %s", c.ticket["key"], e)
+        return None
 
 
 def with_knowledge_context(prompt: str, pack: dict | None) -> str:
@@ -188,8 +224,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         return api.call("POST", f"/v1/jira/{key}/{path}", {"run_id": c.run_id, "fence": c.fence, **body})
 
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})["token"]
-        mirror = git.mirror(repo, token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})
+        token = credential["token"]
+        mirror = git.mirror(repo, token, credential.get("transport_url", ""))
         wt = Path(srv_root) / "work" / project["key"] / branch
         moved = git.foreign_worktree(mirror, wt, branch)
         if moved:  # the ticket's repository changed since the worktree was made: never reuse it
@@ -217,9 +254,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                   why=("Rework after verify findings" if c.findings else "The ticket is ready and its blockers are done"),
                                   next_="The AI implements the acceptance criteria and runs the checks; AI Flow commits and opens a draft PR",
                                   node=api_node(api)))
+        ci_log = fetch_ci_log(api, c, branch)
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, branch, conflicts), cwd=str(wt),
+        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60, control_url=control_url,
                        run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
@@ -262,8 +300,27 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
         if missing:
+            # Record the class through the same fenced path as every other developer stop. The run result below
+            # still carries all missing requirements so the normal tool-wait path is preserved.
+            raised = api.call("POST", "/v1/escalations/raise", {
+                "run_id": c.run_id, "fence": c.fence, "question": res.verdict_reason})
+            if raised.get("resolved") and raised.get("outcome") == "auto_answered":
+                result["outcome"] = "auto_answered"
+                result["details"]["escalation_class"] = raised.get("class", "")
+                result["details"]["missing_tools"] = []
+                cited = f" {raised['citation']}." if raised.get("citation") else ""
+                jira("comment", body=note(c, "question answered without the owner",
+                                          what=f"The developer AI stopped with a question: {res.verdict_reason[:400]}",
+                                          why=f"Classified as: {raised.get('label', 'Resolved automatically')} "
+                                              f"({raised.get('reason', 'the register answered this')}).{cited}",
+                                          result=raised.get("answer", ""),
+                                          next_="Back to To Do; the next run gets this answer in its prompt",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
             result["outcome"] = "tool_missing"
             result["details"]["missing_tools"] = missing
+            result["details"]["escalation_class"] = raised.get("class", "")
             jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
                                       why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
                                       result="No question goes to the owner; the machine and the tool are recorded",
@@ -272,9 +329,28 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         if res.verdict == "BLOCKED":
+            # every escalation is classified when it is raised; only a new business decision or an irreversible or
+            # production action may reach a person (docs/v4/escalations.md)
+            raised = classify_question(api, c, res.verdict_reason)
+            if raised and raised.get("resolved"):
+                result["outcome"] = raised["outcome"]
+                if raised.get("missing_tools"):
+                    result["details"]["missing_tools"] = raised["missing_tools"]
+                result["details"]["escalation_class"] = raised["class"]
+                cited = f" {raised['citation']}." if raised.get("citation") else ""
+                jira("comment", body=note(c, "question answered without the owner",
+                                          what=f"The developer AI stopped with a question: {res.verdict_reason[:400]}",
+                                          why=f"Classified as: {raised['label']} ({raised['reason']}).{cited}",
+                                          result=raised["answer"],
+                                          next_="Back to To Do; the next run gets this answer in its prompt",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
+            label = f" [{raised['label']}]" if raised and raised.get("label") else ""
             result["outcome"] = "blocked"
             jira("comment", body=note(c, "question for the owner", what="The developer AI stopped before changing code",
-                                      why=res.verdict_reason, next_="Answer in a comment and move the ticket back to To Do",
+                                      why=res.verdict_reason + label,
+                                      next_="Answer in a comment and move the ticket back to To Do",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="Needs owner")
             return result
@@ -293,7 +369,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             return result
         hb.progress = {"phase": "commit", "files": len(changed)}
         sha = git.commit_all(wt, commit_message(c, summary), c.identity)
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": repo})["token"]
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": repo, "branch": branch})
+        token = credential["token"]
         git.push(wt, branch, token)
         body = (f"Jira: {key}\n\n## Summary\n{summary}\n\n## Tests\n{tests or 'see the run log'}\n\n"
                 f"## Run\n- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"

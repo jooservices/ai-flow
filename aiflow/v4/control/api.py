@@ -8,11 +8,13 @@ from __future__ import annotations
 import hashlib
 import base64
 import binascii
+import hmac
 import csv
 import io
 import ipaddress
 import re
 import logging
+import os
 import secrets
 import shlex
 import socket
@@ -20,7 +22,8 @@ import uuid
 import html
 import json
 import httpx
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
@@ -28,28 +31,36 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+                               Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
 from .. import VERSION
-from ..core.controlrepo import ControlRepo, epic_for_ticket
+from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
 from ..core import backups as control_backups
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
-from . import business, jira_connect, knowledge, memory, role_health, rollout, tooling, version_release
+from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
+               shared_accounts, support_bundle, tooling, version_release)
+from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
+                           issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
+                           verify_session)
 from . import review_metrics
-from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
+from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
-from .github import GitHubApp
+from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
+from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
 from .jira import Jira
-from .policy import Decision, decide, decide_master_action, decide_read_only
+from .policy import Decision, decide, decide_master_action, decide_read_only, explain
 from .report import ReportNotFound, build_report, render_csv, render_html, render_markdown
 from . import notify
 
@@ -87,6 +98,267 @@ SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
 WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
 ORDER BY ticket_key, started_at DESC
 """
+
+# `/v1/state` is consumed by the console and deployment tools. Its implementation is a shared helper in
+# control/state.py, so keep its complete response contract explicit in OpenAPI for generated docs.
+def _state_object(properties: dict, required: tuple[str, ...] = ()) -> dict:
+    return {"type": "object", "properties": properties, "additionalProperties": True,
+            **({"required": list(required)} if required else {})}
+
+
+def _state_array(items: dict) -> dict:
+    return {"type": "array", "items": items}
+
+
+def _state_nullable(value: dict) -> dict:
+    return {"anyOf": [value, {"type": "null"}]}
+
+
+_STATE_STRING = {"type": "string"}
+_STATE_INTEGER = {"type": "integer"}
+_STATE_NUMBER = {"type": "number"}
+_STATE_BOOLEAN = {"type": "boolean"}
+_STATE_DATETIME = {"type": "string", "format": "date-time"}
+_STATE_ANY_OBJECT = _state_object({})
+_STATE_STRING_ARRAY = _state_array(_STATE_STRING)
+_STATE_RATE = _state_object({"tokens_per_hour": _STATE_NUMBER, "cost_usd_per_hour": _STATE_NUMBER,
+                             "runs": _STATE_INTEGER, "steady_runs": _STATE_INTEGER},
+                            ("tokens_per_hour", "cost_usd_per_hour", "runs", "steady_runs"))
+_STATE_RUN = _state_object({
+    "id": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
+    "summary": _state_nullable(_STATE_STRING), "step": _STATE_STRING, "account": _STATE_STRING,
+    "provider": _STATE_STRING, "model": _STATE_STRING, "node": _STATE_STRING, "fence": _STATE_INTEGER,
+    "elapsed_s": _state_nullable(_STATE_INTEGER), "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
+    "lease_ms": _STATE_INTEGER, "progress": _STATE_ANY_OBJECT,
+}, ("id", "ticket", "summary", "project", "step", "account", "provider", "model", "node", "fence",
+    "elapsed_s", "heartbeat_age_s", "lease_ms", "progress"))
+_STATE_RECENT_RUN = _state_object({
+    "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
+    "step": _STATE_STRING, "account": _STATE_STRING, "provider": _STATE_STRING, "model": _STATE_STRING,
+    "node": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
+    "duration_s": _state_nullable(_STATE_INTEGER), "cost_usd": _STATE_NUMBER,
+    "tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER, "pr_url": _STATE_STRING,
+    "ended_age_s": _state_nullable(_STATE_INTEGER),
+}, ("id", "ticket", "summary", "step", "account", "provider", "model", "node", "outcome", "error_kind",
+    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "ended_age_s"))
+_STATE_ACCOUNT = _state_object({
+    "id": _STATE_STRING, "provider": _STATE_STRING, "node": _STATE_STRING, "tier": _STATE_STRING,
+    "roles": _STATE_STRING_ARRAY, "explicit_only": _STATE_BOOLEAN, "paused": _STATE_BOOLEAN,
+    "jobs": _STATE_STRING_ARRAY, "sign_in_pending": _STATE_BOOLEAN, "sign_in_status": _STATE_STRING,
+    "status": _STATE_STRING, "provider_status": _STATE_STRING,
+    "cooldown": _state_nullable(_state_object({"reason": _STATE_STRING, "seconds_left": _STATE_INTEGER},
+                                               ("reason", "seconds_left"))),
+    "cooldown_until": _state_nullable(_STATE_DATETIME), "cooldown_since": _state_nullable(_STATE_DATETIME),
+    "idle_since": _state_nullable(_STATE_DATETIME), "credential_expires_at": _STATE_STRING,
+    "credential_expiry_warning": _STATE_BOOLEAN, "check_failed": _STATE_BOOLEAN,
+    "quota": _STATE_ANY_OBJECT,
+    "quota_awareness": _state_object({
+        "source": _STATE_STRING, "is_estimate": _STATE_BOOLEAN, "runs_24h": _STATE_INTEGER,
+        "confidence": _STATE_STRING, "rate_spread_ratio": _state_nullable(_STATE_NUMBER),
+        "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
+                                     "whole_window": _STATE_RATE},
+                                    ("last_hour", "last_day", "whole_window")),
+        "usage_7d": _state_object({"tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER,
+                                   "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+                                   "runs": _STATE_INTEGER},
+                                  ("tokens_in", "tokens_out", "tokens", "cost_usd", "runs")),
+        "largest_run": _state_nullable(_state_object({"ticket": _state_nullable(_STATE_STRING),
+            "model": _STATE_STRING, "tokens": _STATE_INTEGER, "context_tokens": _STATE_INTEGER,
+            "cost_usd": _STATE_NUMBER, "duration_s": _STATE_NUMBER},
+            ("ticket", "model", "tokens", "context_tokens", "cost_usd", "duration_s"))),
+        "history": _state_array(_state_object({"day": _STATE_STRING, "tokens_in": _STATE_INTEGER,
+            "tokens_out": _STATE_INTEGER, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+            "runs": _STATE_INTEGER}, ("day", "tokens_in", "tokens_out", "tokens", "cost_usd", "runs"))),
+        "windows": _state_array(_state_object({
+            "name": _STATE_STRING, "label": _STATE_STRING, "source": _STATE_STRING,
+            "used_pct": _state_nullable(_STATE_NUMBER), "left_pct": _state_nullable(_STATE_NUMBER),
+            "used_tokens": _STATE_INTEGER, "left_tokens": _state_nullable(_STATE_INTEGER),
+            "quota_tokens": _state_nullable(_STATE_NUMBER), "reset_at": _state_nullable(_STATE_DATETIME),
+            "reset_source": _STATE_STRING, "tokens": _STATE_INTEGER, "cost_usd": _STATE_NUMBER,
+            "burn_rates": _state_object({"last_hour": _STATE_RATE, "last_day": _STATE_RATE,
+                                         "whole_window": _STATE_RATE},
+                                        ("last_hour", "last_day", "whole_window")),
+            "prediction": _state_object({"status": _STATE_STRING, "before_reset": _STATE_BOOLEAN,
+                "confidence": _STATE_STRING, "exhaustion_at": _state_nullable(_STATE_DATETIME),
+                "remaining_at_reset_pct": _state_nullable(_STATE_NUMBER),
+                "remaining_now_pct": _state_nullable(_STATE_NUMBER)},
+                ("status", "before_reset", "confidence", "exhaustion_at", "remaining_at_reset_pct",
+                 "remaining_now_pct")),
+        }, ("name", "label", "source", "used_pct", "left_pct", "used_tokens", "left_tokens",
+            "quota_tokens", "reset_at", "reset_source", "tokens", "cost_usd", "burn_rates", "prediction"))),
+        "at_risk": _STATE_BOOLEAN,
+    }, ("source", "is_estimate", "runs_24h", "confidence", "rate_spread_ratio", "burn_rates", "usage_7d",
+        "largest_run", "history", "windows", "at_risk")),
+    "quota_used": _state_nullable(_STATE_NUMBER), "quota_resets_at": _state_nullable(_STATE_DATETIME),
+    "tokens_today": _STATE_INTEGER, "cost_today": _STATE_NUMBER, "last_error": _STATE_STRING,
+    "worker": _STATE_ANY_OBJECT, "model": _STATE_STRING, "effort": _state_nullable(_STATE_STRING),
+    "runs_active": _STATE_INTEGER, "parallel": _STATE_INTEGER,
+    "run": _state_nullable(_state_object({
+        "id": _STATE_STRING, "ticket": _STATE_STRING, "summary": _state_nullable(_STATE_STRING),
+        "step": _STATE_STRING, "elapsed_s": _state_nullable(_STATE_INTEGER), "fence": _STATE_INTEGER,
+        "progress": _STATE_ANY_OBJECT,
+    }, ("id", "ticket", "step", "elapsed_s", "fence", "progress"))),
+}, ("id", "provider", "node", "tier", "roles", "explicit_only", "paused", "jobs", "sign_in_pending",
+    "sign_in_status", "status", "provider_status", "cooldown", "cooldown_until", "cooldown_since", "idle_since",
+    "credential_expires_at", "credential_expiry_warning", "check_failed", "quota", "quota_awareness", "quota_used",
+    "quota_resets_at", "tokens_today", "cost_today", "last_error", "worker", "model", "effort", "runs_active",
+    "parallel", "run"))
+_STATE_INCIDENT = _state_object({
+    "id": _STATE_INTEGER, "opened_at": _STATE_DATETIME, "closed_at": _state_nullable(_STATE_DATETIME),
+    "severity": _STATE_STRING, "kind": _STATE_STRING, "subject": _STATE_STRING, "title": _STATE_STRING,
+    "detail": _STATE_STRING,
+}, ("id", "opened_at", "severity", "kind", "subject", "title", "detail"))
+_STATE_READINESS_REASON = _state_object({"cause": _STATE_STRING, "ticket": _state_nullable(_STATE_STRING),
+    "summary": _STATE_STRING, "status": _STATE_STRING, "bug": _STATE_STRING, "detail": _STATE_STRING},
+    ("cause", "ticket", "summary"))
+_STATE_RELEASE_STEP = _state_object({"step": _STATE_STRING, "state": _STATE_STRING, "run_id": _STATE_STRING,
+    "node": _STATE_STRING, "detail": _STATE_STRING, "at": _state_nullable(_STATE_DATETIME), "url": _STATE_STRING},
+    ("step", "state", "run_id", "node", "detail", "at"))
+
+STATE_RESPONSE_SCHEMA = _state_object({
+    "generated_at": _STATE_DATETIME, "env": _STATE_STRING, "control_repo": _STATE_STRING,
+    "versions": {"type": "object", "additionalProperties": _STATE_STRING}, "version": _STATE_STRING,
+    "links": _state_object({"o2": _STATE_STRING, "mail": _STATE_STRING, "gatus": _STATE_STRING},
+                            ("o2", "mail", "gatus")),
+    "tool_waits": _state_array(_state_object({
+        "requirement": _STATE_STRING,
+        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+                                               "machine": _STATE_STRING}, ("key", "summary", "machine"))),
+        "projects": _STATE_STRING_ARRAY, "machines": _STATE_STRING_ARRAY, "since": _STATE_DATETIME,
+        "count": _STATE_INTEGER, "maintenance_ticket": _STATE_STRING,
+    }, ("requirement", "tickets", "projects", "machines", "since", "count", "maintenance_ticket"))),
+    "nodes": _state_array(_state_object({
+        "name": _STATE_STRING, "ip": _STATE_STRING, "services": _state_array(_state_object({
+            "name": _STATE_STRING, "projects": _STATE_STRING_ARRAY, "healthy": _STATE_BOOLEAN,
+            "state": _STATE_STRING, "endpoint": _STATE_STRING, "image": _STATE_STRING, "detail": _STATE_STRING,
+        }, ("name", "projects", "healthy", "state", "endpoint", "image", "detail"))),
+        "role": _STATE_STRING, "status": _STATE_STRING, "accepting_work": _STATE_BOOLEAN,
+        "sessions_busy": _STATE_INTEGER, "slots_total": _STATE_INTEGER, "slots_used": _STATE_INTEGER,
+        "release": _STATE_STRING, "metrics": _STATE_ANY_OBJECT, "tools": _STATE_ANY_OBJECT,
+        "has_agent": _STATE_BOOLEAN, "required_tools": _STATE_STRING_ARRAY,
+        "desired_services": _state_array(_state_object({"name": _STATE_STRING, "unit": _STATE_STRING,
+            "healthcheck_configured": _STATE_BOOLEAN}, ("name", "unit", "healthcheck_configured"))),
+        "missing_tools": _STATE_STRING_ARRAY, "heartbeat_age_s": _state_nullable(_STATE_INTEGER),
+        "accounts_assigned": _STATE_INTEGER, "in_control_repo": _STATE_BOOLEAN,
+        "last_heartbeat": _state_nullable(_STATE_DATETIME), "idle_since": _state_nullable(_STATE_DATETIME),
+        "purpose": _STATE_STRING, "notes": _STATE_STRING, "capabilities": _STATE_STRING_ARRAY,
+        "projects": _STATE_STRING_ARRAY,
+        "version_policy": _state_object({"compatible": _STATE_BOOLEAN, "state": _STATE_STRING,
+                                          "reason": _STATE_STRING}, ("compatible", "state", "reason")),
+        "joined_at": _STATE_DATETIME,
+    }, ("name", "ip", "services", "role", "status", "accepting_work", "sessions_busy", "slots_total", "slots_used",
+        "release", "metrics", "tools", "has_agent", "required_tools", "desired_services", "missing_tools",
+        "heartbeat_age_s", "accounts_assigned", "in_control_repo", "last_heartbeat", "idle_since", "purpose", "notes",
+        "capabilities", "projects", "version_policy", "joined_at"))),
+    "accounts": _state_array(_STATE_ACCOUNT),
+    "active_runs": _state_array(_STATE_RUN), "recent_runs": _state_array(_STATE_RECENT_RUN),
+    "projects": _state_array(_state_object({
+        "key": _STATE_STRING, "repo": _STATE_STRING, "repositories": _STATE_STRING_ARRAY,
+        "base": _STATE_STRING, "environments": _STATE_ANY_OBJECT,
+        "work_minutes": _state_object({"target": _STATE_INTEGER, "warn": _STATE_INTEGER, "hard": _STATE_INTEGER},
+                                       ("target", "warn", "hard")),
+        "counts": {"type": "object", "additionalProperties": _STATE_INTEGER},
+        "status": _STATE_STRING, "closed": _STATE_BOOLEAN, "closed_at": _state_nullable(_STATE_DATETIME),
+        "closed_by": _STATE_STRING, "report_version": _STATE_INTEGER, "close_suggested": _STATE_BOOLEAN,
+    }, ("key", "repo", "repositories", "base", "environments", "work_minutes", "counts", "status", "closed",
+        "closed_at", "closed_by", "report_version", "close_suggested"))),
+    "tickets": _state_array(_state_object({
+        "key": _STATE_STRING, "project": _STATE_STRING, "status": _STATE_STRING, "type": _STATE_STRING,
+        "priority": _STATE_STRING, "labels": _STATE_STRING_ARRAY, "summary": _STATE_STRING,
+        "parent_key": _state_nullable(_STATE_STRING), "blocked_by": _STATE_STRING_ARRAY,
+        "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
+        "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
+    }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "epic",
+        "repository", "run", "last_run", "updated_age_s"))),
+    "release_readiness": _state_array(_state_object({
+        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
+        "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,
+        "reasons": _state_array(_STATE_READINESS_REASON),
+    }, ("project", "version_id", "version", "ready", "ticket_count", "done_count", "tickets", "reasons"))),
+    "release_progress": _state_array(_state_object({
+        "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "released": _STATE_BOOLEAN,
+        "release_date": _state_nullable(_STATE_STRING), "ready": _STATE_BOOLEAN, "ticket_count": _STATE_INTEGER,
+        "done_count": _STATE_INTEGER, "started_at": _state_nullable(_STATE_DATETIME),
+        "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "open_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "late_tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
+            "status": _STATE_STRING, "added_at": _state_nullable(_STATE_DATETIME), "added_late": _STATE_BOOLEAN},
+            ("key", "summary", "status", "added_at", "added_late"))),
+        "reasons": _state_array(_STATE_READINESS_REASON),
+        "release": _state_object({"status": _STATE_STRING, "tracker": _STATE_STRING, "tag": _STATE_STRING,
+            "github_release_url": _STATE_STRING, "detail": _STATE_STRING, "steps": _state_array(_STATE_RELEASE_STEP)},
+            ("status", "tracker", "tag", "github_release_url", "detail", "steps")),
+    }, ("project", "version_id", "version", "released", "release_date", "ready", "ticket_count", "done_count",
+        "started_at", "tickets", "open_tickets", "late_tickets", "reasons", "release"))),
+    "incidents": _state_array(_STATE_INCIDENT), "incidents_recent": _state_array(_STATE_INCIDENT),
+    "events": _state_array(_state_object({
+        "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "account": _STATE_STRING,
+        "node": _STATE_STRING, "outcome": _STATE_STRING, "reason": _STATE_STRING,
+    }, ("ts", "type", "ticket", "account", "node", "outcome", "reason"))),
+    "sa": _state_object({
+        "thresholds": _state_object({"slots_used_percent": _STATE_NUMBER, "slots_duration_minutes": _STATE_NUMBER,
+            "role_cooldown_minutes": _STATE_NUMBER, "idle_days": _STATE_NUMBER,
+            "credential_expiry_days": _STATE_NUMBER},
+            ("slots_used_percent", "slots_duration_minutes", "role_cooldown_minutes", "idle_days", "credential_expiry_days")),
+        "slots": _state_object({"used": _STATE_INTEGER, "total": _STATE_INTEGER,
+            "utilization_percent": _state_nullable(_STATE_NUMBER), "pressure_since": _state_nullable(_STATE_DATETIME)},
+            ("used", "total", "utilization_percent", "pressure_since")),
+        "recommendations": _state_array(_state_object({"kind": _STATE_STRING, "subject": _STATE_STRING,
+            "reason": _STATE_STRING}, ("kind", "subject", "reason"))),
+        "policy_denials": _state_array(_state_object({"id": _STATE_INTEGER, "ts": _STATE_DATETIME,
+            "ticket": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
+            "reason": _STATE_STRING, "command": _state_nullable(_STATE_STRING)},
+            ("id", "ts", "ticket", "account", "node", "run_id",
+                "reason", "command"))),
+        "provider_blocks": _state_array(_STATE_ACCOUNT),
+        "network_issues": _state_array(_state_object({"source": _STATE_STRING,
+            "id": {"anyOf": [_STATE_INTEGER, _STATE_STRING]},
+            "ts": _STATE_DATETIME, "type": _STATE_STRING, "ticket": _STATE_STRING, "project": _STATE_STRING,
+            "step": _STATE_STRING, "account": _STATE_STRING, "node": _STATE_STRING, "run_id": _STATE_STRING,
+            "status": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
+            "detail": _STATE_STRING, "attempts": _STATE_INTEGER, "retry": _STATE_BOOLEAN,
+            "reason": _STATE_STRING, "data": _STATE_ANY_OBJECT}, ("source",))),
+    }, ("thresholds", "slots", "recommendations", "policy_denials", "provider_blocks", "network_issues")),
+    "role_health": _state_object({
+        "settings": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_NUMBER,
+            "updated_by": _STATE_STRING, "updated_at": _state_nullable(_STATE_DATETIME),
+            "defaults": _state_object({"window_runs": _STATE_INTEGER, "failure_percent": _STATE_INTEGER},
+                                       ("window_runs", "failure_percent"))},
+            ("window_runs", "failure_percent", "updated_by", "updated_at", "defaults")),
+        "metrics_days": _STATE_INTEGER,
+        "roles": _state_array(_state_object({
+            "account": _STATE_STRING, "provider": _STATE_STRING, "role": _STATE_STRING, "enabled": _STATE_BOOLEAN,
+            "mode": _STATE_STRING, "note": _STATE_STRING, "disabled_at": _state_nullable(_STATE_DATETIME),
+            "failure_score": _state_nullable(_STATE_NUMBER), "scored_runs": _STATE_INTEGER,
+            "success_rate": _state_nullable(_STATE_NUMBER), "finished_tickets": _STATE_INTEGER,
+            "cost_per_finished_ticket": _state_nullable(_STATE_NUMBER), "rework_rounds": _STATE_INTEGER,
+            "probation": _state_nullable(_state_object({"open_ticket": _STATE_STRING, "streak": _STATE_INTEGER,
+                "needed": _STATE_INTEGER, "results": _STATE_STRING_ARRAY}, ("open_ticket", "streak", "needed", "results"))),
+        }, ("account", "provider", "role", "enabled", "mode", "note", "disabled_at", "failure_score", "scored_runs",
+            "success_rate", "finished_tickets", "cost_per_finished_ticket", "rework_rounds", "probation"))),
+    }, ("settings", "metrics_days", "roles")),
+    "rollout": _state_nullable(_state_object({
+        "id": _STATE_INTEGER, "target": _STATE_STRING, "previous": _STATE_STRING, "status": _STATE_STRING,
+        "wave": _STATE_INTEGER, "batch_size": _STATE_INTEGER, "failed_node": _STATE_STRING,
+        "reason": _STATE_STRING, "rollback": _STATE_STRING, "started_at": _STATE_DATETIME,
+        "nodes": _state_array(_state_object({"node": _STATE_STRING, "wave": _STATE_INTEGER,
+            "status": _STATE_STRING, "from": _STATE_STRING, "detail": _STATE_STRING},
+            ("node", "wave", "status", "from", "detail"))),
+    }, ("id", "target", "previous", "status", "wave", "batch_size", "failed_node", "reason", "rollback",
+        "started_at", "nodes"))),
+    "version_policy": _state_object({"control": _STATE_STRING, "max_minor_lag": _STATE_INTEGER},
+                                     ("control", "max_minor_lag")),
+    "totals": _state_object({"runs_24h": _STATE_INTEGER, "cost_24h": _STATE_NUMBER,
+        "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
+        "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
+        ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
+}, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
+    "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
+    "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
 
 
 def h(token: str) -> str:
@@ -188,8 +460,61 @@ class Ctx:
     jira_auth: Any = None  # jira_connect.JiraAuth: the Jira credential connected on the Integrations screen
 
 
-def github_gateway(ctx: Ctx) -> GitHubApp | None:
-    """Load the shared secret-store configuration lazily and refresh it across API replicas."""
+github_connection_used: ContextVar[str] = ContextVar("github_connection_used", default="")
+
+
+def github_connections(ctx: Ctx) -> GitHubConnections:
+    """The registry of the connections after the default one, shared by every API replica through the secret store."""
+    registry = getattr(ctx, "github_registry", None)
+    if registry is None or registry.root != Path(ctx.settings.github_app_dir):
+        registry = GitHubConnections(ctx.settings.github_app_dir, lambda directory, org: GitHubApp(directory, org),
+                                     lambda token, account, kind: GitHubTokenApp(token, account, kind))
+        ctx.github_registry = registry
+    return registry
+
+
+def github_connection_list(ctx: Ctx) -> list[Connection]:
+    """Every connection in order, the legacy single App first."""
+    out: list[Connection] = []
+    default = github_gateway(ctx)
+    if default is not None:
+        meta = getattr(default, "meta", {}) or {}
+        out.append(Connection(DEFAULT_ID, str(meta.get("name") or "GitHub App"), "app",
+                              str(getattr(default, "org", "") or ctx.settings.github_org),
+                              str(meta.get("account_type") or ""), default))
+    return out + github_connections(ctx).connections()
+
+
+def github_route(ctx: Ctx, repo: str) -> Connection:
+    """The connection that serves a repository: its assignment, else the first of its owner that reaches it.
+
+    Refuses with 409 when the assigned connection is gone or cannot reach the repository, and when none can."""
+    registry = github_connections(ctx)
+    connections = github_connection_list(ctx)
+    if not connections:
+        raise HTTPException(503, "GitHub is not connected")
+    owner = repo.split("/", 1)[0].lower() if "/" in repo else ""
+    assigned = registry.assignments().get(repo.lower())
+    if assigned:
+        chosen = next((c for c in connections if c.id == assigned), None)
+        if chosen is None or not registry.reaches(chosen.id, chosen.gateway, repo):
+            raise HTTPException(409, f"the GitHub connection assigned to {repo} cannot reach it")
+        return chosen
+    for conn in connections:
+        if (not owner or conn.account.lower() == owner) and registry.reaches(conn.id, conn.gateway, repo):
+            return conn
+    raise HTTPException(409, f"no GitHub connection can reach {repo}")
+
+
+def github_gateway(ctx: Ctx, repo: str | None = None) -> GitHubApp | None:
+    """Load the shared secret-store configuration lazily and refresh it across API replicas.
+
+    With a repository, always check that the selected connection can reach it, including a single legacy App.
+    The connection used is remembered for the audit log."""
+    if repo is not None:
+        conn = github_route(ctx, repo)
+        github_connection_used.set(conn.id)
+        return conn.gateway
     gateway = ctx.github
     if gateway is None:
         store = GitHubSecretStore(ctx.settings.github_app_dir)
@@ -198,14 +523,146 @@ def github_gateway(ctx: Ctx) -> GitHubApp | None:
             ctx.github = gateway
     elif hasattr(gateway, "_refresh_config"):
         gateway._refresh_config()
+        if not getattr(gateway, "configured", True):
+            ctx.github = None
+            gateway = None
     if gateway is not None and getattr(gateway, "org", ""):
         ctx.settings.github_org = str(gateway.org)
+    github_connection_used.set(DEFAULT_ID if gateway is not None else "")
     return gateway
+
+
+def github_gateway_for_connection(ctx: Ctx, connection_id: str, repo: str) -> GitHubApp:
+    """Resolve the connection captured by a run and confirm it still reaches the repository."""
+    registry = github_connections(ctx)
+    connection = next((item for item in github_connection_list(ctx) if item.id == connection_id), None)
+    if connection is None or not registry.reaches(connection.id, connection.gateway, repo):
+        raise HTTPException(409, f"the GitHub connection assigned to {repo} cannot reach it")
+    github_connection_used.set(connection.id)
+    return connection.gateway
+
+
+def github_control_gateway(ctx: Ctx) -> GitHubApp:
+    """Resolve the connection assigned to the control repository, preserving per-repository routing."""
+    repository = f"{ctx.settings.github_org}/{Path(ctx.settings.control_repo).name}"
+    gateway = github_gateway(ctx, repository)
+    if gateway is None:
+        raise HTTPException(503, "GitHub is not connected")
+    return gateway
+
+
+def github_context_for_repository(ctx: Ctx, repo: str) -> tuple[GitHubApp, str]:
+    gateway = github_gateway(ctx, repo)
+    if gateway is None:
+        raise HTTPException(503, "GitHub is not connected")
+    return gateway, github_connection_used.get()
+
+
+def _git_proxy_key(ctx: Ctx) -> bytes:
+    """Load or create the shared signing key for short-lived worker Git relay capabilities."""
+    path = Path(ctx.settings.github_app_dir) / "worker-git-proxy.key"
+    try:
+        value = path.read_bytes()
+    except FileNotFoundError:
+        value = b""
+    if value and len(value) < 32:
+        raise RuntimeError("Git transfer signing key is invalid")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    if not value:
+        value = secrets.token_bytes(32)
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)  # atomic create: a second API replica reads a complete key
+            except FileExistsError:
+                value = path.read_bytes()
+        finally:
+            temporary.unlink(missing_ok=True)
+    if len(value) < 32:
+        raise RuntimeError("Git transfer signing key is invalid")
+    os.chmod(path, 0o600)
+    return value
+
+
+def _issue_git_proxy_token(ctx: Ctx, claims: dict[str, Any]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=")
+    signature = hmac.new(_git_proxy_key(ctx), payload, hashlib.sha256).digest()
+    return payload.decode() + "." + base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+
+
+def _verify_git_proxy_token(ctx: Ctx, token: str) -> dict[str, Any] | None:
+    try:
+        encoded, encoded_signature = token.split(".", 1)
+        payload = encoded.encode()
+        signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+        expected = hmac.new(_git_proxy_key(ctx), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        if not isinstance(claims, dict) or int(claims.get("expires", 0)) < int(utcnow().timestamp()):
+            return None
+        return claims
+    except (ValueError, TypeError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _git_proxy_credential(request: Request) -> str:
+    scheme, _, value = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "basic":
+        return ""
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        _, separator, token = decoded.partition(":")
+        return token if separator else ""
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _receive_pack_target(body: bytes) -> set[str] | None:
+    """Read Git receive-pack command pkt-lines; malformed or empty requests are refused."""
+    targets: set[str] = set()
+    offset = 0
+    while offset < len(body):
+        header = body[offset:offset + 4]
+        if len(header) != 4:
+            return None
+        try:
+            length = int(header, 16)
+        except ValueError:
+            return None
+        offset += 4
+        if length == 0:
+            break
+        if length < 4 or offset + length - 4 > len(body):
+            return None
+        packet = body[offset:offset + length - 4]
+        offset += length - 4
+        fields = packet.split(b"\0", 1)[0].strip().split()
+        if len(fields) >= 3 and re.fullmatch(rb"[0-9a-fA-F]{40,64}", fields[0]) and re.fullmatch(
+                rb"[0-9a-fA-F]{40,64}", fields[1]):
+            if set(fields[1]) == {ord("0")}:
+                return None
+            targets.add(fields[2].decode("ascii", errors="ignore"))
+    return targets or None
+
+
+def _github_git_upstream(repository: str, suffix: str, method: str, params: list[tuple[str, str]],
+                         headers: dict[str, str], body: bytes, token: str) -> httpx.Response:
+    """Relay one Git smart HTTP request using a Command Center held access token."""
+    with httpx.Client(timeout=180, follow_redirects=False) as client:
+        return client.request(method, f"https://github.com/{repository}{suffix}", params=params,
+                              headers=headers, content=body, auth=("x-access-token", token))
 
 
 def validate_github_app_permissions(details: dict[str, Any]) -> None:
     permissions = details.get("permissions") or {}
-    required = {"contents": "write", "pull_requests": "write", "workflows": "write",
+    required = {"contents": "write", "pull_requests": "write", "workflows": "write", "actions": "read",
                 "checks": "read", "statuses": "read", "administration": "write"}
     missing = [name for name, level in required.items() if permissions.get(name) != level]
     if missing:
@@ -222,8 +679,10 @@ def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[
     email = assignee.get("email") if isinstance(assignee, dict) else ""
     title = f"{key} is ready for human review"
     detail = ticket.get("summary") or key
-    link = f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}" if ctx.settings.jira_site else ""
-    sent = notify.send("info", title, detail, link, recipient=email or "")
+    link = ctx.settings.public_url.rstrip("/") + "/review"
+    sent = notify.send("info", title, detail, link, recipient=email or "", ctx=ctx,
+                       alert_kind="review_before_merge", project=ticket.get("project", ""), ticket=key,
+                       needed="Review the ticket before merge.")
     ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
                (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
@@ -306,11 +765,22 @@ class ProjectRepositoryConfigBody(BaseModel):
     checks: list[str] = Field(default_factory=list, max_length=50)
     stack: str = Field(default="", max_length=80)
     containers: bool | None = None
+    connection: str = Field(default="", max_length=64)
 
 
 class ProjectRepositoriesBody(BaseModel):
     repositories: list[ProjectRepositoryConfigBody] = Field(default_factory=list, max_length=100)
     epic_repositories: dict[str, str] = Field(default_factory=dict, max_length=500)
+
+
+class SupportBundleBody(BaseModel):
+    ticket_key: str = Field(default="", max_length=40)
+
+
+class GitHubConnectionTokenBody(BaseModel):
+    token: str = Field(min_length=20, max_length=600, repr=False)
+    label: str = Field(default="", max_length=80)
+    account: str = Field(default="", max_length=39)
 
 
 class GitHubInstallationBody(BaseModel):
@@ -345,7 +815,7 @@ class ResultBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
-    branch: str = ""
+    branch: str = Field(default="", max_length=240)
     pr_url: str = ""
     head_sha: str = ""
     summary: str = ""
@@ -367,6 +837,7 @@ class GitHubTokenBody(BaseModel):
     run_id: str
     fence: int
     repo: str
+    branch: str = ""
 
 
 class PRBody(BaseModel):
@@ -395,6 +866,7 @@ class ProbeBody(BaseModel):
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    model: str = ""
     credential_expires_at: datetime | None = None
 
 
@@ -413,10 +885,51 @@ class PRCommentBody(BaseModel):
     body: str
 
 
+class BranchCleanupBody(BaseModel):
+    run_id: str
+    fence: int
+    branch: str
+
+
 class TriageAlertBody(BaseModel):
     run_id: str
     fence: int
     detail: str
+
+
+class EscalationRaiseBody(BaseModel):
+    run_id: str
+    fence: int
+    question: str = Field(min_length=1, max_length=6000)
+
+
+class TriageDecisionBody(BaseModel):
+    run_id: str
+    fence: int
+    decision: str
+    question: str = ""
+    answer: str = ""
+    why: str = ""
+    escalation_class: str = ""
+    options: list[str] = Field(default_factory=list)
+    recommended: str = ""
+    topic: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    criterion: str = ""
+    narrowed: str = ""
+
+
+class OwnerDecisionBody(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    decision: str = Field(min_length=3, max_length=3000)
+    keywords: list[str] = Field(default_factory=list, max_length=8)
+    patterns: list[str] = Field(default_factory=list, max_length=8)
+    project: str = Field(default="", max_length=40)
+
+
+class OwnerDecisionAnswerBody(BaseModel):
+    choice: str = Field(default="recommended", max_length=1000)
+    note: str = Field(default="", max_length=1000)
 
 
 class ReviewerBody(BaseModel):
@@ -499,6 +1012,26 @@ class KnowledgeRestoreBody(BaseModel):
     actor: str
 
 
+class ConsoleUserCreateBody(BaseModel):
+    email: str
+    display_name: str = ""
+    roles: list[str]
+    project_keys: list[str] | None = None
+
+
+class ConsoleUserUpdateBody(BaseModel):
+    roles: list[str]
+    project_keys: list[str] | None = None
+
+
+class ConsoleUserDisabledBody(BaseModel):
+    disabled: bool
+
+
+class ViewAsBody(BaseModel):
+    role: str
+
+
 class BackupConfigBody(BaseModel):
     schedule: Literal["daily", "weekly"] = "daily"
     destination_kind: Literal["local", "mounted", "s3"] = "local"
@@ -574,12 +1107,90 @@ class JoinCommandBody(BaseModel):
     project: str = Field(default="", max_length=32)
 
 
+class LicenseKeyBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    key: str = Field(min_length=1, max_length=2000)
+
+
+class OfflineLicenseBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    license_file: str = Field(min_length=1, max_length=50000)
+
+
+class PlanLimitsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    plan: str
+    limits: dict[str, int]
+
+
+class ManagedAccountCreateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    provider: Literal["claude", "codex", "opencode", "grok"]
+    sessions: int = Field(ge=1, le=8)
+    jobs: list[Literal["develop", "verify", "intake", "master"]] = Field(min_length=1, max_length=4)
+
+
+class ManagedAccountUpdateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    sessions: int | None = Field(default=None, ge=1, le=8)
+    jobs: list[Literal["develop", "verify", "intake", "master"]] | None = Field(default=None, min_length=1,
+                                                                                  max_length=4)
+    action: Literal["pause", "resume"] | None = None
+
+
+class ConfirmBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    confirm: bool = False
+
+
+class ManagedAccountSignInStatusBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    request_id: str = Field(min_length=1, max_length=64)
+    status: Literal["starting", "waiting", "completed", "failed"]
+    sign_in_url: str = Field(default="", max_length=2048)
+    code: str = Field(default="", max_length=80)
+    error: str = Field(default="", max_length=300)
+
+
 # --- app --------------------------------------------------------------------------------------------------
 def create_app(ctx: Ctx) -> FastAPI:
     from contextlib import asynccontextmanager
 
+    configured_repo = getattr(ctx, "_configured_repo", ctx.repo)
+    ctx._configured_repo = configured_repo
+
+    def runtime_repo() -> ControlRepo:
+        """Merge console-managed accounts over the control-repo snapshot for live worker scheduling."""
+        base = configured_repo()
+        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
+        removed_ids = {row["id"] for row in ctx.db.all(
+            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
+        managed = [row for row in ctx.db.all(
+            "SELECT * FROM managed_ai_accounts WHERE removed_at IS NULL ORDER BY created_at,id")
+                   if row["node"] not in removed_nodes]
+        if not managed and not removed_nodes and not removed_ids:
+            return base
+        managed_ids = {row["id"] for row in managed}
+        accounts = {account.id: account for account in base.accounts
+                    if account.id not in managed_ids and account.id not in removed_ids
+                    and account.node not in removed_nodes}
+        for row in managed:
+            accounts[row["id"]] = Account(
+                id=row["id"], provider=row["provider"], node=row["node"], tier=row["tier"],
+                roles=list(row["roles"] or []), parallel=int(row["parallel"]),
+                explicit_only=bool(row["explicit_only"]), paused=bool(row["paused"]))
+        return replace(base, accounts=list(accounts.values()))
+
+    # The registry is the live source for screen-managed accounts. Configured accounts stay supported,
+    # while the console can add and edit account assignments without a control-repo file change.
+    ctx.repo = runtime_repo
+
     @asynccontextmanager
     async def lifespan(_app):
+        try:
+            licensing.initialize(ctx.db)
+        except Exception as e:  # noqa: BLE001
+            log.warning("licence state initialization failed (%s)", type(e).__name__)
         try:
             _app.state.sync_accounts()
         except Exception as e:  # noqa: BLE001
@@ -588,21 +1199,77 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+    if not getattr(ctx, "_shared_accounts", False):  # accounts managed in Command Center join the control repo view
+        base_repo = ctx.repo
+        ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
+        ctx._shared_accounts = True
+    support_bundle.control_log_buffer(
+        *(v if isinstance(v, str) else "" for v in (ctx.settings.support_log_dir, ctx.settings.o2_source))
+    )
+    app.state.license_sync_warnings = []
+    # Release reconciliation loops receive the same per-repository routing as API handlers.
+    ctx.github_connection_for_repository = lambda repository: github_context_for_repository(ctx, repository)
 
-    def sync_accounts() -> None:
-        repo = ctx.repo()
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Return safe 422 details without echoing rejected credentials or licence material."""
+        if request.url.path in {"/v1/licensing/activate", "/v1/licensing/offline"}:
+            return JSONResponse(
+                {"detail": "Licence key or signed licence file is invalid or exceeds the supported size."},
+                status_code=422,
+            )
+        errors = []
+        for error in exc.errors():
+            errors.append({"loc": list(error.get("loc") or ()), "msg": "Invalid value",
+                           "type": error.get("type", "value_error")})
+        return JSONResponse(status_code=422, content={"detail": errors})
+
+    def sync_accounts() -> list[str]:
+        """Sync configured accounts and machines that fit the current licence limits."""
+        repo = configured_repo()
+        warnings: list[str] = []
+        removed = {row["id"] for row in ctx.db.all(
+            "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
+        removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
         for a in repo.accounts:
+            if a.id in removed or a.node in removed_nodes:
+                continue
+            if not ctx.db.one("SELECT 1 FROM accounts WHERE id=%s", (a.id,)):
+                try:
+                    # Startup admits configured accounts in order; use registered rows for admission because the
+                    # Licence screen's usage count also includes configured accounts that have not synced yet.
+                    registered_count = int(ctx.db.one("SELECT count(*) AS count FROM accounts")["count"])
+                    licensing.require_capacity(ctx, "ai_accounts", count=registered_count,
+                                                public_key=ctx.settings.license_public_key)
+                except licensing.LicenseError as exc:
+                    message = f"Configured AI account {a.id} was not synced: {exc}"
+                    warnings.append(message)
+                    log.warning("%s", message)
+                    continue
             ctx.db.run(
                 "INSERT INTO accounts (id, provider, node, tier, roles) VALUES (%s,%s,%s,%s,%s)"
                 " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
                 " roles=EXCLUDED.roles, updated_at=now()", (a.id, a.provider, a.node, a.tier, a.roles))
         for n in repo.nodes.values():
+            removed_node = ctx.db.one("SELECT removed_at FROM nodes WHERE name=%s", (n.name,))
+            if removed_node and removed_node["removed_at"]:
+                continue
+            if not removed_node:
+                try:
+                    licensing.require_capacity(ctx, "machines", public_key=ctx.settings.license_public_key)
+                except licensing.LicenseError as exc:
+                    message = f"Configured machine {n.name} was not synced: {exc}"
+                    warnings.append(message)
+                    log.warning("%s", message)
+                    continue
             # Keep the IP a node reported at join: a restart must not replace where it was last seen with
             # the control repo value. Only a first insert (no join yet) takes the configured address.
             ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total, projects) VALUES (%s,%s,%s,%s,%s)"
                        " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total,"
                        " projects=EXCLUDED.projects, dynamic=false",
                        (n.name, n.ip, n.role, n.slots, n.projects))
+        app.state.license_sync_warnings = warnings
+        return warnings
 
     app.state.sync_accounts = sync_accounts
     _identity: list[tuple[str, str, str]] = []
@@ -620,7 +1287,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- auth -----------------------------------------------------------------------------------------------
     def node_auth(authorization: str = Header(default="")) -> str:
         token = authorization.removeprefix("Bearer ").strip()
-        row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> ''", (h(token),)) if token else None
+        row = ctx.db.one("SELECT name FROM nodes WHERE token_hash = %s AND token_hash <> '' AND removed_at IS NULL",
+                         (h(token),)) if token else None
         if not row:
             raise HTTPException(401, "unknown node token")
         return row["name"]
@@ -635,31 +1303,64 @@ def create_app(ctx: Ctx) -> FastAPI:
                 return row["node_name"]
         return node_auth(authorization)
 
-    def reviewer_auth(authorization: str = Header(default="")) -> str:
+    def reviewer_auth(request: Request, authorization: str = Header(default="")) -> str:
+        """The legacy reviewer bearer token, or a console session whose roles grant `review.actions`."""
         configured = ctx.settings.reviewer_token
-        if not configured:
-            raise HTTPException(503, "reviewer actions are not configured")
         scheme, separator, token = authorization.partition(" ")
-        if (not separator or scheme.lower() != "bearer" or not token.strip()
-                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
-            raise HTTPException(401, "reviewer authorization required",
-                                headers={"WWW-Authenticate": "Bearer"})
-        return "reviewer"
+        if (configured and separator and scheme.lower() == "bearer" and token.strip()
+                and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            return "reviewer"
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user:
+            ticket_key = str(request.path_params.get("key", ""))
+            row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket_key,)) if ticket_key else None
+            in_scope = (user.project_keys is None or not row or row["project"] in user.project_keys)
+            if has_permission(user.effective_roles, "review.actions") and in_scope:
+                return user.subject
+            audit("console", "access_denied", ticket_key, "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        if not configured and not ctx.settings.console_session_secret:
+            raise HTTPException(503, "reviewer actions are not configured")
+        raise HTTPException(401, "reviewer authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     def owner_auth(request: Request, authorization: str = Header(default="")) -> str:
+        def writable() -> None:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
+
         configured = ctx.settings.owner_token
         scheme, separator, token = authorization.partition(" ")
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            writable()
             return ""
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and has_permission(user.role, "knowledge.approve"):
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user and has_permission(user.effective_roles, "knowledge.approve"):
+            writable()
             return user.subject
         if not configured and not ctx.settings.console_session_secret:
             raise HTTPException(503, "owner actions are not configured")
         if user:
-            raise HTTPException(403, "owner role required")
+            audit("aiflow-control", "knowledge_approve", "", "", None, user.subject, False,
+                  "not available for your role")
+            raise HTTPException(403, "not available for your role")
         raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
+
+    def deploy_auth(authorization: str = Header(default="")) -> str:
+        """The deploy scripts on the control machine sign in with the owner token (a bearer token, never a cookie)."""
+        configured = ctx.settings.owner_token
+        if not configured:
+            raise HTTPException(503, "deploy access is not configured")
+        scheme, separator, token = authorization.partition(" ")
+        if (not separator or scheme.lower() != "bearer" or not token.strip()
+                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            raise HTTPException(401, "deploy authorization required", headers={"WWW-Authenticate": "Bearer"})
+        return "deploy"
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
@@ -671,7 +1372,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         connection.execute(
             "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (target, action, ticket, run_id, fence, actor, accepted, result[:500], J(payload or {})))
+            (target, action, ticket, run_id, fence, actor, accepted, result[:500],
+             J(with_connection(target, payload))))
+
+    def with_connection(target: str, payload: dict | None) -> dict:
+        """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
+        payload = dict(payload or {})
+        used = github_connection_used.get()
+        if used and target in ("github", "aiflow-control") and "connection" not in payload:
+            payload["connection"] = used
+        return payload
 
     def console_user(request: Request, permissions: set[str] | str | None, target: str = "console", action: str = "read",
                      node: str = "") -> ConsoleUser:
@@ -681,17 +1391,37 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "console session signing key is not configured")
             raise HTTPException(503, "console session authentication is not configured")
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
         if not user:
             if action != "read":
                 audit(target, action, node, "", None, "", False, "authenticated console session required")
             raise HTTPException(401, "authenticated console session required")
         required = {permissions} if isinstance(permissions, str) else permissions
-        if required is not None and not role_satisfies(user.role, required):
+        if required is not None and not role_satisfies(user.effective_roles, required):
             if action != "read":
-                audit(target, action, node, "", None, user.subject, False, "owner role required")
-            raise HTTPException(403, "owner role required")
+                audit(target, action, node, "", None, user.subject, False, "not available for your role")
+            raise HTTPException(403, "not available for your role")
+        read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
+                        "list_import_installations", "open_installation_settings"}
+        if action not in read_actions | {"license_activate"}:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
         return user
+
+    def optional_console_user(request: Request) -> ConsoleUser | None:
+        """Read a session when present without changing the legacy open-console mode."""
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        return resolve_session_user(ctx.db, claims) if claims else None
+
+    def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
+        try:
+            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key,
+                                              connection=connection)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     def run_row(run_id: str) -> dict:
         try:
@@ -730,6 +1460,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",),
                      allowed_kinds: tuple[str, ...] | None = None) -> tuple[dict, str, int, int]:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         ticket = ctx.db.one("SELECT key, project, status, labels, summary, blocked_by FROM tickets WHERE key=%s", (key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
@@ -737,12 +1471,19 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "ticket is no longer waiting for this review action")
         if allowed_kinds is not None and current_review_item_kind(ticket) not in allowed_kinds:
             raise HTTPException(409, "this action does not apply to the current human review item")
-        if not ctx.jira or not github_gateway(ctx):
-            raise HTTPException(503, "Jira or GitHub is unavailable")
+        if not ctx.jira:
+            raise HTTPException(503, "Jira is unavailable")
         pr_run = ctx.db.one("SELECT pr_url,details FROM runs WHERE ticket_key=%s AND pr_url<>''"
                             " ORDER BY started_at DESC LIMIT 1", (key,))
         match = re.search(r"/pull/(\d+)(?:/|$)", (pr_run or {}).get("pr_url", ""))
         number = int(match.group(1)) if match else 0
+        if number:
+            repository = str(((pr_run or {}).get("details") or {}).get("repository") or "")
+            project = ctx.repo().projects.get(ticket["project"])
+            repository = repository or (repository_for_run(pr_run or {}, project) if project else "")
+            if not project or not repository:
+                raise HTTPException(404, "project repository is not configured")
+            github_gateway(ctx, repository)
         run_id = str(uuid.uuid4())
         claim = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
         if not claim.ok:
@@ -783,7 +1524,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if not project:
                 raise HTTPException(404, "project is not configured")
             repository = repository_for_run(github_run, project)
-            gateway = github_gateway(ctx)
+            gateway = github_gateway(ctx, repository)
             gateway.comment(repository.split("/", 1)[-1], number, text)
             audit("github", "comment", ticket, run_id, fence, github_run["account_id"], True, "ok",
                   {"source": source, "number": number, "repo": repository})
@@ -911,10 +1652,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(run["project"])
         if not project:
             raise HTTPException(404, "project is not configured")
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
         repo_name = repository.split("/", 1)[-1]
         res = github.merge_pr(repo_name, number, title, method)
         ok = bool(res.get("merged"))
@@ -944,6 +1683,71 @@ def create_app(ctx: Ctx) -> FastAPI:
     def account_master_paused(account_id: str) -> bool:
         return bool(ctx.db.one("SELECT 1 AS paused FROM master_account_pauses"
                                " WHERE account_id=%s AND paused_until > now()", (account_id,)))
+
+    def mark_machine_auth_failure(account_id: str, node: str, summary: str) -> None:
+        """Require sign-in again on the failing machine while keeping other assignments usable."""
+        acc = ctx.repo().account(account_id)
+        other_machine_ready = shared_accounts.mark_pending(ctx.db, acc, node) if acc else False
+        active = bool(ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1",
+                                 (account_id,)))
+        cooling = ctx.leases.cooling(account_id)
+        status = "cooldown" if cooling else "working" if active else "idle" if other_machine_ready else "signed_out"
+        ctx.db.run("UPDATE accounts SET status=%s,last_error=%s,updated_at=now(),"
+                   "idle_since=CASE WHEN %s='idle' THEN coalesce(idle_since,now()) ELSE NULL END WHERE id=%s",
+                   (status, summary[:300], status, account_id))
+
+    def quota_forecast_at_risk(account_id: str) -> bool:
+        """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
+        row = ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id=%s", (account_id,))
+        return bool(row and row["quota_at_risk"])
+
+    def quota_peer_accounts(account_id: str, roles: set[str] | None = None) -> list[dict]:
+        """Ready same-provider accounts that can serve at least one of this account's workflow roles."""
+        account_row = ctx.db.one("SELECT provider FROM accounts WHERE id=%s", (account_id,))
+        if not account_row:
+            return []
+        peers = ctx.db.all(
+            "SELECT a.id,a.roles,a.status,a.quota_at_risk FROM accounts a"
+            " WHERE a.provider=%s AND a.id<>%s AND a.status NOT IN ('cooldown','signed_out','error') ORDER BY a.id",
+            (account_row["provider"], account_id))
+        online = shared_accounts.online_nodes(ctx.db)
+        available: list[dict] = []
+        for peer in peers:
+            account = ctx.repo().account(peer["id"])
+            peer["nodes"] = ([machine for machine in account.machines if machine in online
+                               and shared_accounts.may_take(ctx.db, account, machine, as_peer=True)[0]]
+                              if account else [])
+            if not peer["nodes"]:
+                continue
+            peer_roles = set(peer.get("roles") or ["dev", "verify"])
+            if roles and not roles.intersection(peer_roles):
+                continue
+            if roles == {"master"} and peer["status"] not in ("idle", "working", "probing"):
+                continue
+            if peer["quota_at_risk"] or ctx.leases.cooling(peer["id"]) or account_master_paused(peer["id"]):
+                continue
+            available.append(peer)
+        return available
+
+    def account_quota_at_risk(account_id: str, roles: set[str] | None = None) -> bool:
+        """Defer a risky account only while another ready account of the same provider can take its role."""
+        if not quota_forecast_at_risk(account_id):
+            return False
+        return bool(quota_peer_accounts(account_id, roles))
+
+    def quota_peer_release_candidates(account_id: str) -> set[tuple[str, str, str]]:
+        """Release work a ready peer can actually claim for this quota-risky account."""
+        if not quota_forecast_at_risk(account_id):
+            return set()
+        available: set[tuple[str, str, str]] = set()
+        for peer in quota_peer_accounts(account_id, {"master", "release"}):
+            for node in peer["nodes"]:
+                if not rollout.node_compatible(ctx, node, RELEASES)["compatible"]:
+                    continue
+                for candidate in version_release.candidates(ctx, peer["id"], node):
+                    available.add((candidate["project"], str(candidate["version_id"]),
+                                   str(candidate.get("repository") or "")))
+        return available
 
     def master_snapshot() -> dict:
         now = utcnow()
@@ -1112,15 +1916,343 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- health ---------------------------------------------------------------------------------------------
     @app.get("/v1/console/session")
     def console_session(request: Request) -> dict:
+        user = (console_user(request, None) if ctx.settings.console_login else optional_console_user(request))
+        if user is None:
+            return {"authenticated": False}
+        effective = user.view_as or user.role
+        return {"authenticated": True, "user": user.subject, "role": effective,
+                "role_label": ROLE_LABELS[effective], "roles": list(user.assigned_roles),
+                "role_labels": [ROLE_LABELS[role] for role in user.assigned_roles],
+                "permissions": sorted(user.permissions), "landing_page": landing_page((effective,)),
+                "can_view_as": user.is_administrator, "viewing_as": user.view_as,
+                "role_options": [{"id": role, "label": ROLE_LABELS[role],
+                                  "permissions": sorted(ROLE_PERMISSIONS[role]),
+                                  "landing_page": landing_page((role,))} for role in CANONICAL_ROLES]}
+
+    def validate_project_keys(project_keys: list[str] | None) -> list[str] | None:
+        if project_keys is None:
+            return None
+        selected = list(dict.fromkeys(str(key).strip() for key in project_keys if str(key).strip()))
+        unknown = sorted(set(selected) - set(ctx.repo().projects))
+        if unknown:
+            raise HTTPException(400, "unknown project: " + ", ".join(unknown))
+        return selected
+
+    @app.get("/v1/console/users")
+    def console_users(request: Request) -> dict:
+        console_user(request, "console.manage")
+        rows = ctx.db.all("SELECT email,display_name,roles,project_keys,disabled,last_login_at,created_at"
+                          " FROM console_users ORDER BY lower(display_name),email")
+        audits = ctx.db.all("SELECT ts,actor,action,accepted,result,payload FROM write_audit"
+                            " WHERE target='console' AND action IN ('user_add','user_update','user_disable',"
+                            "'user_enable','view_as','view_as_stop') ORDER BY id DESC LIMIT 100")
+        return {"users": rows, "projects": sorted(ctx.repo().projects), "audit": audits,
+                "role_options": [{"id": role, "label": ROLE_LABELS[role],
+                                  "permissions": sorted(ROLE_PERMISSIONS[role])} for role in CANONICAL_ROLES]}
+
+    @app.post("/v1/console/users")
+    def add_console_user(body: ConsoleUserCreateBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", action="user_add")
+        from .login import generate_password, hash_password, normalize_email
+        try:
+            email = normalize_email(body.email)
+            roles = normalize_roles(body.roles)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        project_keys = validate_project_keys(body.project_keys)
+        password = generate_password()
+        try:
+            with ctx.db.pool.connection() as connection:
+                with connection.transaction():
+                    licensing.lock_resource_admission(connection)
+                    people = connection.execute(
+                        "SELECT count(*) AS n FROM console_users WHERE disabled=false").fetchone()["n"]
+                    require_capacity("users", int(people), connection=connection)
+                    created = connection.execute(
+                        "INSERT INTO console_users (email,display_name,role,roles,project_keys,password_hash)"
+                        " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (email) DO NOTHING RETURNING email",
+                        (email, body.display_name.strip()[:200], roles[0], list(roles), project_keys,
+                         hash_password(password))).fetchone()
+                    if not created:
+                        raise HTTPException(409, "a console user with that email already exists")
+                    audit_in(connection, "console", "user_add", "", "", None, user.subject, True, "Person added",
+                             {"email": email, "roles": list(roles), "project_keys": project_keys})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("console user could not be added")
+            raise HTTPException(500, "person could not be added") from exc
+        return {"email": email, "temporary_password": password}
+
+    @app.put("/v1/console/users/{email}")
+    def update_console_user(email: str, body: ConsoleUserUpdateBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="console", action="user_update")
+        from .login import normalize_email
+        try:
+            email = normalize_email(email)
+            roles = normalize_roles(body.roles)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        project_keys = validate_project_keys(body.project_keys)
+        with ctx.db.pool.connection() as connection:
+            connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
+            current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
+                                         (email,)).fetchone()
+            if not current:
+                raise HTTPException(404, "console user not found")
+            current_roles = normalize_roles(current["roles"])
+            if not current["disabled"] and "administrator" in current_roles and "administrator" not in roles:
+                others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
+                                            " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
+                if int(others) == 0:
+                    raise HTTPException(409, "the last administrator cannot be removed")
+            connection.execute("UPDATE console_users SET role=%s,roles=%s,project_keys=%s,updated_at=now() WHERE email=%s",
+                               (roles[0], list(roles), project_keys, email))
+            audit_in(connection, "console", "user_update", "", "", None, user.subject, True, "Person updated",
+                     {"email": email, "roles": list(roles), "project_keys": project_keys})
+        return {"updated": True}
+
+    @app.patch("/v1/console/users/{email}/disabled")
+    def set_console_user_disabled(email: str, body: ConsoleUserDisabledBody, request: Request) -> dict:
+        user = console_user(request, "console.manage", target="console",
+                            action="user_disable" if body.disabled else "user_enable")
+        from .login import normalize_email
+        try:
+            email = normalize_email(email)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        with ctx.db.pool.connection() as connection:
+            connection.execute("LOCK TABLE console_users IN EXCLUSIVE MODE")
+            current = connection.execute("SELECT roles,disabled FROM console_users WHERE email=%s FOR UPDATE",
+                                         (email,)).fetchone()
+            if not current:
+                raise HTTPException(404, "console user not found")
+            roles = normalize_roles(current["roles"])
+            if body.disabled and not current["disabled"] and "administrator" in roles:
+                others = connection.execute("SELECT count(*) AS n FROM console_users WHERE email<>%s AND disabled=false"
+                                            " AND 'administrator'=ANY(roles)", (email,)).fetchone()["n"]
+                if int(others) == 0:
+                    raise HTTPException(409, "the last administrator cannot be disabled")
+            connection.execute("UPDATE console_users SET disabled=%s,updated_at=now() WHERE email=%s",
+                               (body.disabled, email))
+            action = "user_disable" if body.disabled else "user_enable"
+            audit_in(connection, "console", action, "", "", None, user.subject, True,
+                     "Person disabled" if body.disabled else "Person enabled", {"email": email})
+        return {"disabled": body.disabled}
+
+    @app.post("/v1/console/view-as")
+    def console_view_as(body: ViewAsBody, request: Request) -> JSONResponse:
+        user = console_user(request, "console.manage", target="console", action="view_as")
+        try:
+            role = normalize_role(body.role)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        from .login import SESSION_TTL_S
+        token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
+                              ctx.settings.console_session_secret, view_as=role)
+        audit("console", "view_as", "", "", None, user.subject, True, "Administrator viewing as role",
+              {"role": role})
+        response = JSONResponse({"viewing_as": role, "role_label": ROLE_LABELS[role]})
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
+                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
+                            samesite="strict", path="/")
+        return response
+
+    @app.post("/v1/console/view-as/stop")
+    def console_stop_view_as(request: Request) -> JSONResponse:
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if not user or not user.is_administrator:
+            raise HTTPException(403, "not available for your role")
+        from .login import SESSION_TTL_S
+        token = issue_session(user.subject, user.assigned_roles, int(utcnow().timestamp()) + SESSION_TTL_S,
+                              ctx.settings.console_session_secret)
+        audit("console", "view_as_stop", "", "", None, user.subject, True, "Administrator returned to own role",
+              {"previous_role": user.view_as or ""})
+        response = JSONResponse({"viewing_as": None})
+        response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
+                            secure=str(ctx.settings.public_url or "").lower().startswith("https://"),
+                            samesite="strict", path="/")
+        return response
+
+    @app.post("/v1/support/bundles")
+    def create_support_bundle(body: SupportBundleBody, request: Request) -> dict:
+        creator = console_user(request, {"console.manage"}, target="support_bundle", action="create")
+        ticket_key = body.ticket_key.strip().upper() or None
+        try:
+            archive, inventory = support_bundle.build_support_bundle(ctx, ticket_key)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown ticket") from exc
+        except ValueError as exc:
+            log.warning("support bundle scan blocked; sensitive content remained after sanitization")
+            raise HTTPException(422, "bundle scan failed; no bundle was offered") from exc
+        bundle_id = secrets.token_urlsafe(24)
+        key = ctx.leases._k("support_bundle", bundle_id)
+        payload = json.dumps({"archive": base64.b64encode(archive).decode("ascii"), "inventory": inventory,
+                              "creator": creator.subject}, separators=(",", ":"))
+        try:
+            ctx.leases.r.set(key, payload, ex=600)
+        except Exception as exc:  # noqa: BLE001 - do not return an unreviewable or non-shared in-memory bundle
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        return {"bundle_id": bundle_id, "inventory": inventory, "download_url": f"/v1/support/bundles/{bundle_id}/download"}
+
+    @app.get("/v1/support/bundles/{bundle_id}/download")
+    def download_support_bundle(bundle_id: str, request: Request) -> Response:
+        user = console_user(request, {"console.manage"})
+        key = ctx.leases._k("support_bundle", bundle_id)
+        try:
+            stored = ctx.leases.r.get(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("temporary support bundle storage is unavailable: %s", type(exc).__name__)
+            raise HTTPException(503, "temporary bundle storage is unavailable") from exc
+        if not stored:
+            raise HTTPException(404, "bundle expired or unknown")
+        item = json.loads(stored)
+        if not item.get("creator") or not secrets.compare_digest(str(item["creator"]), user.subject):
+            raise HTTPException(403, "bundle belongs to the user who created it")
+        ticket_key = item["inventory"].get("ticket_key")
+        filename = f"support-bundle-{ticket_key}.zip" if ticket_key else "support-bundle.zip"
+        archive = base64.b64decode(item["archive"], validate=True)
+        return Response(archive, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                 "Cache-Control": "no-store"})
+
+    # --- per-person console layouts (layouts.py, docs/v4/console-layouts.md) ---------------------------------
+    def layout_page(page: str) -> str:
+        if page not in layouts.PAGES:
+            raise HTTPException(404, "unknown console page")
+        return page
+
+    @app.get("/v1/console/layouts")
+    def console_layouts(request: Request) -> dict:
         user = console_user(request, None)
-        return {"authenticated": True, "user": user.subject, "role": user.role,
-                "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
+        return layouts.overview(ctx.db, user.subject, user.role)
+
+    @app.put("/v1/console/layouts/{page}")
+    def console_layout_save(page: str, body: layouts.LayoutBody, request: Request) -> dict:
+        # Layouts are personal preferences, like reads, and remain available if the licence expires.
+        user = console_user(request, None)
+        try:
+            blocks = layouts.normalise(layout_page(page), [b.model_dump() for b in body.blocks])
+        except layouts.LayoutError as exc:
+            raise HTTPException(400, str(exc)) from None
+        layouts.save(ctx.db, user.subject, page, blocks)
+        return layouts.page_view(page, user.role, blocks)
+
+    @app.delete("/v1/console/layouts/{page}")
+    def console_layout_reset(page: str, request: Request) -> dict:
+        user = console_user(request, None)
+        layouts.reset(ctx.db, user.subject, layout_page(page))
+        return layouts.page_view(page, user.role, None)
+
+    def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
+        return console_user(request, {"notifications.manage"}, target="notifications", action=action)
+
+    async def notification_json(request: Request) -> dict:
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "invalid notification settings") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid notification settings")
+        return payload
+
+    @app.get("/v1/notifications")
+    def notification_settings(request: Request) -> dict:
+        notification_admin(request)
+        return notify.public_settings(ctx.db)
+
+    @app.put("/v1/notifications/channels")
+    async def notification_channel_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            channel = notify.save_channel(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"channel": channel}
+
+    @app.delete("/v1/notifications/channels/{channel_id}")
+    def notification_channel_delete(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        if not notify.delete_channel(ctx.db, channel_id):
+            raise HTTPException(404, "notification channel was not found")
+        return {"deleted": True}
+
+    @app.put("/v1/notifications/preferences")
+    async def notification_preferences_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            preferences = notify.save_preferences(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"preferences": preferences}
+
+    @app.post("/v1/notifications/channels/{channel_id}/test")
+    def notification_channel_test(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            return notify.send_test(ctx, channel_id)
+        except ValueError:
+            raise HTTPException(404, "notification channel was not found") from None
 
     @app.get("/healthz")
     def healthz() -> dict:
         ctx.db.one("SELECT 1 AS ok")
         ctx.leases.r.ping()
         return {"ok": True, "version": VERSION}
+
+    # --- licence and metered usage ---------------------------------------------------------------------------
+    @app.get("/v1/licensing")
+    def licensing_state(request: Request) -> dict:
+        console_user(request, "licensing.manage")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        state["usage"] = licensing.resource_counts(ctx)
+        state["sync_warnings"] = list(app.state.license_sync_warnings)
+        return state
+
+    @app.get("/v1/licensing/status")
+    def licensing_status(request: Request) -> dict:
+        console_user(request, "console.read")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only")}
+
+    @app.post("/v1/licensing/activate")
+    def activate_license(body: LicenseKeyBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                             ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/v1/licensing/offline")
+    def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.put("/v1/licensing/limits")
+    def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        try:
+            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/v1/licensing/usage")
+    def licensing_usage(request: Request) -> dict:
+        console_user(request, "console.read")
+        return {"rows": licensing.usage_report(ctx.db)}
+
+    @app.get("/v1/licensing/usage.csv")
+    def licensing_usage_csv(request: Request) -> PlainTextResponse:
+        console_user(request, "console.read")
+        content = licensing.usage_csv(licensing.usage_report(ctx.db))
+        return PlainTextResponse(content, media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=ai-flow-usage.csv"})
 
     # --- Owner-managed GitHub App connection ----------------------------------------------------------------
     def github_secret_store() -> GitHubSecretStore:
@@ -1200,15 +2332,23 @@ def create_app(ctx: Ctx) -> FastAPI:
         repositories = gateway.installation_repositories()
         active_meta["repository_names"] = sorted({str(item["full_name"]) for item in repositories
                                                   if item.get("full_name")})
-        store.save_active(active_meta, private_key)
-        ctx.github = GitHubApp(ctx.settings.github_app_dir, account_login)
-        ctx.settings.github_org = account_login
+        target = str(record.get("connection") or "default")
+        if target == "default" or (target == "new" and not store.active_exists):
+            connection_id = DEFAULT_ID
+            store.save_active(active_meta, private_key)
+            ctx.github = GitHubApp(ctx.settings.github_app_dir, account_login)
+            ctx.settings.github_org = account_login
+        else:
+            connection_id = github_connections(ctx).save_app(None if target == "new" else target, "",
+                                                             active_meta, private_key)
         store.delete_pending(pending_id)
         audit("github", "connect", "", "", None, actor, True, "GitHub App connected",
               {"app_id": str(active_meta.get("id") or ""), "installation_id": installation_id,
-               "account": account_login, "repositories": len(repositories), "source": source})
+               "account": account_login, "repositories": len(repositories), "source": source,
+               "connection": connection_id})
         ctx.events.emit("github.connected", account=account_login, outcome="connected", reason=source)
         return {"account": account_login, "account_type": account_type, "installation_id": installation_id,
+                "connection": connection_id,
                 "repositories": len(repositories), "settings_url": github_installation_settings(
                     account_login, account_type, installation_id)}
 
@@ -1239,8 +2379,121 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "settings_url": github_installation_settings(account, account_type, int(installation_id))
                 if installation_id else ""}
 
+    def target_connection(value: Any) -> str:
+        """Where a GitHub App being connected goes: the default one, a new connection, or an existing id."""
+        text = str(value or "default")
+        if text in ("default", "new") or (text != DEFAULT_ID and github_connections(ctx).meta(text)):
+            return text
+        raise HTTPException(422, "unknown GitHub connection")
+
+    def connection_view(conn: Connection) -> dict[str, Any]:
+        """One row of the Integrations list: account, credential type, status and reachable repositories."""
+        meta = getattr(conn.gateway, "meta", {}) or {}
+        view: dict[str, Any] = {**conn.summary(), "status": "connected", "repositories": [], "warning": "",
+                                "app": None, "settings_url": ""}
+        if conn.kind == "token":
+            view["warning"] = ("An access token reaches more than a GitHub App, has no bot identity and cannot "
+                               "be limited per run: it stays in Command Center and is never given to a node. "
+                               "Prefer a GitHub App.")
+        else:
+            view["app"] = {"id": str(meta.get("id") or ""), "name": str(meta.get("name") or "GitHub App"),
+                           "slug": str(meta.get("slug") or "")}
+            installation = meta.get("installation_id") or getattr(conn.gateway, "_inst", None)
+            if installation and conn.account:
+                view["settings_url"] = github_installation_settings(conn.account, conn.account_type or "Organization",
+                                                                    int(installation))
+        try:
+            view["repositories"] = sorted(
+                str(r.get("full_name")) for r in conn.gateway.installation_repositories()
+                if str(r.get("full_name") or "").split("/", 1)[0].lower() == conn.account.lower())
+        except Exception as exc:  # provider text may carry credentials; show only a generic status
+            log.warning("GitHub connection %s status failed (%s)", conn.id, type(exc).__name__)
+            view["status"] = "error"
+        return view
+
+    def find_connection(connection_id: str) -> Connection:
+        conn = next((c for c in github_connection_list(ctx) if c.id == connection_id), None)
+        if conn is None:
+            raise HTTPException(404, "unknown GitHub connection")
+        return conn
+
+    @app.get("/v1/integrations/github/connections")
+    def github_connections_status(request: Request) -> dict[str, Any]:
+        console_user(request, {"integrations.manage"})
+        return {"connections": [connection_view(c) for c in github_connection_list(ctx)],
+                "recommendation": "Use a GitHub App; an access token is broader, has no bot identity and cannot "
+                                  "be limited to one repository per run."}
+
+    @app.post("/v1/integrations/github/connections/token")
+    def github_add_token(body: GitHubConnectionTokenBody, request: Request) -> dict[str, Any]:
+        user = console_user(request, {"integrations.manage"}, target="github", action="add_token_connection")
+        account = body.account.strip()
+        if account and not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", account):
+            audit("github", "add_token_connection", "", "", None, user.subject, False, "invalid account")
+            raise HTTPException(422, "enter a valid GitHub account or organization login")
+        try:
+            gateway = verify_token(body.token.strip(), account)
+        except Exception as exc:
+            log.warning("GitHub token could not be verified (%s)", type(exc).__name__)
+            audit("github", "add_token_connection", "", "", None, user.subject, False, "token could not be verified")
+            raise HTTPException(422, "GitHub did not accept this token for that account") from exc
+        label = body.label.strip() or f"{gateway.org} access token"
+        connection_id = github_connections(ctx).add_token(label, body.token.strip(), gateway.org,
+                                                           gateway.meta.get("account_type", ""))
+        audit("github", "add_token_connection", "", "", None, user.subject, True, "access token connection added",
+              {"connection": connection_id, "account": gateway.org})
+        ctx.events.emit("github.connected", account=gateway.org, outcome="connected", reason="token")
+        return connection_view(find_connection(connection_id))
+
+    @app.post("/v1/integrations/github/connections/{connection_id}/test")
+    def github_test_connection(connection_id: str, request: Request) -> dict[str, Any]:
+        user = console_user(request, {"integrations.manage"}, target="github", action="test_connection")
+        view = connection_view(find_connection(connection_id))
+        audit("github", "test_connection", "", "", None, user.subject, view["status"] == "connected",
+              view["status"], {"connection": connection_id, "repositories": len(view["repositories"])})
+        return view
+
+    @app.put("/v1/integrations/github/connections/{connection_id}/token")
+    def github_replace_token(connection_id: str, body: GitHubConnectionTokenBody, request: Request) -> dict[str, Any]:
+        user = console_user(request, {"integrations.manage"}, target="github", action="replace_token_connection")
+        conn = find_connection(connection_id)
+        if conn.kind != "token":
+            raise HTTPException(409, "only an access token connection takes a new token; reconnect the App instead")
+        try:
+            gateway = verify_token(body.token.strip(), conn.account)
+        except Exception as exc:
+            log.warning("GitHub token could not be verified (%s)", type(exc).__name__)
+            audit("github", "replace_token_connection", "", "", None, user.subject, False,
+                  "token could not be verified", {"connection": connection_id})
+            raise HTTPException(422, "GitHub did not accept this token for that account") from exc
+        github_connections(ctx).replace_token(connection_id, body.token.strip(), gateway.org,
+                                              gateway.meta.get("account_type", ""))
+        audit("github", "replace_token_connection", "", "", None, user.subject, True, "access token replaced",
+              {"connection": connection_id, "account": gateway.org})
+        return connection_view(find_connection(connection_id))
+
+    @app.delete("/v1/integrations/github/connections/{connection_id}")
+    def github_remove_connection(connection_id: str, request: Request) -> dict[str, Any]:
+        user = console_user(request, {"integrations.manage"}, target="github", action="remove_connection")
+        find_connection(connection_id)
+        registry = github_connections(ctx)
+        using = sorted(repo for repo, assigned in registry.assignments().items() if assigned == connection_id)
+        if using:
+            audit("github", "remove_connection", "", "", None, user.subject, False,
+                  "connection is assigned to repositories", {"connection": connection_id, "repositories": using})
+            raise HTTPException(409, "reassign these repositories first: " + ", ".join(using))
+        if connection_id == DEFAULT_ID:
+            for name in ("app.json", "app.pem"):
+                (Path(ctx.settings.github_app_dir) / name).unlink(missing_ok=True)
+            ctx.github = None
+        else:
+            registry.remove(connection_id)
+        audit("github", "remove_connection", "", "", None, user.subject, True, "connection removed",
+              {"connection": connection_id})
+        return {"removed": connection_id}
+
     @app.get("/v1/integrations/github/manifest/start", response_class=HTMLResponse)
-    def github_manifest_start(organization: str, request: Request) -> HTMLResponse:
+    def github_manifest_start(organization: str, request: Request, connection: str = "default") -> HTMLResponse:
         user = console_user(request, {"integrations.manage"}, target="github", action="manifest_start")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", organization):
             audit("github", "manifest_start", "", "", None, user.subject, False, "invalid GitHub organization")
@@ -1248,7 +2501,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         base = github_public_base()
         store = github_secret_store()
         state = store.new_id()
-        store.create_pending(state, {"phase": "manifest", "actor": user.subject,
+        store.create_pending(state, {"phase": "manifest", "actor": user.subject, "connection": target_connection(connection),
                                      "expected_owner": organization, "source": "manifest"})
         audit("github", "manifest_start", "", "", None, user.subject, True, "GitHub App manifest started",
               {"organization": organization})
@@ -1258,6 +2511,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     "redirect_url": callback, "setup_url": setup, "setup_on_update": False, "public": False,
                     "default_events": [],
                     "default_permissions": {"contents": "write", "pull_requests": "write", "metadata": "read",
+                                            "actions": "read",
                                             "checks": "read", "statuses": "read", "workflows": "write",
                                             "administration": "write"}}
         action = f"https://github.com/organizations/{quote(organization, safe='-')}/settings/apps/new?state={state}"
@@ -1363,7 +2617,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(422, "select a valid GitHub App private key file")
         store = github_secret_store()
         pending_id = store.new_id()
-        record = {"phase": "import", "actor": user.subject, "source": "import", "app": {"id": app_id}}
+        record = {"phase": "import", "actor": user.subject, "source": "import", "app": {"id": app_id},
+                  "connection": target_connection(payload.get("connection"))}
         store.create_pending(pending_id, record, pem)
         try:
             _, meta, _ = store.read_pending(pending_id)
@@ -1494,12 +2749,43 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(422, "Jira project must be a project key or project URL")
         return key
 
+    def github_catalog(actor: str, source: str) -> list[dict[str, Any]]:
+        """Repositories of every connection, each with the connections that reach it and the one it uses."""
+        connections = github_connection_list(ctx)
+        assigned = github_connections(ctx).assignments()
+        repos: dict[str, dict[str, Any]] = {}
+        failures: list[Exception] = []
+        for conn in connections:
+            try:
+                rows = conn.gateway.installation_repositories()
+                if conn.id == DEFAULT_ID:
+                    audit_github_repository_changes(conn.gateway, rows, actor, source)
+            except Exception as exc:  # one broken connection must not hide the others
+                log.warning("GitHub connection %s repositories failed (%s)", conn.id, type(exc).__name__)
+                failures.append(exc)
+                continue
+            for item in rows:
+                name = str(item.get("full_name") or "")
+                if name.split("/", 1)[0].lower() != conn.account.lower():
+                    continue
+                repos.setdefault(name.lower(), {**item, "connections": []})["connections"].append(conn.id)
+        if connections and len(failures) == len(connections):
+            raise failures[0]
+        for key, item in repos.items():
+            assigned_connection = assigned.get(key, "")
+            item["assigned_connection"] = assigned_connection
+            item["connection"] = assigned_connection if assigned_connection in item["connections"] else (
+                "" if assigned_connection else item["connections"][0])
+        return sorted(repos.values(), key=lambda row: str(row["full_name"]).lower())
+
+    def connection_summaries() -> list[dict[str, str]]:
+        return [conn.summary() for conn in github_connection_list(ctx)]
+
     def project_preflight(body: ProjectPreflightBody, actor: str = "owner") -> dict[str, Any]:
         if not ctx.jira:
             raise HTTPException(503, "Jira is not connected")
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
+        if not github_connection_list(ctx):
+            raise HTTPException(503, "GitHub is not connected")
         site = jira_site()
         if body.site.rstrip("/") != site:
             raise HTTPException(422, "selected Jira site is not connected")
@@ -1509,18 +2795,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", body.base) or ".." in body.base:
             raise HTTPException(422, "invalid base branch")
         org, slash, repo_name = body.repo.partition("/")
-        github_owner = str(getattr(github, "org", "") or ctx.settings.github_org)
-        if not slash or org.lower() != github_owner.lower() or not re.fullmatch(
-                r"[A-Za-z0-9_.-]+", repo_name):
-            raise HTTPException(422, "select a repository accessible to the GitHub App")
+        if not slash or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo_name) or not re.fullmatch(r"[A-Za-z0-9_.-]+", org):
+            raise HTTPException(422, "select a repository accessible to a connected GitHub account")
 
         try:
             jira_statuses = ctx.jira.project_statuses(key)
-            repositories = github.installation_repositories()
-            audit_github_repository_changes(github, repositories, actor, "project_preflight")
-            available = {str(item.get("full_name", "")).lower() for item in repositories}
-            if body.repo.lower() not in available:
-                raise HTTPException(422, "repository is not accessible to the GitHub App")
+            catalog = github_catalog(actor, "project_preflight")
+            entry = next((item for item in catalog if str(item["full_name"]).lower() == body.repo.lower()), None)
+            if entry is None or not entry["connection"]:
+                raise HTTPException(422, "repository is not accessible to any connected GitHub account")
+            github = github_gateway(ctx, body.repo)
             branch_exists = bool(github.branch_exists(repo_name, body.base))
         except HTTPException:
             raise
@@ -1549,12 +2833,16 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "branch_exists": branch_exists, "nodes": node_results, "required_tools": required_tools,
                 "ok": not missing_statuses and branch_exists}
 
-    def refresh_projects() -> None:
+    def refresh_projects() -> bool:
+        if not ctx.refresh_repo:
+            return True
         if ctx.refresh_repo:
             try:
                 ctx.refresh_repo()
-            except Exception as exc:  # commit already exists remotely; RepoCache will retry its pull later
+            except Exception as exc:  # RepoCache will retry its pull on a later refresh
                 log.warning("project control repo refresh failed (%s)", type(exc).__name__)
+                return False
+        return True
 
     def project_audit(action: str, key: str, actor: str, accepted: bool, result: str,
                       payload: dict[str, Any] | None = None) -> None:
@@ -1578,36 +2866,37 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ""
 
     @app.get("/v1/projects")
-    def managed_projects() -> dict:
+    def managed_projects(request: Request) -> dict:
+        user = (console_user(request, "projects.manage") if ctx.settings.console_login
+                else optional_console_user(request))
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
         probes = tooling.probe_report(ctx)
-        return {"projects": [{"key": project.key, "repo": project.repo,
+        projects = [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack,
                               "checks": probes.get(project.key, {})}
-                             for project in sorted(repo.projects.values(), key=lambda item: item.key)]}
+                    for project in sorted(repo.projects.values(), key=lambda item: item.key)]
+        if user and user.project_keys is not None:
+            projects = [project for project in projects if project["key"] in user.project_keys]
+        return {"projects": projects}
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_catalog")
-        github = github_gateway(ctx)
-        if not ctx.jira or not github:
-            raise HTTPException(503, "Jira and GitHub App must be connected before adding a project")
+        if not ctx.jira or not github_connection_list(ctx):
+            raise HTTPException(503, "Jira and GitHub must be connected before adding a project")
         try:
             jira_projects = ctx.jira.projects()
-            github_repos = github.installation_repositories()
-            audit_github_repository_changes(github, github_repos, user.subject, "project_catalog")
+            github_repos = github_catalog(user.subject, "project_catalog")
         except Exception as exc:
             log.warning("project catalog could not be loaded (%s)", type(exc).__name__)
             raise HTTPException(502, "could not load connected Jira projects and GitHub repositories") from exc
         return {"jira_sites": [jira_site()], "jira_projects": jira_projects,
-                "github_repos": [item for item in github_repos
-                                 if str(item.get("full_name", "")).split("/", 1)[0].lower()
-                                 == str(getattr(github, "org", "") or ctx.settings.github_org).lower()],
+                "github_repos": github_repos, "connections": connection_summaries(),
                 "stacks": sorted(STACK_TOOLS), "required_statuses": required_project_statuses}
 
     def jira_project_epics(key: str) -> list[dict[str, str]]:
@@ -1643,23 +2932,33 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = ctx.repo().projects.get(key)
         if not project:
             raise HTTPException(404, "project is not configured")
-        github = github_gateway(ctx)
-        if not ctx.jira or not github:
-            raise HTTPException(503, "Jira and GitHub App must be connected to configure repositories")
+        if not ctx.jira or not github_connection_list(ctx):
+            raise HTTPException(503, "Jira and GitHub must be connected to configure repositories")
         try:
             epics = jira_project_epics(key)
-            available = github.installation_repositories()
-            audit_github_repository_changes(github, available, user.subject, "project_repositories")
+            available = github_catalog(user.subject, "project_repositories")
         except Exception as exc:
             log.warning("project repositories could not be loaded (%s)", type(exc).__name__)
             raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
-        owner = str(getattr(github, "org", "") or ctx.settings.github_org).lower()
-        available = [item for item in available
-                     if str(item.get("full_name", "")).split("/", 1)[0].lower() == owner]
-        return {"project": key, "default_repo": project.repo,
+        by_name = {str(item["full_name"]).lower(): item for item in available}
+        assignments = github_connections(ctx).assignments()
+        repositories = []
+        for row in repository_settings_payload(project):
+            catalog_row = by_name.get(row["repo"].lower()) or {}
+            reachable = catalog_row.get("connections", [])
+            assigned_connection = assignments.get(row["repo"].lower(), catalog_row.get("assigned_connection", ""))
+            stale_assignment = bool(assigned_connection and assigned_connection not in reachable)
+            selected_connection = catalog_row.get("connection", "")
+            if stale_assignment:
+                selected_connection = reachable[0] if reachable else ""
+            repositories.append({**row, "connection": selected_connection,
+                                 "assigned_connection": assigned_connection,
+                                 "connection_stale": stale_assignment,
+                                 "connections": reachable})
+        return {"project": key, "default_repo": project.repo, "connections": connection_summaries(),
                 "project_defaults": {"base": project.base, "checks": project.checks, "stack": project.stack,
                                      "containers": project.containers},
-                "repositories": repository_settings_payload(project),
+                "repositories": repositories,
                 "epic_repositories": project.epic_repositories or {},
                 "epics": epics, "github_repos": available, "stacks": sorted(STACK_TOOLS)}
 
@@ -1671,30 +2970,33 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not project:
             project_audit("save_project_repositories", key[:32], user.subject, False, "project is not configured")
             raise HTTPException(404, "project is not configured")
-        github = github_gateway(ctx)
-        if not ctx.jira or not github:
+        if not ctx.jira or not github_connection_list(ctx):
             project_audit("save_project_repositories", key, user.subject, False,
-                          "Jira and GitHub App must be connected")
-            raise HTTPException(503, "Jira and GitHub App must be connected")
+                          "Jira and GitHub must be connected")
+            raise HTTPException(503, "Jira and GitHub must be connected")
         try:
             epics = jira_project_epics(key)
-            available_repositories = github.installation_repositories()
+            available_repositories = github_catalog(user.subject, "project_repository_save")
         except Exception as exc:
             project_audit("save_project_repositories", key, user.subject, False, "could not load providers")
             log.warning("project repository save preflight failed (%s)", type(exc).__name__)
             raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
-        audit_github_repository_changes(github, available_repositories, user.subject, "project_repository_save")
-        owner = str(getattr(github, "org", "") or ctx.settings.github_org).lower()
-        available = {str(item.get("full_name") or "").lower() for item in available_repositories
-                     if str(item.get("full_name", "")).split("/", 1)[0].lower() == owner}
+        available = {str(item["full_name"]).lower(): item for item in available_repositories}
+        gateways = {conn.id: conn.gateway for conn in github_connection_list(ctx)}
+        chosen: dict[str, str] = {}  # repository -> connection the owner picked on this save
         epic_keys = {item["key"] for item in epics}
         repos: dict[str, dict[str, Any]] = {}
         error = ""
         for item in body.repositories:
             name = item.repo.strip()
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name) or name.lower() not in available:
-                error = f"repository {name} is not visible to the connected GitHub App"
+                error = f"repository {name} is not visible to any connected GitHub account"
                 break
+            if item.connection:
+                if item.connection not in available[name.lower()]["connections"]:
+                    error = f"GitHub connection {item.connection} cannot reach {name}"
+                    break
+                chosen[name.lower()] = item.connection
             if name.lower() in repos:
                 error = f"repository {name} is listed more than once"
                 break
@@ -1718,7 +3020,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     error = f"{epic} is not an epic in Jira project {key}"
                     break
                 if name.lower() not in available:
-                    error = f"repository {name} is not visible to the connected GitHub App"
+                    error = f"repository {name} is not visible to any connected GitHub account"
                     break
                 if name.lower() not in repos:
                     repos[name.lower()] = {"repo": name, "base": "", "checks": [], "stack": ""}
@@ -1726,8 +3028,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             repos[project.repo.lower()] = {"repo": project.repo, "base": "", "checks": [], "stack": ""}
         if not error:
             for item in repos.values():
+                lowered = item["repo"].lower()
+                connection = chosen.get(lowered) or (available.get(lowered) or {}).get("connection", "")
+                if not connection or connection not in gateways:
+                    error = f"no GitHub connection can reach {item['repo']}"
+                    break
                 branch = item["base"] or project.base
-                if not github.branch_exists(item["repo"].split("/", 1)[-1], branch):
+                if not gateways[connection].branch_exists(item["repo"].split("/", 1)[-1], branch):
                     error = f"base branch {branch} is missing from {item['repo']}"
                     break
         if error:
@@ -1743,14 +3050,22 @@ def create_app(ctx: Ctx) -> FastAPI:
             config["epic_repositories"] = mappings
             content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
             control_name = Path(ctx.settings.control_repo).name
+            github = github_control_gateway(ctx)
             branch = github.default_branch(control_name)
             commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
                                        f"projects: update repositories for {key} via AI Flow console")
+        except HTTPException:
+            raise
         except Exception as exc:
             log.warning("project repository update failed (%s)", type(exc).__name__)
             project_audit("save_project_repositories", key, user.subject, False, "control repo commit failed",
                           {"epic_repositories": mappings, "repositories": list(repos.values())})
             raise HTTPException(502, "could not save repository settings to aiflow-control") from exc
+        for lowered, connection in chosen.items():
+            github_connections(ctx).assign(repos[lowered]["repo"], connection)
+            audit("github", "assign_connection", "", "", None, user.subject, True,
+                  f"{repos[lowered]['repo']} uses connection {connection}",
+                  {"repo": repos[lowered]["repo"], "connection": connection, "project": key})
         refresh_projects()
         project_audit("save_project_repositories", key, user.subject, True,
                       commit or "bot commit created", {"epic_repositories": mappings,
@@ -1770,49 +3085,62 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
-        try:
-            result = project_preflight(body, user.subject)
-        except HTTPException as exc:
-            project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
-                          {"project_input": body.project, "repo": body.repo})
-            raise
-        key = result["project"]
-        if key in ctx.repo().projects:
-            project_audit("add_project", key, user.subject, False, "project is already configured",
-                          {"repo": body.repo})
-            raise HTTPException(409, "project is already configured")
-        if not result["ok"]:
-            reasons = []
-            if result["missing_statuses"]:
-                reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
-            if not result["branch_exists"]:
-                reasons.append(f"base branch {body.base} is missing from {body.repo}")
-            detail = {"message": "; ".join(reasons) or "project checks failed",
-                      "missing_statuses": result["missing_statuses"],
-                      "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
-            project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
-            raise HTTPException(422, detail)
+        with ctx.db.pool.connection() as connection:
+            with connection.transaction():
+                # Keep the shared admission lock through preflight, the external commit, and repo refresh. A
+                # competing request then counts the project just committed before it can take the final slot.
+                licensing.lock_resource_admission(connection)
+                if not refresh_projects():
+                    project_audit("add_project", body.project[:32], user.subject, False,
+                                  "control repo refresh failed before capacity check", {"repo": body.repo})
+                    raise HTTPException(503, "could not refresh the control repo before checking project capacity")
+                require_capacity("projects", len(ctx.repo().projects), connection=connection)
+                try:
+                    result = project_preflight(body, user.subject)
+                except HTTPException as exc:
+                    project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
+                                  {"project_input": body.project, "repo": body.repo})
+                    raise
+                key = result["project"]
+                if key in ctx.repo().projects:
+                    project_audit("add_project", key, user.subject, False, "project is already configured",
+                                  {"repo": body.repo})
+                    raise HTTPException(409, "project is already configured")
+                if not result["ok"]:
+                    reasons = []
+                    if result["missing_statuses"]:
+                        reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
+                    if not result["branch_exists"]:
+                        reasons.append(f"base branch {body.base} is missing from {body.repo}")
+                    detail = {"message": "; ".join(reasons) or "project checks failed",
+                              "missing_statuses": result["missing_statuses"],
+                              "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
+                    project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
+                    raise HTTPException(422, detail)
 
-        worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
-        worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
-        checks = [check.strip() for check in body.checks if check.strip()]
-        config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                  "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
-                  "limits": {"parallel": body.parallel_limit,
-                             "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
-                  "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
-        content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-        control_name = Path(ctx.settings.control_repo).name
-        try:
-            github = github_gateway(ctx)
-            branch = github.default_branch(control_name)
-            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
-                                            f"projects: add {key} via AI Flow console")
-        except Exception as exc:
-            log.warning("project add commit failed (%s)", type(exc).__name__)
-            project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
-            raise HTTPException(502, "could not save the project to aiflow-control") from exc
-        refresh_projects()
+                worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
+                worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
+                checks = [check.strip() for check in body.checks if check.strip()]
+                config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
+                          "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
+                          "limits": {"parallel": body.parallel_limit,
+                                     "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
+                          "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
+                content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+                control_name = Path(ctx.settings.control_repo).name
+                try:
+                    github = github_control_gateway(ctx)
+                    branch = github.default_branch(control_name)
+                    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                                f"projects: add {key} via AI Flow console")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    log.warning("project add commit failed (%s)", type(exc).__name__)
+                    project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
+                    raise HTTPException(502, "could not save the project to aiflow-control") from exc
+                # Make the committed project visible to the next admission before releasing the lock.
+                refresh_projects()
         project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
@@ -1830,10 +3158,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             config["paused"] = body.paused
             content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
             control_name = Path(ctx.settings.control_repo).name
-            github = github_gateway(ctx)
+            github = github_control_gateway(ctx)
             branch = github.default_branch(control_name)
             commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
                                             f"projects: {'pause' if body.paused else 'resume'} {key}")
+        except HTTPException:
+            raise
         except Exception as exc:
             log.warning("project pause update failed (%s)", type(exc).__name__)
             project_audit("pause_project", key, user.subject, False, "control repo commit failed",
@@ -1855,10 +3185,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(404, "project is not configured")
         control_name = Path(ctx.settings.control_repo).name
         try:
-            github = github_gateway(ctx)
+            github = github_control_gateway(ctx)
             branch = github.default_branch(control_name)
             commit = github.delete_file(control_name, branch, f"projects/{key}.yaml",
                                             f"projects: remove {key} via AI Flow console")
+        except HTTPException:
+            raise
         except Exception as exc:
             log.warning("project remove commit failed (%s)", type(exc).__name__)
             project_audit("remove_project", key, user.subject, False, "control repo commit failed")
@@ -1886,6 +3218,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def create_join_grant(name: str, role: str, project: str) -> tuple[str, datetime]:
         """Create the shared five-minute grant used by both Command Center entry points."""
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             raise HTTPException(422, "invalid node name")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", role):
@@ -1896,21 +3232,33 @@ def create_app(ctx: Ctx) -> FastAPI:
         dynamic = name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
-        existing = ctx.db.one("SELECT name,status FROM nodes WHERE name=%s", (name,))
-        if existing and dynamic and existing["status"] == "online":
-            raise HTTPException(409, "an online node already uses this name")
-        token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
-            issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
-                                  " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
-                                  " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
-                                  " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
-                                  " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
-                                  " RETURNING expires_at",
-                                  (h(token), name, role, project, dynamic)).fetchone()
-            # Register a pending dynamic node so Command Center can show it before its first heartbeat.
-            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic) VALUES (%s,%s,'joined',%s,%s)"
-                         " ON CONFLICT (name) DO NOTHING", (name, role, [project], dynamic))
+            with conn.transaction():
+                # The count, join grant, and pending node insert share the lock and transaction. A second request
+                # waits here, then sees the first request's node before checking the last available slot.
+                licensing.lock_resource_admission(conn)
+                existing = conn.execute(
+                    "SELECT name,removed_at,(token_hash<>'' AND last_heartbeat > now()-interval '75 seconds') AS live"
+                    " FROM nodes WHERE name=%s FOR UPDATE", (name,)).fetchone()
+                if existing and existing["live"] and not existing["removed_at"]:
+                    raise HTTPException(409, "a live node already uses this name")
+                if not existing or existing["removed_at"]:
+                    count = int(conn.execute(
+                        "SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL").fetchone()["count"])
+                    require_capacity("machines", count, connection=conn)
+                token = secrets.token_urlsafe(32)
+                issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
+                                      " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
+                                      " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
+                                      " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
+                                      " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
+                                      " RETURNING expires_at",
+                                      (h(token), name, role, project, dynamic)).fetchone()
+                # Register a pending dynamic node so Command Center can show it before its first heartbeat.
+                conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic,accepting_work,removed_at)"
+                             " VALUES (%s,%s,'joined',%s,%s,true,NULL) ON CONFLICT (name) DO UPDATE"
+                             " SET removed_at=NULL,accepting_work=true WHERE nodes.removed_at IS NOT NULL",
+                             (name, role, [project], dynamic))
         return token, issued["expires_at"]
 
     @app.post("/v1/nodes/join-tokens")
@@ -1935,10 +3283,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", release):
             raise HTTPException(503, "no signed AI Flow release is deployed")
         return {"name": row["node_name"], "role": row["role"], "project": row["project"],
-                "stack": project.stack, "release": release}
+                "stack": project.stack, "stacks": project.stacks, "release": release}
 
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             row = conn.execute(
@@ -1950,7 +3302,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " SELECT node_name,%s,role,%s,'joined',ARRAY[project],dynamic FROM grant_row"
                 " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash,"
                 " ip=coalesce(nullif(EXCLUDED.ip,''),nodes.ip), role=EXCLUDED.role,projects=EXCLUDED.projects,"
-                " dynamic=EXCLUDED.dynamic,status='joined'"
+                " dynamic=EXCLUDED.dynamic,status='joined',accepting_work=true,removed_at=NULL"
                 " RETURNING name,role,projects,dynamic",
                 (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()
             if row:
@@ -1961,29 +3313,47 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
         repo = ctx.repo()
         project = repo.projects[row["projects"][0]]
+        sign_in_requests = ctx.db.all(
+            "SELECT id FROM managed_ai_accounts"
+            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')",
+            (row["name"],))
+        signing_in = {account["id"] for account in sign_in_requests}
+        accounts = repo.accounts_on(row["name"])
         return {"node": row["name"], "role": row["role"], "project": row["projects"][0],
-                "stack": project.stack, "release": current_release(), "node_token": token,
-                "accounts": [a.id for a in repo.accounts_on(row["name"])]}
+                "stack": project.stack, "stacks": project.stacks, "release": current_release(), "node_token": token,
+                "accounts": [a.id for a in accounts],
+                "worker_accounts": [a.id for a in accounts if not a.paused and a.id not in signing_in]}
 
     @app.post("/v1/nodes/{name}/heartbeat")
     def node_heartbeat(name: str, body: HeartbeatBody, node: str = Depends(node_auth)) -> dict:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
-        prev = ctx.db.one("SELECT status FROM nodes WHERE name=%s", (node,))
-        ctx.db.run("UPDATE nodes SET status='online', slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
+        prev = ctx.db.one("SELECT status,accepting_work FROM nodes WHERE name=%s", (node,))
+        ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
+                   " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
                    " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
                     body.release_protocol, body.slots_used, node))
+        repo = ctx.repo()
         for account_id, expires_at in body.credential_expiries.items():
-            ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s AND node=%s",
+            # the account row keeps the earliest expiry of its machines; each machine's own date is kept beside it
+            reported = repo.account(account_id)
+            if not reported or not reported.runs_on(node):
+                continue
+            ctx.db.run("UPDATE account_machines SET credential_expires_at=%s WHERE account_id=%s AND node=%s",
                        (expires_at, account_id, node))
+            ctx.db.run("UPDATE accounts SET credential_expires_at=(SELECT min(m.v) FROM (SELECT %s::timestamptz AS v"
+                       " UNION ALL SELECT credential_expires_at FROM account_machines WHERE account_id=%s"
+                       " AND node<>%s AND credential_expires_at IS NOT NULL) m) WHERE id=%s",
+                       (expires_at, account_id, node, account_id))
         from .sa import update_slot_pressure
         update_slot_pressure(ctx)
-        ctx.events.ship("node.heartbeat", node=node, outcome="online", slots_total=body.slots_total,
+        heartbeat_status = "online" if not prev or prev.get("accepting_work", True) else "draining"
+        ctx.events.ship("node.heartbeat", node=node, outcome=heartbeat_status, slots_total=body.slots_total,
                         slots_used=body.slots_used, release_version=body.release_version, metrics=body.metrics)
-        if prev and prev["status"] != "online":
+        if prev and prev["status"] != "online" and prev.get("accepting_work", True):
             ctx.events.emit("node.online", node=node, reason=f"was {prev['status']}")
             from .incidents import close_incident
             close_incident(ctx, "node_down", node, "heartbeats are back")
@@ -2000,18 +3370,44 @@ def create_app(ctx: Ctx) -> FastAPI:
             else:
                 cur["instances"] = cur.get("instances", 1) + 1
         for acc, w in merged.items():
+            member = repo.account(acc)
+            if not member or not member.runs_on(node):
+                continue
             state = w.pop("_state")
             # "unavailable" (last probe failed) keeps the status the probe set: cooldown, signed_out or error
             ctx.db.run("UPDATE accounts SET worker_state=%s, status=CASE WHEN status='signed_out' THEN status"
                        " WHEN cooldown_until > now() THEN 'cooldown' WHEN %s = 'unavailable' THEN status"
                        " WHEN status = 'working' AND %s = 'idle' THEN status ELSE %s END,"
-                       " updated_at=now() WHERE id=%s AND node=%s", (J(w), state, state, state, acc, node))
+                       " updated_at=now() WHERE id=%s", (J(w), state, state, state, acc))
+            ctx.db.run("UPDATE account_machines SET worker_state=%s WHERE account_id=%s AND node=%s",
+                       (J({**w, "state": state}), acc, node))
             ctx.db.run("UPDATE accounts SET idle_since=CASE WHEN status='idle' THEN coalesce(idle_since,now()) ELSE NULL END,"
                        " cooldown_since=CASE WHEN status='cooldown' THEN coalesce(cooldown_since,now()) ELSE NULL END"
-                       " WHERE id=%s AND node=%s", (acc, node))
+                       " WHERE id=%s", (acc,))
         repo = ctx.repo()
-        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in repo.accounts_on(node)
-                     for i in range(1, max(1, int(a.parallel or 1)) + 1)]
+        sign_in_requests = ctx.db.all(
+            "SELECT id,provider,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+            " WHERE node=%s AND removed_at IS NULL AND sign_in_status IN ('queued','starting','waiting')"
+            " ORDER BY created_at,id", (node,))
+        signing_in = {row["id"] for row in sign_in_requests}
+        # A shared account still waiting for sign-in on this machine gets no worker: its auth probe would fail and
+        # reset the sign-in attempt (link and code) the user is completing. Workers start once sign-in completes.
+        pending_shared = {row["account_id"] for row in ctx.db.all(
+            "SELECT account_id FROM account_machines WHERE node=%s AND status='pending'", (node,))}
+        assigned = [a for a in repo.accounts_on(node)
+                    if not a.paused and a.id not in signing_in and a.id not in pending_shared]
+        instances = [a.id if i == 1 else f"{a.id}.{i}" for a in assigned
+                     for i in range(1, a.sessions + 1)]
+        # Shared accounts are signed in independently on each machine. The node agent starts their provider CLI
+        # login and reports only the provider's short-lived link and code; credentials stay in its account home.
+        shared_signins = []
+        for row in ctx.db.all("SELECT account_id, signin_attempt FROM account_machines WHERE node=%s"
+                              " AND status='pending' ORDER BY account_id", (node,)):
+            account = repo.account(row["account_id"])
+            if account:
+                shared_signins.append({"account": account.id, "provider": account.provider,
+                                       "request_id": f"shared:{node}:{account.id}:{row['signin_attempt']}",
+                                       "shared_account": True})
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
         # Signed-release agents follow the fleet rollout (canary, waves, rollback: docs/v4/fleet-upgrade.md).
@@ -2021,7 +3417,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
-        return {"desired": {"accounts": [a.id for a in repo.accounts_on(node)], "workers": instances,
+        return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
+                            "sign_ins": [{"account": row["id"], "provider": row["provider"],
+                                          "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
+                                         for row in sign_in_requests], "signin": shared_signins,
                             "release": release,
                             "projects": node_projects,
                             "project_stacks": project_stacks,
@@ -2029,6 +3428,33 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                  if key in repo.projects and repo.projects[key].required_services},
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
+
+    @app.get("/v1/nodes/{name}/health")
+    def node_health(name: str, node: str = Depends(node_auth)) -> dict:
+        """What an installer needs to call a new node healthy: a fresh heartbeat and a green project preflight."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        row = ctx.db.one("SELECT status,tools,projects,dynamic,metrics,"
+                         " extract(epoch FROM now()-last_heartbeat) AS age FROM nodes WHERE name=%s", (node,)) or {}
+        repo = ctx.repo()
+        node_projects = repo.projects_for_node(node, row.get("projects") or [], row.get("dynamic", False))
+        tools = row.get("tools") or {}
+        gaps = missing_tools(tools, repo.tools_for_node(node, node_projects))
+        for key in node_projects:
+            project = repo.projects.get(key)
+            if project and project.stacks:
+                gaps += toolchain_gaps(tools, project.tools, repo.versions, project.stacks, require_pins=True)
+        gaps = list(dict.fromkeys(gaps))
+        # Declared test services (PostgreSQL, Redis) must be healthy too, or the node can claim no work.
+        needed_services = list(dict.fromkeys(s for key in node_projects if key in repo.projects
+                                             for s in repo.projects[key].required_services))
+        reported_services = (row.get("metrics") or {}).get("services")
+        unhealthy = service_gaps(reported_services, needed_services)
+        age = row.get("age")
+        return {"node": node, "status": row.get("status", "unknown"),
+                "heartbeat_age_seconds": None if age is None else float(age),
+                "projects": node_projects, "missing_tools": gaps, "missing_services": unhealthy,
+                "preflight_ok": not gaps and not unhealthy}
 
     # --- owner-operated node installation and repair ---------------------------------------------------------
     def operation_plan(name: str, body: NodeOperationBody, node_row: dict) -> dict:
@@ -2136,6 +3562,284 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"node": name, "role": role, "project": project, "command": command,
                 "expires_at": expires_at.isoformat(), "expires_in_s": 300}
 
+    JOB_ROLES = {"develop": "dev", "verify": "verify", "intake": "intake_refiner", "master": "master"}
+    def account_jobs(roles: list[str]) -> list[str]:
+        return [job for job, role in JOB_ROLES.items() if role in roles]
+
+    def lock_machine_capacity(connection, name: str) -> None:
+        """Serialize all account session-budget checks for this machine across API processes."""
+        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                           (f"aiflow4-machine-sessions:{name}",))
+
+    def machine_capacity(repo: ControlRepo, name: str) -> int:
+        return sum(max(1, int(account.parallel or 1)) for account in repo.accounts_on(name))
+
+    def save_managed_account(account: Account, roles: list[str], sessions: int, paused: bool,
+                             sign_in_url: str = "", sign_in_code: str = "",
+                             expires_at: datetime | None = None, connection=None) -> None:
+        sql = (
+            "INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,parallel,explicit_only,paused,"
+            "sign_in_url,sign_in_code,sign_in_expires_at,sign_in_started_at,removed_at)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s<>'' THEN now() ELSE NULL END,NULL)"
+            " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider,node=EXCLUDED.node,tier=EXCLUDED.tier,"
+            "roles=EXCLUDED.roles,parallel=EXCLUDED.parallel,explicit_only=EXCLUDED.explicit_only,paused=EXCLUDED.paused,"
+            "sign_in_url=CASE WHEN EXCLUDED.sign_in_url='' THEN managed_ai_accounts.sign_in_url"
+            " ELSE EXCLUDED.sign_in_url END,sign_in_code=CASE WHEN EXCLUDED.sign_in_code=''"
+            " THEN managed_ai_accounts.sign_in_code ELSE EXCLUDED.sign_in_code END,"
+            "sign_in_expires_at=coalesce(EXCLUDED.sign_in_expires_at,managed_ai_accounts.sign_in_expires_at),"
+            "sign_in_started_at=CASE WHEN EXCLUDED.sign_in_code<>'' THEN now()"
+            " ELSE managed_ai_accounts.sign_in_started_at END,"
+            "removed_at=NULL,updated_at=now()")
+        params = (account.id, account.provider, account.node, account.tier, roles, sessions, account.explicit_only,
+                  paused, sign_in_url, sign_in_code, expires_at, sign_in_code)
+        if connection is None:
+            ctx.db.run(sql, params)
+        else:
+            connection.execute(sql, params)
+
+    @app.post("/v1/machines/{name}/accounts")
+    def add_managed_account(name: str, body: ManagedAccountCreateBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="add", node=name)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
+            raise HTTPException(422, "invalid machine name")
+        roles = [JOB_ROLES[job] for job in dict.fromkeys(body.jobs)]
+        request_id = str(uuid.uuid4())
+        with ctx.db.pool.connection() as connection:
+            lock_machine_capacity(connection, name)
+            licensing.lock_resource_admission(connection)
+            node = connection.execute("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)).fetchone()
+            if not node:
+                audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
+                         "machine is not registered", {})
+                raise HTTPException(404, "machine is not registered")
+            repo = ctx.repo()
+            capacity = machine_capacity(repo, name)
+            if capacity + body.sessions > 8:
+                audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
+                         "machine session limit is eight",
+                         {"current_sessions": capacity, "requested_sessions": body.sessions})
+                raise HTTPException(422, "a machine can run at most 8 sessions")
+            require_capacity("ai_accounts", connection=connection)
+            existing_ids = {account.id for account in repo.accounts}
+            existing_ids.update(row["id"] for row in connection.execute(
+                "SELECT id FROM managed_ai_accounts").fetchall())
+            index = 1
+            while f"{body.provider}-{name}-{index:02d}" in existing_ids:
+                index += 1
+            account_id = f"{body.provider}-{name}-{index:02d}"
+            connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,parallel,paused,"
+                               "sign_in_request_id,sign_in_status,sign_in_started_at)"
+                               " VALUES (%s,%s,%s,'middle',%s,%s,false,%s,'queued',now())",
+                               (account_id, body.provider, name, roles, body.sessions, request_id))
+            connection.execute("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+                               " VALUES (%s,%s,%s,'middle',%s,'signed_out')",
+                               (account_id, body.provider, name, roles))
+            audit_in(connection, "ai-account", "add", account_id, "", None, user.subject, True,
+                     "account added; sign-in pending", {"node": name, "provider": body.provider,
+                                                         "sessions": body.sessions, "jobs": account_jobs(roles)})
+        ctx.events.emit("account.added", account=account_id, provider=body.provider, node=name,
+                        outcome="sign_in_queued", reason="provider sign-in started on the machine")
+        return {"account": account_id, "node": name, "provider": body.provider, "sessions": body.sessions,
+                "jobs": account_jobs(roles), "status": "queued", "sign_in_url": "", "code": ""}
+
+    @app.patch("/v1/accounts/{account_id}")
+    def update_managed_account(account_id: str, body: ManagedAccountUpdateBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="update", node=account_id)
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        if body.sessions is None and body.jobs is None and body.action is None:
+            raise HTTPException(422, "choose sessions, jobs, pause, or resume")
+        with ctx.db.pool.connection() as connection:
+            lock_machine_capacity(connection, account.node)
+            repo = ctx.repo()
+            account = repo.account(account_id)
+            if not account:
+                raise HTTPException(404, "AI account is not registered")
+            sessions = body.sessions if body.sessions is not None else max(1, int(account.parallel or 1))
+            total = machine_capacity(repo, account.node)
+            if total - max(1, int(account.parallel or 1)) + sessions > 8:
+                audit_in(connection, "ai-account", "update", account_id, "", None, user.subject, False,
+                         "machine session limit is eight", {"current_sessions": total, "requested_sessions": sessions})
+                raise HTTPException(422, "a machine can run at most 8 sessions")
+            roles = ([JOB_ROLES[job] for job in dict.fromkeys(body.jobs)] if body.jobs is not None
+                     else list(account.roles or []))
+            paused = body.action == "pause" if body.action else account.paused
+            save_managed_account(account, roles, sessions, paused, connection=connection)
+            connection.execute("UPDATE accounts SET roles=%s,updated_at=now() WHERE id=%s", (roles, account_id))
+            action = body.action or "update"
+            payload = {"sessions": sessions, "jobs": account_jobs(roles), "paused": paused}
+            audit_in(connection, "ai-account", action, account_id, "", None, user.subject, True, "updated", payload)
+        ctx.events.emit("account.management_changed", account=account_id, node=account.node,
+                        outcome=action, reason="account settings updated", data=payload)
+        return {"account": account_id, **payload}
+
+    @app.post("/v1/accounts/{account_id}/sign-in")
+    def restart_account_sign_in(account_id: str, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="sign_in_again", node=account_id)
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        if ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1", (account_id,)):
+            raise HTTPException(409, "account has an active session; wait for it to finish before signing in again")
+        request_id = str(uuid.uuid4())
+        with ctx.db.pool.connection() as connection:
+            save_managed_account(account, list(account.roles or []), max(1, int(account.parallel or 1)),
+                                 account.paused, connection=connection)
+            connection.execute("UPDATE managed_ai_accounts SET sign_in_request_id=%s,sign_in_status='queued',"
+                               "sign_in_url='',sign_in_code='',sign_in_expires_at=NULL,sign_in_error='',"
+                               "sign_in_started_at=now(),updated_at=now() WHERE id=%s",
+                               (request_id, account_id))
+            connection.execute("UPDATE accounts SET status='signed_out',last_error='',updated_at=now() WHERE id=%s",
+                               (account_id,))
+            audit_in(connection, "ai-account", "sign_in_again", account_id, "", None, user.subject, True,
+                     "provider sign-in queued on the machine", {"provider": account.provider,
+                                                                  "node": account.node})
+        ctx.events.emit("account.sign_in_started", account=account_id, provider=account.provider,
+                        node=account.node, outcome="queued", reason="owner requested provider sign-in again")
+        return {"account": account_id, "status": "queued", "sign_in_url": "", "code": ""}
+
+    @app.get("/v1/accounts/{account_id}/sign-in")
+    def account_sign_in_details(account_id: str, request: Request) -> dict:
+        console_user(request, {"nodes.manage"})
+        row = ctx.db.one("SELECT node,provider,sign_in_status,sign_in_url,sign_in_code,sign_in_error,"
+                         "sign_in_expires_at FROM managed_ai_accounts"
+                         " WHERE id=%s AND removed_at IS NULL AND sign_in_status<>'idle'", (account_id,))
+        if not row:
+            raise HTTPException(404, "no active sign-in link for this account")
+        return {"account": account_id, "node": row["node"], "provider": row["provider"],
+                "status": row["sign_in_status"], "sign_in_url": row["sign_in_url"],
+                "code": row["sign_in_code"], "error": row["sign_in_error"],
+                "expires_at": row["sign_in_expires_at"].isoformat() if row["sign_in_expires_at"] else None}
+
+    @app.post("/v1/accounts/{account_id}/sign-in/status")
+    def report_account_sign_in_status(account_id: str, body: ManagedAccountSignInStatusBody,
+                                      node: str = Depends(node_auth)) -> dict:
+        row = ctx.db.one("SELECT node,sign_in_request_id,sign_in_status FROM managed_ai_accounts"
+                         " WHERE id=%s AND removed_at IS NULL", (account_id,))
+        if not row or row["node"] != node:
+            raise HTTPException(404, "account sign-in request is not assigned to this machine")
+        if row["sign_in_request_id"] != body.request_id:
+            raise HTTPException(409, "sign-in request has been replaced")
+        if body.sign_in_url:
+            try:
+                parsed = urlsplit(body.sign_in_url)
+                _ = parsed.port
+            except ValueError as exc:
+                raise HTTPException(422, "provider sign-in URL is invalid") from exc
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise HTTPException(422, "provider sign-in URL must be an HTTPS URL")
+        if body.code and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{3,79}", body.code):
+            raise HTTPException(422, "provider sign-in code has an invalid format")
+        if body.status == "waiting" and not body.sign_in_url:
+            raise HTTPException(422, "provider sign-in must supply its authorization URL")
+        with ctx.db.pool.connection() as connection:
+            updated = connection.execute(
+                "UPDATE managed_ai_accounts SET sign_in_status=%s,"
+                "sign_in_url=CASE WHEN %s<>'' THEN %s ELSE sign_in_url END,"
+                "sign_in_code=CASE WHEN %s<>'' THEN %s ELSE sign_in_code END,"
+                "sign_in_error=%s,updated_at=now() WHERE id=%s AND node=%s AND sign_in_request_id=%s"
+                " AND removed_at IS NULL RETURNING id",
+                (body.status, body.sign_in_url, body.sign_in_url, body.code, body.code,
+                 body.error[:300], account_id, node, body.request_id)).fetchone()
+            if not updated:
+                raise HTTPException(409, "sign-in request has been replaced")
+        return {"account": account_id, "status": body.status}
+
+    @app.post("/v1/accounts/{account_id}/sign-in/complete")
+    def complete_account_sign_in(account_id: str, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="sign_in_complete",
+                            node=account_id)
+        with ctx.db.pool.connection() as connection:
+            row = connection.execute(
+                "SELECT m.node,m.provider,m.sign_in_status,a.status,a.last_probe_at,m.sign_in_started_at"
+                " FROM managed_ai_accounts m JOIN accounts a ON a.id=m.id"
+                " WHERE m.id=%s AND m.removed_at IS NULL AND m.sign_in_status<>'idle'"
+                " FOR UPDATE OF m", (account_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "no pending sign-in for this account")
+            if row["sign_in_status"] != "completed":
+                raise HTTPException(409, "provider authorization has not completed on the machine")
+            if row["status"] not in ("idle", "working") or not row["last_probe_at"] or not row["sign_in_started_at"] \
+                    or row["last_probe_at"] < row["sign_in_started_at"]:
+                raise HTTPException(409, "the machine has not reported a successful account check since sign-in started")
+            connection.execute("UPDATE managed_ai_accounts SET sign_in_url='',sign_in_code='',sign_in_error='',"
+                               "sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+                               "sign_in_started_at=NULL,updated_at=now() WHERE id=%s",
+                               (account_id,))
+            audit_in(connection, "ai-account", "sign_in_complete", account_id, "", None, user.subject, True,
+                     "provider account check succeeded", {"node": row["node"], "provider": row["provider"]})
+        ctx.events.emit("account.sign_in_completed", account=account_id, provider=row["provider"],
+                        node=row["node"], outcome="ready", reason="owner confirmed the successful provider check")
+        return {"account": account_id, "signed_in": True}
+
+    @app.delete("/v1/accounts/{account_id}")
+    def remove_managed_account(account_id: str, body: ConfirmBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="ai-account", action="remove", node=account_id)
+        if not body.confirm:
+            audit("ai-account", "remove", account_id, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm account removal")
+        account = ctx.repo().account(account_id)
+        if not account:
+            raise HTTPException(404, "AI account is not registered")
+        active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id=%s AND status='running'", (account_id,))
+        if active and active["n"]:
+            raise HTTPException(409, "account has an active session; wait for it to finish before removing it")
+        with ctx.db.pool.connection() as connection:
+            connection.execute("INSERT INTO managed_ai_accounts (id,provider,node,tier,roles,removed_at)"
+                               " VALUES (%s,%s,%s,%s,%s,now()) ON CONFLICT (id) DO UPDATE SET removed_at=now(),"
+                               "updated_at=now()", (account.id, account.provider, account.node, account.tier,
+                                                     account.roles))
+            connection.execute("DELETE FROM accounts WHERE id=%s", (account_id,))
+            audit_in(connection, "ai-account", "remove", account_id, "", None, user.subject, True,
+                     "account removed from machine", {"node": account.node})
+        ctx.events.emit("account.removed", account=account_id, provider=account.provider, node=account.node,
+                        outcome="removed", reason="removed from Machines and AI screen")
+        return {"account": account_id, "removed": True}
+
+    @app.put("/v1/nodes/{name}/work-acceptance")
+    def set_node_work_acceptance(name: str, body: ConfirmBody, accepting_work: bool, request: Request) -> dict:
+        action = "resume_work" if accepting_work else "stop_taking_work"
+        user = console_user(request, {"nodes.manage"}, target="node", action=action, node=name)
+        if not accepting_work and not body.confirm:
+            audit("node", action, name, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm stopping new work on this machine")
+        row = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        if not row:
+            raise HTTPException(404, "machine is not registered")
+        ctx.db.run("UPDATE nodes SET accepting_work=%s,status=CASE WHEN last_heartbeat > now()-interval '75 seconds'"
+                   " THEN CASE WHEN %s THEN 'online' ELSE 'draining' END ELSE status END WHERE name=%s",
+                   (accepting_work, accepting_work, name))
+        audit("node", action, name, "", None, user.subject, True,
+              "accepting new work" if accepting_work else "stopping new work", {})
+        ctx.events.emit("node.work_acceptance_changed", node=name, outcome=action,
+                        reason="accepting new work" if accepting_work else "new work disabled")
+        return {"node": name, "accepting_work": accepting_work}
+
+    @app.delete("/v1/nodes/{name}")
+    def remove_managed_node(name: str, body: ConfirmBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="node", action="remove", node=name)
+        if not body.confirm:
+            audit("node", "remove", name, "", None, user.subject, False, "confirmation required")
+            raise HTTPException(400, "confirm machine removal")
+        node = ctx.db.one("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        if not node:
+            raise HTTPException(404, "machine is not registered")
+        active = ctx.db.one("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'", (name,))
+        if active and active["n"]:
+            raise HTTPException(409, "machine has active sessions; wait for them to finish before removing it")
+        with ctx.db.pool.connection() as connection:
+            connection.execute("UPDATE nodes SET removed_at=now(),accepting_work=false,token_hash='',status='offline'"
+                               " WHERE name=%s", (name,))
+            connection.execute("UPDATE managed_ai_accounts SET removed_at=now(),updated_at=now() WHERE node=%s",
+                               (name,))
+            connection.execute("DELETE FROM accounts WHERE node=%s", (name,))
+            connection.execute("UPDATE node_join_tokens SET used_at=now() WHERE node_name=%s AND used_at IS NULL",
+                               (name,))
+            audit_in(connection, "node", "remove", name, "", None, user.subject, True, "machine removed", {})
+        ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
+        return {"node": name, "removed": True}
+
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="node", action=body.action, node=name)
@@ -2193,12 +3897,23 @@ def create_app(ctx: Ctx) -> FastAPI:
         project = probe_project(name, body.project)
         if body.repo not in project.configured_repositories:
             raise HTTPException(403, "repository does not belong to the project")
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
+        github = github_gateway(ctx, body.repo)
+        connection_id = github_connection_used.get()
+        if getattr(github, "kind", "app") == "token":
+            expires = utcnow() + timedelta(hours=1)
+            token = _issue_git_proxy_token(ctx, {
+                "purpose": "check_probe", "connection": connection_id, "repo": body.repo.lower(),
+                "node": node, "project": body.project, "expires": int(expires.timestamp()),
+            })
+            audit("github", "check_probe_token", "", "", None, node, True, "read-only relay capability issued",
+                  {"repo": body.repo, "project": body.project, "connection": connection_id,
+                   "expires": expires.isoformat(), "transport": "control"})
+            return {"token": token, "expires_at": expires.isoformat(),
+                    "transport_url": f"{ctx.settings.control_url.rstrip('/')}/v1/github/git/{body.repo}.git"}
         token, expires = github.token(body.repo.split("/", 1)[-1], {"contents": "read", "metadata": "read"})
         audit("github", "check_probe_token", "", "", None, node, True, "issued",
-              {"repo": body.repo, "project": body.project, "expires": expires.isoformat()})
+              {"repo": body.repo, "project": body.project, "connection": connection_id,
+               "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
 
     @app.post("/v1/nodes/{name}/check-probes")
@@ -2368,13 +4083,19 @@ def create_app(ctx: Ctx) -> FastAPI:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if account_master_paused(account_id):
+        if acc.paused or account_master_paused(account_id):
             return []
         if ctx.leases.cooling(account_id):
             return []
-        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+        if not shared_accounts.may_take(ctx.db, acc, node)[0]:  # total session limit and this machine's share
+            return []
+        quota_at_risk = quota_forecast_at_risk(account_id)
+        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
+                              " AND removed_at IS NULL", (node,)) or {}
+        if not node_row.get("accepting_work", True):
+            return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
         projects = [key for key in projects if not repo.projects[key].paused]
         running_by_project = {row["project"]: int(row["count"]) for row in
@@ -2514,23 +4235,36 @@ def create_app(ctx: Ctx) -> FastAPI:
             out += dev_rows
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
+        if quota_at_risk and out:
+            # Prefer peers only for tickets they can actually claim. A peer on another node, with different
+            # project access or roles, must not leave this account's otherwise-routable tickets waiting.
+            available_elsewhere: set[tuple[str, str]] = set()
+            for peer in quota_peer_accounts(account_id, roles):
+                for peer_node in peer["nodes"]:
+                    if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
+                        continue
+                    available_elsewhere.update((ticket["key"], ticket["step"])
+                                               for ticket in eligible(peer["id"], peer_node))
+            out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         return out
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):
             return False
-        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a JOIN nodes n ON n.name=a.node"
-                           " WHERE a.id=%s AND a.node=%s", (account_id, node))
+        ready = ctx.db.one("SELECT a.status, n.status AS node_status FROM accounts a, nodes n"
+                           " WHERE a.id=%s AND n.name=%s", (account_id, node))
         return bool(ready) and ready["status"] in ("idle", "working", "probing") and ready["node_status"] == "online"
 
     def master_candidate(account_id: str, node: str) -> dict | None:
         repo = ctx.repo()
         account = repo.account(account_id)
-        if not account or account.node != node:
+        if not account or not account.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if "master" not in (account.roles or []) or not master_ready(account_id, node):
+        if account.paused or "master" not in (account.roles or []) or not master_ready(account_id, node):
             return None
-        if (account_id, "master") in role_health.disabled_roles(ctx.db):  # no ticket to try on: probation uses triage
+        if account_quota_at_risk(account_id, {"master"}) or (account_id, "master") in role_health.disabled_roles(ctx.db):
+            return None
+        if not shared_accounts.may_take(ctx.db, account, node)[0]:
             return None
         if not master_budget_state()["enabled"]:
             return None
@@ -2551,7 +4285,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             if (failed_over and recent["provider"] == account.provider
                     and failed_at > utcnow() - timedelta(seconds=MASTER_CYCLE_S)
                     and any(a.provider != account.provider and "master" in (a.roles or [])
-                            and master_ready(a.id, a.node) for a in repo.accounts)):
+                            and any(master_ready(a.id, m) for m in a.machines) for a in repo.accounts)):
                 return None
             # A lost or quota-stopped holder is an account failure, not a failing cycle: no scope backoff.
             failover = failed_over
@@ -2566,16 +4300,45 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
+    def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
+        """Filter offers by account, machine, and project plan limits without affecting active runs."""
+        state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                    public_key=ctx.settings.license_public_key)
+        candidates = eligible(account, node)
+        allowed: list[dict] = []
+        refused: list[str] = []
+        for ticket in candidates:
+            try:
+                licensing.enforce_project_entitlement(ctx, ticket["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(ticket)
+        reason = refused[0] if candidates and not allowed and refused else ""
+        return allowed, reason
+
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            tickets, reason = entitled_candidates(account, node)
+        except licensing.LicenseError as exc:
+            return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
-        return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
-                             "step": t["step"]} for t in eligible(account, node)[:20]]}
+        result = {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"],
+                                "labels": t["labels"], "step": t["step"]} for t in tickets[:20]]}
+        if reason:
+            result["reason"] = reason
+        return result
 
     @app.get("/v1/master/candidate")
     def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
 
     def related_hits(t: dict) -> list[dict]:
@@ -2588,11 +4351,27 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
-        candidates = [master_candidate(body.account, node)] if body.step == "master" else eligible(body.account, node)
+        if body.step == "master":
+            candidates = [master_candidate(body.account, node)]
+        else:
+            candidates = eligible(body.account, node)
+            offered = next((candidate for candidate in candidates
+                            if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
+            if offered:
+                try:
+                    licensing.enforce_project_entitlement(ctx, offered["project"],
+                                                          public_key=ctx.settings.license_public_key, state=state)
+                except licensing.LicenseError as exc:
+                    return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))
         if not t:
@@ -2607,7 +4386,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             triage_context = {"last_dev_summary": (last_dev(t["key"]) or {}).get("summary", ""),
                               "verify_findings": ((verify["details"] or {}).get("findings") or verify["summary"])
                               if verify else "", "recent_comments": comments}
-            asked = ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
+            # what the owner already decided, and how the question was classified when it was raised
+            triage_context["owner_register"] = [
+                {"id": d["id"], "title": d["title"], "decision": d["decision"]} for d in ctx.db.all(
+                    "SELECT id,title,decision FROM owner_decisions WHERE kind='decision' AND status='decided'"
+                    " AND (project='' OR project=%s) ORDER BY id LIMIT 60", (t["project"],))]
+            raised = escalations.open_escalation(ctx.db, t["key"])
+            triage_context["escalation_class"] = (raised or {}).get("class", "")
+            asked =ctx.db.one("SELECT ts,data FROM events WHERE ticket=%s AND type='review.action'"
                                " AND data->>'action'='ask-ai' ORDER BY ts DESC LIMIT 1", (t["key"],))
             prior_triage = ctx.db.one("SELECT started_at FROM runs WHERE ticket_key=%s AND step='triage'"
                                       " ORDER BY started_at DESC LIMIT 1", (t["key"],))
@@ -2648,11 +4434,18 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
                         "repository_settings": selected_repo} if selected_repo else {})
-        ctx.db.run("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence, token_hash)"
-                   " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (run_id, t["key"], t["project"], body.step, acc.id, acc.provider, model, node, c.fence, h(run_token)))
+        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
+                                                       model, node, c.fence, h(run_token))):
+            ctx.leases.release(t["key"], run_id, c.fence)
+            return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
+                                 " concurrent sessions"}, status_code=409)
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
+        if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
+            # A rework run carries the PR identity that the previous developer run recorded. The CI-log endpoint
+            # uses this row to bind branch and SHA requests to this ticket's pull request.
+            ctx.db.run("UPDATE runs SET pr_url=%s, branch=%s, head_sha=%s WHERE id=%s",
+                       (prior_dev["pr_url"], prior_dev["branch"], prior_dev.get("head_sha") or "", run_id))
         if probation_id is not None:
             role_health.attach_probation_run(ctx.db, probation_id, run_id)
             ctx.events.emit("role.probation", ticket=t["key"], project=t["project"], step=body.step, run_id=run_id,
@@ -2689,6 +4482,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                                " AND started_at < %s ORDER BY started_at DESC LIMIT 1", (t["key"], a["started_at"]))
                 extra["triage_answer"] = (a["details"] or {}).get("answer") or a["summary"]
                 extra["triage_question"] = (q or {}).get("summary") or ""
+            # an escalation resolved without a triage run (register, policy message, machine, amendment) is answered
+            # the same way; the newer of the two wins
+            auto = escalations.pending_answer(ctx.db, t["key"])
+            if auto and (not extra.get("triage_answer") or not a or auto["created_at"] > a["started_at"]):
+                extra["triage_answer"], extra["triage_question"] = auto["answer"], auto["question"]
+            owner_answer = escalations.owner_answered_on_ticket(ctx, t["key"])
+            if owner_answer:
+                extra["triage_answer"] = owner_answer["answer"]
+                extra["triage_question"] = owner_answer["question"]
         if body.step == "triage":
             extra.update(triage_context)
         if body.step == "intake":
@@ -2733,22 +4535,54 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"versions": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
         repo = ctx.repo()
-        node_row = ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {}
+        node_row = ctx.db.one("SELECT accepting_work,tools FROM nodes WHERE name=%s AND removed_at IS NULL", (node,))
+        if not node_row or not node_row["accepting_work"]:
+            return {"versions": [], "reason": "machine is not accepting new work"}
         if account_master_paused(account):
             return {"versions": [], "reason": "account is paused by master monitoring"}
+        if ctx.leases.cooling(account):
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
         versions = version_release.candidates(ctx, account, node)
         versions = [item for item in versions
                     if not (item.get("project") in repo.projects
                             and repo.projects[item["project"]].settings_for_repo(item.get("repository", "")).get("containers")
                             and toolchain_gaps(node_row.get("tools") or {}, [CONTAINER_RUNTIME_TOOL], repo.versions))]
-        return {"versions": versions}
+        peer_candidates = quota_peer_release_candidates(account)
+        available = [candidate for candidate in versions
+                     if (candidate["project"], str(candidate["version_id"]),
+                         str(candidate.get("repository") or "")) not in peer_candidates]
+        if versions and not available:
+            return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
+        allowed, refused = [], []
+        for candidate in available:
+            try:
+                licensing.enforce_project_entitlement(ctx, candidate["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(candidate)
+        result = {"versions": allowed}
+        if refused and not allowed:
+            result["reason"] = refused[0]
+        return result
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             raise HTTPException(409, f"node version skew: {policy['reason']}")
@@ -2757,12 +4591,24 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(body.account)
         if account_master_paused(body.account):
             raise HTTPException(409, "account is paused by master monitoring")
+        if ctx.leases.cooling(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
-        if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
+        if not acc or not acc.runs_on(node) or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
-        node_row = ctx.db.one("SELECT projects,dynamic,status FROM nodes WHERE name=%s", (node,)) or {}
+        try:
+            licensing.enforce_project_entitlement(ctx, project.key,
+                                                  public_key=ctx.settings.license_public_key, state=state)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
+        can_take, reason = shared_accounts.may_take(ctx.db, acc, node)
+        if not can_take:
+            raise HTTPException(409, reason)
+        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}
+        if not node_row.get("accepting_work", False):
+            raise HTTPException(409, "machine is not accepting new work")
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
             raise HTTPException(403, "project is not assigned to this node")
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
@@ -2779,13 +4625,20 @@ def create_app(ctx: Ctx) -> FastAPI:
                 and toolchain_gaps((ctx.db.one("SELECT tools FROM nodes WHERE name=%s", (node,)) or {}).get("tools") or {},
                                    [CONTAINER_RUNTIME_TOOL], repo.versions)):
             raise HTTPException(409, "safe container runtime is missing on this node")
+        candidate_key = (project.key, str(version["id"]), project.repo)
+        if candidate_key in quota_peer_release_candidates(body.account):
+            raise HTTPException(409, "account quota is cooling or predicted to run out before reset")
         state = ctx.db.one("SELECT status FROM version_releases WHERE project=%s AND version_id=%s AND repository=%s",
                            (project.key, version["id"], project.repo))
         if state and state["status"] in ("checking", "released"):
             raise HTTPException(409, "version already has an active or completed release run")
-        snapshot = version_release.post_merge_resume(ctx, project, version)
+        claim_github = github_gateway(ctx, project.repo)
+        if claim_github is None:
+            raise HTTPException(503, "GitHub is not connected")
+        release_ctx = replace(ctx, github=claim_github)
+        snapshot = version_release.post_merge_resume(release_ctx, project, version)
         if snapshot is None:
-            snapshot = version_release.evaluate(ctx, project, version)
+            snapshot = version_release.evaluate(release_ctx, project, version)
         if not snapshot["ready"]:
             if not snapshot.get("resume_after_merge"):
                 version_release.record_gate(ctx, project, version, snapshot)
@@ -2797,9 +4650,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not lease.ok:
             raise HTTPException(409, "version release is already claimed")
         try:
-            github = github_gateway(ctx)
+            github = github_gateway(ctx, project.repo)
             if github is None:
                 raise HTTPException(503, "GitHub App is not connected")
+            connection_id = github_connection_used.get() or DEFAULT_ID
             source_branch = version_release.source_branch(project)
             if snapshot.get("resume_after_merge"):
                 source_sha = snapshot["source_sha"]
@@ -2817,10 +4671,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_settings = {"repo": project.repo, "base": project.base,
                                  "checks": version_release.check_commands(project), "stack": project.stack,
                                  "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
-            ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,token_hash,details)"
-                       " VALUES (%s,%s,%s,'version_release',%s,%s,'',%s,%s,'',%s)",
-                       (run_id, key, project.key, acc.id, acc.provider, node, lease.fence,
-                        J({"repository": project.repo, "repository_settings": selected_settings})))
+            if not shared_accounts.claim_run(
+                    ctx.db, acc,
+                    (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")):
+                raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
+            ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
+                       (J({"repository": project.repo, "repository_settings": selected_settings,
+                          "github_connection": connection_id}), run_id))
             ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
                        " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
                        " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
@@ -2828,7 +4685,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " gate_detail='',ticket_snapshot=EXCLUDED.ticket_snapshot,updated_at=now()",
                        (project.key, version["id"], version["name"], tracker, J(snapshot["tickets"]), project.repo))
             version_release._audit(ctx, project, tracker,
-                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id},
+                                   {"id": run_id, "fence": lease.fence, "account_id": acc.id,
+                                    "github_connection": connection_id},
                                    "github-release-branch", "created" if branch_created else "existing",
                                    {"branch": release_branch, "source": source_branch, "source_sha": source_sha})
         except Exception:
@@ -2888,12 +4746,26 @@ def create_app(ctx: Ctx) -> FastAPI:
             body.error = body.error or "Worker did not report every configured full project check."
         report = {"head_sha": body.head_sha, "source_sha": body.source_sha or body.head_sha,
                   "checks": body.checks, "error": body.error}
-        github_gateway(ctx)
+        connection_id = str(((run.get("details") or {}).get("github_connection") or ""))
         try:
-            result = version_release.complete(ctx, project, version, run, report)
+            if connection_id:
+                selected_github = github_gateway_for_connection(ctx, connection_id, project.repo)
+            else:
+                selected_github = github_gateway(ctx, project.repo)
+                connection_id = github_connection_used.get()
+        except HTTPException:
+            raise
+        if selected_github is None:
+            raise HTTPException(503, "GitHub is not connected")
+        run = dict(run)
+        if connection_id:
+            run["github_connection"] = connection_id
+        release_ctx = replace(ctx, github=selected_github)
+        try:
+            result = version_release.complete(release_ctx, project, version, run, report)
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
-            return version_release.publish_failed(ctx, project, version, run, exc)
+            return version_release.publish_failed(release_ctx, project, version, run, exc)
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
                                                                               "checks": body.checks}), body.run_id))
@@ -2920,23 +4792,37 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["node"] != node:
             raise HTTPException(403, "run belongs to another node")
         still_owner = ctx.leases.valid(run["ticket_key"], run_id, body.fence)
+        details = dict(body.details)
+        run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
+        details.pop("support_log_truncated", None)
+        if isinstance(run_log, str) and run_log:
+            try:
+                support_bundle.store_run_log(ctx, run_id, run_log)
+            except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
+                log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         ctx.db.run("UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
                    " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
                    " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
                    " WHERE id=%s",
                    (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
-                    body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(body.details), run_id))
+                    body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id))
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
-        if body.error_kind in ("quota", "auth"):
+        sample_quota = body.quota or (ctx.db.one("SELECT quota FROM accounts WHERE id=%s", (run["account_id"],)) or {}).get("quota") or {}
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (run["account_id"], run["provider"], run["model"], J(sample_quota), body.tokens_in,
+                    body.tokens_out, body.cost_usd,
+                    int((utcnow() - run["started_at"]).total_seconds() * 1000)))
+        if body.error_kind == "quota":
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
-            ctx.leases.cooldown(run["account_id"], seconds, body.error_kind)
+            ctx.leases.cooldown(run["account_id"], seconds, "quota")
             ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s, updated_at=now(),"
-                       " cooldown_since=CASE WHEN %s='quota' THEN coalesce(cooldown_since,now()) ELSE NULL END,"
-                       " idle_since=NULL WHERE id=%s",
-                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300],
-                        body.error_kind, run["account_id"]))
+                       " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s",
+                       ("cooldown", until, body.summary[:300], run["account_id"]))
+        elif body.error_kind == "auth":
+            mark_machine_auth_failure(run["account_id"], node, body.summary)
         else:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
@@ -3025,7 +4911,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"valid": valid, "invalid_streak": streak, "invalid_last_hour": last_hour,
                 "incident_opened": incident_open}
 
-    def autonomy_report(weeks: int = 8) -> dict[str, Any]:
+    def autonomy_report(weeks: int = 8, scope: tuple[str, ...] | None = None) -> dict[str, Any]:
         now = utcnow()
         this_monday = now.date() - timedelta(days=now.weekday())
         first_monday = this_monday - timedelta(days=(weeks - 1) * 7)
@@ -3041,26 +4927,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             offset = (date - first_monday).days // 7
             return offset if 0 <= offset < weeks else None
 
+        # A person limited to some projects gets the report of those projects only.
+        ticket_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))" if scope is not None else ""
+        scope_params: tuple = (list(scope),) if scope is not None else ()
         finished = ctx.db.all(
             "SELECT DISTINCT t.key, t.summary, t.done_at FROM tickets t WHERE t.status='Done'"
+            + (" AND t.project=ANY(%s)" if scope is not None else "") +
             " AND t.done_at >= %s AND t.done_at <= %s AND EXISTS (SELECT 1 FROM runs r"
             " WHERE r.ticket_key=t.key AND r.status<>'running' AND lower(r.outcome) IN ('done','pass','passed')"
             " AND r.started_at <= t.done_at AND NOT EXISTS (SELECT 1 FROM runs later"
             " WHERE later.ticket_key=t.key AND later.started_at > r.started_at AND later.started_at <= t.done_at))"
             " AND NOT EXISTS (SELECT 1 FROM write_audit w WHERE w.ticket=t.key AND w.action='transition'"
-            " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", (start, end))
+            " AND w.payload->>'source'='human-review' AND w.result='Done' AND w.ts <= t.done_at)", scope_params + (start, end))
         for item in finished:
             i = trend_index(item["done_at"])
             if i is not None:
                 trend[i]["finished_without_person"] += 1
         needed = ctx.db.all("SELECT observation_key, ticket, reason, options, sent_at FROM master_escalations"
-                            " WHERE sent_at >= %s AND sent_at <= %s ORDER BY sent_at DESC", (start, end))
+                            " WHERE sent_at >= %s AND sent_at <= %s" + ticket_filter + " ORDER BY sent_at DESC",
+                            (start, end) + scope_params)
         for item in needed:
             i = trend_index(item["sent_at"])
             if i is not None:
                 trend[i]["needed_person"] += 1
         repeated = ctx.db.all("SELECT ts, type FROM events WHERE type IN ('flow_bug.created','flow_bug.repeated')"
-                              " AND ts >= %s AND ts <= %s", (start, end))
+                              " AND ts >= %s AND ts <= %s" + ticket_filter, (start, end) + scope_params)
         for item in repeated:
             i = trend_index(item["ts"])
             if i is not None:
@@ -3071,15 +4962,22 @@ def create_app(ctx: Ctx) -> FastAPI:
         current_repeated = ctx.db.all(
             "SELECT f.ticket_key, f.signature, f.repeat_count, f.updated_at, t.summary, t.status"
             " FROM flow_bug_tracker f LEFT JOIN tickets t ON t.key=f.ticket_key"
-            " WHERE f.updated_at >= %s ORDER BY f.updated_at DESC LIMIT 50", (week_start,))
+            " WHERE f.updated_at >= %s" + (" AND t.project=ANY(%s)" if scope is not None else "") +
+            " ORDER BY f.updated_at DESC LIMIT 50", (week_start,) + scope_params)
+        # Accounts are shared infrastructure, not project data.
+        quota_accounts = ctx.db.all("SELECT id, provider, quota FROM accounts ORDER BY id") if scope is None else []
+        quota_state = quota_reporting.assessments(ctx.db, quota_accounts, now)
         return {"week_start": this_monday.isoformat(),
                 "finished_without_person": current_finished[:50], "needed_person": current_needed[:50],
-                "repeated_failures": current_repeated, "trend": trend}
+                "repeated_failures": current_repeated, "trend": trend,
+                "escalations": escalations.weekly_metrics(ctx.db, weeks),
+                "quota_accounts": [{"id": a["id"], "provider": a["provider"],
+                                    "quota_awareness": quota_state.get(a["id"], {})} for a in quota_accounts]}
 
     @app.get("/v1/master/autonomy")
     def master_autonomy(request: Request) -> dict:
-        console_user(request, "console.read")
-        return {"budget": master_budget_state(), "report": autonomy_report()}
+        user = console_user(request, "console.read")
+        return {"budget": master_budget_state(), "report": autonomy_report(scope=user.project_keys)}
 
     @app.put("/v1/master/autonomy/budget")
     def master_budget_update(body: MasterBudgetBody, request: Request) -> dict:
@@ -3095,8 +4993,8 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/master/report")
     def master_report(request: Request, weeks: int = Query(8, ge=1, le=52)) -> dict:
-        console_user(request, "console.read")
-        return autonomy_report(weeks)
+        user = console_user(request, "console.read")
+        return autonomy_report(weeks, scope=user.project_keys)
 
     @app.post("/v1/master/actions")
     def master_action(body: MasterActionBody, node: str = Depends(node_auth)) -> dict:
@@ -3150,7 +5048,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     observation_key = f"ticket:{ticket}:{updated['jira_updated'].isoformat() if updated and updated['jira_updated'] else 'current'}"
                 else:
                     observation_key = f"master:{body.action}:{body.intent[:200]}"
-            configured_channels = notify.configured_channels()
+            configured_channels = notify.configured_channels(ctx, "ticket_needs_person")
             created_row = ctx.db.one(
                 "INSERT INTO master_escalations"
                 " (observation_key,ticket,reason,options,run_id,pending_channels,delivered_channels,intent)"
@@ -3184,7 +5082,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             attempt_channels = sorted(pending_channels.intersection(configured_channels))
             try:
                 sent = (notify.send("warning", f"{ticket or 'AI Flow'} requires an owner decision", message, link,
-                                    channels=attempt_channels) if attempt_channels else [])
+                                    ctx=ctx, alert_kind="ticket_needs_person", project=policy_project or "AI Flow",
+                                    ticket=ticket, needed=why, channels=attempt_channels, queued_ok=True)
+                        if attempt_channels else [])
             except Exception as exc:  # Persist the pending channels and retry them on a later master cycle.
                 log.warning("master escalation notification failed: %s", type(exc).__name__)
                 sent = []
@@ -3372,6 +5272,129 @@ def create_app(ctx: Ctx) -> FastAPI:
               {"fields": list(body.fields), "add": body.add_labels, "remove": body.remove_labels})
         return {"ok": True}
 
+    # --- escalation classes and the owner decision register (docs/v4/escalations.md) --------------------------
+    @app.post("/v1/escalations/raise")
+    def escalation_raise(body: EscalationRaiseBody, node: str = Depends(node_auth)) -> dict:
+        """A developer run stopped on a question: classify it and resolve the classes that never need a person."""
+        run = fenced(body.run_id, body.fence, "escalation", "raise", {"chars": len(body.question)})
+        if run["step"] != "dev":
+            raise HTTPException(403, "only a developer run raises an escalation here")
+        result = escalations.dev_question(ctx, run, body.question)
+        audit("escalation", "raise", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              result["class"], {"resolved": result["resolved"], "outcome": result["outcome"]})
+        ctx.events.emit("escalation.raised", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
+                        account=run["account_id"], node=node, outcome=result["class"],
+                        reason=("resolved without a person: " if result["resolved"] else "goes to triage: ") + result["reason"])
+        return result
+
+    @app.post("/v1/escalations/triage")
+    def escalation_triage(body: TriageDecisionBody, node: str = Depends(node_auth)) -> dict:
+        """The triage AI's decision goes through the register: applied, amended, asked once, or refused."""
+        run = fenced(body.run_id, body.fence, "escalation", "triage", {"decision": body.decision})
+        if run["step"] != "triage":
+            raise HTTPException(403, "only a triage run decides an escalation")
+        if body.decision not in ("ANSWER", "ESCALATE", "AMEND"):
+            raise HTTPException(400, "decision must be ANSWER, ESCALATE or AMEND")
+        decision = {"decision": body.decision, "answer": body.answer, "why": body.why, "class": body.escalation_class,
+                    "options": body.options, "recommended": body.recommended, "topic": body.topic,
+                    "keywords": body.keywords, "criterion": body.criterion, "narrowed": body.narrowed}
+        result = escalations.triage_decision(ctx, run, decision, body.question)
+        audit("escalation", "triage", run["ticket_key"], body.run_id, body.fence, run["account_id"],
+              result["action"] != "refused", f"{result['action']}: {result.get('class', '')}",
+              {"decision": body.decision, "decision_id": result.get("decision_id")})
+        ctx.events.emit("escalation.triaged", ticket=run["ticket_key"], project=run["project"], run_id=body.run_id,
+                        account=run["account_id"], node=node, outcome=result["action"], reason=result.get("class", ""))
+        return result
+
+    @app.get("/v1/escalations")
+    def escalation_overview(request: Request, weeks: int = Query(8, ge=1, le=52)) -> dict:
+        console_user(request, "console.read")
+        return {"metrics": escalations.weekly_metrics(ctx.db, weeks), "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions")
+    def decision_add(body: OwnerDecisionBody, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-add")
+        try:
+            row = escalations.add_decision(ctx.db, body.title, body.decision, body.keywords, body.patterns,
+                                           body.project, user.subject)
+        except re.error as exc:
+            raise HTTPException(400, f"a pattern is not a valid regular expression: {exc}") from None
+        audit("escalation", "decision-add", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
+              {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions/{decision_id}/answer")
+    def decision_answer(decision_id: int, body: OwnerDecisionAnswerBody, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-answer")
+        try:
+            row = escalations.answer_decision(ctx, decision_id, body.choice, body.note, user.subject)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        audit("escalation", "decision-answer", row["ticket_key"], "", None, user.subject, True,
+              f"D{row['id']} {row['title']}", {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.post("/v1/decisions/{decision_id}/retire")
+    def decision_retire(decision_id: int, request: Request) -> dict:
+        user = console_user(request, "console.write", target="escalations", action="decision-retire")
+        row = escalations.retire_decision(ctx.db, decision_id)
+        if not row:
+            raise HTTPException(404, "unknown decision")
+        audit("escalation", "decision-retire", "", "", None, user.subject, True, f"D{row['id']} {row['title']}",
+              {"decision_id": row["id"]})
+        return {"id": row["id"], "register": escalations.register(ctx.db)}
+
+    @app.get("/v1/github/ci-log")
+    def github_ci_log(run_id: str, fence: int, branch: str = "", sha: str = "", lines: int = Query(200, ge=1, le=1000),
+                      node: str = Depends(node_auth)) -> dict:
+        """The tail of the failing CI job log of the run's pull request: a developer never has to ask for it."""
+        run = fenced(run_id, fence, "github", "ci-log", {"branch": branch, "sha": sha[:12], "lines": lines})
+
+        def refuse(reason: str) -> None:
+            audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], False, reason,
+                  {"branch": branch, "sha": sha[:12]})
+            raise HTTPException(403, reason)
+
+        if run["node"] != node:
+            refuse("CI logs are available only to the node running this developer run")
+        if run["step"] != "dev":
+            refuse("CI logs are available only to a developer run")
+        project = ctx.repo().projects[run["project"]]
+        expected_branch = str(run.get("branch") or "")
+        expected_pr = str(run.get("pr_url") or "")
+        pr_match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)/?", expected_pr, re.I)
+        expected_repository = repository_for_run(run, project)
+
+        if not pr_match or not expected_branch or not expected_repository:
+            refuse("developer run has no recorded pull request")
+        pr_repository = f"{pr_match.group(1)}/{pr_match.group(2)}"
+        if pr_repository.lower() != expected_repository.lower():
+            refuse("recorded pull request does not match the run repository")
+        if branch and branch != expected_branch:
+            refuse("requested branch is not the run's pull request branch")
+        if not branch and not sha:
+            raise HTTPException(400, "give the recorded pull request branch or commit sha")
+        github = github_gateway(ctx)
+        if not github:
+            raise HTTPException(503, "GitHub App is not connected")
+        repository = expected_repository.split("/", 1)[-1]
+        pull_request = github.pr(repository, int(pr_match.group(3)))
+        head = pull_request.get("head") or {}
+        head_repo = head.get("repo") or {}
+        pull_request_sha = str(head.get("sha") or "")
+        if (int(pull_request.get("number") or 0) != int(pr_match.group(3))
+                or head.get("ref") != expected_branch
+                or str(head_repo.get("full_name") or "").lower() != expected_repository.lower()
+                or not pull_request_sha):
+            refuse("recorded pull request no longer matches the run's repository and branch")
+        if sha and sha.lower() != pull_request_sha.lower():
+            refuse("requested commit is not the current head of the run's pull request")
+        sha = sha or pull_request_sha
+        log_tail = github.failing_job_log(repository, sha, lines)
+        audit("github", "ci-log", run["ticket_key"], run_id, fence, run["account_id"], True,
+              log_tail.get("job") or "no failing job", {"sha": sha[:12], "lines": lines})
+        return {"sha": sha, **log_tail}
+
     @app.post("/v1/notify/triage")
     def triage_alert(body: TriageAlertBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "notify", "triage-alert", {"chars": len(body.detail)})
@@ -3382,7 +5405,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         severity = "critical" if blocks else "warning"
         sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
                            ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
-                           if ctx.settings.jira_site else "")
+                           if ctx.settings.jira_site else "", ctx=ctx, alert_kind="ticket_needs_person",
+                           ticket=run["ticket_key"], needed="Review the question and provide an owner decision.")
         audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
               ",".join(sent) or "no channel configured", {"severity": severity})
         return {"ok": True, "severity": severity, "sent": sent}
@@ -3408,9 +5432,6 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/github/token")
     def github_token(body: GitHubTokenBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "token", {"repo": body.repo})
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         project = ctx.repo().projects.get(run["project"])
         repository = repository_for_run(run, project)
         if not project or not matches_run_repository(repository, body.repo):
@@ -3420,21 +5441,126 @@ def create_app(ctx: Ctx) -> FastAPI:
                        {"contents": "write", "metadata": "read", "workflows": "write"})
         if run["step"] == "version_release" and not version_release.enabled(project):
             raise HTTPException(403, "project is not enabled for version releases")
+        github = github_gateway(ctx, repository)
+        if getattr(github, "kind", "app") == "token":
+            branch = body.branch.strip()
+            if branch and (run["step"] != "dev" or not branch.startswith(f"{run['ticket_key']}-")
+                           or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", branch)
+                           or branch.startswith("/") or branch.endswith("/") or ".." in branch
+                           or "@{" in branch):
+                raise HTTPException(422, "the Git transfer branch is invalid for this run")
+            expires = utcnow() + timedelta(hours=1)
+            connection_id = github_connection_used.get()
+            capability = _issue_git_proxy_token(ctx, {
+                "connection": connection_id, "repo": repository.lower(), "run_id": body.run_id,
+                "fence": body.fence, "node": node, "branch": branch,
+                "expires": int(expires.timestamp()),
+            })
+            audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+                  "repository Git relay capability issued",
+                  {"repo": repository, "branch": branch, "expires": expires.isoformat(), "transport": "control"})
+            return {"token": capability, "expires_at": expires.isoformat(),
+                    "transport_url": f"{ctx.settings.control_url.rstrip('/')}/v1/github/git/{repository}.git"}
         token, expires = github.token(repository.split("/", 1)[-1], permissions)
         audit("github", "token", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "issued",
               {"repo": repository, "expires": expires.isoformat()})
         return {"token": token, "expires_at": expires.isoformat()}
 
+    async def github_git_proxy(git_path: str, request: Request) -> Response:
+        """Broker token-backed Git smart HTTP without exposing the stored access token to a worker."""
+        capability = _verify_git_proxy_token(ctx, _git_proxy_credential(request))
+        if not capability:
+            raise HTTPException(401, "Git repository transfer credential is invalid or expired",
+                                headers={"WWW-Authenticate": 'Basic realm="AI Flow Git transfer"'})
+        repository, separator, suffix = git_path.partition(".git")
+        if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                or repository.lower() != str(capability.get("repo", ""))):
+            raise HTTPException(403, "Git repository transfer is outside this credential's scope")
+        suffix = ".git" + suffix
+        if request.method == "GET" and suffix == ".git/info/refs":
+            service = request.query_params.get("service", "")
+            if service not in ("git-upload-pack", "git-receive-pack"):
+                raise HTTPException(400, "unsupported Git service")
+            operation = service
+        elif request.method == "POST" and suffix in (".git/git-upload-pack", ".git/git-receive-pack"):
+            operation = suffix.rsplit("/", 1)[-1]
+        else:
+            raise HTTPException(404, "unsupported Git repository transfer operation")
+
+        purpose = str(capability.get("purpose") or "run")
+        run = None
+        run_id = ""
+        fence = -1
+        if purpose == "check_probe":
+            if operation != "git-upload-pack":
+                raise HTTPException(403, "check-probe Git credentials are read-only")
+            node_name = str(capability.get("node") or "")
+            project_key = str(capability.get("project") or "")
+            project = probe_project(node_name, project_key)
+            if repository.lower() not in {name.lower() for name in project.configured_repositories}:
+                raise HTTPException(409, "check-probe repository is no longer configured")
+        elif purpose == "run":
+            run_id = str(capability.get("run_id") or "")
+            run = run_row(run_id)
+            fence = int(capability.get("fence", -1))
+            if (run["node"] != capability.get("node") or int(run["fence"]) != fence
+                    or not ctx.leases.valid(run["ticket_key"], run_id, fence)
+                    or not matches_run_repository(repository_for_run(run, ctx.repo().projects.get(run["project"])),
+                                                  repository)):
+                raise HTTPException(409, "Git repository transfer run is no longer active")
+            if operation == "git-receive-pack" and not capability.get("branch"):
+                raise HTTPException(403, "Git push is not allowed by this read-only credential")
+        else:
+            raise HTTPException(403, "Git repository transfer credential has an unsupported purpose")
+        body_bytes = await request.body() if request.method == "POST" else b""
+        branch = str(capability.get("branch") or "")
+        if request.method == "POST" and operation == "git-receive-pack":
+            targets = _receive_pack_target(body_bytes)
+            if targets != {f"refs/heads/{branch}"}:
+                raise HTTPException(403, "Git push is limited to the branch assigned to this run")
+
+        connection_id = str(capability.get("connection") or "")
+        gateway = github_gateway_for_connection(ctx, connection_id, repository)
+        if getattr(gateway, "kind", "app") != "token":
+            raise HTTPException(403, "Git relay credentials are only valid for access-token connections")
+        upstream_token, _ = gateway.token(repository.split("/", 1)[-1])
+        forwarded_headers = {key: value for key, value in request.headers.items()
+                             if key.lower() in {"accept", "content-type", "git-protocol"}}
+        try:
+            import anyio
+            upstream = await anyio.to_thread.run_sync(
+                _github_git_upstream, repository, suffix, request.method,
+                list(request.query_params.multi_items()), forwarded_headers, body_bytes, upstream_token)
+        except httpx.HTTPError as exc:
+            log.warning("GitHub repository transfer failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "GitHub repository transfer failed") from exc
+        if request.method == "POST" and operation == "git-receive-pack":
+            if run is None:
+                raise HTTPException(403, "check-probe Git credentials are read-only")
+            accepted = 200 <= upstream.status_code < 300
+            audit("github", "git-push", run["ticket_key"], run_id, fence, run["account_id"], accepted,
+                  "pushed" if accepted else f"GitHub returned {upstream.status_code}",
+                  {"repo": repository, "branch": branch})
+        response_headers = {key: value for key, value in upstream.headers.items()
+                            if key.lower() in {"content-type", "cache-control", "expires", "pragma"}}
+        return Response(content=upstream.content, status_code=upstream.status_code, headers=response_headers)
+
+    @app.get("/v1/github/git/{git_path:path}", operation_id="githubGitProxyGet")
+    async def github_git_proxy_get(git_path: str, request: Request) -> Response:
+        return await github_git_proxy(git_path, request)
+
+    @app.post("/v1/github/git/{git_path:path}", operation_id="githubGitProxyPost")
+    async def github_git_proxy_post(git_path: str, request: Request) -> Response:
+        return await github_git_proxy(git_path, request)
+
     @app.post("/v1/github/pr")
     def github_pr(body: PRBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "pr", {"repo": body.repo, "head": body.head})
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         project = ctx.repo().projects.get(run["project"])
         repository = repository_for_run(run, project)
         if not project or not matches_run_repository(repository, body.repo):
             raise HTTPException(403, "repository does not belong to the run's project")
+        github = github_gateway(ctx, repository)
         settings = settings_for_run(run, project)
         if body.base != settings["base"]:
             raise HTTPException(403, "pull request base does not match the repository settings")
@@ -3453,37 +5579,57 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "only a verify run can merge")
         return merge_command(run, body.number, body.title, body.method, node)
 
-    def review_data(project_filter: str = "") -> dict:
+    def review_data(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> dict:
         repo = ctx.repo()
         configured = sorted(repo.projects)
+        if project_scope is not None:
+            configured = [key for key in configured if key in project_scope]
         if project_filter and project_filter not in configured:
             raise HTTPException(400, "unknown project filter")
-        where = " WHERE project=%s" if project_filter else ""
-        params = (project_filter,) if project_filter else ()
+        if project_filter:
+            where, params = " WHERE project=%s", (project_filter,)
+            project_where, project_params = " AND project=%s", (project_filter,)
+            ticket_filter, ticket_params = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)", (project_filter,)
+        elif project_scope is not None:
+            where, params = " WHERE project=ANY(%s)", (list(project_scope),)
+            project_where, project_params = " AND project=ANY(%s)", (list(project_scope),)
+            ticket_filter, ticket_params = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))", (list(project_scope),)
+        else:
+            where, params = "", ()
+            project_where, project_params = "", ()
+            ticket_filter, ticket_params = "", ()
         metrics_tickets = ctx.db.all("SELECT key, project, status, labels, blocked_by, done_at, jira_updated, synced_at"
                                      " FROM tickets" + where, params)
-        project_where = " AND project=%s" if project_filter else ""
-        project_params = (project_filter,) if project_filter else ()
-        event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
         events = ctx.db.all("SELECT ts,type,ticket,project,outcome,reason,data FROM events"
-                            " WHERE type IN ('jira.transition','review.action')" + event_filter + " ORDER BY ts",
-                            project_params)
+                            " WHERE type IN ('jira.transition','review.action')" + ticket_filter + " ORDER BY ts",
+                            ticket_params)
         runs = ctx.db.all("SELECT ticket_key,project,step,account_id,outcome,summary,details,started_at,ended_at FROM runs"
                           " WHERE 1=1" + project_where + " ORDER BY started_at", project_params)
-        audit_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project_filter else ""
         audits = ctx.db.all("SELECT ts,ticket,action,target,accepted,result,payload FROM write_audit"
                             " WHERE (target='human-review' OR (target='jira' AND action='transition'))"
-                            + audit_filter + " ORDER BY ts", project_params)
+                            + ticket_filter + " ORDER BY ts", ticket_params)
         metrics = review_metrics.calculate_review_metrics(metrics_tickets, events, runs, audits)
         return {"metrics": metrics, "projects": configured}
 
     @app.get("/v1/reviews")
-    def human_reviews(project: str = Query(default="")) -> dict:
+    def human_reviews(request: Request, project: str = Query(default="")) -> dict:
         """Queue waiting items with their action set and project-filtered human-review metrics."""
+        user = (console_user(request, "view.human_review") if ctx.settings.console_login
+                else optional_console_user(request))
         repo = ctx.repo()
-        metrics_data = review_data(project)
-        where = " AND project=%s" if project else ""
-        params = (project,) if project else ()
+        scope = user.project_keys if user and user.project_keys is not None else None
+        if project and scope is not None and project not in scope:
+            audit("console", "access_denied", "", "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "project": project,
+                                                    "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        metrics_data = review_data(project, scope)
+        if project:
+            where, params = " AND project=%s", (project,)
+        elif scope is not None:
+            where, params = " AND project=ANY(%s)", (list(scope),)
+        else:
+            where, params = "", ()
         tickets = ctx.db.all("SELECT key, project, type, summary, description, labels, parent_key, status, blocked_by"
                              " FROM tickets WHERE (status IN ('Human review','Needs owner') OR"
                              " (cardinality(blocked_by)>0 AND status NOT IN ('Done','Closed')))" + where
@@ -3506,10 +5652,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             project_config = repo.projects.get(ticket["project"])
             repository = repository_for_run(dev or {}, project_config) if project_config else ""
             pr_detail: dict[str, Any] = {}
-            github = github_gateway(ctx)
-            if project_config and match and github:
+            if project_config and match:
                 try:
-                    pr_detail = github.pr(repository.split("/", 1)[-1], int(match.group(1))) or {}
+                    pr_detail = github_gateway(ctx, repository).pr(
+                        repository.split("/", 1)[-1], int(match.group(1))) or {}
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not load PR details for %s: %s", ticket["key"], e)
             verify = ctx.db.one("SELECT outcome, summary, details, started_at FROM runs"
@@ -3555,16 +5701,27 @@ def create_app(ctx: Ctx) -> FastAPI:
                            "findings": details.get("findings", "")},
                 "preview_url": preview_url,
             })
-        thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)" if project else ""
-        thread_run_filter = " AND project=%s" if project else ""
+        if project:
+            thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=%s)"
+            thread_event_params = (project,)
+            thread_run_filter = " AND project=%s"
+            thread_run_params = (project,)
+        elif scope is not None:
+            thread_event_filter = " AND ticket IN (SELECT key FROM tickets WHERE project=ANY(%s))"
+            thread_event_params = (list(scope),)
+            thread_run_filter = " AND project=ANY(%s)"
+            thread_run_params = (list(scope),)
+        else:
+            thread_event_filter, thread_event_params = "", ()
+            thread_run_filter, thread_run_params = "", ()
         thread_dates: dict[str, Any] = {}
         for row in ctx.db.all("SELECT ticket,max(ts) AS latest FROM events WHERE type='review.action'"
                               " AND data->>'action'='ask-ai'" + thread_event_filter + " GROUP BY ticket",
-                              (project,) if project else ()):
+                              thread_event_params):
             thread_dates[str(row["ticket"])] = row["latest"]
         for row in ctx.db.all("SELECT ticket_key AS ticket,max(started_at) AS latest FROM runs"
                               " WHERE step IN ('dev','triage') AND outcome IN ('blocked','answered','escalated')"
-                              + thread_run_filter + " GROUP BY ticket_key", (project,) if project else ()):
+                              + thread_run_filter + " GROUP BY ticket_key", thread_run_params):
             key = str(row["ticket"])
             thread_dates[key] = max(thread_dates.get(key, row["latest"]), row["latest"])
         threads = []
@@ -3576,8 +5733,16 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"tickets": out, "threads": threads, **metrics_data}
 
     @app.get("/v1/reviews/export.csv")
-    def export_review_metrics(project: str = Query(default="")) -> PlainTextResponse:
-        metrics = review_data(project)["metrics"]
+    def export_review_metrics(request: Request, project: str = Query(default="")) -> PlainTextResponse:
+        user = (console_user(request, "view.human_review") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = user.project_keys if user and user.project_keys is not None else None
+        if project and scope is not None and project not in scope:
+            audit("console", "access_denied", "", "", None, user.subject, False,
+                  "not available for your role", {"path": request.url.path, "project": project,
+                                                    "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+        metrics = review_data(project, scope)["metrics"]
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(("metric", "value", "project"))
@@ -3673,7 +5838,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             run = fenced(run_id, fence, "github", "close", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
             repository = repository_for_run(run, project)
-            gateway = github_gateway(ctx)
+            gateway = github_gateway(ctx, repository)
             closed = gateway.close_pr(repository.split("/", 1)[-1], number)
             audit("github", "close", key, run_id, fence, run["account_id"], True,
                   "pull request closed", {"number": number, "repo": repository})
@@ -3793,10 +5958,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["step"] != "verify":
             raise HTTPException(403, "only a verify run updates a PR branch")
         project = ctx.repo().projects[run["project"]]
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
         res = github.update_branch(repository.split("/", 1)[-1], body.number)
         audit("github", "update-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], res["ok"],
               res["message"][:200], {"number": body.number, "repo": repository})
@@ -3808,24 +5971,43 @@ def create_app(ctx: Ctx) -> FastAPI:
         if run["node"] != node or not ctx.leases.valid(run["ticket_key"], run_id, fence):
             raise HTTPException(409, "not the owner of this run")
         project = ctx.repo().projects[run["project"]]
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
         return {"checks": github.checks(repository.split("/", 1)[-1], sha)}
 
     @app.post("/v1/github/comment")
     def github_comment(body: PRCommentBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "comment", {"number": body.number})
         project = ctx.repo().projects[run["project"]]
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "GitHub App is not connected")
         repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
         github.comment(repository.split("/", 1)[-1], body.number, body.body)
         audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
               {"number": body.number, "repo": repository})
         return {"ok": True}
+
+    @app.post("/v1/github/delete-branch")
+    def github_delete_branch(body: BranchCleanupBody, node: str = Depends(node_auth)) -> dict:
+        """Delete the ticket's remote work branch through the connection assigned to its repository."""
+        run = fenced(body.run_id, body.fence, "github", "delete-branch", {"branch": body.branch})
+        if run["step"] not in ("dev", "verify"):
+            raise HTTPException(403, "only a development or verify run cleans up a branch")
+        branch = body.branch.strip()
+        if (not branch.startswith(f"{run['ticket_key']}-") or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", branch)
+                or branch.endswith("/") or ".." in branch):
+            raise HTTPException(422, "the branch does not belong to this ticket")
+        project = ctx.repo().projects[run["project"]]
+        repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
+        try:
+            deleted = github.delete_branch(repository.split("/", 1)[-1], branch)
+        except GitHubError as exc:
+            audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], False,
+                  "GitHub refused the branch deletion", {"branch": branch, "repo": repository})
+            raise HTTPException(502, "GitHub refused the branch deletion") from exc
+        audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              "deleted" if deleted else "already gone", {"branch": branch, "repo": repository})
+        return {"ok": True, "deleted": deleted}
 
     # --- policy hook ------------------------------------------------------------------------------------------
     @app.post("/v1/policy/decide")
@@ -3856,18 +6038,21 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected = details.get("repository_settings") or {}
             d = decide(ctx.repo().policy_for(run["project"]), tool, payload.get("tool_input") or {},
                        str(payload.get("cwd") or ""), containers=bool(selected.get("containers")))
+        d = explain(d, tool, payload.get("tool_input") or {})  # every refusal names the allowed alternative
         ctx.events.emit("policy.decision", ticket=run["ticket_key"], run_id=str(run["id"]), account=run["account_id"],
                         node=run["node"], outcome=d.decision, reason=d.reason[:200], tool=tool,
                         command=str((payload.get("tool_input") or {}).get("command", ""))[:300])
         return d.hook_output()
 
-    # --- events from nodes ------------------------------------------------------------------------------------
+    # --- shared accounts: enable an account on machines, remove it, report the sign-in prompt ----------------------
+    shared_accounts.install(app, ctx, console_user, audit, node_auth)
+
     # --- account probes: a tiny prompt tells whether an account can work and how much quota is left -------------
     @app.get("/v1/accounts/{account_id}/spec")
     def account_spec(account_id: str, node: str = Depends(node_auth)) -> dict:
         repo = ctx.repo()
         acc = repo.account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         model, effort = repo.model_for(acc.provider, acc.tier)
         return {"account": acc.id, "provider": acc.provider, "tier": acc.tier, "model": model, "effort": effort}
@@ -3875,24 +6060,29 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.post("/v1/accounts/{account_id}/probe")
     def account_probe(account_id: str, body: ProbeBody, node: str = Depends(node_auth)) -> dict:
         acc = ctx.repo().account(account_id)
-        if not acc or acc.node != node:
+        if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s WHERE id=%s", (J(body.quota), account_id))
+        ctx.db.run("INSERT INTO account_quota_samples (account_id,provider,model,quota,tokens_in,tokens_out,cost_usd,"
+                   "duration_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (account_id, acc.provider, body.model, J(body.quota), body.tokens_in, body.tokens_out,
+                    body.cost_usd, body.duration_ms))
         ctx.db.run("UPDATE accounts SET last_probe_at=now(), updated_at=now() WHERE id=%s", (account_id,))
         if "credential_expires_at" in body.model_fields_set:
             ctx.db.run("UPDATE accounts SET credential_expires_at=%s WHERE id=%s",
                        (body.credential_expires_at, account_id))
-        if body.error_kind in ("quota", "auth"):
+        if body.error_kind == "auth":
+            mark_machine_auth_failure(account_id, node, body.summary)
+        elif body.error_kind == "quota":
             until = body.reset_at or (utcnow() + timedelta(minutes=30))
             seconds = max(60, int((until - utcnow()).total_seconds()))
-            ctx.leases.cooldown(account_id, seconds, body.error_kind)
+            ctx.leases.cooldown(account_id, seconds, "quota")
             ctx.db.run("UPDATE accounts SET status=%s, cooldown_until=%s, last_error=%s,"
-                       " cooldown_since=CASE WHEN %s='quota' THEN coalesce(cooldown_since,now()) ELSE NULL END,"
-                       " idle_since=NULL WHERE id=%s AND status<>'working'",
-                       ("cooldown" if body.error_kind == "quota" else "signed_out", until, body.summary[:300],
-                        body.error_kind, account_id))
+                       " cooldown_since=coalesce(cooldown_since,now()), idle_since=NULL WHERE id=%s AND status<>'working'",
+                       ("cooldown", until, body.summary[:300], account_id))
         elif body.ok:
+            shared_accounts.mark_signed_in(ctx.db, account_id, node)  # the probe ran with this machine's own credentials
             ctx.leases.uncool(account_id)
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'idle' END,"
                        " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
@@ -4139,10 +6329,100 @@ def create_app(ctx: Ctx) -> FastAPI:
                         account=sender, reason=body.environment, data={"related": body.change_key})
         return {"ok": True, "verdict": body.verdict, "key": issue_key, "status": status}
 
-    @app.get("/v1/state")
-    def state() -> dict:
+    @app.get("/v1/state", responses={200: {"description": "Command Center, Delivery, and SA snapshot",
+                                            "content": {"application/json": {"schema": STATE_RESPONSE_SCHEMA}}}})
+    def state(request: Request, authorization: str = Header(default="")) -> dict:
+        if authorization:  # the deploy scripts on the control machine read it with the owner token (login is on)
+            owner_auth(request, authorization)
+        from .state import snapshot
+        # The login middleware authenticates console sessions and permits this legacy owner-token route;
+        # resolving the cookie here keeps scoped session data filtered while allowing the owner token alone.
+        user = optional_console_user(request)
+        include_signin = bool(user and has_permission(user.effective_roles, "nodes.manage"))
+        data = snapshot(ctx, include_signin=include_signin)
+        all_tickets = data["tickets"]
+        if user and user.project_keys is not None:
+            visible = set(user.project_keys)
+            data["projects"] = [project for project in data["projects"] if project["key"] in visible]
+            data["tickets"] = [ticket for ticket in all_tickets if ticket["project"] in visible]
+            ticket_keys = {ticket["key"] for ticket in data["tickets"]}
+            data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
+            data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
+            data["events"] = [event for event in data["events"] if event.get("ticket") in ticket_keys]
+            # Project level artifacts carry different shapes across releases; omit aggregates for restricted users.
+            data["release_readiness"] = []
+            data["release_progress"] = []
+            data["rollout"] = {}
+            data["totals"] = ctx.db.one(
+                "SELECT count(*) FILTER (WHERE started_at > now()-interval '24 hours') AS runs_24h,"
+                " coalesce(sum(cost_usd) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS cost_24h,"
+                " coalesce(sum(tokens_in) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_in_24h,"
+                " coalesce(sum(tokens_out) FILTER (WHERE started_at > now()-interval '24 hours'),0) AS tokens_out_24h,"
+                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome='done') AS done_24h,"
+                " count(*) FILTER (WHERE started_at > now()-interval '24 hours' AND outcome = ANY(%s)) AS failed_24h"
+                " FROM runs WHERE project=ANY(%s)",
+                (["failed", "blocked", "timeout", "lost"], list(visible)))
+            data["totals"] = {key: int(value) if key in {"runs_24h", "tokens_in_24h", "tokens_out_24h",
+                                                               "done_24h", "failed_24h"} else float(value)
+                              for key, value in data["totals"].items()}
+            visible_nodes = {node["name"] for node in data["nodes"] if visible.intersection(node.get("projects") or [])}
+            data["nodes"] = [node for node in data["nodes"] if node["name"] in visible_nodes]
+            data["accounts"] = [account for account in data["accounts"]
+                                if any(machine.get("node") in visible_nodes
+                                       for machine in account.get("machines") or [])]
+            data["incidents"] = [item for item in data["incidents"]
+                                 if item.get("subject") in visible or item.get("subject") in visible_nodes]
+            data["incidents_recent"] = [item for item in data["incidents_recent"]
+                                         if item.get("subject") in visible or item.get("subject") in visible_nodes]
+            data["sa"] = {}
+            data["version_policy"] = {}
+        if user and not has_permission(user.effective_roles, "view.machines_ai"):
+            data["nodes"] = []
+            data["accounts"] = []
+            data["sa"] = {}
+            data["role_health"] = {"roles": [], "settings": {}}
+            data["version_policy"] = {}
+            data["incidents"] = []
+            data["incidents_recent"] = []
+            data["events"] = [{key: event.get(key) for key in ("ts", "type", "ticket", "outcome", "reason")}
+                               for event in data["events"]]
+            for ticket in data["tickets"]:
+                if ticket.get("run"):
+                    ticket["run"] = {key: ticket["run"].get(key) for key in
+                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
+                if ticket.get("last_run"):
+                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
+                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
+                                           "duration_s", "pr_url", "ended_age_s")}
+            data["active_runs"] = [{key: run[key] for key in ("id", "ticket", "project", "summary", "step",
+                                                                  "elapsed_s", "heartbeat_age_s", "lease_ms", "progress")}
+                                    for run in data["active_runs"]]
+            data["recent_runs"] = [{key: run[key] for key in ("id", "ticket", "summary", "step", "outcome",
+                                                                  "error_kind", "duration_s", "pr_url", "ended_age_s")}
+                                    for run in data["recent_runs"]]
+            for ticket in data["tickets"]:
+                if ticket.get("run"):
+                    ticket["run"] = {key: ticket["run"].get(key) for key in
+                                     ("id", "ticket", "project", "summary", "step", "elapsed_s", "progress")}
+                if ticket.get("last_run"):
+                    ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
+                                          ("id", "ticket", "summary", "step", "outcome", "error_kind",
+                                           "duration_s", "pr_url", "ended_age_s")}
+        return data
+
+    @app.get("/v1/deploy/state")
+    def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:
+        """The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token."""
         from .state import snapshot
         return snapshot(ctx)
+
+    @app.get("/v1/deploy/ci-state")
+    def deploy_ci_state(repo: str = Query(pattern=r"^[\w.-]+/[\w.-]+$"), sha: str = Query(pattern=r"^[0-9a-fA-F]{7,64}$"),
+                        _deploy: str = Depends(deploy_auth)) -> dict:
+        """CI state of a commit (pending|failed|ok|none) through the connection for its repository."""
+        from .canary import ci_state
+        gateway = github_gateway(ctx, repo)
+        return {"repo": repo, "sha": sha, "state": ci_state(gateway, repo, sha)}
 
     @app.get("/v1/tickets/{key}/timeline")
     def ticket_timeline(key: str) -> dict:
@@ -4171,17 +6451,88 @@ def create_app(ctx: Ctx) -> FastAPI:
         return role_health.summary(ctx)
 
     @app.get("/v1/analytics/daily")
-    def analytics_daily(days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
+    def analytics_daily(request: Request, days: int = Query(14, ge=1, le=90), project: str = "") -> dict:
         from .analytics import daily
-        return {"days": days, "project": project, "rows": daily(ctx.db, days, project)}
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                projects = [project]
+            else:
+                projects = list(user.project_keys)
+            rows = [row for key in projects for row in daily(ctx.db, days, key)]
+        else:
+            rows = daily(ctx.db, days, project)
+        return {"days": days, "project": project, "rows": rows}
+
+    @app.get("/v1/analytics/usage")
+    def analytics_usage(request: Request, days: int = Query(7, ge=1, le=90),
+                        group_by: Literal["account", "ai", "machine", "project", "ticket"] = "account",
+                        project: str = "", ticket: str = "", account: str = "") -> dict:
+        from .analytics import usage
+        user = (console_user(request, None) if ctx.settings.console_login
+                else optional_console_user(request))
+
+        def refuse() -> None:
+            if user:
+                audit("console", "access_denied", "", "", None, user.subject, False,
+                      "not available for your role", {"path": request.url.path, "method": request.method,
+                                                       "roles": list(user.effective_roles)})
+            raise HTTPException(403, "not available for your role")
+
+        needs_machine_access = group_by in {"account", "machine"}
+        if user and needs_machine_access and not has_permission(user.effective_roles, "view.machines_ai"):
+            refuse()
+
+        project_keys = None
+        if user and user.project_keys is not None:
+            project_keys = user.project_keys
+            if project and project not in project_keys:
+                refuse()
+            if ticket:
+                ticket_row = ctx.db.one("SELECT project FROM tickets WHERE key=%s", (ticket,))
+                projects = ({ticket_row["project"]} if ticket_row else set())
+                if not projects:
+                    projects = {row["project"] for row in ctx.db.all(
+                        "SELECT DISTINCT project FROM runs WHERE ticket_key=%s AND project<>''", (ticket,))}
+                if projects and not projects.issubset(set(project_keys)):
+                    refuse()
+
+        return {"days": days, "group_by": group_by, "filters": {"project": project, "ticket": ticket,
+                                                                     "account": account},
+                "rows": usage(ctx.db, days, group_by, project, ticket, account, project_keys=project_keys)}
 
     # --- memory: past tickets, run summaries and verify findings ------------------------------------------------
     @app.get("/v1/memory/search")
-    def memory_search(q: str = "", project: str = "", limit: int = 10) -> dict:
+    def memory_search(request: Request, q: str = "", project: str = "", limit: int = 10) -> dict:
+        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                keys = [project]
+            else:
+                keys = list(user.project_keys)
+            hits = [hit for key in keys for hit in memory.search(ctx.db, key, q, limit)]
+            return {"project": project, "q": q, "hits": hits[:limit]}
         return {"project": project, "q": q, "hits": memory.search(ctx.db, project, q, limit)}
 
     @app.get("/v1/memory/study-cases")
-    def memory_study_cases(project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+    def memory_study_cases(request: Request, project: str = "", limit: int = Query(50, ge=1, le=100)) -> dict:
+        user = (console_user(request, "view.knowledge") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and user.project_keys is not None:
+            if project:
+                if project not in user.project_keys:
+                    raise HTTPException(403, "not available for your role")
+                keys = [project]
+            else:
+                keys = list(user.project_keys)
+            cases = [case for key in keys for case in project_lifecycle.study_cases(ctx.db, key, limit)]
+            return {"project": project, "study_cases": cases[:limit]}
         return {"project": project, "study_cases": project_lifecycle.study_cases(ctx.db, project, limit)}
 
     # --- learned knowledge: automatic capture, isolated context packs, and Knowledge screen data --------------
@@ -4223,9 +6574,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             kind, resource_id, title, content, actor = knowledge.validate(kind, resource_id, title, content, actor)
         except knowledge.Invalid as e:
             raise HTTPException(400, str(e)) from e
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "control repo bot is unavailable")
+        github = github_control_gateway(ctx)
         load_managed_resources()
         current = knowledge.get_resource(ctx.db, kind, resource_id)
         if expected_version is not None and (not current or int(current["version"]) != expected_version):
@@ -4318,9 +6667,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(404, "policy proposal not found")
         if proposal["status"] != "pending":
             raise HTTPException(409, "policy proposal is no longer pending")
-        github = github_gateway(ctx)
-        if not github:
-            raise HTTPException(503, "control repo bot is unavailable")
+        github = github_control_gateway(ctx)
         repo_name = Path(ctx.settings.control_repo).name
         owner = _owner or body.approved_by.strip() or "owner"
         try:

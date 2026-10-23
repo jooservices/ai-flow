@@ -34,9 +34,10 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
     report: dict = {"head_sha": "", "source_sha": str(project.get("source_sha") or ""), "checks": [], "error": ""}
     env = project_env(project["key"])
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
-                                                        "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                             "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         branch = project.get("release_branch") or project["source_branch"]
         if not git.remote_branch_exists(mirror, branch):
             raise RuntimeError(f"configured release branch {branch} does not exist")

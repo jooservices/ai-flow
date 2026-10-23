@@ -94,7 +94,6 @@ volumes:
   vendor: {}
 """)
     monkeypatch.setattr(containers, "_active_containers", lambda: [])
-    monkeypatch.setattr(containers, "_volume_quota_supported", lambda: True)
     monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
     up, _, _ = containers._compose_command(["compose", "up", "-d"], worktree, worktree, tmp_path, "aiflow-run")
     assert up[-3:] == ["-p", "aiflow-run", "up", "-d"][-3:]
@@ -102,7 +101,8 @@ volumes:
     override = Path(up[file_flags[-1] + 1])
     override_data = __import__("yaml").safe_load(override.read_text())
     assert override_data["services"]["composer"]["storage_opt"]["size"] == "1g"
-    assert override_data["volumes"]["vendor"]["driver_opts"]["o"] == "size=1g"
+    # Podman's size= volume option needs root; rootless volumes must not ask for it.
+    assert "volumes" not in override_data
     run, _, _ = containers._compose_command(["compose", "run", "composer", "composer", "ci"],
                                              worktree, worktree, tmp_path, "aiflow-run")
     assert run[run.index("run") + 1:run.index("run") + 3] == ["--rm", "composer"]
@@ -693,7 +693,52 @@ def test_runtime_setup_failure_revokes_the_worktree_grant_and_removes_run_direct
     runtime = containers.ContainerRuntime(spec, ["setpriv"])
     with pytest.raises(OSError):
         runtime.__enter__()
-    assert any(call[:3] == ["setfacl", "-R", "-m"] for call in calls)
-    assert any(call[:3] == ["setfacl", "-R", "-x"] for call in calls)
+    assert any(call[:4] == ["setfacl", "-R", "-P", "-m"] for call in calls)
+    assert any(call[:4] == ["setfacl", "-R", "-P", "-x"] for call in calls)
     assert not runtime.public_dir.exists() and not runtime.runtime_dir.exists()
     assert spec.container_start_hook is None
+
+
+def test_acl_cleanup_uses_the_pinned_worktree_after_the_path_is_replaced(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    other = tmp_path / "another-run"
+    other.mkdir()
+    spec = SimpleNamespace(cwd=str(worktree), extra_env={}, container_start_hook=None)
+    monkeypatch.setattr(containers, "scratch_root", lambda spec: tmp_path / "scratch")
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path / "home")))
+    calls: list[tuple[list[str], str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), os.readlink(f"/proc/self/fd/{argv[-1].split('/')[4]}")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(containers.subprocess, "run", fake_run)
+    runtime = containers.ContainerRuntime(spec, ["setpriv"])
+    info = os.lstat(worktree)
+    runtime._grant_worktree(worktree.resolve(), (info.st_dev, info.st_ino))
+    # The run swaps its checkout for a symlink to a different tree before exit.
+    worktree.rename(tmp_path / "moved")
+    worktree.symlink_to(other)
+    runtime.__exit__(None, None, None)
+    revoke, target = calls[-1]
+    assert revoke[:4] == ["setfacl", "-R", "-P", "-x"]
+    assert str(worktree) not in revoke and str(other) not in revoke
+    assert target == str(tmp_path / "moved")
+    assert runtime.acl_fd == -1
+
+
+@pytest.mark.skipif(os.environ.get("AIFLOW4_TEST_PODMAN") != "1" or not _engine_available(),
+                    reason="opt-in: set AIFLOW4_TEST_PODMAN=1 on a node with the safe container runtime")
+def test_real_podman_creates_a_named_volume_rootless(tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (worktree / "compose.yaml").write_text(
+        "services:\n  app:\n    image: alpine:3.20\n    command: sh -c 'echo ok > /data/f && cat /data/f'\n"
+        "    volumes:\n      - data:/data\nvolumes:\n  data: {}\n")
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    code, stdout, _ = containers._execute(["compose", "up", "--abort-on-container-exit"], worktree, worktree,
+                                          runtime_dir=runtime_dir, project_name="aiflow-it-volume")
+    assert code == 0
+    assert "ok" in stdout

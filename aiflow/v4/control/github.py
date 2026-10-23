@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import base64
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -22,7 +23,10 @@ API = "https://api.github.com"
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, response_body: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
 
 
 class GitHubApp:
@@ -31,6 +35,7 @@ class GitHubApp:
         self.dir = d
         self.meta: dict[str, Any] = {}
         self.key = ""
+        self._fallback_org = org
         self.org = org
         self.c = client or httpx.Client(base_url=API, timeout=30, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "aiflow4"})
@@ -40,11 +45,27 @@ class GitHubApp:
         self._config_stamp: tuple[int, int] | None = None
         self._refresh_config(force=True)
 
+    @property
+    def configured(self) -> bool:
+        """Whether this gateway still has a complete, currently loaded App configuration."""
+        return bool(self._config_stamp is not None and self.meta.get("id") and self.key)
+
+    def _revoke_config(self) -> None:
+        """Drop cached credentials when the shared secret files have been removed or become unreadable."""
+        with self._lock:
+            self.meta = {}
+            self.key = ""
+            self.org = self._fallback_org
+            self._inst = None
+            self._cache.clear()
+            self._config_stamp = None
+
     def _refresh_config(self, force: bool = False) -> None:
         """Reload a connection saved by another API replica without restarting workers or control loops."""
         try:
             stamp = ((self.dir / "app.json").stat().st_mtime_ns, (self.dir / "app.pem").stat().st_mtime_ns)
         except OSError:
+            self._revoke_config()
             if force:
                 raise
             return
@@ -62,6 +83,11 @@ class GitHubApp:
                          (self.dir / "app.pem").stat().st_mtime_ns)
                 meta = json.loads((self.dir / "app.json").read_text(encoding="utf-8"))
                 key = (self.dir / "app.pem").read_text(encoding="utf-8")
+            except OSError:
+                self._revoke_config()
+                if force:
+                    raise
+                return
             finally:
                 if lock_fd is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -84,7 +110,9 @@ class GitHubApp:
     def _req(self, method: str, path: str, token: str, body: Any = None, ok=(200, 201, 202, 204)) -> Any:
         r = self.c.request(method, path, json=body, headers={"Authorization": f"Bearer {token}"})
         if r.status_code not in ok:
-            raise GitHubError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+            body_text = r.text[:300]
+            raise GitHubError(f"{method} {path} -> {r.status_code}: {body_text}",
+                              status_code=r.status_code, response_body=body_text)
         return r.json() if r.content else None
 
     def installation_id(self) -> int:
@@ -216,6 +244,17 @@ class GitHubApp:
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
                  {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
 
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete one remote branch; a branch that is already gone counts as cleaned up."""
+        ref = quote(f"heads/{branch}", safe="/")
+        try:
+            self.api("DELETE", f"/repos/{self.org}/{repo}/git/refs/{ref}", repo=repo)
+        except GitHubError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        return True
+
     def create_branch_at_sha(self, repo: str, branch: str, sha: str) -> None:
         """Restore a deleted release branch at the exact audited commit for a post-merge retry."""
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
@@ -318,6 +357,36 @@ class GitHubApp:
             state = {"success": "success", "pending": "pending"}.get(c["state"], "failure")
             out.append({"name": c["context"], "state": state, "url": c.get("target_url", "")})
         return out
+
+    def failing_job_log(self, repo: str, sha: str, lines: int = 200) -> dict:
+        """The tail of the log of the first failing GitHub Actions job of a commit (AC6 of JAIF-255): a developer
+        never has to ask for a CI log. Returns the job name, its URL and at most `lines` lines (20,000 characters)."""
+        lines = max(1, min(int(lines), 1000))
+        perms = {"actions": "read", "metadata": "read"}
+        base = f"/repos/{self.org}/{repo}"
+        runs = self.api("GET", f"{base}/actions/runs?head_sha={quote(sha, safe='')}&per_page=20", repo=repo,
+                        permissions=perms) or {}
+        for run in runs.get("workflow_runs", []):
+            if run.get("status") == "completed" and run.get("conclusion") in ("success", "skipped", "neutral"):
+                continue
+            jobs = self.api("GET", f"{base}/actions/runs/{run['id']}/jobs?per_page=100", repo=repo,
+                            permissions=perms) or {}
+            for job in jobs.get("jobs", []):
+                if job.get("conclusion") not in ("failure", "timed_out", "cancelled"):
+                    continue
+                token, _ = self.token(repo, perms)
+                response = self.c.request("GET", f"{base}/actions/jobs/{job['id']}/logs", follow_redirects=True,
+                                          headers={"Authorization": f"Bearer {token}"})
+                if response.status_code != 200:
+                    raise GitHubError(f"GET job log -> {response.status_code}: {response.text[:200]}")
+                text = re.sub(r"\x1b\[[0-9;]*m", "", response.text)
+                text = re.sub(r"(?m)^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", text)
+                tail = "\n".join(text.splitlines()[-lines:])[-20_000:]
+                failed_steps = [s.get("name", "") for s in job.get("steps", []) if s.get("conclusion") == "failure"]
+                return {"found": True, "job": job.get("name", ""), "workflow": run.get("name", ""),
+                        "conclusion": job.get("conclusion", ""), "url": job.get("html_url", ""),
+                        "failed_steps": failed_steps, "lines": len(tail.splitlines()), "tail": tail}
+        return {"found": False, "job": "", "tail": "", "message": "no failing GitHub Actions job for this commit"}
 
     # --- project version releases ---------------------------------------------------------------------------
     def branch_sha(self, repo: str, branch: str) -> str:

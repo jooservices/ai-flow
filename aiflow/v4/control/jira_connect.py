@@ -40,8 +40,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .console_auth import COOKIE_NAME, checks_bearer, role_satisfies, verify_session
+from .console_auth import COOKIE_NAME, checks_bearer, resolve_session_user, role_satisfies, verify_session
 from .db import J
+from . import licensing
 from .incidents import close_incident, open_incident
 from .jira import JiraError
 
@@ -515,18 +516,29 @@ def mount(app: FastAPI, ctx) -> None:
 
     def owner(request: Request, action: str = "read") -> str:
         """The owner bearer token or a signed console session with `integrations.manage`; anyone else is refused."""
+        def writable() -> None:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
+
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         configured = ctx.settings.owner_token
         if scheme.lower() == "bearer" and token.strip() and configured and secrets.compare_digest(
                 token.strip().encode(), configured.encode()):
+            if action != "read":
+                writable()
             return "owner"
-        user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
-        if user and role_satisfies(user.role, {"integrations.manage"}):
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if user and role_satisfies(user.effective_roles, {"integrations.manage"}):
+            if action != "read":
+                writable()
             return user.subject
         if action != "read":
-            write_audit(ctx, action, user.subject if user else "", False, "owner role required")
+            write_audit(ctx, action, user.subject if user else "", False, "not available for your role")
         if user:
-            raise HTTPException(403, "owner role required")
+            raise HTTPException(403, "not available for your role")
         raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
     async def body_of(request: Request) -> dict:
@@ -596,6 +608,10 @@ def mount(app: FastAPI, ctx) -> None:
         if error or not code:
             write_audit(ctx, "connect", actor, False, f"consent not given: {_clean(error, 60) or 'no code'}")
             return back("denied")
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         try:
             data = a.connect_oauth(code, actor)
         except OAuthFailed as e:

@@ -67,8 +67,10 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             log.warning("PR comment failed: %s", e)
 
     try:
-        token = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence, "repo": project["repo"]})["token"]
-        mirror = git.mirror(project["repo"], token)
+        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                              "repo": project["repo"]})
+        token = credential["token"]
+        mirror = git.mirror(project["repo"], token, credential.get("transport_url", ""))
         if not git.remote_branch_exists(mirror, pr["branch"]):
             raise RuntimeError(f"branch {pr['branch']} is gone")
         wt = Path(srv_root) / "work" / project["key"] / f"{pr['branch']}--verify"

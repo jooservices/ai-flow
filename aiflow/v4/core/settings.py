@@ -67,6 +67,8 @@ class Settings:
     join_token: str = ""
     console_session_secret: str = ""
     console_login: bool = False  # AIFLOW4_CONSOLE_LOGIN=1: the console pages and read APIs need a signed-in user
+    license_service_url: str = ""
+    license_public_key: str = ""
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
     reviewer_token: str = ""
     owner_token: str = ""
@@ -76,6 +78,7 @@ class Settings:
     public_url: str = "http://127.0.0.1:18480"
     join_control_url: str = ""
     gatus_url: str = "/gatus/"  # Gatus status page, linked from the console footer
+    support_log_dir: str = ""  # persistent, rotated service logs when the control deployment provides a shared directory
     # fleet upgrades (docs/v4/fleet-upgrade.md)
     control_version: str = ""  # the control plane's release (AIFLOW4_VERSION); not vX.Y.Z disables the skew policy
     rollout_batch_size: int = 2  # nodes per wave after the canary
@@ -117,11 +120,14 @@ class Settings:
         s.control_repo = _env("CONTROL_REPO", s.control_repo)
         s.console_session_secret = _env("CONSOLE_SESSION_SECRET", s.console_session_secret)
         s.console_login = _env("CONSOLE_LOGIN", "0").strip().lower() in ("1", "true", "yes", "on")
+        s.license_service_url = _env("LICENSE_SERVICE_URL", s.license_service_url)
+        s.license_public_key = _env("LICENSE_PUBLIC_KEY", s.license_public_key)
         s.trusted_proxies = [value.strip() for value in _env("TRUSTED_PROXIES", "").split(",") if value.strip()]
         s.o2_url = _env("O2_URL", s.o2_url)
         s.public_url = _env("PUBLIC_URL", s.public_url)
         s.join_control_url = _env("JOIN_CONTROL_URL", s.join_control_url)
         s.gatus_url = _env("GATUS_URL", s.gatus_url)
+        s.support_log_dir = _env("SUPPORT_LOG_DIR", s.support_log_dir)
         s.control_version = _env("VERSION", s.control_version)
         s.o2_source = _env("O2_SOURCE", s.o2_source)
         s.rollout_batch_size = max(1, int(_env("ROLLOUT_BATCH_SIZE", str(s.rollout_batch_size))))

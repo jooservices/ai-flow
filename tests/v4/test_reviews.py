@@ -33,6 +33,8 @@ def test_review_queue_shows_summary_pr_diff_verify_and_gated_preview(client, ctx
     ctx.repo().projects["TESTFLOW"] = Project(
         key="TESTFLOW", repo="jooservices/testflow", environments={"preview": {"url": "https://preview.testflow.test"}}
     )
+    ctx.github.repositories.append({"full_name": "jooservices/testflow", "name": "testflow",
+                                    "default_branch": "develop"})
     add_ticket(ctx.db, "TESTFLOW-5", status="To Do", labels=())
     ctx.db.run("UPDATE tickets SET type='Epic' WHERE key='TESTFLOW-5'")
     add_ticket(ctx.db, "TESTFLOW-28", status="Human review", labels=("require-human",))
@@ -62,7 +64,7 @@ def test_review_page_is_routed_by_traefik():
     from pathlib import Path
 
     compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
-    assert "PathPrefix(`/review`)" in compose.read_text()
+    assert 'PathPrefix(`/`) && !PathPrefix(`/o2`) && !PathPrefix(`/gatus`)' in compose.read_text()
 
 
 def test_reviewer_token_is_loaded_from_control_environment(monkeypatch):
@@ -84,12 +86,13 @@ def test_jira_sync_notifies_assignee_when_require_human_ticket_enters_review(ctx
     }}
     ctx.jira.search = lambda _jql: iter([issue])
     calls = []
-    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="":
+    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
                         calls.append((severity, title, detail, link, recipient)) or ["email"])
 
     assert jira_sync(ctx) == 1
     assert len(calls) == 1
     assert calls[0][0] == "info" and calls[0][1] == "TESTWP-81 is ready for human review"
+    assert calls[0][3] == ctx.settings.public_url.rstrip("/") + "/review"
     assert calls[0][4] == "reviewer@example.test"
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-81'")["status"] == "Human review"
 
@@ -100,19 +103,17 @@ def test_worker_transition_notifies_owner_when_assignee_is_missing(client, ctx, 
     headers = {"Authorization": f"Bearer {cc['node_token']}"}
     run = client.post("/v1/work/claim", json={"ticket": "TESTWP-82", "account": "claude-01"}, headers=headers).json()
     calls = []
-    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="":
+    monkeypatch.setattr(control_api.notify, "send", lambda severity, title, detail="", link="", recipient="", **kwargs:
                         calls.append(recipient) or ["email"])
 
     response = client.post("/v1/jira/TESTWP-82/transition",
                            json={"run_id": run["run_id"], "fence": run["fence"], "to": "Human review"},
                            headers=headers)
     assert response.json() == {"status": "Human review"}
-    assert calls == [""]  # notify.send routes an empty recipient to the configured owner alert email
+    assert calls == [""]  # empty recipient uses the saved channel recipient
 
 
-def test_notify_email_targets_assignee_and_uses_owner_as_fallback(monkeypatch):
-    monkeypatch.setenv("AIFLOW4_SMTP_HOST", "mail.test")
-    monkeypatch.setenv("AIFLOW4_ALERT_EMAIL", "owner@example.test")
+def test_notify_email_targets_assignee_and_uses_saved_owner_recipient(ctx, monkeypatch):
     sent = []
 
     class Mail:
@@ -122,14 +123,21 @@ def test_notify_email_targets_assignee_and_uses_owner_as_fallback(monkeypatch):
         def __exit__(self, *_args):
             return False
 
+        def login(self, *_args):
+            return None
+
         def send_message(self, message):
-            sent.append(message["To"])
+            sent.append((message["To"], message.get("Cc", "")))
 
     monkeypatch.setattr(notify.smtplib, "SMTP", lambda *_args, **_kwargs: Mail())
-    notify.send("info", "review", recipient="reviewer@example.test")
-    notify.send("info", "review", recipient="")
+    channel = notify.save_channel(ctx.db, {"name": "owner email", "kind": "email", "config": {
+        "host": "mail.test", "port": 25, "from": "flow@example.test", "to": "owner@example.test",
+        "tls_mode": "none"}})
+    notify.save_preferences(ctx.db, {"routes": {"review_before_merge": [channel["id"]]}})
+    notify.send("info", "review", recipient="reviewer@example.test", ctx=ctx, alert_kind="review_before_merge")
+    notify.send("info", "review", recipient="", ctx=ctx, alert_kind="review_before_merge")
 
-    assert sent == ["reviewer@example.test", "owner@example.test"]
+    assert sent == [("owner@example.test", "reviewer@example.test"), ("owner@example.test", "")]
 
 
 def test_reviewer_approve_merges_with_fence_and_marks_ticket_done(client, ctx):

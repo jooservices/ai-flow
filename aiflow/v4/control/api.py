@@ -28,6 +28,8 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -38,7 +40,7 @@ from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps, tools_for_stack
-from . import business, jira_connect, knowledge, memory, role_health, rollout, tooling, version_release
+from . import business, jira_connect, knowledge, licensing, memory, role_health, rollout, tooling, version_release
 from . import review_metrics
 from . import quota as quota_reporting
 from .console_auth import ConsoleUser, COOKIE_NAME, ROLE_PERMISSIONS, has_permission, role_satisfies, verify_session
@@ -836,6 +838,22 @@ class JoinCommandBody(BaseModel):
     project: str = Field(default="", max_length=32)
 
 
+class LicenseKeyBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    key: str = Field(min_length=1, max_length=2000)
+
+
+class OfflineLicenseBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    license_file: str = Field(min_length=1, max_length=50000)
+
+
+class PlanLimitsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    plan: str
+    limits: dict[str, int]
+
+
 class ManagedAccountCreateBody(BaseModel):
     model_config = {"extra": "forbid"}
     provider: Literal["claude", "codex", "opencode", "grok"]
@@ -901,6 +919,10 @@ def create_app(ctx: Ctx) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app):
         try:
+            licensing.initialize(ctx.db)
+        except Exception as e:  # noqa: BLE001
+            log.warning("licence state initialization failed (%s)", type(e).__name__)
+        try:
             _app.state.sync_accounts()
         except Exception as e:  # noqa: BLE001
             log.warning("account sync failed: %s", e)
@@ -908,15 +930,41 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     app = FastAPI(title="AI Flow v4 control API", version=VERSION, lifespan=lifespan)
     app.state.ctx = ctx
+    app.state.license_sync_warnings = []
 
-    def sync_accounts() -> None:
+    @app.exception_handler(RequestValidationError)
+    async def safe_license_validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path in {"/v1/licensing/activate", "/v1/licensing/offline"}:
+            # Pydantic's normal error response includes the rejected value. These bodies contain secrets,
+            # including when the value exceeds a field's maximum length, so never return validation details.
+            return JSONResponse(
+                {"detail": "Licence key or signed licence file is invalid or exceeds the supported size."},
+                status_code=422,
+            )
+        return await request_validation_exception_handler(request, exc)
+
+    def sync_accounts() -> list[str]:
+        """Sync configured accounts and machines that fit the current licence limits."""
         repo = configured_repo()
+        warnings: list[str] = []
         removed = {row["id"] for row in ctx.db.all(
             "SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL")}
         removed_nodes = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NOT NULL")}
         for a in repo.accounts:
             if a.id in removed or a.node in removed_nodes:
                 continue
+            if not ctx.db.one("SELECT 1 FROM accounts WHERE id=%s", (a.id,)):
+                try:
+                    # Startup admits configured accounts in order; use registered rows for admission because the
+                    # Licence screen's usage count also includes configured accounts that have not synced yet.
+                    registered_count = int(ctx.db.one("SELECT count(*) AS count FROM accounts")["count"])
+                    licensing.require_capacity(ctx, "ai_accounts", count=registered_count,
+                                                public_key=ctx.settings.license_public_key)
+                except licensing.LicenseError as exc:
+                    message = f"Configured AI account {a.id} was not synced: {exc}"
+                    warnings.append(message)
+                    log.warning("%s", message)
+                    continue
             ctx.db.run(
                 "INSERT INTO accounts (id, provider, node, tier, roles) VALUES (%s,%s,%s,%s,%s)"
                 " ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, node=EXCLUDED.node, tier=EXCLUDED.tier,"
@@ -925,12 +973,22 @@ def create_app(ctx: Ctx) -> FastAPI:
             removed_node = ctx.db.one("SELECT removed_at FROM nodes WHERE name=%s", (n.name,))
             if removed_node and removed_node["removed_at"]:
                 continue
+            if not removed_node:
+                try:
+                    licensing.require_capacity(ctx, "machines", public_key=ctx.settings.license_public_key)
+                except licensing.LicenseError as exc:
+                    message = f"Configured machine {n.name} was not synced: {exc}"
+                    warnings.append(message)
+                    log.warning("%s", message)
+                    continue
             # Keep the IP a node reported at join: a restart must not replace where it was last seen with
             # the control repo value. Only a first insert (no join yet) takes the configured address.
             ctx.db.run("INSERT INTO nodes (name, ip, role, slots_total, projects) VALUES (%s,%s,%s,%s,%s)"
                        " ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, slots_total=EXCLUDED.slots_total,"
                        " projects=EXCLUDED.projects, dynamic=false",
                        (n.name, n.ip, n.role, n.slots, n.projects))
+        app.state.license_sync_warnings = warnings
+        return warnings
 
     app.state.sync_accounts = sync_accounts
     _identity: list[tuple[str, str, str]] = []
@@ -976,13 +1034,21 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "reviewer"
 
     def owner_auth(request: Request, authorization: str = Header(default="")) -> str:
+        def writable() -> None:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
+
         configured = ctx.settings.owner_token
         scheme, separator, token = authorization.partition(" ")
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            writable()
             return ""
         user = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         if user and has_permission(user.role, "knowledge.approve"):
+            writable()
             return user.subject
         if not configured and not ctx.settings.console_session_secret:
             raise HTTPException(503, "owner actions are not configured")
@@ -1031,7 +1097,21 @@ def create_app(ctx: Ctx) -> FastAPI:
             if action != "read":
                 audit(target, action, node, "", None, user.subject, False, "owner role required")
             raise HTTPException(403, "owner role required")
+        read_actions = {"read", "project_catalog", "project_repositories", "project_preflight",
+                        "list_import_installations", "open_installation_settings"}
+        if action not in read_actions | {"license_activate"}:
+            try:
+                licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
         return user
+
+    def require_capacity(resource: str, count: int | None = None, *, connection=None) -> dict:
+        try:
+            return licensing.require_capacity(ctx, resource, count, public_key=ctx.settings.license_public_key,
+                                              connection=connection)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     def run_row(run_id: str) -> dict:
         try:
@@ -1070,6 +1150,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def reviewer_run(key: str, statuses: tuple[str, ...] = ("Human review",),
                      allowed_kinds: tuple[str, ...] | None = None) -> tuple[dict, str, int, int]:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         ticket = ctx.db.one("SELECT key, project, status, labels, summary, blocked_by FROM tickets WHERE key=%s", (key,))
         if not ticket:
             raise HTTPException(404, "unknown ticket")
@@ -1558,6 +1642,58 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.leases.r.ping()
         return {"ok": True, "version": VERSION}
 
+    # --- licence and metered usage ---------------------------------------------------------------------------
+    @app.get("/v1/licensing")
+    def licensing_state(request: Request) -> dict:
+        console_user(request, "licensing.manage")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        state["usage"] = licensing.resource_counts(ctx)
+        state["sync_warnings"] = list(app.state.license_sync_warnings)
+        return state
+
+    @app.get("/v1/licensing/status")
+    def licensing_status(request: Request) -> dict:
+        console_user(request, "console.read")
+        state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
+        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only")}
+
+    @app.post("/v1/licensing/activate")
+    def activate_license(body: LicenseKeyBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                             ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/v1/licensing/offline")
+    def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        try:
+            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.put("/v1/licensing/limits")
+    def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
+        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        try:
+            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/v1/licensing/usage")
+    def licensing_usage(request: Request) -> dict:
+        console_user(request, "console.read")
+        return {"rows": licensing.usage_report(ctx.db)}
+
+    @app.get("/v1/licensing/usage.csv")
+    def licensing_usage_csv(request: Request) -> PlainTextResponse:
+        console_user(request, "console.read")
+        content = licensing.usage_csv(licensing.usage_report(ctx.db))
+        return PlainTextResponse(content, media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": "attachment; filename=ai-flow-usage.csv"})
+
     # --- Owner-managed GitHub App connection ----------------------------------------------------------------
     def github_secret_store() -> GitHubSecretStore:
         return GitHubSecretStore(ctx.settings.github_app_dir)
@@ -1983,12 +2119,16 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "branch_exists": branch_exists, "nodes": node_results, "required_tools": required_tools,
                 "ok": not missing_statuses and branch_exists}
 
-    def refresh_projects() -> None:
+    def refresh_projects() -> bool:
+        if not ctx.refresh_repo:
+            return True
         if ctx.refresh_repo:
             try:
                 ctx.refresh_repo()
-            except Exception as exc:  # commit already exists remotely; RepoCache will retry its pull later
+            except Exception as exc:  # RepoCache will retry its pull on a later refresh
                 log.warning("project control repo refresh failed (%s)", type(exc).__name__)
+                return False
+        return True
 
     def project_audit(action: str, key: str, actor: str, accepted: bool, result: str,
                       payload: dict[str, Any] | None = None) -> None:
@@ -2201,49 +2341,60 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
-        try:
-            result = project_preflight(body, user.subject)
-        except HTTPException as exc:
-            project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
-                          {"project_input": body.project, "repo": body.repo})
-            raise
-        key = result["project"]
-        if key in ctx.repo().projects:
-            project_audit("add_project", key, user.subject, False, "project is already configured",
-                          {"repo": body.repo})
-            raise HTTPException(409, "project is already configured")
-        if not result["ok"]:
-            reasons = []
-            if result["missing_statuses"]:
-                reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
-            if not result["branch_exists"]:
-                reasons.append(f"base branch {body.base} is missing from {body.repo}")
-            detail = {"message": "; ".join(reasons) or "project checks failed",
-                      "missing_statuses": result["missing_statuses"],
-                      "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
-            project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
-            raise HTTPException(422, detail)
+        with ctx.db.pool.connection() as connection:
+            with connection.transaction():
+                # Keep the shared admission lock through preflight, the external commit, and repo refresh. A
+                # competing request then counts the project just committed before it can take the final slot.
+                licensing.lock_resource_admission(connection)
+                if not refresh_projects():
+                    project_audit("add_project", body.project[:32], user.subject, False,
+                                  "control repo refresh failed before capacity check", {"repo": body.repo})
+                    raise HTTPException(503, "could not refresh the control repo before checking project capacity")
+                require_capacity("projects", len(ctx.repo().projects), connection=connection)
+                try:
+                    result = project_preflight(body, user.subject)
+                except HTTPException as exc:
+                    project_audit("add_project", body.project[:32], user.subject, False, str(exc.detail),
+                                  {"project_input": body.project, "repo": body.repo})
+                    raise
+                key = result["project"]
+                if key in ctx.repo().projects:
+                    project_audit("add_project", key, user.subject, False, "project is already configured",
+                                  {"repo": body.repo})
+                    raise HTTPException(409, "project is already configured")
+                if not result["ok"]:
+                    reasons = []
+                    if result["missing_statuses"]:
+                        reasons.append("missing Jira statuses: " + ", ".join(result["missing_statuses"]))
+                    if not result["branch_exists"]:
+                        reasons.append(f"base branch {body.base} is missing from {body.repo}")
+                    detail = {"message": "; ".join(reasons) or "project checks failed",
+                              "missing_statuses": result["missing_statuses"],
+                              "branch_exists": result["branch_exists"], "nodes": result["nodes"]}
+                    project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
+                    raise HTTPException(422, detail)
 
-        worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
-        worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
-        checks = [check.strip() for check in body.checks if check.strip()]
-        config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                  "checks": checks, "merge": {"method": body.merge_method},
-                  "limits": {"parallel": body.parallel_limit,
-                             "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
-                  "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
-        content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-        control_name = Path(ctx.settings.control_repo).name
-        try:
-            github = github_gateway(ctx)
-            branch = github.default_branch(control_name)
-            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
-                                            f"projects: add {key} via AI Flow console")
-        except Exception as exc:
-            log.warning("project add commit failed (%s)", type(exc).__name__)
-            project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
-            raise HTTPException(502, "could not save the project to aiflow-control") from exc
-        refresh_projects()
+                worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
+                worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
+                checks = [check.strip() for check in body.checks if check.strip()]
+                config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
+                          "checks": checks, "merge": {"method": body.merge_method},
+                          "limits": {"parallel": body.parallel_limit,
+                                     "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
+                          "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
+                content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+                control_name = Path(ctx.settings.control_repo).name
+                try:
+                    github = github_gateway(ctx)
+                    branch = github.default_branch(control_name)
+                    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                                f"projects: add {key} via AI Flow console")
+                except Exception as exc:
+                    log.warning("project add commit failed (%s)", type(exc).__name__)
+                    project_audit("add_project", key, user.subject, False, "control repo commit failed", config)
+                    raise HTTPException(502, "could not save the project to aiflow-control") from exc
+                # Make the committed project visible to the next admission before releasing the lock.
+                refresh_projects()
         project_audit("add_project", key, user.subject, True, commit or "bot commit created", config)
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
@@ -2317,6 +2468,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def create_join_grant(name: str, role: str, project: str) -> tuple[str, datetime]:
         """Create the shared five-minute grant used by both Command Center entry points."""
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", name):
             raise HTTPException(422, "invalid node name")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", role):
@@ -2327,24 +2482,33 @@ def create_app(ctx: Ctx) -> FastAPI:
         dynamic = name not in repo.nodes
         if not dynamic and project not in repo.nodes[name].projects:
             raise HTTPException(422, "project is not assigned to this node in the control repo")
-        existing = ctx.db.one("SELECT name,removed_at FROM nodes WHERE name=%s AND token_hash<>''"
-                              " AND last_heartbeat > now()-interval '75 seconds'", (name,))
-        if existing and not existing["removed_at"]:
-            raise HTTPException(409, "a live node already uses this name")
-        token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
-            issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
-                                  " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
-                                  " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
-                                  " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
-                                  " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
-                                  " RETURNING expires_at",
-                                  (h(token), name, role, project, dynamic)).fetchone()
-            # Register a pending dynamic node so Command Center can show it before its first heartbeat.
-            conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic,accepting_work,removed_at)"
-                         " VALUES (%s,%s,'joined',%s,%s,true,NULL) ON CONFLICT (name) DO UPDATE"
-                         " SET removed_at=NULL,accepting_work=true WHERE nodes.removed_at IS NOT NULL",
-                         (name, role, [project], dynamic))
+            with conn.transaction():
+                # The count, join grant, and pending node insert share the lock and transaction. A second request
+                # waits here, then sees the first request's node before checking the last available slot.
+                licensing.lock_resource_admission(conn)
+                existing = conn.execute(
+                    "SELECT name,removed_at,(token_hash<>'' AND last_heartbeat > now()-interval '75 seconds') AS live"
+                    " FROM nodes WHERE name=%s FOR UPDATE", (name,)).fetchone()
+                if existing and existing["live"] and not existing["removed_at"]:
+                    raise HTTPException(409, "a live node already uses this name")
+                if not existing or existing["removed_at"]:
+                    count = int(conn.execute(
+                        "SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL").fetchone()["count"])
+                    require_capacity("machines", count, connection=conn)
+                token = secrets.token_urlsafe(32)
+                issued = conn.execute("INSERT INTO node_join_tokens (token_hash,node_name,role,project,dynamic,expires_at)"
+                                      " VALUES (%s,%s,%s,%s,%s,now()+interval '5 minutes')"
+                                      " ON CONFLICT (node_name) WHERE used_at IS NULL DO UPDATE SET"
+                                      " token_hash=EXCLUDED.token_hash,role=EXCLUDED.role,project=EXCLUDED.project,"
+                                      " dynamic=EXCLUDED.dynamic,created_at=now(),expires_at=EXCLUDED.expires_at"
+                                      " RETURNING expires_at",
+                                      (h(token), name, role, project, dynamic)).fetchone()
+                # Register a pending dynamic node so Command Center can show it before its first heartbeat.
+                conn.execute("INSERT INTO nodes (name,role,status,projects,dynamic,accepting_work,removed_at)"
+                             " VALUES (%s,%s,'joined',%s,%s,true,NULL) ON CONFLICT (name) DO UPDATE"
+                             " SET removed_at=NULL,accepting_work=true WHERE nodes.removed_at IS NOT NULL",
+                             (name, role, [project], dynamic))
         return token, issued["expires_at"]
 
     @app.post("/v1/nodes/join-tokens")
@@ -2373,6 +2537,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/nodes/join")
     def join(body: JoinBody) -> dict:
+        try:
+            licensing.require_writable(ctx.db, ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(423, str(exc)) from None
         token = secrets.token_urlsafe(32)
         with ctx.db.pool.connection() as conn:
             row = conn.execute(
@@ -2621,6 +2789,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         request_id = str(uuid.uuid4())
         with ctx.db.pool.connection() as connection:
             lock_machine_capacity(connection, name)
+            licensing.lock_resource_admission(connection)
             node = connection.execute("SELECT name FROM nodes WHERE name=%s AND removed_at IS NULL", (name,)).fetchone()
             if not node:
                 audit_in(connection, "ai-account", "add", name, "", None, user.subject, False,
@@ -2633,6 +2802,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                          "machine session limit is eight",
                          {"current_sessions": capacity, "requested_sessions": body.sessions})
                 raise HTTPException(422, "a machine can run at most 8 sessions")
+            require_capacity("ai_accounts", connection=connection)
             existing_ids = {account.id for account in repo.accounts}
             existing_ids.update(row["id"] for row in connection.execute(
                 "SELECT id FROM managed_ai_accounts").fetchall())
@@ -3273,16 +3443,45 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
+    def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
+        """Filter offers by account, machine, and project plan limits without affecting active runs."""
+        state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                    public_key=ctx.settings.license_public_key)
+        candidates = eligible(account, node)
+        allowed: list[dict] = []
+        refused: list[str] = []
+        for ticket in candidates:
+            try:
+                licensing.enforce_project_entitlement(ctx, ticket["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(ticket)
+        reason = refused[0] if candidates and not allowed and refused else ""
+        return allowed, reason
+
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            tickets, reason = entitled_candidates(account, node)
+        except licensing.LicenseError as exc:
+            return {"tickets": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"tickets": [], "reason": f"version skew: {policy['reason']}"}
-        return {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"], "labels": t["labels"],
-                             "step": t["step"]} for t in eligible(account, node)[:20]]}
+        result = {"tickets": [{"key": t["key"], "summary": t["summary"], "priority": t["priority"],
+                                "labels": t["labels"], "step": t["step"]} for t in tickets[:20]]}
+        if reason:
+            result["reason"] = reason
+        return result
 
     @app.get("/v1/master/candidate")
     def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
 
     def related_hits(t: dict) -> list[dict]:
@@ -3295,11 +3494,27 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         # a node outside the version skew policy gets no new work (docs/v4/fleet-upgrade.md)
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return JSONResponse({"claimed": False, "reason": f"version skew: {policy['reason']}"}, status_code=409)
-        candidates = [master_candidate(body.account, node)] if body.step == "master" else eligible(body.account, node)
+        if body.step == "master":
+            candidates = [master_candidate(body.account, node)]
+        else:
+            candidates = eligible(body.account, node)
+            offered = next((candidate for candidate in candidates
+                            if candidate["key"] == body.ticket and candidate["step"] == body.step), None)
+            if offered:
+                try:
+                    licensing.enforce_project_entitlement(ctx, offered["project"],
+                                                          public_key=ctx.settings.license_public_key, state=state)
+                except licensing.LicenseError as exc:
+                    return JSONResponse({"claimed": False, "reason": str(exc)}, status_code=409)
         tickets = {(t["key"], t["step"]): t for t in candidates if t}
         t = tickets.get((body.ticket, body.step))
         if not t:
@@ -3440,6 +3655,11 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"versions": [], "reason": str(exc)}
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             return {"versions": [], "reason": f"version skew: {policy['reason']}"}
@@ -3457,10 +3677,27 @@ def create_app(ctx: Ctx) -> FastAPI:
                          str(candidate.get("repository") or "")) not in peer_candidates]
         if versions and not available:
             return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
-        return {"versions": available}
+        allowed, refused = [], []
+        for candidate in available:
+            try:
+                licensing.enforce_project_entitlement(ctx, candidate["project"],
+                                                      public_key=ctx.settings.license_public_key, state=state)
+            except licensing.LicenseError as exc:
+                refused.append(str(exc))
+            else:
+                allowed.append(candidate)
+        result = {"versions": allowed}
+        if refused and not allowed:
+            result["reason"] = refused[0]
+        return result
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        try:
+            state = licensing.enforce_work_entitlement(ctx, body.account, node,
+                                                        public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
         policy = rollout.node_compatible(ctx, node, RELEASES)
         if not policy["compatible"]:
             raise HTTPException(409, f"node version skew: {policy['reason']}")
@@ -3474,6 +3711,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (not project or not version_release.enabled(project)
                 or project.repo.lower().rstrip("/") == "jooservices/ai-flow"):
             raise HTTPException(403, "project is not enabled for version releases")
+        try:
+            licensing.enforce_project_entitlement(ctx, project.key,
+                                                  public_key=ctx.settings.license_public_key, state=state)
+        except licensing.LicenseError as exc:
+            raise HTTPException(409, str(exc)) from None
         if not acc or acc.node != node or body.account != acc.id or not ({"master", "release"} & set(acc.roles or [])):
             raise HTTPException(403, "a master or release account assigned to this node is required")
         node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work FROM nodes WHERE name=%s", (node,)) or {}

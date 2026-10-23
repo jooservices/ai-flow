@@ -13,8 +13,9 @@ from conftest import join_node
 from aiflow.v4 import cli
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
-from aiflow.v4.control import console_auth
+from aiflow.v4.control import console_auth, licensing
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
+from aiflow.v4.control.db import J
 from aiflow.v4.core.settings import Settings
 
 SECRET = "s" * 40
@@ -64,6 +65,35 @@ def test_seed_user_is_created_once_and_stores_only_a_hash(ctx):
         login.seed_user(ctx.db, "not-an-email", "super_admin")
     with pytest.raises(ValueError):
         login.seed_user(ctx.db, "x@example.test", "nobody")
+
+
+def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, seeded):
+    client = make_client(ctx, gate=True)
+    assert sign_in(client, seeded).status_code == 200
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["users"] = 2
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+
+    listed = client.get("/v1/auth/users")
+    assert listed.status_code == 200 and listed.json()["count"] == 1 and listed.json()["limit"] == 2
+    created = client.post("/v1/auth/users", json={"email": "new@example.test", "display_name": "New User",
+                                                  "role": "lead"})
+    assert created.status_code == 201
+    result = created.json()
+    assert result["email"] == "new@example.test" and result["role"] == "lead"
+    assert result["initial_password"] and result["message"]
+    stored = ctx.db.one("SELECT password_hash FROM console_users WHERE email='new@example.test'")
+    assert result["initial_password"] not in stored["password_hash"]
+
+    refused = client.post("/v1/auth/users", json={"email": "third@example.test", "role": "lead"})
+    assert refused.status_code == 409
+    assert "Users limit of 2 reached" in refused.json()["detail"]
+    assert "Raise the user limit in the Licence screen" in refused.json()["detail"]
+
+    console = (Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html").read_text()
+    assert 'id="users-create-form"' in console and "fetch('/v1/auth/users'" in console
+    assert "S.users.error" in console and "S.users.initialPassword" in console
+    assert has_permission("owner", "users.manage")
 
 
 # --- AC1: endpoints --------------------------------------------------------------------------------------------------

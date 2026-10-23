@@ -124,3 +124,33 @@ Every GitHub write in `write_audit` (target `github`, and `aiflow-control` for c
 carries `connection` in its payload: `default` or the connection id. This includes worker branch pushes through
 the relay and version release publication. Token and key values never appear in the UI, logs, Jira, events or
 audit rows.
+
+### API routes served through a connection
+
+These control API routes resolve the GitHub connection of the repository they act on, or list connections, and
+refuse with HTTP 409 when none reaches it (`github_gateway(ctx, repo)`):
+
+- Connections: `GET /v1/integrations/github`, `GET /v1/integrations/github/connections`,
+  `POST /v1/integrations/github/connections/token`, `PUT /v1/integrations/github/connections/{connection_id}/token`,
+  `POST /v1/integrations/github/connections/{connection_id}/test`,
+  `DELETE /v1/integrations/github/connections/{connection_id}`, `GET /v1/integrations/github/manifest/start`,
+  `GET /v1/integrations/github/setup`, `GET /v1/integrations/github/installation-settings`,
+  `POST /v1/integrations/github/imports`, `POST /v1/integrations/github/imports/{pending_id}/connect`.
+- Projects and repositories: `GET /v1/projects/catalog`, `POST /v1/projects`, `POST /v1/projects/preflight`,
+  `POST /v1/projects/{key}/pause`, `DELETE /v1/projects/{key}`, `GET /v1/projects/{key}/repositories`,
+  `PUT /v1/projects/{key}/repositories`.
+- GitHub operations: `POST /v1/github/pr`, `POST /v1/github/comment`, `POST /v1/github/merge`,
+  `POST /v1/github/update-branch`, `GET /v1/github/checks`, `GET /v1/github/git/{git_path:path}`,
+  `POST /v1/github/git/{git_path:path}`, `POST /v1/nodes/{name}/check-probes/token`,
+  `POST /v1/runs/{run_id}/result`, `POST /v1/version-releases/claim`,
+  `POST /v1/version-releases/{version_id}/complete`, `GET /v1/version-releases/candidates`.
+- Control repository commits (accounts, nodes, users, knowledge and review decisions, through the connection of
+  the control repository): `DELETE /v1/accounts/{account_id}`, `PATCH /v1/accounts/{account_id}`,
+  `POST /v1/accounts/{account_id}/sign-in`, `POST /v1/accounts/{account_id}/sign-in/complete`,
+  `POST /v1/machines/{name}/accounts`, `DELETE /v1/nodes/{name}`, `POST /v1/nodes/join`,
+  `POST /v1/nodes/{name}/operations`, `POST /v1/console/users`, `PUT /v1/console/users/{email}`,
+  `PATCH /v1/console/users/{email}/disabled`, `POST /v1/knowledge/resources`,
+  `POST /v1/knowledge/resources/{kind}/{resource_id}/restore`,
+  `POST /v1/knowledge/proposals/{proposal_id}/approve`, `GET /v1/reviews`, `POST /v1/reviews/{key}/answer`,
+  `POST /v1/reviews/{key}/approve`, `POST /v1/reviews/{key}/ask-ai`, `POST /v1/reviews/{key}/reject`,
+  `POST /v1/reviews/{key}/rework`, `POST /v1/reviews/{key}/skip-gate`, `GET /v1/deploy/ci-state`.

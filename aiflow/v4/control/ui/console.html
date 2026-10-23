@@ -1092,6 +1092,19 @@ function githubConnectionAction(id, method, suffix, body, notice) {
     .then(function () { S.integrations.notice = notice; loadGitHubIntegrations(); })
     .catch(function (e) { S.integrations.error = String(e.message || e); S.integrations.busy = false; renderIntegrations(); });
 }
+function githubManifestStart() {
+  var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
+  if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); return; }
+  window.open('/v1/integrations/github/manifest/start?organization=' + encodeURIComponent(org) + '&connection=' + encodeURIComponent(githubAppTarget()), '_blank', 'noopener');
+}
+function replaceGitHubToken(id) {
+  var field = $('[data-github-replace-token="' + id + '"]'), pasted = field ? field.value.trim() : '';
+  if (!pasted) { S.integrations.error = 'Paste the new token first.'; renderIntegrations(); return; }
+  githubConnectionAction(id, 'PUT', '/token', { token: pasted }, 'Token replaced.');
+}
+function removeGitHubConnection(id) {
+  if (window.confirm('Remove this GitHub connection? Repositories using it must be reassigned first.')) githubConnectionAction(id, 'DELETE', '', null, 'Connection removed.');
+}
 function loadGitHubIntegrations() {
   S.integrations.busy = true; S.integrations.error = ''; renderIntegrations();
   fetch('/v1/integrations/github/connections', { cache: 'no-store' }).then(function (r) { return githubResponseError(r); })
@@ -4178,22 +4191,12 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-repository-add') { var addSelect = $('[data-repository-add]'); addProjectRepository(addSelect ? addSelect.value : ''); }
   else if (act === 'project-repositories-save') saveProjectRepositories();
   else if (act === 'github-refresh') loadGitHubIntegrations();
-  else if (act === 'github-manifest') {
-    var orgField = $('[data-github-org]'), org = orgField ? orgField.value.trim() : '';
-    if (!org) { S.integrations.error = 'Enter the GitHub organization that will own the App.'; renderIntegrations(); }
-    else window.open('/v1/integrations/github/manifest/start?organization=' + encodeURIComponent(org) + '&connection=' + encodeURIComponent(githubAppTarget()), '_blank', 'noopener');
-  }
+  else if (act === 'github-manifest') githubManifestStart();
   else if (act === 'github-add-token') addGitHubToken();
   else if (act === 'github-test') githubConnectionAction(el.getAttribute('data-id'), 'POST', '/test', null, 'Connection tested.');
-  else if (act === 'github-replace-token') {
-    var field = $('[data-github-replace-token="' + el.getAttribute('data-id') + '"]'), pasted = field ? field.value.trim() : '';
-    if (!pasted) { S.integrations.error = 'Paste the new token first.'; renderIntegrations(); }
-    else githubConnectionAction(el.getAttribute('data-id'), 'PUT', '/token', { token: pasted }, 'Token replaced.');
-  }
+  else if (act === 'github-replace-token') replaceGitHubToken(el.getAttribute('data-id'));
   else if (act === 'github-replace-app') { S.integrations.target = el.getAttribute('data-id'); S.integrations.notice = 'Add the replacement GitHub App below; it takes over this connection.'; renderIntegrations(); }
-  else if (act === 'github-remove') {
-    if (window.confirm('Remove this GitHub connection? Repositories using it must be reassigned first.')) githubConnectionAction(el.getAttribute('data-id'), 'DELETE', '', null, 'Connection removed.');
-  }
+  else if (act === 'github-remove') removeGitHubConnection(el.getAttribute('data-id'));
   else if (act === 'github-import') importGitHubApp();
   else if (act === 'github-import-refresh') loadImportedInstallations();
   else if (act === 'github-import-connect') connectImportedGitHubApp();

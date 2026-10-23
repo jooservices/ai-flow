@@ -342,9 +342,12 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
     incidents = ctx.db.all(
         "SELECT id,opened_at,closed_at,severity,kind,subject,title,detail FROM incidents"
         " WHERE opened_at >= now() - interval '7 days' ORDER BY opened_at DESC LIMIT %s", (MAX_INCIDENTS,))
+    # Incident prose is owner-controlled free-form text. Heuristics cannot reliably identify
+    # every personal name in it, so retain incident metadata but never export those fields.
     incident_data = [{"id": row["id"], "opened_at": _iso(row["opened_at"]), "closed_at": _iso(row["closed_at"]),
-                      "severity": row["severity"], "kind": row["kind"], "subject": row["subject"],
-                      "title": row["title"], "detail": row["detail"]} for row in incidents]
+                      "severity": row["severity"], "kind": row["kind"],
+                      "subject": "[REDACTED_FREEFORM]", "title": "[REDACTED_FREEFORM]",
+                      "detail": "[REDACTED_FREEFORM]"} for row in incidents]
 
     files: dict[str, bytes] = {
         "versions.json": _safe_json({"aiflow": version, "python": platform.python_version(),

@@ -86,6 +86,24 @@ def test_incident_collection_excludes_incidents_older_than_seven_days(ctx):
     assert [item["kind"] for item in incidents] == ["recent"]
 
 
+def test_bundle_excludes_unscreenable_free_form_incident_text(ctx):
+    incident_text = "jane doe called support yesterday"
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail)"
+               " VALUES ('support','jane doe','warning',%s,%s)", (incident_text, incident_text))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        incidents = json.loads(bundle.read("incidents.json"))
+        contents = "\n".join(bundle.read(name).decode("utf-8") for name in bundle.namelist())
+
+    assert inventory["scan"] == "passed"
+    assert incident_text not in contents
+    assert incidents[0]["kind"] == "support"
+    assert incidents[0]["subject"] == "[REDACTED_FREEFORM]"
+    assert incidents[0]["title"] == "[REDACTED_FREEFORM]"
+    assert incidents[0]["detail"] == "[REDACTED_FREEFORM]"
+
+
 def test_bundle_scrubs_personal_data_and_credentials_before_archive_is_built(ctx):
     token = "ghp_abcdefghijklmnopqrstuvwxyz123456"
     email = "private.person@example.test"

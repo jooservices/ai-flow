@@ -6,7 +6,9 @@ the owner can then download and inspect the ZIP before sharing it.
 
 The general bundle includes the AI Flow, Python and node release versions; selected non-secret control settings;
 machine and account states; up to 100 incidents opened in the last seven days; and control-service logs from the last
-24 hours. Incident text and logs are scrubbed for common credentials and personal identifiers, then scanned again.
+24 hours. Incident subject, title and detail are free-form text, so they are replaced with redaction markers before
+scanning; the structured incident metadata remains available. Logs are scrubbed for recognizable credentials and
+personal identifiers, then scanned again.
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
 bundle is rejected and no download is made available. Secret values and free-form account/provider error state are
 not selected from settings or registry records.

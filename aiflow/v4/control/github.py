@@ -24,7 +24,10 @@ API = "https://api.github.com"
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, response_body: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
 
 
 class GitHubApp:
@@ -33,6 +36,7 @@ class GitHubApp:
         self.dir = d
         self.meta: dict[str, Any] = {}
         self.key = ""
+        self._fallback_org = org
         self.org = org
         self.c = client or httpx.Client(base_url=API, timeout=30, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "aiflow4"})
@@ -42,11 +46,27 @@ class GitHubApp:
         self._config_stamp: tuple[int, int] | None = None
         self._refresh_config(force=True)
 
+    @property
+    def configured(self) -> bool:
+        """Whether this gateway still has a complete, currently loaded App configuration."""
+        return bool(self._config_stamp is not None and self.meta.get("id") and self.key)
+
+    def _revoke_config(self) -> None:
+        """Drop cached credentials when the shared secret files have been removed or become unreadable."""
+        with self._lock:
+            self.meta = {}
+            self.key = ""
+            self.org = self._fallback_org
+            self._inst = None
+            self._cache.clear()
+            self._config_stamp = None
+
     def _refresh_config(self, force: bool = False) -> None:
         """Reload a connection saved by another API replica without restarting workers or control loops."""
         try:
             stamp = ((self.dir / "app.json").stat().st_mtime_ns, (self.dir / "app.pem").stat().st_mtime_ns)
         except OSError:
+            self._revoke_config()
             if force:
                 raise
             return
@@ -70,6 +90,11 @@ class GitHubApp:
                     from .github_connect import GitHubSecretStore
                     GitHubSecretStore(self.dir)._write_file(key_path, key)
                     stamp = ((self.dir / "app.json").stat().st_mtime_ns, key_path.stat().st_mtime_ns)
+            except OSError:
+                self._revoke_config()
+                if force:
+                    raise
+                return
             finally:
                 if lock_fd is not None:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -92,7 +117,9 @@ class GitHubApp:
     def _req(self, method: str, path: str, token: str, body: Any = None, ok=(200, 201, 202, 204)) -> Any:
         r = self.c.request(method, path, json=body, headers={"Authorization": f"Bearer {token}"})
         if r.status_code not in ok:
-            raise GitHubError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+            body_text = r.text[:300]
+            raise GitHubError(f"{method} {path} -> {r.status_code}: {body_text}",
+                              status_code=r.status_code, response_body=body_text)
         return r.json() if r.content else None
 
     def installation_id(self) -> int:
@@ -223,6 +250,17 @@ class GitHubApp:
         data = self.api("GET", f"/repos/{self.org}/{repo}/git/ref/{ref}", repo=repo)
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
                  {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
+
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete one remote branch; a branch that is already gone counts as cleaned up."""
+        ref = quote(f"heads/{branch}", safe="/")
+        try:
+            self.api("DELETE", f"/repos/{self.org}/{repo}/git/refs/{ref}", repo=repo)
+        except GitHubError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        return True
 
     def create_branch_at_sha(self, repo: str, branch: str, sha: str) -> None:
         """Restore a deleted release branch at the exact audited commit for a post-merge retry."""

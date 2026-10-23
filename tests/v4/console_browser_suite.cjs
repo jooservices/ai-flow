@@ -316,24 +316,35 @@ async function exerciseMode(browser, mode) {
 }
 
 async function exerciseRoleMenus(browser) {
-  for (const person of config.roles.filter((entry) => entry.role !== 'administrator')) {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: 'light' });
-    const page = await context.newPage();
-    await traceOnFailure(context, `role-${person.role}`, async () => {
-      await page.goto(`${config.baseUrl}/login`, { waitUntil: 'domcontentloaded' });
-      await page.getByLabel('Email').fill(person.email);
-      await page.getByLabel('Password').fill(person.password);
-      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-      await page.waitForURL(`**${landingPath[person.role]}`);
-      await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
-      await visitScreens(page, person.views);
-      const forbidden = screens.find((label) => !person.views.includes(label));
-      if (forbidden) {
-        await page.goto(`${config.baseUrl}${viewPath[forbidden]}`, { waitUntil: 'domcontentloaded' });
-        await page.getByText('This view is not available for your role.', { exact: true }).waitFor({ state: 'visible' });
-      }
-    });
-    await context.close();
+  const people = config.roles.filter((entry) => entry.role !== 'administrator');
+  for (const mode of ['light', 'dark', 'phone']) {
+    const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1280, height: 800 };
+    for (const person of people) {
+      const context = await browser.newContext({
+        viewport: dimensions,
+        colorScheme: mode === 'dark' ? 'dark' : 'light'
+      });
+      const page = await context.newPage();
+      await traceOnFailure(context, `role-${person.role}-${mode}`, async () => {
+        await page.goto(`${config.baseUrl}/login`, { waitUntil: 'domcontentloaded' });
+        await auditLogin(page);
+        await page.getByLabel('Email').fill(person.email);
+        await page.getByLabel('Password').fill(person.password);
+        await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+        await page.waitForURL(`**${landingPath[person.role]}`);
+        await page.waitForFunction(() => !document.documentElement.classList.contains('role-loading'));
+        const actualScheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
+        assert.equal(actualScheme, mode === 'dark', `${person.role} ${mode} color scheme was not applied`);
+        assert.equal(page.viewportSize().width, dimensions.width, `${person.role} ${mode} viewport was not applied`);
+        await visitScreens(page, person.views);
+        const forbidden = screens.find((label) => !person.views.includes(label));
+        if (forbidden) {
+          await page.goto(`${config.baseUrl}${viewPath[forbidden]}`, { waitUntil: 'domcontentloaded' });
+          await page.getByText('This view is not available for your role.', { exact: true }).waitFor({ state: 'visible' });
+        }
+      });
+      await context.close();
+    }
   }
 }
 

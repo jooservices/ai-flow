@@ -84,7 +84,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install
-        run: pip install uv==0.13.4 && uv sync --frozen --group dev
+        run: |
+          pip install uv==0.13.4
+          uv sync --frozen --group dev
+          npm install --global playwright@1.64.1
+          playwright install chromium --with-deps
       - name: Two newest published releases for clean install, upgrade and rollback
         id: releases
         env:
@@ -115,6 +119,7 @@ jobs:
           AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
           ACCEPTANCE_PREVIOUS: ${{ steps.releases.outputs.previous }}
           ACCEPTANCE_TARGET: ${{ steps.releases.outputs.target }}
+          AIFLOW4_PLAYWRIGHT_TRACE_DIR: ${{ runner.temp }}/aiflow-playwright-traces
         run: bash deploy/v4/ci/clean-install-acceptance.sh full
 
       - name: Upload release acceptance logs
@@ -123,6 +128,15 @@ jobs:
         with:
           name: clean-install-acceptance-release
           path: ${{ runner.temp }}/aiflow-acceptance-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload clean-install acceptance Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-install-acceptance-release-playwright-traces
+          path: ${{ runner.temp }}/aiflow-playwright-traces/
           if-no-files-found: ignore
           retention-days: 14
 

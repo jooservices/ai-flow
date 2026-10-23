@@ -3,7 +3,8 @@
 #   fast  every pull request touching install, deploy, control or node code: the acceptance cases of
 #         tests/v4/test_clean_install_acceptance.py (clean control machine and two machines with sign-in on,
 #         tickets through Intake, development, verification and merge, Human review, policy calls, deploy
-#         scripts, backup and restore, upgrade and rollback, adding a machine and an AI account)
+#         scripts, backup and restore, upgrade and rollback, adding a machine and an AI account), plus the
+#         console's Playwright browser suite
 #   full  nightly and before every release: fast, then the whole tests/v4 suite and, when
 #         ACCEPTANCE_TARGET names a published release, the real clean machines (clean-install-containers.sh: control
 #         plane and two machines in containers, sign-in on, backup and restore) and, when ACCEPTANCE_PREVIOUS names a
@@ -50,5 +51,7 @@ if [[ $MODE == full ]]; then
   else
     echo "upgrade and rollback need two published releases; the systemd containers run in the release workflow" | tee "$LOGS/control-install-systemd.log"
   fi
+else
+  pipefail_step console-browser-suite uv run --frozen pytest tests/v4/test_console_browser.py -q -p no:warnings
 fi
 echo "clean-install acceptance ($MODE) passed"

@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from conftest import join_node
 from aiflow.v4 import cli
-from aiflow.v4.control import login
+from aiflow.v4.control import login, mfa
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control import console_auth
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
@@ -25,7 +25,7 @@ EXP = 4_102_444_800
 def make_client(ctx, gate=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
-    ctx.settings.console_require_mfa = False  # these login behavior tests opt out explicitly
+    ctx.settings.console_require_mfa = False  # a legacy false setting must not bypass administrator MFA
     app = create_app(ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
@@ -270,6 +270,9 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
         assert client.get(open_path).status_code == 200
     assert client.get("/v1/auth/me").status_code == 401
     assert sign_in(client, seeded).status_code == 200
+    secret = client.post("/v1/security/mfa/setup").json()["secret"]
+    enabled = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)})
+    assert enabled.status_code == 200
     assert client.get("/v1/state").status_code == 200 and client.get("/cc").status_code not in (302, 401)
 
 

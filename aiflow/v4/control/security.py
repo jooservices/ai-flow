@@ -157,13 +157,15 @@ def install_security(app: FastAPI, ctx) -> None:
         try:
             wait = await run_in_threadpool(over_budget, request)
         except redis.RedisError:
-            log.warning("rate limits: Redis is unavailable; requests are not limited meanwhile")
-            wait = 0
-        if wait:
-            response = JSONResponse({"detail": "too many requests; try again later"}, status_code=429,
-                                    headers={"Retry-After": str(wait)})
+            log.exception("rate limits: Redis is unavailable; refusing request")
+            response = JSONResponse({"detail": "request protection is unavailable; try again shortly"},
+                                    status_code=503, headers={"Retry-After": "5"})
         else:
-            response = await call_next(request)
+            if wait:
+                response = JSONResponse({"detail": "too many requests; try again later"}, status_code=429,
+                                        headers={"Retry-After": str(wait)})
+            else:
+                response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -193,13 +195,16 @@ def install_security(app: FastAPI, ctx) -> None:
     @app.put("/v1/security/settings")
     def put_security_settings(request: Request, body: SettingsBody) -> dict:
         user = require(request, "security.manage")
+        if body.require_mfa is False:
+            raise HTTPException(422, "two-factor sign-in is mandatory for administrator roles")
         changes: dict[str, Any] = {}
         if body.session_ttl_s is not None:
             changes["session_ttl_s"] = body.session_ttl_s
         if body.require_mfa is not None:
             changes["require_mfa"] = body.require_mfa
         for name, value in changes.items():
-            before = settings_view()[name]
+            before = (get_setting(ctx.db, "require_mfa", "1" if settings.console_require_mfa else "0") == "1"
+                      if name == "require_mfa" else settings_view()[name])
             set_setting(ctx.db, name, ("1" if value else "0") if isinstance(value, bool) else str(value), user.subject)
             audit_log.record(ctx.db, user.subject, "settings", f"security_setting_{name}", name,
                              {"from": before, "to": value}, ip_of(request))
@@ -301,7 +306,9 @@ def install_security(app: FastAPI, ctx) -> None:
         if own_row(user)["totp_enabled"]:
             raise HTTPException(409, "two-factor sign-in is already on; turn it off first to set up a new device")
         new = mfa.new_secret()
-        mfa.store_pending_secret(ctx.db, user.subject, new, secret())
+        with ctx.db.transaction():
+            mfa.store_pending_secret(ctx.db, user.subject, new, secret())
+            audit_log.record(ctx.db, user.subject, "security", "mfa_setup", user.subject, {}, ip_of(request))
         return {"secret": new, "otpauth_uri": mfa.otpauth_uri(new, user.subject)}
 
     @app.post("/v1/security/mfa/enable")

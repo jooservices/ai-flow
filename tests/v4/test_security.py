@@ -4,6 +4,7 @@ import re
 import time
 
 import pytest
+import redis
 from fastapi.testclient import TestClient
 
 from aiflow.v4.control import audit, login, mfa
@@ -22,7 +23,7 @@ OTHER = "lead@example.test"
 def make_client(ctx, gate=False, ip="127.0.0.1", require_mfa=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
-    ctx.settings.console_require_mfa = require_mfa  # tests opt out except when checking the secure default
+    ctx.settings.console_require_mfa = require_mfa  # exercise legacy settings, which must not weaken administrator MFA
     app = create_app(ctx)
     app.state.sync_accounts()
     return TestClient(app, follow_redirects=False, client=(ip, 50000))
@@ -45,9 +46,9 @@ def admin(ctx):
     return password
 
 
-def enrol(client, admin_password, step_offset=-30):
+def enrol(client, admin_password, email=ADMIN, step_offset=-30):
     """Turn on two-factor for ADMIN on a signed-in client; returns (totp secret, recovery codes)."""
-    assert sign_in(client, admin_password).status_code == 200
+    assert sign_in(client, admin_password, email).status_code == 200
     secret = client.post("/v1/security/mfa/setup").json()["secret"]
     # the enrolment code is from the previous time step so the current and next steps are still unused
     r = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret, time.time() + step_offset)})
@@ -68,6 +69,9 @@ def test_two_factor_setup_enable_and_sign_in_needs_the_code(ctx, key, admin):
     secret, codes = enrol(owner, admin)
     assert len(codes) == 10 and all(re.fullmatch(r"[a-z2-9]{4}(-[a-z2-9]{4}){2}", c) for c in codes)
     assert owner.get("/v1/security/mfa").json()["enabled"] is True
+    setup_audit = ctx.db.one("SELECT actor, category, target, detail FROM audit_log WHERE action='mfa_setup'")
+    assert setup_audit == {"actor": ADMIN, "category": "security", "target": ADMIN, "detail": {}}
+    assert secret not in json.dumps(ctx.db.all("SELECT * FROM audit_log"), default=str)
 
     fresh = make_client(ctx)
     needs = sign_in(fresh, admin)
@@ -82,6 +86,22 @@ def test_two_factor_setup_enable_and_sign_in_needs_the_code(ctx, key, admin):
     other = make_client(ctx)
     refused = sign_in(other, "wrong", code=mfa.totp_code(secret, time.time() + 30))
     assert refused.status_code == 401 and refused.json() == {"detail": login.REFUSED}
+
+
+def test_pending_mfa_secret_rolls_back_when_its_audit_entry_cannot_be_written(ctx, admin, monkeypatch):
+    signed_in = make_client(ctx)
+    assert sign_in(signed_in, admin).status_code == 200
+    client = TestClient(signed_in.app, follow_redirects=False, raise_server_exceptions=False)
+    client.cookies.update(signed_in.cookies)
+
+    def fail_append(*_args, **_kwargs):
+        raise RuntimeError("audit database unavailable")
+
+    monkeypatch.setattr(audit, "record", fail_append)
+    assert client.post("/v1/security/mfa/setup").status_code == 500
+    row = ctx.db.one("SELECT totp_secret FROM console_users WHERE email=%s", (ADMIN,))
+    assert row["totp_secret"] == ""
+    assert ctx.db.one("SELECT 1 FROM audit_log WHERE action='mfa_setup'") is None
 
 
 def test_administrator_mfa_is_required_by_default(ctx, admin):
@@ -125,27 +145,31 @@ def test_turning_two_factor_off_needs_a_code_and_an_admin_can_reset_it(ctx, key,
     assert ctx.db.one("SELECT count(*) AS n FROM console_recovery_codes WHERE email=%s", (OTHER,))["n"] == 0
 
 
-def test_required_two_factor_limits_a_new_session_to_the_setup(ctx, key, admin):
-    client = make_client(ctx, gate=True)
-    assert sign_in(client, admin).status_code == 200
-    assert client.put("/v1/security/settings", json={"require_mfa": True}).json()["require_mfa"] is True
-    fresh = make_client(ctx, gate=True)
-    r = sign_in(fresh, admin)
-    assert r.status_code == 200 and r.json()["mfa_setup_required"] is True
-    assert fresh.get("/v1/state").status_code == 403  # the gate lets nothing else through
-    assert fresh.get("/v1/console/session").status_code == 403
-    secret = fresh.post("/v1/security/mfa/setup").json()["secret"]
-    enabled = fresh.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)})
-    assert enabled.status_code == 200 and fresh.get("/v1/console/session").status_code == 200  # full session now
-    assert fresh.post("/v1/security/mfa/disable", json={"code": "1"}).status_code == 403  # may not turn it off again
+def test_administrator_mfa_cannot_be_disabled_by_the_legacy_setting(ctx, key, admin):
+    login.set_setting(ctx.db, "require_mfa", "0", ADMIN)  # a prior release or direct database edit
+    client = make_client(ctx, gate=True, require_mfa=False)
+    started = sign_in(client, admin)
+    assert started.status_code == 200 and started.json()["mfa_setup_required"] is True
+    assert client.get("/v1/state").status_code == 403  # the gate permits only two-factor setup
+    assert client.get("/v1/console/session").status_code == 403
+    secret = client.post("/v1/security/mfa/setup").json()["secret"]
+    enabled = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)})
+    assert enabled.status_code == 200 and client.get("/v1/console/session").status_code == 200
+    assert client.get("/v1/security/settings").json()["require_mfa"] is True
+    assert client.put("/v1/security/settings", json={"require_mfa": False}).status_code == 422
+    assert ctx.db.one("SELECT value FROM security_settings WHERE key='require_mfa'")["value"] == "0"
+    assert client.post("/v1/security/mfa/disable", json={"code": mfa.totp_code(secret)}).status_code == 403
+    fresh = make_client(ctx, gate=True, require_mfa=False)
+    needs = sign_in(fresh, admin)
+    assert needs.status_code == 401 and needs.json()["mfa_required"] is True
 
 
 def test_session_length_is_a_setting_and_applies_to_the_next_sign_in(ctx, admin):
     client = make_client(ctx)
-    assert sign_in(client, admin).status_code == 200
+    secret, _ = enrol(client, admin)
     assert client.put("/v1/security/settings", json={"session_ttl_s": 10}).status_code == 422  # below the minimum
     assert client.put("/v1/security/settings", json={"session_ttl_s": 3600}).json()["session_ttl_s"] == 3600
-    r = sign_in(make_client(ctx), admin)
+    r = sign_in(make_client(ctx), admin, code=mfa.totp_code(secret))
     assert "max-age=3600" in r.headers["set-cookie"].lower()
     row = ctx.db.one("SELECT extract(epoch FROM expires_at - created_at) AS s FROM console_sessions ORDER BY created_at DESC")
     assert 3590 <= float(row["s"]) <= 3610
@@ -153,7 +177,8 @@ def test_session_length_is_a_setting_and_applies_to_the_next_sign_in(ctx, admin)
 
 def test_forced_sign_out_ends_the_session_and_the_next_request_is_rejected(ctx, admin):
     target, boss = make_client(ctx), make_client(ctx)  # the login gate is off: the check must not rely on it
-    assert sign_in(target, admin).status_code == 200 and sign_in(boss, admin).status_code == 200
+    secret, _ = enrol(target, admin)
+    assert sign_in(boss, admin, code=mfa.totp_code(secret)).status_code == 200
     assert target.get("/v1/console/session").status_code == 200
     sessions = boss.get("/v1/security/sessions").json()["sessions"]
     assert len(sessions) == 2 and sum(s["current"] for s in sessions) == 1
@@ -168,7 +193,8 @@ def test_forced_sign_out_ends_the_session_and_the_next_request_is_rejected(ctx, 
 
 def test_forced_sign_out_through_the_gate_and_sign_out_everywhere(ctx, admin):
     target, boss = make_client(ctx, gate=True), make_client(ctx, gate=True)
-    assert sign_in(target, admin).status_code == 200 and sign_in(boss, admin).status_code == 200
+    secret, _ = enrol(target, admin)
+    assert sign_in(boss, admin, code=mfa.totp_code(secret)).status_code == 200
     assert target.get("/v1/state").status_code == 200
     assert boss.post(f"/v1/security/users/{ADMIN}/sign-out").json()["revoked"] == 2
     assert target.get("/v1/state").status_code == 401 and boss.get("/v1/state").status_code == 401
@@ -177,7 +203,7 @@ def test_forced_sign_out_through_the_gate_and_sign_out_everywhere(ctx, admin):
 
 def test_logout_and_password_reset_end_the_session(ctx, admin):
     a = make_client(ctx)
-    assert sign_in(a, admin).status_code == 200
+    secret, _ = enrol(a, admin)
     stolen = a.cookies.get(COOKIE_NAME)
     assert a.get("/logout").status_code == 405
     assert a.get("/v1/auth/me").status_code == 200  # a safe request cannot end the session
@@ -186,9 +212,9 @@ def test_logout_and_password_reset_end_the_session(ctx, admin):
     thief.cookies.set(COOKIE_NAME, stolen)
     assert thief.get("/v1/console/session").status_code == 401  # a copied cookie dies with the logout
     b = make_client(ctx)
-    assert sign_in(b, admin).status_code == 200
+    assert sign_in(b, admin, code=mfa.totp_code(secret)).status_code == 200
     assert b.post("/v1/auth/logout").status_code == 200
-    assert sign_in(b, admin).status_code == 200
+    assert sign_in(b, admin, code=mfa.totp_code(secret, time.time() + 30)).status_code == 200
     login.reset_password(ctx.db, ADMIN)
     assert b.get("/v1/console/session").status_code == 401
 
@@ -198,7 +224,10 @@ def test_only_authorised_people_manage_security(ctx):
     owner_pw = login.seed_user(ctx.db, "owner@example.test", "owner")
     for email, password in ((OTHER, lead_pw), ("owner@example.test", owner_pw)):
         c = make_client(ctx)
-        assert sign_in(c, password, email).status_code == 200
+        if email == "owner@example.test":
+            enrol(c, password, email=email)
+        else:
+            assert sign_in(c, password, email).status_code == 200
         assert c.get("/v1/security/settings").status_code == 403
         assert c.put("/v1/security/settings", json={"session_ttl_s": 600}).status_code == 403
         assert c.get("/v1/security/sessions").status_code == 403
@@ -328,6 +357,19 @@ def test_every_endpoint_has_a_per_address_budget(ctx):
     assert make_client(ctx, ip="10.0.0.9").get("/v1/state").status_code == 200
 
 
+def test_rate_limiter_fails_closed_when_redis_is_unavailable(ctx, monkeypatch):
+    ctx.settings.rate_limit_public_per_min = 3
+    client = make_client(ctx)
+
+    def redis_down(*_args, **_kwargs):
+        raise redis.ConnectionError("test outage")
+
+    monkeypatch.setattr(ctx.leases.r, "pipeline", redis_down)
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
+
+
 def test_anonymous_changes_have_a_tighter_budget(ctx):
     ctx.settings.rate_limit_public_per_min = 2
     client = make_client(ctx)
@@ -396,7 +438,8 @@ def test_an_account_without_two_factor_stays_locked_until_the_lock_expires_or_an
     assert sign_in(make_client(ctx), admin, code="123456").status_code == 401  # a code means nothing without two-factor
     helper = login.seed_user(ctx.db, OTHER, "super_admin")
     boss = make_client(ctx, ip="127.0.0.3")
-    assert sign_in(boss, helper, OTHER).status_code == 200
+    helper_secret, _ = enrol(boss, helper, email=OTHER)
+    assert sign_in(boss, helper, OTHER, code=mfa.totp_code(helper_secret)).status_code == 200
     assert boss.post(f"/v1/security/users/{ADMIN}/unlock").json() == {"unlocked": True}
     assert sign_in(make_client(ctx, ip="127.0.0.4"), admin).status_code == 200
 
@@ -406,6 +449,12 @@ def test_an_account_without_two_factor_stays_locked_until_the_lock_expires_or_an
 def test_state_changing_requests_with_a_session_need_the_csrf_token(ctx, admin):
     client = make_client(ctx)
     r = sign_in(client, admin)
+    token = client.cookies.get("aiflow4_csrf")
+    setup = client.post("/v1/security/mfa/setup", headers={"X-CSRF-Token": token})
+    secret = setup.json()["secret"]
+    enabled = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)},
+                          headers={"X-CSRF-Token": token})
+    assert enabled.status_code == 200
     cookie = client.cookies.get(COOKIE_NAME)
     token = client.cookies.get("aiflow4_csrf")
     assert token == csrf_token(cookie, SECRET) and "httponly" not in [p.strip().lower() for p in r.headers.get_list("set-cookie")[1].split(";")]
@@ -417,7 +466,7 @@ def test_state_changing_requests_with_a_session_need_the_csrf_token(ctx, admin):
     assert client.get("/v1/security/settings").status_code == 200  # reading needs no token
     # a token of another session does not work
     other = make_client(ctx)
-    sign_in(other, admin)
+    assert sign_in(other, admin, code=mfa.totp_code(secret, time.time() + 30)).status_code == 200
     assert client.put("/v1/security/settings", json=body, headers={"X-CSRF-Token": other.cookies.get("aiflow4_csrf")}).status_code == 403
     assert client.post("/v1/auth/logout").status_code == 403
     assert ctx.db.one("SELECT value FROM security_settings WHERE key='session_ttl_s'")["value"] == "7200"
@@ -472,7 +521,8 @@ def test_people_roles_and_credentials_changes_are_recorded(ctx):
     actions = {(r["category"], r["action"]) for r in ctx.db.all("SELECT category, action FROM audit_log")}
     assert {("people", "user_created"), ("roles", "role_granted"), ("people", "password_reset")} <= actions
     client = make_client(ctx)
-    assert sign_in(client, login.reset_password(ctx.db, ADMIN)).status_code == 200
+    password = login.reset_password(ctx.db, ADMIN)
+    secret, _ = enrol(client, password)
     client.put("/v1/security/settings", json={"session_ttl_s": 7200, "require_mfa": True})
     changed = ctx.db.all("SELECT action, actor, detail FROM audit_log WHERE category='settings'")
     assert {c["action"] for c in changed} == {"security_setting_session_ttl_s", "security_setting_require_mfa"}
@@ -486,7 +536,7 @@ def test_people_roles_and_credentials_changes_are_recorded(ctx):
 
 def test_audit_append_failure_rolls_back_the_associated_setting_change(ctx, admin, monkeypatch):
     signed_in = make_client(ctx)
-    assert sign_in(signed_in, admin).status_code == 200
+    enrol(signed_in, admin)
     client = TestClient(signed_in.app, follow_redirects=False, raise_server_exceptions=False)
     client.cookies.update(signed_in.cookies)
 
@@ -512,7 +562,7 @@ def test_secrets_never_reach_the_audit_log(ctx, key, admin):
 
 def test_the_audit_log_is_read_only_in_the_console_and_in_the_database(ctx, admin):
     client = make_client(ctx)
-    assert sign_in(client, admin).status_code == 200
+    enrol(client, admin)
     listed = client.get("/v1/security/audit").json()
     assert listed["entries"] and {"id", "ts", "actor", "category", "action"} <= set(listed["entries"][0])
     assert client.get("/v1/security/audit?category=people").json()["entries"]

@@ -1,7 +1,7 @@
 import threading
 from types import SimpleNamespace
 
-from aiflow.v4.node import agent
+from aiflow.v4.node import agent, operations
 
 
 def test_node_tool_versions_include_codex_code_mode_host(monkeypatch):
@@ -110,6 +110,20 @@ def test_node_tool_versions_require_current_playwright_chromium_and_report_its_p
     monkeypatch.setattr(agent.subprocess, "run", stale_browser)
     assert agent.tool_versions(["playwright", "playwright-browser"]) == {
         "playwright": "Version 1.56.2", "playwright-browser": "missing"}
+
+
+def test_playwright_global_prefix_already_in_path_does_not_replace_its_command(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    source = bin_dir / "playwright"
+    source.write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(operations, "_run_installer",
+                        lambda *_args, **_kwargs: SimpleNamespace(stdout=f"{tmp_path}\n"))
+
+    operations._link_playwright({}, link_dir=bin_dir)
+
+    assert source.is_file() and not source.is_symlink()
+    assert source.read_text() == "#!/bin/sh\nexit 0\n"
 
 
 def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypatch):

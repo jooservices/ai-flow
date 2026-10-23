@@ -3600,7 +3600,7 @@ function renderSecurity() {
     if (!s) h += '<div class="empty">Loading…</div>';
     else {
       h += '<form data-sec-form="settings"><label>Session length (hours) <input data-sec-ttl type="number" min="' + Number(s.session_ttl_min_s / 3600) + '" max="' + Number(s.session_ttl_max_s / 3600) + '" step="0.5" value="' + Number(s.session_ttl_s / 3600) + '"></label> ';
-      h += '<label><input data-sec-require type="checkbox"' + (s.require_mfa ? ' checked' : '') + '> Require two-factor sign-in for administrators (' + esc((s.mfa_roles || []).join(', ')) + ')</label> ';
+      h += '<label><input data-sec-require type="checkbox" checked disabled> Require two-factor sign-in for administrators (' + esc((s.mfa_roles || []).join(', ')) + ')</label> ';
       h += '<button class="btn primary" type="submit"' + (SEC.busy ? ' disabled' : '') + '>Save</button></form>';
       h += '<p class="small">Secret encryption key: ' + (s.secret_key_configured ? 'configured' : 'not configured (set AIFLOW4_SECRET_KEY)') + ' · rate limits: ' + Number(s.rate_limit_per_min) + ' requests/min per address, ' + Number(s.rate_limit_public_per_min) + '/min on public endpoints.</p>';
     }

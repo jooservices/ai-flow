@@ -18,9 +18,9 @@ needs `security.audit` (also Super Administrator). All of it is also available a
   is typed in the same field as the authenticator code. "Issue new recovery codes" replaces the set.
 - **Lost both?** A Super Administrator uses *Reset two-factor* on the people table; the person is signed out and sets it up
   again.
-- **Require for administrators.** The setting *Require two-factor sign-in for administrators* (roles `super_admin` and
-  `owner`; on by default) makes a sign-in without two-factor a limited session that can
-  only open the Security screen to set it up. Administrators then cannot turn it off.
+- **Require for administrators.** Two-factor sign-in is mandatory for roles `super_admin` and `owner`, regardless of
+  the legacy `require_mfa` setting. A sign-in without two-factor is a limited session that can only open the Security
+  screen to set it up. Administrators cannot turn it off; the Security screen displays this policy as always on.
 - **Session length.** Setting *Session length* (5 minutes to 30 days, default 12 hours) applies to the next sign-in.
 - **Forced sign-out.** *Sign out* on a session, or *Sign out everywhere* for a person, ends the session in the database.
   Every route that reads the session cookie checks it, so the next request on that session is refused (401). Logout,

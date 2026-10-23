@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 CSRF_COOKIE = "aiflow4_csrf"  # readable by the console script, which echoes it in the X-CSRF-Token header
 SESSION_TTL_S = 12 * 3600  # default session length; the "session length" security setting overrides it
 SESSION_TTL_MIN_S, SESSION_TTL_MAX_S = 5 * 60, 30 * 24 * 3600
-MFA_ROLES = ("super_admin", "owner")  # administrators: the roles the "require two-factor" setting applies to
+MFA_ROLES = ("super_admin", "owner")  # administrators: two-factor sign-in is mandatory for these roles
 MAX_FAILURES = 5          # wrong passwords in a row before the account is locked
 LOCK_S = 15 * 60
 RATE_WINDOW_S = 15 * 60
@@ -210,8 +210,9 @@ def session_ttl_s(ctx) -> int:
     return max(SESSION_TTL_MIN_S, min(SESSION_TTL_MAX_S, value))
 
 
-def require_mfa(ctx) -> bool:
-    return get_setting(ctx.db, "require_mfa", "1" if ctx.settings.console_require_mfa else "0") == "1"
+def require_mfa(_ctx) -> bool:
+    """Administrator MFA is mandatory even when a legacy setting says otherwise."""
+    return True
 
 
 # --- HTTP ----------------------------------------------------------------------------------------------------------

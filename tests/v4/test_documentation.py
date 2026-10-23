@@ -160,6 +160,16 @@ def test_generated_api_reference_shows_request_and_response_schema_fields():
     assert "- `generated_at`: string (date-time) (required)" in reference
     assert "- `nodes[].name`: string (required)" in reference
     assert "- `totals.runs_24h`: integer (required)" in reference
+    state = reference.split("### `GET /v1/state`", 1)[1].split("\n### ", 1)[0]
+    for field in (
+        "accounts[].cooldown.reason",
+        "accounts[].quota_awareness.windows[].prediction.status",
+        "nodes[].desired_services[].healthcheck_configured",
+        "recent_runs[].tokens_in",
+        "events[].type",
+        "release_progress[].release.steps[].state",
+    ):
+        assert f"`{field}`" in state, f"/v1/state reference omits {field}"
     api_module = "aiflow/v4/control/api.py"
     schema_line = next(number for number, line in enumerate((ROOT / api_module).read_text().splitlines(), 1)
                        if line.startswith("STATE_RESPONSE_SCHEMA ="))

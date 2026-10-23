@@ -214,6 +214,22 @@ def _resolve_openapi_ref(value: dict, schema: dict) -> dict:
     return result
 
 
+def _schema_field_shape(value: dict, components: dict) -> dict:
+    """Return the concrete shape of a nullable or union field for recursive field listing."""
+    value = _resolve_openapi_ref(value, {"components": {"schemas": components}})
+    if not isinstance(value, dict):
+        return {}
+    branches = value.get("anyOf") or value.get("oneOf") or []
+    if branches:
+        resolved = [_resolve_openapi_ref(branch, {"components": {"schemas": components}})
+                    for branch in branches]
+        return next((branch for branch in resolved
+                     if isinstance(branch, dict) and (branch.get("properties") or
+                                                     branch.get("type") in ("object", "array"))),
+                    resolved[0] if isinstance(resolved[0], dict) else {})
+    return value
+
+
 def _schema_type(value: dict, components: dict, seen: frozenset[str] = frozenset()) -> str:
     """Readable JSON type for an OpenAPI schema, including references, arrays and unions."""
     if not isinstance(value, dict):
@@ -266,12 +282,14 @@ def _schema_markdown(value: dict, components: dict, prefix: str = "", required: 
         suffix = f" — {description}" if description else ""
         rows.append(f"- `{path}`: {_schema_type(field, components, seen)} "
                     f"({'required' if is_required else 'optional'}){suffix}")
-        nested = _resolve_openapi_ref(field, {"components": {"schemas": components}})
-        if depth < 2 and isinstance(nested, dict):
+        nested = _schema_field_shape(field, components)
+        if depth < 8 and isinstance(nested, dict):
             if nested.get("type") == "array":
                 nested = nested.get("items") or {}
             if nested.get("properties") or nested.get("$ref"):
-                rows.extend(_schema_markdown(nested, components, path + "[]" if field.get("type") == "array" else path,
+                rows.extend(_schema_markdown(nested, components,
+                                             path + "[]" if _schema_field_shape(field, components).get("type") == "array"
+                                             else path,
                                              True, depth + 1, seen))
     return rows
 

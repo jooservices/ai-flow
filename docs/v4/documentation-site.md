@@ -1,5 +1,7 @@
 # Product documentation site
 
+**Assumes:** you maintain AI Flow v4 documentation or releases, and the v4 control app and guide sources are in this checkout.
+
 The product documentation lives in `docs/guide/`, is built into a static site by `aiflow/v4/core/docsite.py`
 (standard library only, no new dependency), ships in every release and is shown through the console Help links.
 
@@ -38,9 +40,10 @@ count.
 
 The route check also follows shared response helpers. For example, `control/state.py` supplies both
 `GET /v1/state` and `GET /v1/deploy/state`, so changing that snapshot helper requires a page that names both routes.
-The generated API reference lists request and response JSON fields with their types and required status. The
-`GET /v1/state` response shape is declared in the mounted app's OpenAPI schema. Release packaging passes its release
-version to both the API reference and the site footer.
+The generated API reference lists request and response JSON fields with their types and required status, including
+the nested item fields for `GET /v1/state` arrays such as accounts, nodes, recent runs, events and release progress.
+That response shape is declared in the mounted app's OpenAPI schema. Release packaging passes its release version to
+both the API reference and the site footer.
 
 ## Build
 

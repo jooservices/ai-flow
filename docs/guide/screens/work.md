@@ -11,6 +11,12 @@ view for the people who follow tickets day to day.
 - Search by key or title, and filter by ticket type or epic.
 - Open a ticket card for its runs, events and links to Jira.
 
+## Page addresses
+
+Every console page opens at its own address (for example `/dashboard`, `/work`, `/lead`), and `/cc` opens the
+Dashboard. Reloading the browser keeps the page you were on. Without a session, each address sends you to `/login`.
+New pages need no change to the proxy rule: only `/o2` and `/gatus` are kept away from the control API.
+
 ## Common tasks
 
 - Open an epic to see only its tickets.

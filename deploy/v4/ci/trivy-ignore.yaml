@@ -1,0 +1,9 @@
+# Reviewed findings that do not block the merge (docs/v4/security.md). Each entry needs a reason.
+misconfigurations:
+  - id: DS002
+    paths:
+      - deploy/v4/control/Dockerfile
+      - deploy/v4/ci/systemd.Dockerfile
+    statement: >-
+      The control-plane image runs the bootstrap and the Docker/compose tooling as root on the control machine;
+      the CI image is a throw-away systemd test machine that needs PID 1 as root.

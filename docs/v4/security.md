@@ -72,6 +72,10 @@ the repository (secrets, misconfiguration) and the control-api container image. 
 fails the job and blocks the merge when the check is required. The level is the repository variable
 `SECURITY_SEVERITY_THRESHOLD` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; default `HIGH`), not a constant in the code.
 
+Reviewed exceptions live next to the script: `deploy/v4/ci/trivy-ignore.yaml` (root user in the two Dockerfiles, with the
+reason) and `deploy/v4/ci/trivy-secret.yaml` (fake keys in `tests/` are not secrets). The image scan ignores findings
+that have no fix yet (`--ignore-unfixed`), so the job fails only on what can be fixed.
+
 ## AC6 Release security report and disclosure policy
 
 Every release runs the same scan on the release image and publishes `SECURITY-REPORT.md` with the release: the blocking

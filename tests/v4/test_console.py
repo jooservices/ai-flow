@@ -157,6 +157,7 @@ S.data = {json.dumps(state)};
 S.analytics = {json.dumps(analytics or [])};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
+S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {{week_start: '2026-10-19', trend: [], finished_without_person: [], needed_person: [], repeated_failures: []}}}};
 renderDashboard();
 console.log(dashboard.innerHTML);
 """
@@ -490,9 +491,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,lead,review,stakeholder,knowledge,integrations,projects"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -501,7 +502,7 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -984,12 +985,13 @@ def test_command_center_menu_order_and_role_visibility():
         ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
-        ("knowledge", "Knowledge"), ("integrations", "Integrations"), ("projects", "Projects"),
+        ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
+        ("projects", "Projects"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
     required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
-                "knowledge": "knowledge.read", "integrations": "integrations.manage", "projects": "projects.manage"}
+                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage", "projects": "projects.manage"}
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
   getAttribute: function () { return item.view; }, setAttribute: function () {}}; });
@@ -1042,7 +1044,7 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
                  "AI and machines", "AI usage", "codex-alpha", "Codex", "Next reported reset:",
                  "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
-                 "Needs owner", "Human review", "ALPHA-2", "provider-codex"):
+                 "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget"):
         assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered

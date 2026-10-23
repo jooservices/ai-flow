@@ -12,6 +12,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
+- [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, Chromium and its libraries go into a shared folder, and a headless launch as the AI user proves it
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
@@ -34,7 +35,9 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): create or import a GitHub App, choose its installation and refresh accessible repositories
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
@@ -56,6 +59,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Scale proof](../../docs/v4/scale-proof.md): 100 projects, 50 machines and 200 simulated AI sessions measured against written performance budgets on every release; a regression blocks the release and files tickets
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
+- [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 
 ## Tools on a node
 

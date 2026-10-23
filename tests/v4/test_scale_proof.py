@@ -4,6 +4,7 @@ it) and the tickets created from findings. Machines and sessions are simulated; 
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -133,6 +134,32 @@ def test_an_unmeasured_budget_and_a_failed_check_both_fail_the_run():
     assert broken["failures"] == ["correctness: every_ready_ticket_picked_once: 3 not picked"]
 
 
+def test_non_200_page_and_picker_responses_fail_the_run(monkeypatch):
+    class Client:
+        def get(self, _path):
+            return SimpleNamespace(json=lambda: {"active_runs": [{}]})
+
+    class Leases:
+        def claim(self, *_args):
+            return SimpleNamespace(ok=False)
+
+    errors = []
+    page_status = {"/cc": 500, scale_harness.PICKER: 503}
+    monkeypatch.setattr(scale_harness, "_timed", lambda _client, path: (0.01, page_status.get(path, 200)))
+    measured, checks = scale_harness._measure_peak(
+        Client(), SimpleNamespace(leases=Leases()), Scenario(page_samples=1, picker_samples=1),
+        [(None, {"ticket": {"key": "SCP001-1"}})], errors)
+    report = finalize({"measurements": {**measured, "ticket_pickup": {"value": 1.0}},
+                       "checks": [{"name": name, "ok": ok, "detail": detail}
+                                  for name, (ok, detail) in checks.items()], "errors": errors})
+    failed_checks = {check["name"] for check in report["checks"] if not check["ok"]}
+    signatures = {finding["signature"] for finding in report["findings"]}
+    assert "/cc answered HTTP 500" in errors and "/v1/projects answered HTTP 503" in errors
+    assert {"http_response:/cc", "http_response:/v1/projects"} <= failed_checks
+    assert {"correctness:http_response:/cc", "correctness:http_response:/v1/projects"} <= signatures
+    assert report["passed"] is False
+
+
 # --- AC3: the result is attached to a release; a regression blocks it ------------------------------------------
 def synthetic(console=0.5, picker=10.0, pickup=4.0, ok=True):
     return {"scenario": {"projects": 100, "machines": 50, "sessions": 200, "seed": 236}, "plan_digest": "d" * 64,
@@ -246,6 +273,24 @@ def test_a_jira_outage_keeps_the_finding_and_the_next_run_creates_the_ticket(ctx
     assert ctx.db.one("SELECT last_error FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")["last_error"] == ""
 
 
+def test_a_jira_outage_is_retried_by_a_later_passing_submission(client, ctx, monkeypatch):
+    monkeypatch.setattr(ctx.jira, "create_issue", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("jira down")))
+    failed = client.post("/v1/scale-proof/results", json={"release": "v4.7.0", "report": synthetic(pickup=33.0)},
+                         headers=OWNER).json()
+    assert failed["passed"] is False
+    assert failed["tickets"] == [{"signature": "budget:ticket_pickup", "ticket": "", "created": False}]
+    pending = ctx.db.one("SELECT ticket, last_error FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")
+    assert (pending["ticket"], pending["last_error"]) == ("", "jira down")
+
+    monkeypatch.undo()
+    passed = client.post("/v1/scale-proof/results", json={"release": "v4.7.1", "report": synthetic()},
+                         headers=OWNER).json()
+    assert passed["passed"] is True
+    assert passed["tickets"] == [{"signature": "budget:ticket_pickup", "ticket": "TESTFLOW-900", "created": True}]
+    assert len(ctx.jira.created) == 1
+    assert ctx.db.one("SELECT last_error FROM scale_proof_findings WHERE signature='budget:ticket_pickup'")["last_error"] == ""
+
+
 def test_the_real_run_has_nothing_to_report(proof, ctx):
     report, _ = proof
     run_id = scale_proof.record(ctx, report, "v4.99.0", "test")
@@ -277,12 +322,23 @@ def _no_scratch(*_args):
 
 
 def test_cli_exits_non_zero_on_a_regression_and_writes_the_report(tmp_path, monkeypatch, capsys):
+    import httpx
     from aiflow.v4 import cli
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"run_id": 7, "tickets": []}
+
     monkeypatch.setattr(scale_harness, "scratch", _no_scratch)
     monkeypatch.setattr(scale_harness, "run", lambda *a, release="", **k: (finalize({**synthetic(console=4.0), "release": release}), None))
+    monkeypatch.setattr(httpx, "post", lambda *_a, **_k: Response())
+    monkeypatch.setenv("AIFLOW4_OWNER_TOKEN", "owner-secret-value")
     out = tmp_path / "scale.json"
-    assert cli.main(["scale-proof", "--release", "v4.9.0", "--out", str(out), "--database-url", "postgresql://x",
-                     "--redis-url", "redis://x"]) == 1
+    assert cli.main(["scale-proof", "--release", "v4.9.0", "--out", str(out), "--submit", "https://control.example",
+                     "--database-url", "postgresql://x", "--redis-url", "redis://x"]) == 1
     saved = json.loads(out.read_text())
     assert saved["release"] == "v4.9.0" and saved["passed"] is False
     assert "EXCEEDED Console pages load: console_page_load" in capsys.readouterr().out
@@ -311,7 +367,36 @@ def test_cli_attaches_the_result_to_the_control_plane_and_a_pass_exits_zero(monk
     assert kwargs["json"]["release"] == "v4.9.1" and kwargs["headers"]["Authorization"] == "Bearer owner-secret-value"
     assert "owner-secret-value" not in capsys.readouterr().out
     monkeypatch.delenv("AIFLOW4_TEST_DATABASE_URL", raising=False)
-    assert cli.main(["scale-proof", "--release", "v4.9.1", "--database-url", "", "--redis-url", ""]) == 2
+    assert cli.main(["scale-proof", "--release", "v4.9.1", "--submit", "https://control.example",
+                     "--database-url", "", "--redis-url", ""]) == 2
+
+
+def test_cli_requires_submission_url_and_owner_token(monkeypatch, capsys):
+    from aiflow.v4 import cli
+    monkeypatch.delenv("AIFLOW4_OWNER_TOKEN", raising=False)
+    args = ["scale-proof", "--release", "v4.9.2", "--database-url", "postgresql://x", "--redis-url", "redis://x"]
+    assert cli.main(args) == 3
+    assert "requires --submit" in capsys.readouterr().err
+    assert cli.main([*args, "--submit", "https://control.example"]) == 3
+    assert "requires AIFLOW4_OWNER_TOKEN" in capsys.readouterr().err
+
+
+def test_cli_fails_when_submission_cannot_complete_even_after_a_budget_failure(monkeypatch, capsys):
+    import httpx
+    from aiflow.v4 import cli
+
+    class Response:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("unavailable", request=None, response=None)
+
+    monkeypatch.setattr(scale_harness, "scratch", _no_scratch)
+    monkeypatch.setattr(scale_harness, "run", lambda *a, **k: (finalize(synthetic(console=4.0)), None))
+    monkeypatch.setattr(httpx, "post", lambda *_a, **_k: Response())
+    monkeypatch.setenv("AIFLOW4_OWNER_TOKEN", "owner-secret-value")
+    result = cli.main(["scale-proof", "--release", "v4.9.3", "--submit", "https://control.example",
+                       "--database-url", "postgresql://x", "--redis-url", "redis://x"])
+    assert result == 3
+    assert "could not attach" in capsys.readouterr().err
 
 
 def test_the_release_workflow_runs_the_scale_proof_before_publishing():
@@ -319,3 +404,7 @@ def test_the_release_workflow_runs_the_scale_proof_before_publishing():
     assert "aiflow4 scale-proof --release" in workflow
     assert workflow.index("aiflow4 scale-proof") < workflow.index("Build and push control-api image")
     assert "scale-proof-$VERSION.json" in workflow
+    assert "AIFLOW4_CONTROL_URL: ${{ secrets.AIFLOW4_CONTROL_URL }}" in workflow
+    assert "AIFLOW4_OWNER_TOKEN: ${{ secrets.AIFLOW4_OWNER_TOKEN }}" in workflow
+    assert '--submit "$AIFLOW4_CONTROL_URL"' in workflow
+    assert 'if [ -n "$AIFLOW4_CONTROL_URL" ]' not in workflow

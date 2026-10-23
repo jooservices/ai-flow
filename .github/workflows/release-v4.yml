@@ -104,8 +104,7 @@ jobs:
 
       - name: Scale proof (100 projects, 50 machines, 200 sessions) against the performance budgets
         # A budget over its limit (or incorrect behaviour at this size) fails this step: nothing below is
-        # published. The result is attached to the release (dist/scale-proof-<version>.json, GitHub Release asset)
-        # and, when the control plane is configured, to the release in Command Center, where findings become tickets.
+        # published. The report is attached to the GitHub Release and submitted to Command Center, where findings become tickets.
         env:
           VERSION: ${{ steps.release.outputs.version }}
           AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
@@ -115,9 +114,7 @@ jobs:
         run: |
           pip install uv==0.13.4 && uv sync --frozen
           mkdir -p dist
-          SUBMIT=()
-          if [ -n "$AIFLOW4_CONTROL_URL" ]; then SUBMIT=(--submit "$AIFLOW4_CONTROL_URL"); fi
-          uv run --frozen aiflow4 scale-proof --release "$VERSION" --out "dist/scale-proof-$VERSION.json" "${SUBMIT[@]}"
+          uv run --frozen aiflow4 scale-proof --release "$VERSION" --out "dist/scale-proof-$VERSION.json" --submit "$AIFLOW4_CONTROL_URL"
 
       - name: Download previous published release for upgrade and rollback
         if: steps.release.outputs.previous != ''

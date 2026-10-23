@@ -58,14 +58,16 @@ visible as an active run.
 
 ## Release attachment and gate
 
-- CI runs `aiflow4 scale-proof --release vX.Y.Z --out dist/scale-proof-vX.Y.Z.json [--submit CONTROL_URL]` in the
+- CI runs `aiflow4 scale-proof --release vX.Y.Z --out dist/scale-proof-vX.Y.Z.json --submit CONTROL_URL` in the
   `release` job of `.github/workflows/release-v4.yml`, before anything is built or published. It creates a
   database and Redis key prefix of its own, prints every budget and exits **1** when the run failed, which stops the
-  release. Exit 2: the scenario could not run; exit 3: the result could not be attached on the control plane.
+  release. The CLI requires `--submit` and `AIFLOW4_OWNER_TOKEN`, and exits **3** if the result cannot be attached
+  to the control plane. Exit 2: the scenario could not run.
 - The JSON report is uploaded as an asset of the GitHub Release (`scale-proof-vX.Y.Z.json`).
-- With the repository secrets `AIFLOW4_CONTROL_URL` and `AIFLOW4_OWNER_TOKEN`, the result is also attached to the
-  release in Command Center: `POST /v1/scale-proof/results` (owner token) stores the run in `scale_proof_runs`,
-  judges it again from its measurements (a submitted verdict is ignored) and files tickets.
+- The release job requires repository secrets `AIFLOW4_CONTROL_URL` and `AIFLOW4_OWNER_TOKEN`; every release result
+  is attached to Command Center: `POST /v1/scale-proof/results` (owner token) stores the run in `scale_proof_runs`,
+  judges it again from its measurements (a submitted verdict is ignored) and files tickets. A missing secret or a
+  failed submission stops the release job.
 - A failed run blocks its release: a Jira version whose name equals the release is not ready for the automatic
   release flow (`version_release.evaluate`) and shows the reason `scale_proof_failed` in release progress, until a
   later run attached to the same release passes. A release without a run is not judged by the gate.
@@ -78,7 +80,8 @@ Every failed budget and every failed correctness check is a finding with a stabl
 
 - the same finding in a later run adds a comment and counts up (`scale_proof_findings.occurrences`), no second ticket;
 - when its ticket is Done and the finding comes back, a new ticket is created;
-- when Jira is unavailable the finding is kept with its error and the ticket is created by the next run.
+- when Jira is unavailable the finding is kept with its error and every later submission retries it, even if that
+  later run passes.
 
 ## Console
 

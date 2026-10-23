@@ -7,7 +7,8 @@ watchdog    every 15 s: nodes without heartbeat, runs whose lease is gone, runs 
             accounts whose cooldown ended, nodes outside the version skew policy. Opens and closes incidents,
             alerts people on critical ones.
 fleet       every 15 s: the rolling node upgrade toward CURRENT (canary, waves, halt, rollback; rollout.py).
-memory      every 60 s: tickets, finished run summaries and verify findings into the memory table (memory.index).
+memory      every 60 s: tickets, finished run summaries and verify findings into memory (memory.index); Jira sync
+            also records closed-ticket study cases once their runs finish. Run results capture their own records.
 Each loop runs on one control-plane instance at a time (leader key in Redis).
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, memory, role_health, tooling
+from . import jira_connect, knowledge, memory, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -202,6 +203,10 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
                             ready=ready, source="jira_sync")
         n += 1
     _reconcile_epics(ctx, keys, changed_ticket_keys, first_seen_ticket_keys, preexisting_ticket_keys)
+    try:
+        knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
+    except Exception as exc:  # noqa: BLE001 - knowledge capture must not stop Jira mirroring
+        log.warning("closed ticket knowledge capture failed: %s", type(exc).__name__)
     return n
 
 
@@ -441,7 +446,7 @@ def version_release_scan(ctx: Ctx) -> int:
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -467,6 +472,11 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 if any(written.values()):
                     log.info("memory indexed: %s", written)
                 last_mem = now
+            if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
+                from ..worker import backups as backup_worker
+                backup_worker.scheduled_backup(ctx)
+                backup_worker.weekly_restore_test(ctx)
+                last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])

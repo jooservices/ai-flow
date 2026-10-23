@@ -16,6 +16,8 @@
   aiflow4 install control --rollback    return the control plane to the previous release (root)
   aiflow4 scale-proof --release vX.Y.Z [--out F] [--submit URL]   run the 100/50/200 scale proof (CI); exit 1: a budget is exceeded
   aiflow4 secret set NAME [--stdin]     store an owner-supplied token with hidden input (root)
+  aiflow4 backup restore --from FILE --key-file FILE [--s3-endpoint URL]
+                                        rebuild a new control plane from an encrypted backup
   aiflow4 version
 """
 from __future__ import annotations
@@ -143,6 +145,13 @@ def _scale_proof(a: argparse.Namespace) -> int:
     2: the scenario could not run. 3: the result could not be attached on the control plane."""
     import tempfile
     from .control import scale_harness
+    if not a.submit:
+        print("scale-proof requires --submit CONTROL_URL so every release result reaches Command Center", file=sys.stderr)
+        return 3
+    owner_token = os.environ.get("AIFLOW4_OWNER_TOKEN", "")
+    if not owner_token:
+        print("scale-proof requires AIFLOW4_OWNER_TOKEN to attach the result", file=sys.stderr)
+        return 3
     if not a.database_url or not a.redis_url:
         print("scale-proof needs --database-url and --redis-url (or AIFLOW4_TEST_DATABASE_URL / AIFLOW4_TEST_REDIS_URL): "
               "it creates and drops a database of its own", file=sys.stderr)
@@ -166,14 +175,14 @@ def _scale_proof(a: argparse.Namespace) -> int:
         import httpx
         try:
             r = httpx.post(a.submit.rstrip("/") + "/v1/scale-proof/results", timeout=60,
-                           headers={"Authorization": f"Bearer {os.environ.get('AIFLOW4_OWNER_TOKEN', '')}"},
+                           headers={"Authorization": f"Bearer {owner_token}"},
                            json={"release": a.release, "source": "ci", "report": report})
             r.raise_for_status()
             print(f"attached to release {a.release} as run #{r.json().get('run_id')}; tickets: "
                   + (", ".join(t["ticket"] for t in r.json().get("tickets", []) if t.get("ticket")) or "none"))
         except Exception as exc:  # noqa: BLE001 - never print the request: it carries the token
             print(f"could not attach the result to {a.submit}: {type(exc).__name__}", file=sys.stderr)
-            code = code or 3
+            code = 3
     return code
 
 
@@ -252,6 +261,13 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
     ps.add_argument("--stdin", action="store_true", help="read the value from a pipe instead of a hidden prompt")
+    pb = sub.add_parser("backup", help="encrypted Command Center backup operations")
+    backup_sub = pb.add_subparsers(dest="backup_action", required=True)
+    pbr = backup_sub.add_parser("restore", help="restore a backup onto a new control machine")
+    pbr.add_argument("--from", dest="source", required=True, help="local encrypted backup or s3://bucket/key")
+    pbr.add_argument("--key-file", required=True, help="the one-time backup key downloaded from Command Center")
+    pbr.add_argument("--s3-endpoint", default="", help="S3-compatible endpoint for an s3:// source")
+    pbr.add_argument("--s3-region", default="us-east-1")
     pu2 = sub.add_parser("console-user", help="create or reset a Command Center user (docs/v4/console-login.md)")
     pu2.add_argument("action", choices=["seed", "reset-password", "list"])
     pu2.add_argument("--email")
@@ -292,6 +308,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result["ok"] else 9
     if a.cmd == "console-user":
         return _console_user(a, s)
+    if a.cmd == "backup" and a.backup_action == "restore":
+        from .core import backups
+        try:
+            key = backups.read_key(a.key_file)
+            result = backups.restore_archive(a.source, key, s.database_url, s,
+                                             s3_endpoint=a.s3_endpoint, s3_region=a.s3_region)
+        except backups.BackupError as exc:
+            print(f"restore failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Backup: {result.get('backup', a.source)}")
+        for name in ("database", "stored_secrets", "control_repository", "knowledge"):
+            component = result["components"].get(name, {"status": "failed", "detail": "no outcome was recorded"})
+            label = {"database": "Database", "stored_secrets": "Stored secrets",
+                     "control_repository": "Control repository settings", "knowledge": "Knowledge"}[name]
+            print(f"{label}: {component['status']} — {component['detail']}")
+        return 0 if result.get("ok") else 1
     if a.cmd == "migrate":
         from .control.db import DB
         db = DB(s.database_url)

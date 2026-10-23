@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from .client import Conflict, ControlClient
-from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node
+from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
 from .notes import note
 
@@ -124,11 +124,12 @@ def build_prompt(c: Claimed, spec: str) -> str:
     label_context = ", ".join(f"{label} ({'recognized' if is_known_label(label) else 'unrecognized; preserve'})"
                                for label in labels) or "(none)"
     outline = "\n".join(_outline_section(section) for section in required_sections(issue_type))
-    return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
+    prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
                       issue_type=issue_type, original_issue_type=t.get("type") or "Task",
                       template_outline=outline, label_context=label_context,
                       description=t["description"] or "(no description)",
                       comments="\n".join(comments) or "(no comments)")
+    return with_knowledge_context(prompt, c.context_pack)
 
 
 def _outline_section(section: str) -> str:

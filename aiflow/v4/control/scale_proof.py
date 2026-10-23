@@ -87,10 +87,28 @@ def evaluate(measured: dict[str, float], budgets: Iterable[Budget] = BUDGETS) ->
 
 
 def finalize(report: dict[str, Any], budgets: Iterable[Budget] = BUDGETS) -> dict[str, Any]:
-    """Recompute budgets, failures, findings and the verdict from `measurements` and `checks`."""
+    """Recompute budgets, HTTP and correctness checks, findings and the verdict from the report."""
     measured = {key: (m or {}).get("value") for key, m in (report.get("measurements") or {}).items()}
     verdicts = evaluate({k: v for k, v in measured.items() if isinstance(v, (int, float))}, budgets)
     checks = [c for c in report.get("checks") or [] if isinstance(c, dict)]
+    seen_errors: set[tuple[str, str]] = set()
+    for error in report.get("errors") or []:
+        detail = str(error).strip()
+        if not detail:
+            continue
+        if " answered HTTP " in detail:
+            endpoint = detail.partition(" answered HTTP ")[0]
+            name = f"http_response:{endpoint}"
+        elif "could not join: HTTP " in detail:
+            machine = detail.partition(" could not join: HTTP ")[0]
+            name = f"http_response:{machine}"
+        else:
+            name = "harness_error"
+        identity = (name, detail)
+        if identity in seen_errors:
+            continue
+        seen_errors.add(identity)
+        checks.append({"name": name, "ok": False, "detail": detail})
     failures = [v["message"] for v in verdicts if not v["passed"]]
     failures += [f"correctness: {c.get('name')}: {c.get('detail', '')}".rstrip(": ") for c in checks if not c.get("ok")]
     findings = [{"signature": f"budget:{v['key']}", "kind": "budget", "title": f"Scale proof: {v['message']}",
@@ -98,8 +116,8 @@ def finalize(report: dict[str, Any], budgets: Iterable[Budget] = BUDGETS) -> dic
     findings += [{"signature": f"correctness:{c.get('name')}", "kind": "correctness",
                   "title": f"Scale proof: incorrect behaviour at this size: {c.get('name')}",
                   "detail": str(c.get("detail", ""))} for c in checks if not c.get("ok")]
-    return {**report, "schema": SCHEMA, "budgets": verdicts, "failures": failures, "findings": findings,
-            "passed": not failures}
+    return {**report, "schema": SCHEMA, "checks": checks, "budgets": verdicts, "failures": failures,
+            "findings": findings, "passed": not failures}
 
 
 # --- storage, release attachment and gate ---------------------------------------------------------------------
@@ -154,7 +172,7 @@ def _description(finding: dict, run_id: int, report: dict) -> str:
 
 
 def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
-    """Create (or count up) one ticket per finding of a stored run. Jira errors are kept for the next call."""
+    """File current findings and retry every persisted finding that still has no Jira ticket."""
     run = ctx.db.one("SELECT report FROM scale_proof_runs WHERE id=%s", (run_id,))
     if not run:
         return []
@@ -162,13 +180,14 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
     project = ctx.settings.canary_bug_project
     out = []
     for finding in report.get("findings") or []:
-        row = ctx.db.one(
+        ctx.db.run(
             "INSERT INTO scale_proof_findings (signature, kind, title, detail, first_run_id, last_run_id)"
             " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (signature) DO UPDATE SET last_run_id=EXCLUDED.last_run_id,"
             " occurrences=scale_proof_findings.occurrences+1, detail=EXCLUDED.detail, title=EXCLUDED.title,"
-            " updated_at=now() RETURNING ticket", (finding["signature"], finding["kind"], finding["title"][:240],
-                                                  finding["detail"], run_id, run_id))
-        ticket = str(row["ticket"] or "")
+            " updated_at=now()", (finding["signature"], finding["kind"], finding["title"][:240],
+                                  finding["detail"], run_id, run_id))
+        row = ctx.db.one("SELECT ticket FROM scale_proof_findings WHERE signature=%s", (finding["signature"],))
+        ticket = str((row or {}).get("ticket") or "")
         if ticket:
             status = (ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,)) or {}).get("status")
             if status != "Done":
@@ -181,6 +200,18 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
                 out.append({"signature": finding["signature"], "ticket": ticket, "created": False})
                 continue
             ticket = ""  # the earlier ticket is Done and the finding is back: a new ticket
+            ctx.db.run("UPDATE scale_proof_findings SET ticket='' WHERE signature=%s", (finding["signature"],))
+
+    # A successful new run can still be the first opportunity to report a finding from an earlier run.
+    pending = ctx.db.all(
+        "SELECT f.signature, f.kind, f.title, f.detail, f.last_run_id, r.report"
+        " FROM scale_proof_findings f JOIN scale_proof_runs r ON r.id=f.last_run_id"
+        " WHERE f.ticket='' ORDER BY f.updated_at, f.signature")
+    for item in pending:
+        finding = {"signature": item["signature"], "kind": item["kind"], "title": item["title"],
+                   "detail": item["detail"]}
+        finding_run_id = int(item["last_run_id"])
+        finding_report = item["report"] or report
         if not ctx.jira:
             ctx.db.run("UPDATE scale_proof_findings SET last_error='Jira is not configured' WHERE signature=%s",
                        (finding["signature"],))
@@ -188,9 +219,9 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
             continue
         labels = ["flow-bug", LABEL, finding["signature"].replace(":", "-")]
         try:
-            description = _description(finding, run_id, report)
+            description = _description(finding, finding_run_id, finding_report)
             key = ctx.jira.create_issue(project, finding["title"][:240], description, issuetype="Bug", labels=labels)
-        except Exception as exc:  # noqa: BLE001 - retried by the next run or file_pending
+        except Exception as exc:  # noqa: BLE001 - retried by the next release submission
             ctx.db.run("UPDATE scale_proof_findings SET last_error=%s WHERE signature=%s",
                        (str(exc)[:300] or type(exc).__name__, finding["signature"]))
             out.append({"signature": finding["signature"], "ticket": "", "created": False})
@@ -207,9 +238,10 @@ def file_tickets(ctx, run_id: int) -> list[dict[str, Any]]:
         ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                    " VALUES ('jira','scale_proof_create',%s,'scale-proof',true,%s,%s)",
                    (key, status, J({"project": project, "labels": labels, "signature": finding["signature"],
-                                    "run_id": run_id})))
+                                    "run_id": finding_run_id})))
         ctx.events.emit("scale_proof.ticket", ticket=key, project=project, outcome="created",
-                        reason=finding["title"][:300], data={"signature": finding["signature"], "run_id": run_id})
+                        reason=finding["title"][:300], data={"signature": finding["signature"],
+                                                              "run_id": finding_run_id})
         out.append({"signature": finding["signature"], "ticket": key, "created": True})
     return out
 

@@ -472,3 +472,34 @@ def test_second_github_app_is_imported_beside_the_first_and_both_repositories_ar
     ctx.settings.public_url = "https://control.example.test"
     assert client.get("/v1/integrations/github/manifest/start?organization=acme&connection=bogus"
                       ).status_code == 422
+
+
+def test_remote_branch_cleanup_uses_assigned_connection_and_audits_it(client, ctx, control_repo, secrets_dir):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    conn = add_token(client).json()["id"]
+    config_path = control_repo / "projects/TESTWP.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": ["pytest"], "stack": ""}]
+    config["epic_repositories"] = {"TESTWP-50": "person/tool"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    ctx.repo = lambda: ControlRepo.load(control_repo)
+    headers = worker_headers(client)
+    ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,parent_key)"
+               " VALUES ('TESTWP-50','TESTWP','In Progress','Epic',%s,'Core','',NULL)", ([],))
+    add_ticket(ctx.db, "TESTWP-51")
+    ctx.db.run("UPDATE tickets SET type='Story',parent_key='TESTWP-50' WHERE key='TESTWP-51'")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-51", "account": "codex-01", "step": "dev"},
+                          headers=headers).json()
+    run = {"run_id": claimed["run_id"], "fence": claimed["fence"]}
+    personal = {c.id: c.gateway for c in api.github_connection_list(ctx)}[conn]
+    personal.branch_heads[("person/tool", "TESTWP-51-work")] = "abc"
+
+    wrong = client.post("/v1/github/delete-branch", json={**run, "branch": "develop"}, headers=headers)
+    assert wrong.status_code == 422
+    done = client.post("/v1/github/delete-branch", json={**run, "branch": "TESTWP-51-work"}, headers=headers)
+    assert done.status_code == 200, done.text
+    assert len(personal.deleted_branches) == 1 and personal.deleted_branches[0][1] == "TESTWP-51-work"
+    assert getattr(ctx.github, "deleted_branches", []) == []  # the organization App was not used
+    row = ctx.db.one("SELECT payload FROM write_audit WHERE action='delete-branch' ORDER BY id DESC")
+    assert row["payload"]["connection"] == conn and row["payload"]["repo"] == "person/tool"

@@ -259,6 +259,10 @@ class FakeGitHub:
             if file_repo == repo and file_branch == base:
                 self.files[(repo, branch, path)] = content
 
+    def delete_branch(self, repo, branch):
+        self.deleted_branches = getattr(self, "deleted_branches", []) + [(repo, branch)]
+        return self.branch_heads.pop((repo, branch), None) is not None
+
     def create_branch_at_sha(self, repo, branch, sha):
         self.branches.append((repo, branch, sha))
         self.branch_heads[(repo, branch)] = sha

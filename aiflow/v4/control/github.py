@@ -216,6 +216,17 @@ class GitHubApp:
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",
                  {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]}, repo=repo)
 
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete one remote branch; a branch that is already gone counts as cleaned up."""
+        ref = quote(f"heads/{branch}", safe="/")
+        try:
+            self.api("DELETE", f"/repos/{self.org}/{repo}/git/refs/{ref}", repo=repo)
+        except GitHubError as exc:
+            if "-> 404:" in str(exc) or "-> 422:" in str(exc):
+                return False
+            raise
+        return True
+
     def create_branch_at_sha(self, repo: str, branch: str, sha: str) -> None:
         """Restore a deleted release branch at the exact audited commit for a post-merge retry."""
         self.api("POST", f"/repos/{self.org}/{repo}/git/refs",

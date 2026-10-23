@@ -101,6 +101,9 @@ store (`assignments.json`, by repository) and in the audit log (`assign_connecti
 connection that cannot reach it, is refused (HTTP 409 on the run, 422 when saving); AI Flow does not fall back to
 another account. A connection assigned to repositories cannot be removed until they are reassigned.
 
+Remote branch cleanup is `POST /v1/github/delete-branch` (run, fence and the ticket's own branch). Command Center
+deletes the branch with the connection assigned to the run's repository and audits the connection used.
+
 Command Center performs pull request, comment, merge, branch, release and checks operations with the
 connection assigned to the repository. For a GitHub App connection a node receives only the short lived
 installation token limited to that repository (`POST /v1/github/token`). For an access-token connection, the same

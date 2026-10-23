@@ -51,7 +51,7 @@ from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
-from .github import GitHubApp
+from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
 from .jira import Jira
@@ -869,6 +869,12 @@ class PRCommentBody(BaseModel):
     fence: int
     number: int
     body: str
+
+
+class BranchCleanupBody(BaseModel):
+    run_id: str
+    fence: int
+    branch: str
 
 
 class TriageAlertBody(BaseModel):
@@ -5307,6 +5313,29 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("github", "comment", run["ticket_key"], body.run_id, body.fence, run["account_id"], True, "ok",
               {"number": body.number, "repo": repository})
         return {"ok": True}
+
+    @app.post("/v1/github/delete-branch")
+    def github_delete_branch(body: BranchCleanupBody, node: str = Depends(node_auth)) -> dict:
+        """Delete the ticket's remote work branch through the connection assigned to its repository."""
+        run = fenced(body.run_id, body.fence, "github", "delete-branch", {"branch": body.branch})
+        if run["step"] not in ("dev", "verify"):
+            raise HTTPException(403, "only a development or verify run cleans up a branch")
+        branch = body.branch.strip()
+        if (not branch.startswith(f"{run['ticket_key']}-") or not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", branch)
+                or branch.endswith("/") or ".." in branch):
+            raise HTTPException(422, "the branch does not belong to this ticket")
+        project = ctx.repo().projects[run["project"]]
+        repository = repository_for_run(run, project)
+        github = github_gateway(ctx, repository)
+        try:
+            deleted = github.delete_branch(repository.split("/", 1)[-1], branch)
+        except GitHubError as exc:
+            audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], False,
+                  "GitHub refused the branch deletion", {"branch": branch, "repo": repository})
+            raise HTTPException(502, "GitHub refused the branch deletion") from exc
+        audit("github", "delete-branch", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              "deleted" if deleted else "already gone", {"branch": branch, "repo": repository})
+        return {"ok": True, "deleted": deleted}
 
     # --- policy hook ------------------------------------------------------------------------------------------
     @app.post("/v1/policy/decide")

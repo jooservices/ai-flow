@@ -65,6 +65,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderStakeholder": ("stakeholder",),
     "renderDrawer": None,
     "renderFooter": None,
+    "renderBackup": ("backup",),
     "renderProjects": ("projects",),
     "renderUsers": ("users",),
     "renderCommandSearchResults": None,
@@ -92,10 +93,10 @@ DOC_PATHS = ("docs/guide/", "docs/v4/")
 
 
 # --- what the code raises ---------------------------------------------------------------------------------------
-def incident_kinds(control: Path = CONTROL) -> set[str]:
-    """Incident kinds in the code: the literal or module constant given to `open_incident(ctx, kind, ...)`."""
+def incident_kinds(source_root: Path = ROOT / "aiflow" / "v4") -> set[str]:
+    """Incident kinds raised anywhere in v4 code by `open_incident(ctx, kind, ...)`."""
     kinds: set[str] = set()
-    for path in sorted(control.glob("*.py")):
+    for path in sorted(source_root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         consts: dict[str, str] = {}
         for node in ast.walk(tree):

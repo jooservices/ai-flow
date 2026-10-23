@@ -18,7 +18,7 @@ Keep pages in plain language, and never put a secret, a token or the content of 
 
 ## Runbooks follow the code
 
-A runbook page exists for every kind that the code in `aiflow/v4/control/*.py` passes to `open_incident` (a literal
+A runbook page exists for every kind that the code in `aiflow/v4/` passes to `open_incident` (a literal
 or a module constant such as `INCIDENT_KIND`). The test `tests/v4/test_documentation.py` finds the kinds by
 reading the code and fails when a kind has no page, a page has no kind, or the runbook index misses one. When you
 raise a new kind, add `docs/guide/runbooks/<kind>.md` (symptom, cause, fix) and a row in `runbooks/index.md`. The

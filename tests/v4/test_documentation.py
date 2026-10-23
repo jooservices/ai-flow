@@ -27,7 +27,8 @@ def site(tmp_path_factory) -> Path:
 def test_runbooks_match_incident_kinds_raised_in_code():
     kinds = docsite.incident_kinds()
     # the kinds named by the ticket are really found
-    assert {"ticket_stuck", "config_pin", "flow_idle", "jira_auth", "openobserve_delivery"} <= kinds
+    assert {"ticket_stuck", "config_pin", "flow_idle", "jira_auth", "openobserve_delivery",
+            "backup_failure", "backup_restore_test"} <= kinds
     pages = {p.stem for p in (GUIDE / "runbooks").glob("*.md")} - {"index"}
     assert pages == kinds, f"missing: {sorted(kinds - pages)}; unknown: {sorted(pages - kinds)}"
     index = (GUIDE / "runbooks" / "index.md").read_text()
@@ -290,10 +291,11 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
     assert docsite.changed_views("origin/develop") == {"cc"}
 
 
-def test_traefik_routes_console_help_to_control_api():
+def test_traefik_routes_console_help_and_backups_to_control_api():
     compose = (ROOT / "deploy/v4/control/compose.yaml").read_text()
     api_rule = next(line for line in compose.splitlines() if "traefik.http.routers.api.rule:" in line)
     assert "PathPrefix(`/help`)" in api_rule
+    assert "PathPrefix(`/backup`)" in api_rule
 
 
 def test_ci_check_maps_javascript_renderer_to_its_screen_page(monkeypatch, capsys):

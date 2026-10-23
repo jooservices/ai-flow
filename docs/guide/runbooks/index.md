@@ -8,6 +8,8 @@ condition clears. Critical and warning incidents are emailed. The list below has
 
 | Kind | Severity | In short |
 |---|---|---|
+| [backup_failure](backup_failure.md) | warning | The scheduled encrypted backup failed |
+| [backup_restore_test](backup_restore_test.md) | warning | The weekly restore test failed |
 | [flow_idle](flow_idle.md) | critical | Tickets are ready but no run started |
 | [config_pin](config_pin.md) | critical | A project's stack has no pin in `versions.lock` |
 | [node_down](node_down.md) | critical | A node stopped sending heartbeats |

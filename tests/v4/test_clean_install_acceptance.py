@@ -589,6 +589,21 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     assert "clean-install-acceptance.sh fast" in text and "clean-install-acceptance.sh full" in text
     assert "open-bug-ticket.sh" in text and ci["jobs"]["acceptance-bug"]["needs"] == ["acceptance-full"]
 
+    for job_name, artifact_name in (("acceptance-fast", "clean-install-acceptance-fast"),
+                                    ("acceptance-full", "clean-install-acceptance-nightly")):
+        upload = next(s for s in ci["jobs"][job_name]["steps"]
+                      if s.get("uses", "").startswith("actions/upload-artifact@"))
+        assert upload["if"] == "always()"
+        assert upload["with"]["name"] == artifact_name
+        assert upload["with"]["path"] == "${{ runner.temp }}/aiflow-acceptance-logs/"
+    nightly_bug = ci["jobs"]["acceptance-bug"]
+    nightly_download = next(s for s in nightly_bug["steps"]
+                            if s.get("uses", "").startswith("actions/download-artifact@"))
+    assert nightly_download["with"]["name"] == "clean-install-acceptance-nightly"
+    nightly_open = next(s for s in nightly_bug["steps"] if "open-bug-ticket.sh" in s.get("run", ""))
+    assert nightly_open["env"]["ACCEPTANCE_LOG_DIR"] == "${{ runner.temp }}/aiflow-acceptance-logs"
+    assert "does not automatically open a bug issue" in DOC.read_text()
+
     release = _workflow("release-v4.yml")
     gate = release["jobs"]["acceptance"]
     full_step = next(s for s in gate["steps"] if "clean-install-acceptance.sh full" in s.get("run", ""))
@@ -596,6 +611,10 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     assert "${{ steps.releases.outputs.previous }}" in full_step["env"]["ACCEPTANCE_PREVIOUS"]
     assert "${{ steps.releases.outputs.target }}" in full_step["env"]["ACCEPTANCE_TARGET"]
     assert any("Two newest published releases" in s.get("name", "") for s in gate["steps"])
+    release_upload = next(s for s in gate["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
+    assert release_upload["if"] == "always()"
+    assert release_upload["with"]["name"] == "clean-install-acceptance-release"
+    assert release_upload["with"]["path"] == "${{ runner.temp }}/aiflow-acceptance-logs/"
     assert set(release["jobs"]["release"]["needs"]) == {"v4-tests", "acceptance"}  # a failure blocks the release
     release_steps = "".join(s.get("run", "") for s in release["jobs"]["release"]["steps"])
     assert "clean-install-containers.sh \"$VERSION\"" in release_steps
@@ -606,6 +625,11 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
     assert ".venv/" in (ROOT / ".gitignore").read_text()
     bug = release["jobs"]["release-bug"]
     assert set(bug["needs"]) == {"v4-tests", "acceptance", "release"} and "failure()" in bug["if"]
+    release_download = next(s for s in bug["steps"]
+                            if s.get("uses", "").startswith("actions/download-artifact@"))
+    assert release_download["with"]["name"] == "clean-install-acceptance-release"
+    release_open = next(s for s in bug["steps"] if "open-bug-ticket.sh" in s.get("run", ""))
+    assert release_open["env"]["ACCEPTANCE_LOG_DIR"] == "${{ runner.temp }}/aiflow-acceptance-logs"
     assert (ROOT / "deploy/v4/ci/open-bug-ticket.sh").is_file()
     for script in ("clean-install-acceptance.sh", "open-bug-ticket.sh"):
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci" / script)]).returncode == 0
@@ -662,6 +686,32 @@ def test_the_bug_ticket_survives_a_log_longer_than_the_size_limit(tmp_path):
     assert "issue create" in (tmp_path / "gh.log").read_text()
     body = (tmp_path / "body.md").read_text()
     assert len(body) <= 60010 and body.count("```") % 2 == 0 and "actions/runs/7" in body
+
+
+def test_the_bug_ticket_contains_the_downloaded_acceptance_log_and_requires_it(tmp_path):
+    logs, stubs = tmp_path / "logs", tmp_path / "stubs"
+    logs.mkdir()
+    stubs.mkdir()
+    marker = "actual acceptance failure from downloaded artifact"
+    (logs / "acceptance-cases.log").write_text(f"{marker}\n")
+    gh = stubs / "gh"
+    gh.write_text('#!/bin/sh\necho "$@" >> "$GH_CALLS"\n'
+                  'while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$GH_BODY"; shift; done\n')
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ACCEPTANCE_LOG_DIR": str(logs), "GH_TOKEN": "t",
+           "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7", "GH_CALLS": str(tmp_path / "gh.log"),
+           "GH_BODY": str(tmp_path / "body.md")}
+    done = subprocess.run(["bash", str(ROOT / "deploy/v4/ci/open-bug-ticket.sh"), "nightly failed"], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert marker in (tmp_path / "body.md").read_text()
+
+    (logs / "acceptance-cases.log").unlink()
+    failed = subprocess.run(["bash", str(ROOT / "deploy/v4/ci/open-bug-ticket.sh"), "nightly failed"], env=env,
+                            capture_output=True, text=True, timeout=60)
+    assert failed.returncode != 0
+    assert "refusing to open a bug ticket without logs" in failed.stderr
+    assert (tmp_path / "gh.log").read_text().count("issue create") == 1
 
 
 def test_the_topic_is_linked_from_the_deploy_readme():

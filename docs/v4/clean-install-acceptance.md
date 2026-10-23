@@ -85,9 +85,16 @@ candidate locally, then uses the documented `aiflow4-control-install` command an
 the control machine and both nodes. The candidate's control image is built from the signed release contents inside
 the temporary control machine, so no unpublished artifact is fetched from GitHub or GHCR.
 
-The release job `needs` the `acceptance` job, so a failure blocks the GHCR image and the GitHub Release. When a
-nightly or release run fails, `deploy/v4/ci/open-bug-ticket.sh` opens a bug ticket (a GitHub issue labelled `bug`)
-naming the run, the ref and the tail of every step log.
+The release job `needs` the `acceptance` job, so a failure blocks the GHCR image and the GitHub Release. Each
+acceptance job uploads its runner-temp logs even when the test fails. The nightly and release bug jobs download those
+artifacts and pass their directory to `deploy/v4/ci/open-bug-ticket.sh`; the issue (a GitHub issue labelled `bug`)
+includes the last 60 lines of each log, capped at 60,000 bytes. The script refuses to create an issue if no log files
+were downloaded, rather than creating a ticket with a placeholder for missing logs.
+
+The fast pull-request run reports a workflow check for the touched files listed above. A failure marks that check
+failed and keeps its logs as a workflow artifact for investigation, but it does not automatically open a bug issue;
+whether a failed check prevents merging follows the repository's branch-protection settings. Nightly and release
+acceptance failures open bug issues with the downloaded logs.
 
 ## Adding a case for a problem found later (AC5)
 

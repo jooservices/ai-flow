@@ -338,10 +338,10 @@ FREEFORM = "[REDACTED_FREEFORM]"
 
 
 def structured_log_text(text: str) -> str:
-    """Reduce log text to timestamp, level, logger and key=value pairs with numeric or id values.
+    """Reduce log text to timestamp, level and key=value pairs with numeric or id values.
 
     Log messages are free text whose personal names no pattern can reliably find, so the message
-    itself is never exported; only its structured parts are.
+    itself is never exported. Logger names are also caller-controlled and are omitted.
     """
     out: list[str] = []
     for line in text.splitlines():
@@ -352,7 +352,7 @@ def structured_log_text(text: str) -> str:
             continue
         head = _LOG_PREFIX.match(line)
         rest = line[head.end():] if head else line
-        parts = [part for part in (head.group("stamp"), head.group("level"), head.group("logger")) if part] if head else []
+        parts = [part for part in (head.group("stamp"), head.group("level")) if part] if head else []
         pairs = [f"{m.group('key')}={m.group('value')}" for m in _LOG_PAIR.finditer(rest)
                  if not re.fullmatch(_SECRET_NAME, m.group("key"), re.I)]
         out.append(" ".join(parts + [FREEFORM] + pairs))

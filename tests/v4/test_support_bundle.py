@@ -74,6 +74,20 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
                if item["name"].startswith("logs/"))
 
 
+def test_bundle_omits_untrusted_logger_name_from_timestamped_log(ctx):
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("jane.doe", logging.INFO, __file__, 1, "hello", (), None))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=logs)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        log = bundle.read("logs/control-service.log").decode("utf-8")
+
+    assert "jane.doe" not in log
+    assert "INFO [REDACTED_FREEFORM]" in log
+    assert inventory["scan"] == "passed"
+    assert not support_bundle.file_findings("logs/control-service.log", log)
+
+
 def test_machine_names_survive_in_structured_files_while_log_names_stay_redacted(ctx):
     for name in ("wsl", "mac-mini", "wsl-1"):
         ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"

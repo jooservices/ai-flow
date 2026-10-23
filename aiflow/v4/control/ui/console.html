@@ -684,7 +684,7 @@ var S = {
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
-    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
+    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
@@ -1230,15 +1230,15 @@ function addProjectRepository(name) {
   var ed = S.projectAdmin.repositoryEditor, data = ed && ed.data;
   if (!data || !name || (data.repositories || []).some(function (r) { return r.repo === name; })) return;
   var known = (data.github_repos || []).filter(function (g) { return g.full_name === name; })[0] || {};
-  data.repositories.push({ repo: name, base: '', checks: [], stack: '', connection: known.connection || '', connections: known.connections || [], effective: { base: data.project_defaults.base,
-    checks: data.project_defaults.checks, stack: data.project_defaults.stack } });
+  data.repositories.push({ repo: name, base: '', checks: [], stack: '', containers: null, connection: known.connection || '', connections: known.connections || [], effective: { base: data.project_defaults.base,
+    checks: data.project_defaults.checks, stack: data.project_defaults.stack, containers: data.project_defaults.containers } });
   renderProjects();
 }
 function saveProjectRepositories() {
   var ed = S.projectAdmin.repositoryEditor; if (!ed || !ed.data || ed.saving) return;
   ed.saving = true; ed.error = ''; renderProjects();
   var body = { repositories: ed.data.repositories.map(function (r) { return { repo: r.repo, base: r.base || '',
-    checks: r.checks || [], stack: r.stack || '',
+    checks: r.checks || [], stack: r.stack || '', containers: r.containers,
     connection: (r.connection_picked || r.connection_stale) ? (r.connection || '') : '' }; }), epic_repositories: ed.data.epic_repositories || {} };
   fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/repositories', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1415,6 +1415,7 @@ function renderGitHubIntegrations() {
 function projectRequestBody() {
   var f = S.projectAdmin.form;
   return { site: f.site, project: f.project, repo: f.repo, base: f.base || 'develop', stack: f.stack || '',
+    containers: Boolean(f.containers),
     checks: String(f.checks || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean),
     priority: Number(f.priority), parallel_limit: Number(f.parallel_limit), merge_method: f.merge_method };
 }
@@ -4157,6 +4158,7 @@ function renderProjects() {
       h += '<a class="btn sm" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repository on GitHub</a></div>';
       h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
       h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Checks need Docker containers<select data-project-field="containers"><option value="false"' + (!form.containers ? ' selected' : '') + '>No</option><option value="true"' + (form.containers ? ' selected' : '') + '>Yes · require the safe rootless runtime</option></select></label>';
       h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
       h += '<label>Parallel limit<input type="number" min="1" max="100" data-project-field="parallel_limit" value="' + esc(form.parallel_limit) + '"></label>';
       h += '<label>Merge method<select data-project-field="merge_method">' + ['squash', 'merge', 'rebase'].map(function (method) { return '<option value="' + method + '"' + (form.merge_method === method ? ' selected' : '') + '>' + method + '</option>'; }).join('') + '</select></label>';
@@ -4194,7 +4196,7 @@ function renderProjects() {
       });
       if (!(data.epics || []).length) h += '<tr><td colspan="3" class="muted">No Jira epics found in this project.</td></tr>';
       h += '</tbody></table></div>';
-      h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
+      h += '<h3>Repository settings</h3><p class="muted">Blank values inherit the project defaults: base ' + esc(defaults.base || 'develop') + ', stack ' + esc(defaults.stack || 'none') + ', containers ' + (defaults.containers ? 'enabled' : 'disabled') + ', checks ' + esc((defaults.checks || []).join(', ') || 'not configured') + '.</p>';
       configured.forEach(function (r) {
         h += '<section class="project-checks"><strong class="mono">' + esc(r.repo) + (r.repo === data.default_repo ? ' · default' : '') + '</strong>';
         var reach = r.connections || [], conns = data.connections || [];
@@ -4207,6 +4209,7 @@ function renderProjects() {
         h += '</select></label>';
         h += '<label>Base branch<input data-repository-config="base" data-repo="' + esc(r.repo) + '" value="' + esc(r.base || '') + '" placeholder="Inherit ' + esc(defaults.base || 'develop') + '"></label>';
         h += '<label>Stack<select data-repository-config="stack" data-repo="' + esc(r.repo) + '"><option value="">Inherit project stack</option>' + (data.stacks || []).map(function (s) { return '<option value="' + esc(s) + '"' + (r.stack === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>';
+        h += '<label>Container runtime<select data-repository-config="containers" data-repo="' + esc(r.repo) + '"><option value="inherit"' + (r.containers === null || r.containers === undefined ? ' selected' : '') + '>Inherit project setting</option><option value="true"' + (r.containers === true ? ' selected' : '') + '>Require safe runtime</option><option value="false"' + (r.containers === false ? ' selected' : '') + '>Not required</option></select></label>';
         h += '<label class="wide">Checks, one command per line<textarea data-repository-config="checks" data-repo="' + esc(r.repo) + '" placeholder="Inherit project checks">' + esc((r.checks || []).join('\n')) + '</textarea></label></div></section>';
       });
       h += '<div class="project-actions"><select data-repository-add><option value="">Add a repository…</option>' + options.filter(function (r) { return !configured.some(function (c) { return c.repo === r.full_name; }); }).map(function (r) { return '<option value="' + esc(r.full_name) + '">' + esc(r.full_name) + '</option>'; }).join('') + '</select><button class="btn sm" data-act="project-repository-add">Add repository</button><span class="spacer"></span><button class="btn primary" data-act="project-repositories-save"' + (editor.saving ? ' disabled' : '') + '>Save repository settings</button></div>';
@@ -5176,7 +5179,7 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.id === 'dash-project-search') { S.dashboardQuery = e.target.value; renderDashboard(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
-    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.form[field] = field === 'containers' ? e.target.value === 'true' : e.target.value;
     S.projectAdmin.preflight = null;
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
@@ -5187,7 +5190,8 @@ document.addEventListener('input', function (e) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
       if (config && fieldName === 'connection') config.connection_picked = true;
-      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) :
+        fieldName === 'containers' ? (e.target.value === 'inherit' ? null : e.target.value === 'true') : e.target.value;
     }
   }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
@@ -5234,7 +5238,7 @@ document.addEventListener('change', function (e) {
   if (e.target && e.target.matches('[data-review-project]')) { S.reviewProject = e.target.value; loadReviews(); }
   if (e.target && e.target.matches('[data-project-field]')) {
     var field = e.target.getAttribute('data-project-field');
-    S.projectAdmin.form[field] = e.target.value;
+    S.projectAdmin.form[field] = field === 'containers' ? e.target.value === 'true' : e.target.value;
     S.projectAdmin.preflight = null;
     var saveButton = $('[data-act="project-save"]'); if (saveButton) saveButton.disabled = true;
     var oldResult = $('.project-checks'); if (oldResult) oldResult.remove();
@@ -5254,7 +5258,8 @@ document.addEventListener('change', function (e) {
       var repoName = e.target.getAttribute('data-repo'), fieldName = e.target.getAttribute('data-repository-config');
       var config = (data.repositories || []).filter(function (r) { return r.repo === repoName; })[0];
       if (config && fieldName === 'connection') config.connection_picked = true;
-      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) : e.target.value;
+      if (config) config[fieldName] = fieldName === 'checks' ? e.target.value.split('\n').map(function (x) { return x.trim(); }).filter(Boolean) :
+        fieldName === 'containers' ? (e.target.value === 'inherit' ? null : e.target.value === 'true') : e.target.value;
     }
   }
 });

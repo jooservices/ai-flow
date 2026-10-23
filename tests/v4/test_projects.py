@@ -202,6 +202,24 @@ def test_missing_base_branch_blocks_save(client, ctx, control_repo):
     assert not (control_repo / "projects" / "NEWAPP.yaml").exists()
 
 
+def test_owner_can_declare_container_checks_from_the_projects_ui_path(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    tools = {"git": "git version 2.43", "uv": "uv 0.8.1", "claude": "Claude 1.0",
+             "safe-container-runtime": "rootless Podman 5.4; podman-compose 1.2; project quota"}
+    worker_headers(client, tools)
+    body = project_body(containers=True, checks=["docker compose run --rm composer composer ci"])
+    checked = client.post("/v1/projects/preflight", json=body)
+    assert checked.status_code == 200, checked.text
+    assert "safe-container-runtime" in checked.json()["required_tools"]
+    assert next(item for item in checked.json()["nodes"] if item["name"] == "node1")["ready"] is True
+
+    saved = client.post("/v1/projects", json=body)
+    assert saved.status_code == 200, saved.text
+    config = yaml.safe_load((control_repo / "projects" / "NEWAPP.yaml").read_text(encoding="utf-8"))
+    assert config["containers"] is True
+
+
 def test_pause_keeps_running_run_alive_and_removes_project_from_candidates_and_sync(client, ctx, control_repo):
     prepare_project_control(ctx, control_repo)
     owner_sign_in(client, ctx)
@@ -303,9 +321,11 @@ def test_project_epic_repository_lookup_inherits_project_defaults_and_all_repo_s
                       epic_repositories={"MULTI-2": "jooservices/core"})
     assert project.repo_for({"key": "MULTI-3", "epic": "MULTI-2"}) == "jooservices/core"
     assert project.settings_for_ticket({"epic": "MULTI-2"}) == {
-        "repo": "jooservices/core", "base": "main", "checks": ["pytest"], "stack": "python-3.12"}
+        "repo": "jooservices/core", "base": "main", "checks": ["pytest"], "stack": "python-3.12",
+        "containers": False}
     assert project.settings_for_ticket({"key": "MULTI-4"}) == {
-        "repo": "jooservices/default", "base": "develop", "checks": ["composer install"], "stack": "php-8.3"}
+        "repo": "jooservices/default", "base": "develop", "checks": ["composer install"], "stack": "php-8.3",
+        "containers": False}
     assert set(project.stacks) == {"php-8.3", "python-3.12"}
     assert {"php", "composer", "wp", "python3"}.issubset(project.tools)
     assert epic_for_ticket({"key": "MULTI-4", "type": "Sub-task", "parent_key": "MULTI-3"}, {

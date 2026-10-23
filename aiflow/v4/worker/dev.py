@@ -380,9 +380,12 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         result.setdefault("details", {})["changed_files"] = changed[:100]
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
-        if res.error_kind or not changed:
-            clean_no_changes = not res.error_kind and not changed
-            reason = res.error_kind or ("no changes" if clean_no_changes else "")
+        failure_verdict = res.verdict == "FAIL"
+        if res.error_kind or failure_verdict or not changed:
+            clean_no_changes = not failure_verdict and not res.error_kind and not changed
+            reason = res.error_kind
+            if not reason:
+                reason = (res.verdict_reason or "AI reported RESULT: FAIL") if failure_verdict else "no changes"
             result["outcome"] = "no_changes" if clean_no_changes else "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",

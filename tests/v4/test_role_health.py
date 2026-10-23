@@ -98,11 +98,16 @@ def ready_enabled_count(ctx, role):
         "pr_url_source": "current"}}, "finished", 0.0),
     ({"step": "dev", "outcome": "no_changes"}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 0.0),
-    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change."}, "no_changes", 0.0),
+    ({"step": "dev", "outcome": "failed", "error_kind": "tests", "summary": "no changes: test command failed"},
+     "failed", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change."}, "excluded", None),
     ({"step": "dev", "outcome": "blocked"}, "blocked", 1.0),
     ({"step": "dev", "outcome": "failed", "summary": "worker error"}, "failed", 1.0),
     ({"step": "dev", "outcome": "tool_missing", "details": {
         "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run"}}, "tool_missing", 1.0),
+    ({"step": "dev", "outcome": "tool_missing", "summary": "Nothing to change.", "details": {
+        "missing_tools": ["php"], "verdict_reason": "MISSING-TOOL: php - check cannot run",
+        "tool_missing_evidence": "explicit_marker"}}, "tool_missing", 1.0),
     ({"step": "dev", "outcome": "tool_missing", "details": {
         "missing_tools": ["php"], "tool_missing_evidence": "command_not_found"}}, "excluded", None),
     ({"step": "dev", "outcome": "timeout"}, "stopped", 1.0),

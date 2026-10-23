@@ -76,7 +76,7 @@ def classify(run: dict) -> Scored | None:
     summary = (run.get("summary") or "").strip().lower()
     if outcome == "merged":
         return Scored("merged", 0.0)
-    if outcome == "no_changes" or (run.get("step") == "dev" and outcome in {"failed", "tool_missing"}
+    if outcome == "no_changes" or (run.get("step") == "dev" and outcome == "failed" and not kind
                                     and summary.startswith(("no changes", "nothing to change"))):
         return Scored("no_changes", 0.0)
     if outcome == "quota" or kind in UNSCORED_KINDS:

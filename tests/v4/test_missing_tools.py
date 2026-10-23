@@ -153,6 +153,13 @@ def test_summary_naming_docker_or_php_and_missing_is_not_a_missing_tool(monkeypa
     assert not any(call[1] == "/v1/escalations/raise" for call in api.calls)
 
 
+def test_fail_verdict_without_file_changes_is_failed_not_no_changes(monkeypatch, tmp_path):
+    result, _ = _run_dev(monkeypatch, tmp_path, "FAIL", "tests reported failure",
+                         final_text="SUMMARY: Nothing to change.\nRESULT: FAIL: tests reported failure")
+    assert result["outcome"] == "failed"
+    assert "tests reported failure" in result["summary"]
+
+
 def test_command_not_found_for_executed_catalogue_command_is_a_missing_tool(monkeypatch, tmp_path):
     result, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "the check could not run",
                          command_results=[{"command": "php -v", "output": "bash: line 1: php: command not found",

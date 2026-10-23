@@ -14,10 +14,12 @@ Every problem found later in real use gets a case in REGRESSIONS at the end (AC5
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -34,12 +36,12 @@ from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from conftest import join_node
 from test_control_install import ROOT, FakeHost, installer, machine  # noqa: F401 - `machine` is a fixture
 from test_projects import SITE, prepare_project_control, project_body
 from aiflow.v4 import cli
 from aiflow.v4.control.github import GitHubApp
 from aiflow.v4.control.jira_connect import JiraAuth, SecretStore
+from aiflow.v4.control import api as control_api
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
@@ -98,7 +100,14 @@ class Fresh:
 
     def join(self, name):
         """Join a machine with the one-use token Command Center issues; the machine itself never signs in."""
-        joined = join_node(self.client, name)
+        command = self.client.post(f"/v1/nodes/{name}/join-command", json={
+            "name": name, "role": "worker", "project": "TESTWP",
+        })
+        assert command.status_code == 200, command.text
+        parts = shlex.split(command.json()["command"])
+        assert parts[:2] == ["curl", "-fsSL"] and parts[-2] == "--token"
+        token = parts[-1]
+        joined = self.client.post("/v1/nodes/join", json={"name": name, "join_token": token})
         assert joined.status_code == 200, joined.text
         headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
         beat = self.client.post(f"/v1/nodes/{name}/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
@@ -111,7 +120,19 @@ class Fresh:
 
 
 @pytest.fixture
-def fresh(machine, ctx, control_repo):  # noqa: F811
+def fresh(machine, ctx, control_repo, tmp_path, monkeypatch):  # noqa: F811
+    releases = tmp_path / "releases"
+    release = releases / "v4.1.0"
+    release.mkdir(parents=True)
+    tarball = b"acceptance signed release fixture"
+    filename = "aiflow4-v4.1.0.tar.gz"
+    (release / filename).write_bytes(tarball)
+    (release / f"{filename}.sigstore.json").write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(tarball).hexdigest()
+    (release / "SHA256SUMS").write_text(f"{digest}  {filename}\n", encoding="utf-8")
+    (releases / "CURRENT").write_text("v4.1.0\n", encoding="utf-8")
+    monkeypatch.setattr(control_api, "RELEASES", releases)
+    ctx.settings.join_control_url = "https://control.example.test"
     f = Fresh(machine, ctx, control_repo)
     f.install_control()
     f.start_control_api()
@@ -151,7 +172,14 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     fresh.sign_in()
     cc, _ = fresh.join("cc")
     n1, _ = fresh.join("node1")
-    saved = client.post("/v1/projects", json=project_body("NEWAPP", stack=""))
+    catalog = client.get("/v1/projects/catalog")
+    assert catalog.status_code == 200
+    assert "NEWAPP" in {project["key"] for project in catalog.json()["jira_projects"]}
+    assert "jooservices/new-app" in {repo["full_name"] for repo in catalog.json()["github_repos"]}
+    body = project_body("NEWAPP", stack="")
+    preflight = client.post("/v1/projects/preflight", json=body)
+    assert preflight.status_code == 200 and preflight.json()["ok"] is True, preflight.text
+    saved = client.post("/v1/projects", json=body)
     assert saved.status_code == 200, saved.text
     fresh.control_repo.joinpath("accounts.yaml").write_text(
         fresh.control_repo.joinpath("accounts.yaml").read_text()
@@ -644,19 +672,21 @@ def test_pull_requests_nightly_and_releases_run_the_acceptance_test_and_failures
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci" / script)]).returncode == 0
 
 
-def test_the_real_machine_run_installs_with_sign_in_and_is_part_of_the_full_run():
+def test_real_machine_run_uses_command_center_project_and_machine_setup():
     script = (ROOT / "deploy/v4/ci/clean-install-containers.sh").read_text()
     assert subprocess.run(["bash", "-n", str(ROOT / "deploy/v4/ci/clean-install-containers.sh")]).returncode == 0
-    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/nodes/join-tokens",
+    for step in ("--domain", "--admin-email", "AIFLOW4_CONSOLE_LOGIN=1", "/v1/projects/catalog",
+                 "/v1/projects/preflight", "$URL/v1/projects", "/v1/nodes/$1/join-command",
                  "acceptance-backup.py create", "acceptance-backup.py restore", "super-admin-password"):
         assert step in script, step
     assert "NODES=(" in script and "node-a" in script and "node-b" in script  # a control machine and two machines
-    # the machines run the documented join bootstrap (the signed release is installed by it), not hand-made HTTP calls
-    assert "/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file" in script
+    assert "aiflow4-acceptance-provider" in script and "acceptance-providers.py" in script
+    assert "/v1/install.sh" in script and "AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token" in script
     assert "aiflow4-node-agent" in script and "/srv/aiflow/current/RELEASE" in script and ":online" in script
-    assert not re.search(r"curl [^\n]*/v1/nodes/\$machine/heartbeat", script)
-    # the join token reaches the node as its own stdin, never under a heredoc that replaces the pipe
-    assert not re.search(r"docker exec -i \"\$node\" bash -se <<", script)
+    assert "aiflow4-acceptance-cookie.jar" in script
+    assert "/v1/nodes/join-tokens" not in script and "AIFLOW4_JOIN_TOKEN" not in script
+    assert not re.search(r"cat > .*projects/|printf .*nodes/", script)
+    assert "acceptance-providers.py" in script
 
 
 def test_the_signed_candidate_uses_documented_install_and_join_before_publishing():
@@ -666,7 +696,7 @@ def test_the_signed_candidate_uses_documented_install_and_join_before_publishing
     assert "cosign verify-blob" in candidate_adapter
     assert "enable -q --now aiflow4-autodeploy.timer" not in candidate_adapter
     assert "aiflow4-control-install" in real_machine
-    assert "/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file" in real_machine
+    assert "/v1/install.sh" in real_machine and "join-command" in real_machine
     assert "AIFLOW4_CONSOLE_LOGIN=1" in real_machine and "/v1/auth/login" in real_machine
     assert "AIFLOW4_DATABASE_URL=postgresql://" not in real_machine
     steps = _workflow("release-v4.yml")["jobs"]["release"]["steps"]
@@ -733,6 +763,7 @@ REGRESSIONS = {
     "deploy and canary scripts failed with login enabled": "test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign_in_is_on",
     "backup omitted active Jira and GitHub App credentials": "test_ci_backup_and_restore_keep_sign_in_machine_and_integration_credentials_working",
     "backup restore had no UI path and must stay CI-only": "test_restore_refuses_a_file_that_is_not_a_backup_and_backup_is_not_an_operator_cli",
+    "release acceptance bypassed Command Center project and node setup": "test_real_machine_run_uses_command_center_project_and_machine_setup",
     "the bug ticket was not opened for a long log (broken pipe)": "test_the_bug_ticket_survives_a_log_longer_than_the_size_limit",
 }
 

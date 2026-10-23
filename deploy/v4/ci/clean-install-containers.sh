@@ -49,6 +49,7 @@ if [[ $# -eq 4 ]]; then
   }
 fi
 cleanup() {
+  docker exec "$CONTROL" docker rm -f aiflow4-acceptance-provider >/dev/null 2>&1 || true
   docker rm -f "${NODES[@]}" "$CONTROL" >/dev/null 2>&1 || true
   docker volume rm "$NAME-docker" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
@@ -68,7 +69,8 @@ start() {  # start <name> <alias> [extra docker args...]
 }
 CONTROL_MOUNTS=(--volume "$NAME-docker:/var/lib/docker"
   --volume "$ROOT/deploy/v4/bin/aiflow4-control-install:/opt/aiflow4-control-install:ro"
-  --volume "$ROOT/deploy/v4/ci/acceptance-backup.py:/opt/aiflow4-acceptance-backup.py:ro")
+  --volume "$ROOT/deploy/v4/ci/acceptance-backup.py:/opt/aiflow4-acceptance-backup.py:ro"
+  --volume "$ROOT/deploy/v4/ci/acceptance-providers.py:/opt/aiflow4-acceptance-providers.py:ro")
 if [[ $CANDIDATE == 1 ]]; then
   CONTROL_MOUNTS+=(--volume "$ARTIFACTS:/candidate:ro"
     --volume "$COSIGN:/usr/local/bin/cosign:ro"
@@ -104,6 +106,51 @@ STAGE_CANDIDATE
 else
   docker exec "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
 fi
+
+echo "== 1a. connect disposable Jira and GitHub test accounts for the documented project flow"
+CONTROL_IMAGE=$(docker exec "$CONTROL" docker compose -f /srv/aiflow/control/compose.yaml config --images | head -n1)
+[[ -n $CONTROL_IMAGE ]] || fail "could not resolve the installed control image"
+docker exec "$CONTROL" bash -se -- "$CONTROL_IMAGE" <<'FAKES' || fail "test provider setup"
+set -euo pipefail
+install -d -m 0700 /root/aiflow4-acceptance-pki /etc/aiflow/secrets/github
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=AI Flow acceptance test root' \
+  -keyout /root/aiflow4-acceptance-pki/ca.key -out /root/aiflow4-acceptance-pki/ca.crt >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -subj '/CN=api.github.com' \
+  -keyout /root/aiflow4-acceptance-pki/server.key -out /root/aiflow4-acceptance-pki/server.csr >/dev/null 2>&1
+printf 'subjectAltName=DNS:api.github.com,DNS:jooservices.atlassian.net\nextendedKeyUsage=serverAuth\n' \
+  > /root/aiflow4-acceptance-pki/server.ext
+openssl x509 -req -days 1 -in /root/aiflow4-acceptance-pki/server.csr \
+  -CA /root/aiflow4-acceptance-pki/ca.crt -CAkey /root/aiflow4-acceptance-pki/ca.key \
+  -CAcreateserial -extfile /root/aiflow4-acceptance-pki/server.ext \
+  -out /root/aiflow4-acceptance-pki/server.crt >/dev/null 2>&1
+openssl genrsa -out /etc/aiflow/secrets/github/app.pem 2048 >/dev/null 2>&1
+chmod 600 /etc/aiflow/secrets/github/app.pem
+printf '%s\n' '{"id":"424242","slug":"aiflow-acceptance","installation_id":1,"account_login":"acceptance","account_type":"Organization"}' \
+  > /etc/aiflow/secrets/github/app.json
+chmod 600 /etc/aiflow/secrets/github/app.json
+install -m 0644 /root/aiflow4-acceptance-pki/ca.crt /etc/aiflow/secrets/control/acceptance-ca.crt
+cat >> /etc/aiflow/secrets/control/aiflow4.env <<'ENV'
+AIFLOW4_JIRA_SITE=https://jooservices.atlassian.net
+JIRA_EMAIL=acceptance@example.test
+JIRA_API_TOKEN=test-jira-token
+SSL_CERT_FILE=/etc/aiflow/secrets/control/acceptance-ca.crt
+ENV
+docker run --detach --user 0 --entrypoint python3 --name aiflow4-acceptance-provider --network aiflow4-control \
+  --network-alias api.github.com --network-alias jooservices.atlassian.net \
+  --volume /opt/aiflow4-acceptance-providers.py:/opt/providers.py:ro \
+  --volume /root/aiflow4-acceptance-pki:/pki:ro \
+  --volume /srv/aiflow/control/repos/aiflow-control:/repo:rw \
+  "$1" /opt/providers.py --cert /pki/server.crt --key /pki/server.key \
+  --repo /repo >/dev/null
+docker compose -f /srv/aiflow/control/compose.yaml up -d --no-deps --force-recreate control-api-a control-api-b
+for _ in $(seq 1 60); do
+  curl -fsS -H 'Host: control.clean.test' http://127.0.0.1/healthz >/dev/null && exit 0
+  sleep 2
+done
+echo 'the control API did not restart with the test accounts' >&2
+exit 1
+FAKES
 docker exec "$CONTROL" grep -qx 'AIFLOW4_CONSOLE_LOGIN=1' /etc/aiflow/secrets/control/aiflow4.env \
   || fail "the install did not turn console sign-in on"
 
@@ -114,29 +161,40 @@ code() { curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' "\$@"; }
 [[ \$(code $URL/healthz) == 200 ]]
 [[ \$(code $URL/v1/state) == 401 ]]
 [[ \$(code $URL/cc) == 302 ]]
-jar=\$(mktemp); trap 'rm -f "\$jar"' EXIT
+jar=/root/aiflow4-acceptance-cookie.jar
+umask 077
 # the password stays in the container: it goes from the file into curl's stdin
 body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/etc/aiflow/secrets/console/super-admin-password").read().strip()}))' '$ADMIN')
 [[ \$(curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' -H 'Content-Type: application/json' -c "\$jar" --data-binary @- $URL/v1/auth/login <<<"\$body") == 200 ]]
 [[ \$(code -b "\$jar" $URL/v1/state) == 200 ]]
 CHECK
 
-echo "== 3. two machines run the documented join bootstrap and heartbeat with only their node token"
-# The control repo of a clean install is empty: give it the project and the two machines (what Command Center's
-# Projects and Nodes screens commit to the control repository on a real installation).
-in_control <<REPO || fail "control repository"
+echo "== 2a. add the test project through Command Center"
+in_control <<PROJECT || fail "Command Center project setup"
 set -euo pipefail
-repo=/srv/aiflow/control/repos/aiflow-control
-mkdir -p "\$repo/projects" "\$repo/nodes"
-cat > "\$repo/projects/CLEAN.yaml" <<'YAML'
-key: CLEAN
-repo: jooservices/clean-install
-base: main
-YAML
-for n in clean-node-0 clean-node-1; do
-  printf 'name: %s\nrole: worker\nslots: 1\nprojects: [CLEAN]\n' "\$n" > "\$repo/nodes/\$n.yaml"
+jar=/root/aiflow4-acceptance-cookie.jar
+catalog=\$(curl -fsS -b "\$jar" -H '$HOSTHDR' $URL/v1/projects/catalog)
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "CLEAN" in {p["key"] for p in d["jira_projects"]}; assert "acceptance/clean-install" in {r["full_name"] for r in d["github_repos"]}' "\$catalog"
+curl -fsS -b "\$jar" -H '$HOSTHDR' $URL/projects -o /dev/null
+body='{"site":"https://jooservices.atlassian.net","project":"CLEAN","repo":"acceptance/clean-install","base":"main","stack":"","checks":[],"priority":3,"parallel_limit":2,"merge_method":"squash"}'
+preflight=\$(curl -fsS -b "\$jar" -H '$HOSTHDR' -H 'Content-Type: application/json' --data "\$body" $URL/v1/projects/preflight)
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["ok"] is True and d["project"] == "CLEAN"' "\$preflight"
+saved=\$(curl -fsS -b "\$jar" -H '$HOSTHDR' -H 'Content-Type: application/json' --data "\$body" $URL/v1/projects)
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["saved"] is True and d["project"] == "CLEAN"' "\$saved"
+grep -q '^key: CLEAN$' /srv/aiflow/control/repos/aiflow-control/projects/CLEAN.yaml
+project_ready=0
+for _ in $(seq 1 30); do
+  projects=\$(curl -fsS -b "\$jar" -H '$HOSTHDR' $URL/v1/projects)
+  if python3 -c 'import json,sys; assert "CLEAN" in {p["key"] for p in json.loads(sys.argv[1])["projects"]}' "\$projects"; then
+    project_ready=1
+    break
+  fi
+  sleep 2
 done
-REPO
+[[ \$project_ready == 1 ]] || { echo 'Command Center project did not become visible' >&2; exit 1; }
+PROJECT
+
+echo "== 3. two machines get one-use join commands from Command Center and run the documented bootstrap"
 state_nodes() {  # the nodes of /v1/state, read with the owner token (name:status per line)
   in_control <<STATE
 set -euo pipefail
@@ -145,32 +203,42 @@ curl -fsS -H '$HOSTHDR' -H "Authorization: Bearer \$AIFLOW4_OWNER_TOKEN" $URL/v1
   | python3 -c 'import json,sys; [print(n["name"] + ":" + str(n.get("status"))) for n in json.load(sys.stdin)["nodes"]]'
 STATE
 }
-issue_token() {  # issue_token <machine> <file>: the one-use join token is written inside the control container
-  in_control <<ISSUE >/dev/null 2>&1
+join_command() {  # join_command <machine> <file>: use the authenticated Command Center action
+  in_control <<ISSUE
 set -euo pipefail
-. /etc/aiflow/secrets/control/aiflow4.env
 umask 077
-curl -fsS -H '$HOSTHDR' -H 'Content-Type: application/json' \
-  --data "{\"provision_key\": \"\$AIFLOW4_JOIN_TOKEN\", \"name\": \"$1\", \"role\": \"worker\", \"project\": \"CLEAN\"}" \
-  $URL/v1/nodes/join-tokens | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' > $2
+curl -fsS -b /root/aiflow4-acceptance-cookie.jar -H '$HOSTHDR' -H 'Content-Type: application/json' \
+  --data '{"name":"$1","role":"worker","project":"CLEAN"}' \
+  $URL/v1/nodes/$1/join-command > /tmp/aiflow4-join-command.json
+python3 -c 'import json,shlex,sys; p=shlex.split(json.load(open(sys.argv[1]))["command"]); print(p[2]); print(p[-1])' \
+  /tmp/aiflow4-join-command.json > "$2"
+chmod 600 "$2"
+rm -f /tmp/aiflow4-join-command.json
 ISSUE
 }
 for i in 0 1; do
   node=${NODES[$i]}; machine="clean-node-$i"; tokenfile="/tmp/join-$i.token"
   issued=0
-  for _ in $(seq 1 30); do  # the control API reads the new repository files on its next refresh
-    if issue_token "$machine" "$tokenfile"; then issued=1; break; fi
+  for _ in $(seq 1 30); do  # project state is reloaded independently by each control API replica
+    if join_command "$machine" "$tokenfile"; then issued=1; break; fi
     sleep 2
   done
-  [[ $issued == 1 ]] || fail "join token for $machine"
-  # the token is streamed from one container into a file of the other; the script text travels separately
+  [[ $issued == 1 ]] || fail "Command Center join command for $machine"
+  # The token is streamed from one container into a private file on the other; it is never printed.
   docker exec "$CONTROL" cat "$tokenfile" \
     | docker exec -i "$node" bash -c 'umask 077; cat > /root/join-token' || fail "$machine token delivery"
   docker exec "$CONTROL" rm -f "$tokenfile"
-  # the documented join command; server-installer's OS setup is skipped (the container is already prepared)
-  docker exec "$node" bash -c \
-    "set -o pipefail; curl -fsSL http://$DOMAIN/v1/install.sh | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token-file /root/join-token" \
-    || fail "$machine join bootstrap"
+  # The systemd container already has server-installer prerequisites, so only host preparation is skipped.
+  docker exec -i "$node" bash -se <<'JOIN' || fail "$machine join bootstrap"
+set -euo pipefail
+mapfile -t join_fields < /root/join-token
+rm -f /root/join-token
+[[ ${#join_fields[@]} == 2 ]] || { echo "Command Center returned an invalid join command" >&2; exit 1; }
+install_url=${join_fields[0]}
+token=${join_fields[1]}
+curl -fsSL "$install_url" \
+  | AIFLOW4_SERVER_INSTALLER_PREPARED=1 sh -s -- --token "$token"
+JOIN
   [[ $(docker exec "$node" cat /srv/aiflow/current/RELEASE) == "$VERSION" ]] || fail "$machine does not run $VERSION"
   docker exec "$node" systemctl is-active --quiet aiflow4-node-agent || fail "$machine node agent is not running"
 done
@@ -211,4 +279,4 @@ set -euo pipefail
 body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/etc/aiflow/secrets/console/super-admin-password").read().strip()}))' '$ADMIN')
 [[ \$(curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' -H 'Content-Type: application/json' --data-binary @- $URL/v1/auth/login <<<"\$body") == 200 ]]
 CHECK
-echo "clean install on real machines passed: sign-in on, two machines joined, backup and restore"
+echo "clean install on real machines passed: sign-in on, Command Center join commands, two machines online, backup and restore"

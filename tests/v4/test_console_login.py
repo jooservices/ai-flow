@@ -288,6 +288,16 @@ def test_without_the_setting_nothing_is_gated(ctx):
     assert client.get("/cc").status_code not in (302, 401)
 
 
+def test_state_accepts_only_the_owner_token_when_sign_in_is_on(ctx):
+    signed_in_gate = make_client(ctx, gate=True)
+    assert signed_in_gate.get("/v1/state").status_code == 401
+    assert signed_in_gate.get("/v1/state", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert signed_in_gate.get("/v1/state", headers={"Authorization": "Bearer owner-secret"}).status_code == 200
+
+    sign_in_off = make_client(ctx, gate=False)
+    assert sign_in_off.get("/v1/state").status_code == 200
+
+
 def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seeded):
     client = make_client(ctx, gate=True, with_ui=True)
     for path in (*CONSOLE_PAGE_PATHS, "/help/"):

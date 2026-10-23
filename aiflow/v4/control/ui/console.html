@@ -529,6 +529,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
+      <button class="tab" role="tab" id="tab-support" aria-controls="view-support" aria-selected="false" data-act="view" data-menu-view data-view="support">Support</button>
     </div>
     <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
     <div class="spacer"></div>
@@ -568,15 +569,14 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="dhead" id="shead"></div>
     <div id="sbody" class="view"></div>
   </section>
-  <section class="view" id="view-machines" role="tabpanel" aria-labelledby="tab-machines" hidden></section>
   <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" hidden></section>
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
   <section class="view" id="view-system-check" role="tabpanel" aria-labelledby="tab-system-check" hidden></section>
-  <section class="view" id="view-users" role="tabpanel" aria-labelledby="tab-users" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
+  <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -665,6 +665,7 @@ var S = {
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
     loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '' },
   autonomy: { data: null, error: '', busy: false, saving: false },
+  esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
@@ -693,19 +694,21 @@ var S = {
   licensing: { data: null, status: null, usage: [], error: '', busy: false, statusBusy: false,
     loadedAt: 0, statusAt: 0, limitsPlan: '' }
 };
+S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
   lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
   machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage', 'system-check': 'node.operations.read',
-  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage' };
+  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', support: 'console.manage' };
 var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
   review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
-  projects: '/projects', 'system-check': '/system-check', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications' };
+  projects: '/projects', 'system-check': '/system-check', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', support: '/support' };
 var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
-  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications']];
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support']];
 function viewOf(path) {
   if (path.indexOf('/system-check') === 0) return 'system-check';
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
+  if (path.indexOf('/support') === 0) return 'support';
   if (path.indexOf('/work') === 0 || path.indexOf('/board') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
@@ -745,6 +748,7 @@ var MENU_ITEMS = [
   { view: 'licensing', label: 'Licence' },
   { view: 'notifications', label: 'Notifications' }
 ];
+MENU_ITEMS.push({ view: 'support', label: 'Support', permission: 'console.manage' });
 // Visibility reads the effective permissions sent from ROLE_PERMISSIONS; the server enforces the same grants.
 function viewAllowed(view) {
   return !S.consoleUser || (!!VIEW_PERMISSION[view] && consoleCan(VIEW_PERMISSION[view]));
@@ -815,6 +819,102 @@ function saveMasterBudget() {
     .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
 }
 
+function escCall(method, url, body) {
+  S.esc.saving = true; S.esc.error = ''; renderDashboard();
+  var options = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (body) options.body = JSON.stringify(body);
+  fetch(url, options).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).catch(function (err) { S.esc.error = String(err.message || err); })
+    .then(function () { S.esc.saving = false; loadEscalations(true); });
+}
+function loadEscalations(force) {
+  if (!consoleReader() || S.esc.busy || (S.esc.data && !force)) return;
+  S.esc.busy = true;
+  fetch('/v1/escalations', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { S.esc.data = d; })
+    .catch(function (err) { S.esc.error = String(err.message || err); })
+    .then(function () { S.esc.busy = false; if (S.view === 'cc') renderDashboard(); });
+}
+function answerDecision(id, choice) { escCall('POST', '/v1/decisions/' + encodeURIComponent(id) + '/answer', { choice: choice || 'recommended' }); }
+function retireDecision(id) { escCall('POST', '/v1/decisions/' + encodeURIComponent(id) + '/retire'); }
+function addDecision() {
+  var title = $('[data-esc-title]'), text = $('[data-esc-decision]'), words = $('[data-esc-keywords]');
+  if (!title || !text || title.value.trim().length < 3 || text.value.trim().length < 3) {
+    S.esc.error = 'Enter a title and the decision.'; renderDashboard(); return;
+  }
+  var keywords = (words ? words.value : '').split(',').map(function (w) { return w.trim(); }).filter(Boolean);
+  escCall('POST', '/v1/decisions', { title: title.value.trim(), decision: text.value.trim(), keywords: keywords });
+}
+function escalationsPanel() {
+  if (!consoleReader()) return '';
+  if (!S.esc.data && !S.esc.busy) loadEscalations(false);
+  var data = S.esc.data, h = '<section class="panel" id="p-escalations"><div class="panel-h"><h2>Escalations and owner decisions</h2><span class="hint">Only a new business decision or an irreversible or production action reaches a person</span></div>';
+  if (S.esc.error) h += '<div class="stakeholder-error">' + esc(S.esc.error) + '</div>';
+  if (!data) return h + '<div class="muted">' + (S.esc.busy ? 'Loading escalations…' : 'Escalations unavailable.') + '</div></section>';
+  var m = data.metrics, reg = data.register, labels = m.labels || {}, person = m.person_classes || [];
+  var now = m.this_week || {};
+  h += '<div class="grid-2"><div class="review-fact"><div class="label">This week</div><div class="value">' + esc(now.total || 0) + ' escalations · ' + (now.share_without_person_pct == null ? 'no data' : esc(now.share_without_person_pct) + '% resolved without a person') + '</div><div class="muted">Target: a falling line' + (m.falling ? ' · falling since last week' : '') + '</div></div>';
+  h += '<div class="review-fact"><div class="label">Top three causes · the fix for each</div>';
+  if (!(m.top_causes || []).length) h += '<div class="muted">No escalations recorded yet.</div>';
+  (m.top_causes || []).forEach(function (c) { h += '<div class="value">' + esc(c.label) + ' · ' + esc(c.count) + '</div><div class="muted">' + esc(c.fix) + '</div>'; });
+  h += '</div></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Week</th>';
+  (m.classes || []).forEach(function (c) { h += '<th>' + esc(labels[c] || c) + (person.indexOf(c) >= 0 ? ' (person)' : '') + '</th>'; });
+  h += '<th>Total</th><th>Without a person</th></tr></thead><tbody>';
+  (m.weeks || []).forEach(function (w) {
+    h += '<tr><td class="mono">' + esc(w.week_start) + '</td>';
+    (m.classes || []).forEach(function (c) { h += '<td>' + esc((w.by_class || {})[c] || 0) + '</td>'; });
+    h += '<td>' + esc(w.total) + '</td><td>' + (w.share_without_person_pct == null ? '—' : esc(w.share_without_person_pct) + '%') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  var projectRows = [];
+  (m.weeks || []).forEach(function (w) {
+    Object.keys(w.by_project || {}).sort().forEach(function (p) {
+      projectRows.push({ week: w.week_start, project: p, counts: w.by_project[p] || {} });
+    });
+  });
+  if (projectRows.length) {
+    h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Project</th>';
+    (m.classes || []).forEach(function (c) { h += '<th>' + esc(labels[c] || c) + '</th>'; });
+    h += '</tr></thead><tbody>';
+    projectRows.forEach(function (row) {
+      h += '<tr><td class="mono">' + esc(row.week) + '</td><td class="mono">' + esc(row.project) + '</td>';
+      (m.classes || []).forEach(function (c) { h += '<td>' + esc(row.counts[c] || 0) + '</td>'; });
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  var writer = consoleCan('console.write');
+  h += '<h3>Waiting for the owner</h3>';
+  if (!(reg.asked || []).length) h += '<div class="muted">No open question. A new kind of decision is asked once, with options and a recommended default.</div>';
+  (reg.asked || []).forEach(function (d) {
+    h += '<div class="review-fact"><div class="label mono">D' + esc(d.id) + ' · ' + esc((d.waiting_tickets || []).join(', ')) + '</div><div class="value">' + esc(d.title) + '</div><div class="muted">' + esc(d.question) + '</div>';
+    if (writer) {
+      (d.options || []).forEach(function (o) { h += '<button class="btn sm' + (o === d.recommended ? ' primary' : '') + '" data-act="esc-answer" data-id="' + esc(d.id) + '" data-choice="' + esc(o) + '"' + (S.esc.saving ? ' disabled' : '') + '>' + esc(o) + (o === d.recommended ? ' (recommended)' : '') + '</button> '; });
+    } else h += '<div class="muted">Options: ' + esc((d.options || []).join(' · ')) + ' · Recommended: ' + esc(d.recommended) + '</div>';
+    h += '</div>';
+  });
+  if ((reg.resuming || []).length) {
+    h += '<h3>Applying saved owner decisions</h3><div class="muted">Jira updates retry automatically; the saved owner choice is retained.</div>';
+    (reg.resuming || []).forEach(function (d) {
+      h += '<div class="review-fact"><div class="label mono">D' + esc(d.id) + ' · ' + esc((d.resuming_tickets || []).join(', ')) + '</div>';
+      h += '<div class="value">' + esc(d.title) + '</div><div class="muted">Saved answer: ' + esc(d.decision) + '</div></div>';
+    });
+  }
+  h += '<h3>Owner decision register</h3><div class="tablebox"><table><thead><tr><th>#</th><th>Decision</th><th>Applied</th><th>By</th><th></th></tr></thead><tbody>';
+  if (!(reg.decisions || []).length) h += '<tr><td colspan="5" class="empty">No decision recorded.</td></tr>';
+  (reg.decisions || []).forEach(function (d) {
+    h += '<tr><td class="mono">D' + esc(d.id) + '</td><td><b>' + esc(d.title) + '</b><div class="small">' + esc(d.decision) + '</div></td><td>' + esc(d.cited_count) + '×</td><td>' + esc(d.decided_by || '') + '</td><td>' + (writer ? '<button class="btn sm" data-act="esc-retire" data-id="' + esc(d.id) + '">Retire</button>' : '') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  if (writer) h += '<div class="review-fact"><div class="label">Record a decision</div><input data-esc-title placeholder="Title" aria-label="Decision title" style="width:30%;min-height:36px"> <input data-esc-decision placeholder="The decision" aria-label="The decision" style="width:40%;min-height:36px"> <input data-esc-keywords placeholder="Keywords that match the question (two or more, comma separated)" aria-label="Keywords" style="width:25%;min-height:36px"> <button class="btn sm primary" data-act="esc-add"' + (S.esc.saving ? ' disabled' : '') + '>Add</button></div>';
+  h += '<h3>Ticket amendments for review</h3><div class="muted">Amendments never block; they are listed here and in the weekly report.</div>';
+  if (!(m.amendments || []).length) h += '<div class="muted">No criterion was amended.</div>';
+  (m.amendments || []).forEach(function (a) { h += '<div class="review-fact"><b class="mono">' + esc(a.ticket_key) + '</b> · ' + esc(a.title) + '<div class="muted">' + esc(a.decision) + '</div></div>'; });
+  return h + '</section>';
+}
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
   var p = n.version_policy || {};
@@ -1635,6 +1735,7 @@ function renderDashboard() {
   h += toolWaitsPanel(d);
   if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
   }
+  h += escalationsPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
   applyLayout('cc', root);
@@ -1734,6 +1835,7 @@ function renderCC() {
 
   h += toolWaitsPanel(d);
   h += masterAutonomyPanel();
+  h += escalationsPanel();
 
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
@@ -3806,6 +3908,46 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function renderSupport() {
+  var root = $('#view-support'); if (!root) return;
+  if (!consoleCan('console.manage')) {
+    root.innerHTML = '<section class="panel"><div class="panel-h"><h2>Support</h2></div><p class="hint">Owner or Super Administrator access is required to build a support bundle.</p></section>';
+    return;
+  }
+  var support = S.support, tickets = D().tickets || [];
+  var h = '<div class="dhead"><div><div class="eyebrow">Owner tools</div><h1>Support</h1><p class="hint">Build a private diagnostic bundle, review its inventory, then download it to inspect before sharing.</p></div></div>';
+  h += '<section class="panel"><div class="panel-h"><h2>Build a bundle</h2><span class="hint">Logs are capped at 5 MB per file.</span></div>';
+  h += '<div class="project-form"><label>Ticket (optional)<select id="support-ticket"><option value="">All recent incidents and control logs</option>';
+  h += tickets.filter(function (ticket) { return ticket.type !== 'Epic'; }).map(function (ticket) {
+    return '<option value="' + esc(ticket.key) + '"' + (support.ticketKey === ticket.key ? ' selected' : '') + '>' + esc(ticket.key + ' · ' + ticket.summary) + '</option>';
+  }).join('');
+  h += '</select></label><div class="wide project-actions"><button class="btn primary" data-act="support-build"' + (support.busy ? ' disabled' : '') + '>' + (support.busy ? 'Scanning bundle…' : 'Build support bundle') + '</button>';
+  h += '<span class="hint">Includes versions, safe settings, machine and account states, up to 100 incidents from 7 days, and control service logs from 24 hours.</span></div></div>';
+  if (support.error) h += '<p class="error" role="alert">' + esc(support.error) + '</p>';
+  h += '</section>';
+  if (support.bundle) {
+    var inv = support.bundle.inventory || {};
+    h += '<section class="panel" aria-labelledby="support-inventory"><div class="panel-h"><h2 id="support-inventory">Review bundle inventory</h2><span class="badge ok">Sensitive data scan passed</span></div>';
+    h += '<p class="hint">Created ' + esc(when(inv.created_at)) + '. Review these files before you share the downloaded bundle.</p><ul class="plain-list">';
+    h += (inv.files || []).map(function (file) { return '<li><span class="mono">' + esc(file.name) + '</span><span class="hint">' + Number(file.bytes || 0).toLocaleString() + ' bytes</span></li>'; }).join('');
+    h += '</ul><div class="project-actions"><a class="btn primary" href="' + esc(support.bundle.download_url) + '">Download reviewed bundle</a><button class="btn" data-act="support-clear">Build another</button><span class="hint">The download stays available for 10 minutes.</span></div></section>';
+  }
+  root.innerHTML = h;
+}
+
+function buildSupportBundle() {
+  if (S.support.busy || !consoleCan('console.manage')) return;
+  var select = $('#support-ticket');
+  S.support.ticketKey = select ? select.value : S.support.ticketKey;
+  S.support.busy = true; S.support.error = ''; S.support.bundle = null; renderSupport();
+  fetch('/v1/support/bundles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket_key: S.support.ticketKey }) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; }); })
+    .then(function (d) { S.support.bundle = d; S.support.error = ''; })
+    .catch(function (e) { S.support.error = String(e.message || e); })
+    .then(function () { S.support.busy = false; renderSupport(); });
+}
+
 function licensingResponse(response) {
   return response.json().then(function (data) {
     if (response.ok) return data;
@@ -4101,6 +4243,7 @@ function render() {
   else if (S.view === 'system-check') renderSystemCheck();
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
+  else if (S.view === 'support') renderSupport();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -4142,6 +4285,7 @@ var HINTS = {
   integrations: 'Connect Jira and GitHub first. Secrets are stored on the control machine and never shown.',
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
+  support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.',
   notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.'
 };
 function helpUrl(view) { return HELP_BASE + view + '.html'; }
@@ -4157,7 +4301,7 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
@@ -4173,6 +4317,7 @@ function setView(v) {
   showView();
   try { history.pushState(null, '', VIEW_PATH[v] || '/cc'); } catch (e) { /* file preview */ }
   render();
+  if (v === 'support') renderSupport();
   if (v === 'review') loadReviews();
   if (v === 'knowledge') loadKnowledge(true);
   if (v === 'backup') loadBackups(true);
@@ -4446,6 +4591,8 @@ document.addEventListener('click', function (e) {
   else if (act === 'system-check-run') runSystemCheck();
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);
   else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
+  else if (act === 'support-build') buildSupportBundle();
+  else if (act === 'support-clear') { S.support.bundle = null; S.support.error = ''; renderSupport(); }
   else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }
   else if (act === 'license-activate') {
     var licenseKeyField = $('[data-license-key]'), licenseKey = licenseKeyField ? licenseKeyField.value.trim() : '';
@@ -4529,6 +4676,9 @@ document.addEventListener('click', function (e) {
     savePrefs(); renderDHead(); var starButton = $('.star-button'); if (starButton) starButton.focus();
   }
   else if (act === 'master-budget-save') saveMasterBudget();
+  else if (act === "esc-answer") answerDecision(el.getAttribute("data-id"), el.getAttribute("data-choice"));
+  else if (act === "esc-retire") retireDecision(el.getAttribute("data-id"));
+  else if (act === "esc-add") addDecision();
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }

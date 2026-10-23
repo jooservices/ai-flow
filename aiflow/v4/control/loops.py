@@ -21,7 +21,8 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import jira_connect, knowledge, memory, notify, role_health, system_check, tooling
+from . import escalations, jira_connect, knowledge, memory, notify, role_health, tooling
+from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -466,6 +467,9 @@ def version_release_scan(ctx: Ctx) -> int:
 
 
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
+    from . import support_bundle
+
+    support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = last_system_check = 0.0
     ctx.events.start()
@@ -481,6 +485,7 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 last_sync = now
             if now - last_wd >= 15 and ctx.leases.leader("watchdog", OWNER, 45_000):
                 watchdog(ctx)
+                escalations.retry_resumptions(ctx)
                 notify.process_retries(ctx)
                 notify.send_scheduled_summaries(ctx)
                 last_wd = now

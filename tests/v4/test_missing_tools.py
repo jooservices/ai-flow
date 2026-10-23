@@ -49,11 +49,21 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
 class _API:
     node_name = "cc"
 
-    def __init__(self):
+    def __init__(self, raise_result=None):
         self.calls = []
+        self.raise_result = raise_result
 
     def call(self, method, path, body=None, params=None):
         self.calls.append((method, path, body))
+        if path == "/v1/escalations/raise":
+            if self.raise_result is not None:
+                return self.raise_result
+            missing = "MISSING-TOOL" in body["question"]
+            return {"class": "missing_tool_or_environment" if missing else "new_business_decision",
+                    "label": "Missing tool or environment" if missing else "New business decision",
+                    "reason": "reported missing tool" if missing else "requirements conflict",
+                    "resolved": missing, "outcome": "tool_missing" if missing else "blocked",
+                    "answer": "", "citation": "", "missing_tools": []}
         return {"token": "github-token", "url": "https://github.com/x/y/pull/1", "number": 1}
 
 
@@ -66,7 +76,7 @@ def _claimed():
                    project=project, identity=("bot", "bot@example.test"))
 
 
-def _run_dev(monkeypatch, tmp_path, verdict, reason):
+def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None):
     class Git:
         def __init__(self, *_a, **_k):
             pass
@@ -93,16 +103,37 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason):
 
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
-    api = _API()
+    api = _API(raise_result)
     return dev.run_dev(api, _claimed(), str(tmp_path), "https://control", 3600, []), api
 
 
 def test_missing_tool_is_not_a_question_for_the_owner(monkeypatch, tmp_path):
     result, api = _run_dev(monkeypatch, tmp_path, "BLOCKED", "MISSING-TOOL: php, composer - phpunit cannot run")
     assert result["outcome"] == "tool_missing" and result["details"]["missing_tools"] == ["php", "composer"]
+    assert result["details"]["escalation_class"] == "missing_tool_or_environment"
+    assert any(c[1] == "/v1/escalations/raise" and "MISSING-TOOL" in c[2]["question"] for c in api.calls)
     transitions = [c[2]["to"] for c in api.calls if c[1].endswith("/transition")]
     assert transitions[-1] == "To Do" and "Needs owner" not in transitions
     assert not any("question for the owner" in str(c[2].get("body", "")) for c in api.calls)
+
+
+def test_missing_tool_marker_applies_a_register_answer_without_recording_a_wait(monkeypatch, tmp_path):
+    register_answer = {
+        "class": "decision_already_taken", "label": "Decision already taken",
+        "reason": "the owner already decided this (No Docker for AI runs)", "resolved": True,
+        "outcome": "auto_answered", "answer": "No. Docker is not used for AI runs.",
+        "citation": 'Owner decision D1 "No Docker for AI runs"', "missing_tools": [],
+    }
+    result, api = _run_dev(monkeypatch, tmp_path, "BLOCKED",
+                           "MISSING-TOOL: docker - Docker is not used for AI runs", register_answer)
+    assert result["outcome"] == "auto_answered"
+    assert result["details"]["escalation_class"] == "decision_already_taken"
+    assert result["details"]["missing_tools"] == []
+    comments = [call[2]["body"] for call in api.calls if call[1].endswith("/comment")]
+    assert any("No. Docker is not used for AI runs." in body and "Owner decision D1" in body for body in comments)
+    assert not any("waiting for a machine with the tool" in body for body in comments)
+    transitions = [call[2]["to"] for call in api.calls if call[1].endswith("/transition")]
+    assert transitions[-1] == "To Do"
 
 
 def test_a_real_requirement_conflict_still_reaches_the_owner(monkeypatch, tmp_path):

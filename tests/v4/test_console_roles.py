@@ -19,7 +19,7 @@ SESSION_EXPIRY = 2_000_000_000
 
 ROLE_VIEWS = {
     "administrator": {"cc", "board", "delivery", "sa", "lead", "business", "review", "stakeholder",
-                      "machines", "knowledge", "integrations", "projects", "users"},
+                      "machines", "knowledge", "integrations", "projects", "users", "support"},
     "product_owner": {"cc", "board", "delivery", "business", "lead", "stakeholder", "review", "knowledge"},
     "delivery": {"cc", "board", "delivery", "review"},
     "sa": {"cc", "board", "sa", "machines", "integrations", "knowledge"},
@@ -32,12 +32,12 @@ ROLE_VIEWS = {
 VIEW_PATHS = {"cc": "/cc", "board": "/board", "delivery": "/delivery", "sa": "/sa", "lead": "/lead",
               "business": "/business", "review": "/review", "stakeholder": "/stakeholder",
               "machines": "/machines", "knowledge": "/knowledge", "integrations": "/integrations", "projects": "/projects",
-              "users": "/users"}
+              "users": "/users", "support": "/support"}
 VIEW_PERMISSIONS = {"cc": "view.dashboard", "board": "view.work_board", "delivery": "view.delivery",
                     "sa": "view.sa", "lead": "view.team_lead", "business": "view.business",
                     "review": "view.human_review", "stakeholder": "view.stakeholder",
                     "machines": "view.machines_ai", "knowledge": "view.knowledge", "integrations": "view.integrations",
-                    "projects": "projects.manage", "users": "console.manage"}
+                    "projects": "projects.manage", "users": "console.manage", "support": "console.manage"}
 ALLOWED_API = {
     "administrator": "/v1/console/users",
     "product_owner": "/v1/business/TESTWP/change-requests",

@@ -245,7 +245,8 @@ def _github_project_conditions(ctx, project, trigger: str, provider_checks: bool
                          "Connect GitHub or assign a working connection to each repository in the Projects screen.")]
 
     permission_labels = {"contents": "Contents", "pull_requests": "Pull requests", "workflows": "Workflows",
-                         "checks": "Checks", "statuses": "Statuses", "administration": "Administration"}
+                         "actions": "Actions", "checks": "Checks", "statuses": "Statuses",
+                         "administration": "Administration"}
     app_connections = {connection_id: gateway for gateway, connection_id, _ in selected.values()
                        if gateway is not None and getattr(gateway, "kind", "app") != "token"}
     permission_checks: list[dict[str, str] | None] = []

@@ -84,14 +84,15 @@ def test_untrusted_identity_headers_and_lead_cannot_install_but_lead_can_read_lo
     assert no_session.status_code == 401
 
     sign_in(client, ctx, "lead", "lead@example.test")
-    assert client.get("/v1/console/session").json() == {
-        "authenticated": True, "user": "lead@example.test", "role": "lead",
-        "permissions": sorted(ROLE_PERMISSIONS["lead"])}
+    session = client.get("/v1/console/session").json()
+    assert session["authenticated"] and session["user"] == "lead@example.test"
+    assert session["role"] == "team_lead" and session["roles"] == ["team_lead"]
+    assert session["permissions"] == sorted(ROLE_PERMISSIONS["team_lead"])
     refused = client.post("/v1/nodes/node1/operations", json={"action": "install", "component": "codex"})
     assert refused.status_code == 403
     assert client.get("/v1/nodes/node1/operations").status_code == 200
     assert ctx.db.one("SELECT accepted, result FROM write_audit WHERE action='install' ORDER BY id DESC LIMIT 1") == {
-        "accepted": False, "result": "owner role required"}
+        "accepted": False, "result": "not available for your role"}
 
 
 def publish_release(tmp_path, monkeypatch, version="v4.2.1"):

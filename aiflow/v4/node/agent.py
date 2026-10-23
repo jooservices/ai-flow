@@ -10,16 +10,20 @@ import hashlib
 import json
 import logging
 import os
+import pty
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import threading
 import time
+import select
+from urllib.parse import quote
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import BROKEN_PREFIX, STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -36,6 +40,19 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
          "playwright-browser": ["playwright", "install", "--dry-run", "chromium"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
+SIGN_IN_COMMANDS = {
+    "claude": ["claude", "auth", "login"],
+    "codex": ["codex", "login", "--device-auth"],
+    "opencode": ["opencode", "auth", "login", "opencode", "--method", "device"],
+    "grok": ["grok", "login", "--device-auth"],
+}
+_SIGN_IN_URL = re.compile(r"https://[^\s\x1b\"'<>]+", re.IGNORECASE)
+_SIGN_IN_CODE = re.compile(
+    r"(?i)(?:enter|use|type|your|device|user|verification|authorization)?\s*(?:the\s+)?"
+    r"(?:device\s+|user\s+|verification\s+|authorization\s+)?code\s*[:=]?\s*"
+    r"([A-Z0-9][A-Z0-9-]{3,31})\b")
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_SIGN_IN_RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
 
 
 _MISSING_LIBRARY = re.compile(r"error while loading shared libraries:\s*([^\s:]+)", re.IGNORECASE)
@@ -89,7 +106,9 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             out[name] = "missing"
             continue
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            env = ({**os.environ, "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR}
+                   if name == "playwright-browser" else None)  # the shared folder the installer fills
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
             output = (p.stdout or p.stderr).strip()
             version = output.splitlines()[0][:80] if output else ""
             if name == "playwright-browser":
@@ -174,11 +193,38 @@ def systemctl(*args: str) -> int:
     return subprocess.run(["systemctl", *args], capture_output=True).returncode
 
 
+def ensure_account_home(instance: str, accounts_root: str = "/srv/aiflow/accounts") -> bool:
+    """Create a newly console-assigned account's private home before systemd starts its worker."""
+    account = re.sub(r"\.\d+$", "", instance)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account):
+        return False
+    try:
+        import pwd
+        worker = pwd.getpwnam("aiflow-worker")
+        root = Path(accounts_root)
+        root.mkdir(parents=True, exist_ok=True)
+        root = root.resolve(strict=True)
+        home = root / account
+        if home.is_symlink():
+            return False
+        home.mkdir(mode=0o700, exist_ok=True)
+        info = home.stat(follow_symlinks=False)
+        if not home.is_dir() or home.resolve(strict=True).parent != root:
+            return False
+        if info.st_uid != worker.pw_uid or info.st_gid != worker.pw_gid or info.st_mode & 0o777 != 0o700:
+            os.chown(home, worker.pw_uid, worker.pw_gid)
+            os.chmod(home, 0o700)
+        return True
+    except (OSError, KeyError, ImportError):
+        log.warning("could not prepare account home for %s", account)
+        return False
+
+
 def reconcile(accounts: list[str]) -> None:
     """Start worker instances (account or account.N) whose account has signed-in credentials; stop the others."""
     for a in accounts:
         if systemctl("is-active", "--quiet", f"aiflow4-worker@{a}") != 0:
-            if Path(f"/srv/aiflow/accounts/{a.split('.')[0]}").is_dir():
+            if ensure_account_home(a):
                 systemctl("enable", "--now", f"aiflow4-worker@{a}")
                 log.info("started worker %s", a)
     p = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend", "aiflow4-worker@*"],
@@ -189,6 +235,148 @@ def reconcile(accounts: list[str]) -> None:
         if acc and acc not in accounts:
             systemctl("disable", "--now", unit)
             log.info("stopped worker %s (not desired here)", acc)
+
+
+def provider_sign_in_command(provider: str) -> list[str] | None:
+    """Return the provider CLI's own login command; authorization codes come from that command."""
+    command = SIGN_IN_COMMANDS.get(provider)
+    return list(command) if command else None
+
+
+def provider_sign_in_details(output: str) -> tuple[str, str]:
+    """Extract only the provider authorization URL and device code from terminal output."""
+    clean = _ANSI.sub("", output)
+    url_match = _SIGN_IN_URL.search(clean)
+    code_match = _SIGN_IN_CODE.search(clean)
+    url = url_match.group(0).rstrip(".,;:)") if url_match else ""
+    code = code_match.group(1).strip() if code_match else ""
+    return url, code
+
+
+def _post_sign_in_status(api: ControlClient, node: str, account: str, request_id: str, status: str,
+                         sign_in_url: str = "", code: str = "", error: str = "") -> None:
+    api.call("POST", f"/v1/accounts/{quote(account, safe='')}/sign-in/status",
+             {"request_id": request_id, "status": status, "sign_in_url": sign_in_url,
+              "code": code, "error": error[:300]}, retries=1)
+
+
+def run_provider_sign_in(api: ControlClient, node: str, request: dict, cancel: threading.Event,
+                         accounts_root: str = "/srv/aiflow/accounts") -> None:
+    """Run a provider login inside its private account home and relay its device handoff to the console."""
+    account = str(request.get("account") or "")
+    request_id = str(request.get("request_id") or "")
+    provider = str(request.get("provider") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", account) or not request_id:
+        return
+    command = provider_sign_in_command(provider)
+    if not command:
+        try:
+            _post_sign_in_status(api, node, account, request_id, "failed", error="Provider sign-in is unsupported.")
+        except Exception:  # noqa: BLE001 - do not log provider output or auth details
+            pass
+        return
+
+    try:
+        _post_sign_in_status(api, node, account, request_id, "starting")
+        if not ensure_account_home(account, accounts_root):
+            _post_sign_in_status(api, node, account, request_id, "failed",
+                                 error="Could not prepare the private account home on this machine.")
+            return
+        home = str(Path(accounts_root) / account)
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": home,
+               "USER": "aiflow-worker", "LOGNAME": "aiflow-worker", "TERM": "xterm-256color",
+               "CODEX_HOME": str(Path(home) / ".codex"),
+               "CLAUDE_CONFIG_DIR": str(Path(home) / ".claude"),
+               "XDG_DATA_HOME": str(Path(home) / ".local" / "share")}
+        master_fd, slave_fd = pty.openpty()
+        process = None
+        try:
+            process = subprocess.Popen(_SIGN_IN_RUN_AS + command, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                                       env=env, close_fds=True, start_new_session=True)
+            os.close(slave_fd)
+            slave_fd = -1
+            output = ""
+            last_details = ("", "")
+            copied_auth_url = False
+            while True:
+                if cancel.is_set():
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
+                    return
+                readable, _, _ = select.select([master_fd], [], [], 0.25)
+                if not readable:
+                    if process.poll() is not None:
+                        break
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096).decode("utf-8", errors="replace")
+                except OSError:  # Linux PTYs report EIO once the child has closed its slave.
+                    break
+                if not chunk:
+                    continue
+                output = (output + chunk)[-16_000:]
+                clean_output = _ANSI.sub("", output)
+                if not copied_auth_url and re.search(
+                        r"(?i)(?:press|type)\s+c\b.{0,80}(?:copy|url|browser)|"
+                        r"(?:copy|show).{0,50}auth(?:entication)?\s+url.{0,40}\bc\b", clean_output):
+                    os.write(master_fd, b"c")
+                    copied_auth_url = True
+                details = provider_sign_in_details(clean_output)
+                if details[0] and details != last_details:
+                    _post_sign_in_status(api, node, account, request_id, "waiting",
+                                         sign_in_url=details[0], code=details[1])
+                    last_details = details
+            return_code = process.wait(timeout=10)
+            if cancel.is_set():
+                return
+            if return_code == 0:
+                _post_sign_in_status(api, node, account, request_id, "completed",
+                                     sign_in_url=last_details[0], code=last_details[1])
+            else:
+                _post_sign_in_status(api, node, account, request_id, "failed",
+                                     sign_in_url=last_details[0], code=last_details[1],
+                                     error=f"Provider sign-in exited with status {return_code}.")
+        finally:
+            if slave_fd >= 0:
+                os.close(slave_fd)
+            os.close(master_fd)
+    except Exception as exc:  # noqa: BLE001 - never include CLI output, tokens, or paths in logs or API errors
+        if cancel.is_set():
+            return
+        try:
+            _post_sign_in_status(api, node, account, request_id, "failed",
+                                 error=f"Provider sign-in could not start ({type(exc).__name__}).")
+        except Exception:  # noqa: BLE001
+            pass
+        log.warning("provider sign-in failed for %s (%s)", account, type(exc).__name__)
+
+
+def sync_provider_sign_ins(api: ControlClient, node: str, requests: list[dict],
+                           active: dict[str, tuple[str, threading.Event, threading.Thread]]) -> None:
+    """Keep one provider login process per account and cancel replaced or removed handoffs."""
+    desired = {str(item.get("account") or ""): item for item in requests if item.get("account")}
+    for account, (request_id, cancel, thread) in list(active.items()):
+        current = desired.get(account)
+        if not thread.is_alive():
+            del active[account]
+        elif not current or current.get("request_id") != request_id:
+            cancel.set()
+    for account, item in desired.items():
+        request_id = str(item.get("request_id") or "")
+        current = active.get(account)
+        if current and current[0] == request_id and current[2].is_alive():
+            continue
+        if current and current[2].is_alive():
+            continue
+        cancel = threading.Event()
+        thread = threading.Thread(target=run_provider_sign_in, args=(api, node, item, cancel),
+                                  name=f"aiflow4-sign-in-{account}", daemon=True)
+        active[account] = (request_id, cancel, thread)
+        thread.start()
 
 
 _update_tried: dict[str, float] = {}
@@ -485,7 +673,19 @@ def _process_node_operation_logged(api: ControlClient, node: str) -> None:
         log.warning("node operation poll failed: %s", type(operation_error).__name__)
 
 
-SERVICE_CHECK_S = 60  # how often declared test services are inspected, recreated when gone and reported
+PROBE_RETRY_S = 900  # a project check probe that did not report is asked for again after this long
+
+
+def _has_worker_user() -> bool:
+    try:
+        import pwd
+        pwd.getpwnam("aiflow-worker")
+        return True
+    except (KeyError, ImportError):
+        return False
+
+
+SERVICE_CHECK_S = 60 # how often declared test services are inspected, recreated when gone and reported
 
 
 def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str, dict]:
@@ -512,6 +712,9 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     service_names: list[str] = []
     service_at = 0.0
     service_lock = threading.Lock()
+    sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
+    probe_thread: threading.Thread | None = None
+    probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
     try:
         while not stop.is_set():
             try:
@@ -538,6 +741,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            sync_provider_sign_ins(api, name, desired.get("sign_ins") or [], sign_in_processes)
             stack_request = {"release": desired.get("release", ""),
                              "project_stacks": desired.get("project_stacks", {}),
                              "versions": desired.get("versions", {})}
@@ -587,6 +791,23 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 service_at = time.time()
                 service_thread = threading.Thread(target=check_services, name=f"aiflow4-services-{name}", daemon=True)
                 service_thread.start()
+            # check commands of the projects on a clean checkout: once per project and set of commands (control asks)
+            asked = [p for p in desired.get("check_probes") or []
+                     if time.time() - probe_tried.get((p["project"], p["signature"]), 0.0) > PROBE_RETRY_S]
+            if asked and manage_workers and (probe_thread is None or not probe_thread.is_alive()):
+                from .probes import run_check_probes
+                from ..worker.loop import RUN_AS
+                for p in asked:
+                    probe_tried[(p["project"], p["signature"])] = time.time()
+
+                def probe_checks(items=asked):
+                    try:
+                        run_check_probes(api, name, items, "/srv/aiflow", RUN_AS if _has_worker_user() else [])
+                    except Exception as exc:  # noqa: BLE001 - control asks again after PROBE_RETRY_S
+                        log.warning("project check probe failed: %s", type(exc).__name__)
+
+                probe_thread = threading.Thread(target=probe_checks, name=f"aiflow4-check-probe-{name}", daemon=True)
+                probe_thread.start()
             if pending_network_events:
                 try:
                     api.call("POST", "/v1/events", {"events": list(pending_network_events)})
@@ -610,5 +831,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
             stop.wait(every_s)
     finally:
+        for _request_id, cancel, _thread in sign_in_processes.values():
+            cancel.set()
         if relay:
             relay.stop()

@@ -143,6 +143,55 @@ console.log(projectsView.innerHTML);
     return result.stdout
 
 
+def render_dashboard(state: dict, analytics: list[dict] | None = None,
+                     weekly_report: dict | None = None) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the console Dashboard")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    project_key = (state.get("projects") or [{}])[0].get("key")
+    report = weekly_report or {"week_start": "2026-10-19", "trend": [], "finished_without_person": [],
+                               "needed_person": [], "repeated_failures": []}
+    driver = f"""
+var dashboard = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-cc' ? dashboard : null; }};
+S.data = {json.dumps(state)};
+S.analytics = {json.dumps(analytics or [])};
+S.project = {json.dumps(project_key)};
+S.consoleUser = {json.dumps(console_session('owner'))};
+S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
+renderDashboard();
+console.log(dashboard.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def render_machines(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Machines and AI view")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machines = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machines : null; }};
+S.data = {json.dumps(state)};
+S.services = [];
+S.view = 'machines';
+S.consoleUser = {json.dumps(console_session('owner'))};
+renderMachines();
+console.log(machines.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def render_integrations(user: dict, jira: dict | None = None) -> str:
     driver = f"""
 var integrationsView = {{innerHTML: ''}};
@@ -300,7 +349,13 @@ def test_console_page_and_state_feed_the_footer(ctx):
     client = TestClient(app)
     page = client.get("/cc")
     assert page.status_code == 200 and 'id="footer"' in page.text
+    assert client.get("/dashboard").status_code == 200
+    assert client.get("/work").status_code == 200
+    assert client.get("/machines").status_code == 200
+    assert client.get("/users").status_code == 200
     assert client.get("/sa").status_code == 200
+    for path in ("/delivery", "/business", "/review", "/stakeholder", "/knowledge", "/integrations", "/projects"):
+        assert client.get(path).status_code == 200
     assert 'id="view-sa"' in page.text and 'data-view="sa"' in page.text
     lead = client.get("/lead")
     assert lead.status_code == 200 and 'id="tab-lead"' in lead.text and 'id="view-lead"' in lead.text
@@ -430,14 +485,23 @@ def test_human_review_tab_renders_ticket_pr_diff_verify_preview_and_actions():
     driver = f"""
 var root = {{innerHTML: ''}};
 document.querySelector = function (s) {{ return s === '#view-review' ? root : null; }};
-S.reviews = [{json.dumps(ticket)}];
+    S.reviews = [{json.dumps(ticket)}, {{key: 'TESTFLOW-29', summary: 'AI question', status: 'Needs owner',
+      kind: 'question_from_ai', actions: ['answer', 'ask-ai'], jira_url: 'https://jira.test/browse/TESTFLOW-29',
+      pr: {{}}, verify: {{}}, thread: [{{kind: 'question', author: 'Reviewer', text: 'Can retries be preserved?'}}]}}];
+S.reviewMetrics = {{people_needed_this_week: 2, people_needed_eight_weeks_ago: 1, finished_with_no_person_pct: 50,
+  median_wait_minutes: 10, approved_first_time_pct: 75, sent_back_or_rejected_pct: 25,
+  weekly: [{{week: '2026-10-19', total: 2, by_reason: {{question_from_ai: 1, decision_needed: 1,
+    review_before_merge: 0, blocked: 0}}}}], suggestions: [{{reason: 'question_from_ai', suggestion: 'Clarify repeated questions.'}}]}};
+S.reviewProjects = ['TESTFLOW', 'TESTWP'];
 renderReviews();
 console.log(root.innerHTML);
 """
     out = run_script(driver)
     for text in ("Human review queue", "TESTFLOW-28", "Ticket details", "pull/28", "Files changed",
                  "Repository", "jooservices/testflow", "Additions", "Deletions", "pytest passed",
-                 "Preview environment", "Approve and merge", "Send for rework"):
+                 "Preview environment", "Approve and merge", "Reject", "Send for rework", "Skip gate and merge",
+                 "Answer", "Ask AI a question", "Can retries be preserved?", "Changes to reduce each reason",
+                 "Approved first time", "Export metrics CSV", "Project"):
         assert text in out
     assert 'data-view="review"' in html() and 'id="view-review"' in html()
 
@@ -452,18 +516,20 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/lead', '/review', '/stakeholder', '/knowledge', '/integrations', '/projects']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "lead,review,stakeholder,knowledge,integrations,projects"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
+    assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
-    assert "['cc', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'integrations', 'projects']" in page
+    assert "else if (S.view === 'notifications') renderNotifications();" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -746,7 +812,8 @@ console.log(JSON.stringify({restored: restored, saved: JSON.parse(store['aiflow4
 """
     out = json.loads(run_script(driver, prelude))
     assert out["restored"] == {"project": "TESTFLOW", "typeFilter": "Bug", "epic": "TESTFLOW-2"}
-    assert out["saved"] == {"project": "OTHER", "typeFilter": "Feature", "epic": "OTHER-7"}
+    assert out["saved"] == {"project": "OTHER", "typeFilter": "Feature", "aiFilter": "all",
+                            "epic": "OTHER-7", "starredProjects": []}
     page = html()
     assert "loadPrefs();" in page.split(BOOT, 1)[1]
     assert "savePrefs(); render();" in page
@@ -831,7 +898,8 @@ def test_poll_falls_back_to_the_first_project_and_clears_a_stale_epic():
     assert out["epic"] == "all"
     assert out["typeFilter"] == "all"
     assert "TESTFLOW-3" in out["body"]
-    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "epic": "all"}
+    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "aiFilter": "all",
+                            "epic": "all", "starredProjects": []}
 
 
 def test_poll_clears_a_stale_epic_and_type_filter_in_the_current_project():
@@ -848,7 +916,8 @@ def test_poll_clears_a_stale_epic_and_type_filter_in_the_current_project():
     assert out["epic"] == "all"
     assert out["typeFilter"] == "all"
     assert "TESTFLOW-3" in out["body"]
-    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "epic": "all"}
+    assert out["saved"] == {"project": "TESTFLOW", "typeFilter": "all", "aiFilter": "all",
+                            "epic": "all", "starredProjects": []}
 
 
 def test_delivery_selection_storage_errors_are_ignored():
@@ -934,3 +1003,233 @@ def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints()
     assert 'id="view-projects"' in page and "/v1/projects/catalog" in page
     assert "/v1/projects/preflight" in page and "method: 'DELETE'" in page
     assert "parallel_limit" in page and "merge_method" in page
+
+
+def test_command_center_menu_order_and_role_visibility():
+    page = html()
+    tabs = re.findall(r'<button class="tab"[^>]*data-view="([^"]+)">([^<]+)</button>', page)
+    assert tabs == [
+        ("cc", "Dashboard"), ("work", "Work board"), ("delivery", "Delivery"), ("sa", "SA"),
+        ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
+        ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
+        ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
+    ]
+    assert "data-view=\"cc\">Command Center</button>" not in page
+    # Each role sees exactly the views its permissions in console_auth.py allow.
+    required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
+                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage",
+                "projects": "projects.manage", "licensing": "licensing.manage", "notifications": "notifications.manage"}
+    visible = json.loads(run_script("""
+var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
+  getAttribute: function () { return item.view; }, setAttribute: function () {}}; });
+document.querySelectorAll = function (selector) { return selector === '.tab[data-menu-view]' ? tabs.slice(2) : tabs; };
+var sessions = %s, roles = {};
+Object.keys(sessions).forEach(function (role) {
+  S.consoleUser = sessions[role]; syncMenuVisibility();
+  roles[role] = tabs.filter(function (tab) { return !tab.hidden; }).map(function (tab) { return tab.view; });
+});
+console.log(JSON.stringify(roles));
+""" % json.dumps({role: console_session(role) for role in ROLE_PERMISSIONS})))
+    for role, granted in ROLE_PERMISSIONS.items():
+        expected = [view for view, _label in tabs
+                    if view not in required or "*" in granted or required[view] in granted]
+        assert visible[role] == expected, role
+        assert visible[role][:2] == ["cc", "work"]
+    # A lead keeps the read-only views it could open before.
+    assert {"knowledge", "machines"} <= set(visible["lead"])
+    assert "users" in visible["super_admin"] and "users" in visible["owner"] and "sa" not in visible["lead"]
+
+
+def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
+    day = datetime.now(timezone.utc).date().isoformat()
+    reset = int(datetime.now(timezone.utc).timestamp()) + 3600
+    awareness = {"source": "reported", "is_estimate": False, "runs_24h": 20, "confidence": "high",
+                 "rate_spread_ratio": .1, "usage_7d": {"tokens_in": 6000, "tokens_out": 1000,
+                                                          "tokens": 7000, "cost_usd": .07},
+                 "largest_run": {"ticket": "ALPHA-3", "tokens": 4000, "cost_usd": .04},
+                 "history": [{"day": day, "tokens": 7000, "cost_usd": .07, "runs": 20}],
+                 "windows": [{"name": "five_hour", "label": "Five hour", "source": "reported",
+                              "used_pct": 40, "left_pct": 60, "used_tokens": 3000, "left_tokens": 4500,
+                              "tokens": 3000, "cost_usd": .03,
+                              "reset_at": datetime.fromtimestamp(reset, timezone.utc).isoformat(),
+                              "reset_source": "reported", "burn_rates": {
+                                  "last_hour": {"tokens_per_hour": 1000}, "last_day": {"tokens_per_hour": 800},
+                                  "whole_window": {"tokens_per_hour": 700}},
+                              "prediction": {"status": "comfortable", "confidence": "high",
+                                             "remaining_at_reset_pct": 50}}]}
+    state = {
+        "projects": [{"key": "ALPHA", "repo": "jooservices/alpha", "closed": False}],
+        "tickets": [
+            {"key": "ALPHA-2", "project": "ALPHA", "type": "Epic", "summary": "Account roadmap",
+             "status": "In Progress", "labels": []},
+            {"key": "ALPHA-3", "project": "ALPHA", "type": "Story", "summary": "Building story",
+             "status": "In Progress", "labels": [], "parent_key": "ALPHA-2", "run": None},
+            {"key": "ALPHA-4", "project": "ALPHA", "type": "Bug", "summary": "Owner question",
+             "status": "Needs owner", "labels": [], "parent_key": "ALPHA-2", "run": None},
+            {"key": "ALPHA-5", "project": "ALPHA", "type": "Story", "summary": "Review this",
+             "status": "Human review", "labels": [], "parent_key": "ALPHA-2", "run": None},
+        ],
+        "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
+                   "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}}],
+        "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
+                      "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
+                      "quota_awareness": awareness}],
+        "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
+                         "provider": "codex", "step": "dev", "elapsed_s": 120}],
+        "recent_runs": [], "incidents": [], "events": [],
+        "totals": {"runs_24h": 3, "done_24h": 2, "failed_24h": 1, "tokens_in_24h": 1200,
+                   "tokens_out_24h": 800, "cost_24h": 0.12}, "versions": {},
+    }
+    analytics = [{"day": day, "account": "codex-alpha", "runs": 3, "done": 2, "merged": 0,
+                  "rework": 0, "failed": 1, "tokens_in": 1200, "tokens_out": 800, "cost_usd": 0.12}]
+    weekly = {"week_start": day, "trend": [], "finished_without_person": [], "needed_person": [],
+              "repeated_failures": [], "quota_accounts": [{"id": "codex-alpha", "provider": "codex",
+                                                               "quota_awareness": awareness}]}
+    rendered = render_dashboard(state, analytics, weekly)
+    assert rendered.count('class="dash-kpi"') == 4
+    for text in ("Work", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
+                 "AI and machines", "AI usage", "codex-alpha", "Codex", "Next quota reset:",
+                 "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
+                 "Tokens · 24 h", "Cost · 24 h", "Tokens · 14 days", "Cost · 14 days",
+                 "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
+                 "Weekly quota and usage", "Largest context run"):
+        assert text in rendered
+    assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
+    assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
+    assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
+
+    machines = render_machines(state)
+    assert "codex-alpha" in machines and "quota-history" in machines and "comfortable" in machines
+    assert "used 40% quota" in machines and "left 60%" in machines
+    assert "Largest context run" in machines and "Burn tokens/hour: 1h 1k, 24h 800, window 700" in machines
+
+
+def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():
+    estimate = {"id": "grok-estimate", "provider": "grok", "quota": {}, "quota_awareness": {
+        "is_estimate": True, "confidence": "low", "runs_24h": 0,
+        "usage_7d": {"tokens": 500, "cost_usd": .01}, "history": [], "largest_run": None,
+        "windows": [{"label": "Estimated weekly", "source": "estimate", "used_pct": 20, "left_pct": 80,
+                     "used_tokens": 500, "left_tokens": 2000, "tokens": 500, "cost_usd": .01,
+                     "reset_at": "2026-10-26T00:00:00+00:00", "reset_source": "estimate",
+                     "burn_rates": {}, "prediction": {"status": "comfortable", "confidence": "low"}}]}}
+    rendered = run_script(f"console.log(qwin({json.dumps(estimate)}));")
+    for label in ("Provider quota not reported", "Usage estimate", "Estimated weekly", "80%", "quota-history"):
+        assert label in rendered
+
+
+def test_search_and_work_board_picker_scale_star_and_filter_results():
+    projects = [{"key": f"PRJ-{i:03}", "repo": f"jooservices/project-{i:03}"} for i in range(300)]
+    prelude = STUBS + """
+var head = {innerHTML: ''}, options = {innerHTML: '', hidden: true};
+var input = {value: 'PRJ-2', setAttribute: function () {}};
+document.activeElement = null;
+document.querySelector = function (selector) {
+  return selector === '#work-head' ? head : selector === '#project-options' ? options :
+    selector === '#work-project' ? input : null;
+};
+"""
+    driver = f"""
+S.view = 'work'; S.project = 'PRJ-150'; S.projectQuery = 'PRJ-2'; S.projectPickerOpen = true;
+S.starredProjects = ['PRJ-250', 'PRJ-200'];
+S.data = {{projects: {json.dumps(projects)}, tickets: [
+  {{key: 'PRJ-150-1', project: 'PRJ-150', type: 'Epic', summary: 'Project roadmap', status: 'To Do', labels: []}},
+  {{key: 'PRJ-150-2', project: 'PRJ-150', type: 'Story', summary: 'Project ticket', status: 'To Do', labels: []}}
+], accounts: [], nodes: [], active_runs: [], recent_runs: [],
+  incidents: [], events: [], totals: {{}}, versions: {{}}}};
+renderDHead(); renderProjectPickerOptions();
+var pick = {{head: head.innerHTML, options: options.innerHTML}};
+S.consoleUser = {{role: 'lead'}};
+var results = quickSearchResults('PRJ-250');
+console.log(JSON.stringify({{pick: pick, results: results}}));
+"""
+    out = json.loads(run_script(driver, prelude))
+    assert 'id="work-project"' in out["pick"]["head"]
+    assert 'id="project-options"' in out["pick"]["head"]
+    assert 'id="epicSel"' in out["pick"]["head"] and 'id="ai-filter"' in out["pick"]["head"]
+    assert 'id="q"' in out["pick"]["head"]
+    assert 'data-act="project"' not in out["pick"]["head"]
+    assert out["pick"]["options"].count('class="project-option"') <= 25
+    assert "Starred projects" in out["pick"]["options"] and "PRJ-250" in out["pick"]["options"]
+    assert any(row["kind"] == "project" and row["key"] == "PRJ-250" for row in out["results"])
+    ticket_result = json.loads(run_script("""
+S.data = {projects: [], tickets: [{key: 'ALPHA-3', project: 'ALPHA', summary: 'Searchable ticket'}]};
+S.consoleUser = {role: 'lead'};
+console.log(JSON.stringify(quickSearchResults('ALPHA-3')));
+"""))
+    assert any(row["kind"] == "ticket" and row["key"] == "ALPHA-3" for row in ticket_result)
+    assert "aria-keyshortcuts=\"Control+K Meta+K\"" in html()
+    assert "e.ctrlKey || e.metaKey" in html() and "openCommandSearch()" in html()
+    chosen = json.loads(run_script("""
+var selected = '';
+var renderCount = 0;
+setView = function (view) { selected = view; S.view = view; };
+render = function () { renderCount += 1; };
+S.consoleUser = {role: 'lead'}; S.view = 'work';
+chooseSearchResult('project', 'PRJ-250');
+console.log(JSON.stringify({view: selected, project: S.project, renders: renderCount}));
+"""))
+    assert chosen == {"view": "work", "project": "PRJ-250", "renders": 1}
+
+
+def test_work_board_filters_epic_ai_state_and_ticket_text():
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Work board")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = r"""
+var body = {innerHTML: ''};
+document.querySelector = function (selector) { return selector === '#work-body' ? body : null; };
+S.view = 'work'; S.project = 'ALPHA'; S.epic = 'ALPHA-2'; S.typeFilter = 'all'; S.aiFilter = 'working'; S.search = 'running needle';
+S.data = {projects: [{key: 'ALPHA', repo: 'jooservices/alpha', work_minutes: {target: 30, warn: 45, hard: 60}}],
+  tickets: [
+    {key: 'ALPHA-2', project: 'ALPHA', type: 'Epic', summary: 'Epic', status: 'In Progress', labels: []},
+    {key: 'ALPHA-3', project: 'ALPHA', type: 'Story', summary: 'Running needle', status: 'In Progress', labels: [],
+      parent_key: 'ALPHA-2', run: {account: 'codex', step: 'dev', elapsed_s: 20}, blocked_by: []},
+    {key: 'ALPHA-4', project: 'ALPHA', type: 'Bug', summary: 'Other text', status: 'In Progress', labels: [],
+      parent_key: 'ALPHA-2', run: null, blocked_by: []},
+    {key: 'BETA-4', project: 'BETA', type: 'Story', summary: 'Running needle', status: 'In Progress', labels: [],
+      run: {account: 'codex', step: 'dev', elapsed_s: 20}, blocked_by: []}
+  ], nodes: [], accounts: [], active_runs: [], recent_runs: [], incidents: [], events: [], totals: {}, versions: {}};
+renderDBody(); console.log(body.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert 'class="card" data-act="open-ticket" data-key="ALPHA-3"' in result.stdout
+    assert 'class="card" data-act="open-ticket" data-key="ALPHA-4"' not in result.stdout
+    assert 'class="card" data-act="open-ticket" data-key="BETA-4"' not in result.stdout
+
+
+def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal():
+    page = html()
+    style = css()
+    assert "--bg:#f5f1eb" in style and "--bg:#121110" in style
+    assert ':root[data-theme="dark"]' in style and ':root:not([data-theme="light"])' in style
+    assert "data-act=\"theme\"" in page and "aiflow4-theme" in page
+    assert ":focus-visible" in style and "ArrowRight" in page and "ArrowLeft" in page
+    assert "Control+K" in page and "Meta+K" in page and "Tab" in page
+    assert "overflow-x:auto" in style and "@media (max-width:900px)" in style
+    assert "@media (max-width:640px)" in style and "prefers-reduced-motion: reduce" in style
+    tabs_rule = re.search(r"\.tabs\s*\{([^}]*)\}", style)
+    tab_rule = re.search(r"\.tab\s*\{([^}]*)\}", style)
+    assert tabs_rule and "min-width:0" in tabs_rule.group(1) and "overflow-x:auto" in tabs_rule.group(1)
+    assert tab_rule and "flex:0 0 auto" in tab_rule.group(1) and "white-space:nowrap" in tab_rule.group(1)
+    assert ".tabs{max-width:100%;width:100%}" in style
+    for old_blue in ("#2453D6", "#88AAFF", "#0A0F1E", "#111933", "#7b6cff"):
+        assert old_blue.lower() not in style.lower()
+    assert ".reason-question_from_ai{background:var(--provider-claude)}" in style
+    assert 'data-view="cc">Command Center</button>' not in page
+
+
+def test_dashboard_epic_roadmap_opens_work_board_with_epic_filter():
+    result = run_script("""
+var selectedView = '';
+setView = function (view) { selectedView = view; S.view = view; };
+S.view = 'cc'; S.search = 'old search'; S.aiFilter = 'attention';
+openEpicOnWorkBoard('ALPHA-2');
+console.log(JSON.stringify({view: selectedView, epic: S.epic, search: S.search, aiFilter: S.aiFilter}));
+""")
+    assert json.loads(result) == {"view": "work", "epic": "ALPHA-2", "search": "", "aiFilter": "all"}

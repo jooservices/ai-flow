@@ -189,6 +189,9 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
             calls["mirrors"].append((repo, token))
             return "mirror"
 
+        def foreign_worktree(self, *_a):
+            return None
+
         def worktree(self, mirror, path, branch, base):
             calls["worktrees"].append((mirror, str(path), branch, base))
             return "origin/" + base

@@ -1,23 +1,71 @@
-# Master monitoring cycles
+# Master autonomy
 
-Master accounts provide one control-wide monitoring cycle at a time. The worker asks the control API for a cycle when its account has the `master` role, its account status is `idle`, `working`, or `probing`, and its node is online. The cycle uses the Redis lease `master:global` and the normal run heartbeat and fencing checks. The lease is not tied to Claude or Codex, so any ready master account may claim the next cycle. A cooldown, signed-out/error account, offline node, or expired lease excludes that account, and the next cycle goes to another ready master account. For one cycle (`MASTER_CYCLE_S`, one minute) after a quota or lost-lease failure, accounts of the failed provider wait while the other provider has a ready master account, so Claude hands over to Codex and back. If the other provider has no ready master account, or that minute has passed, any ready master account (including one of the same provider) takes the cycle, so the flow never stops. Successful cycles are spaced at least one minute apart; normal failed cycles use the usual backoff, while a quota or lost-lease failover claims immediately.
+The master account runs one fenced control-wide review cycle at a time. When `accounts.yaml` has no explicit master
+role, the first configured `senior` account receives `master` by default. Explicit role assignments remain
+authoritative. The owner can view and change the master's daily model-time budget in the Command Center at `/cc`.
+The default budget is 60 minutes per UTC day; setting it to zero disables master cycles. The control plane refuses
+new cycles after the budget is used. A cycle with nothing to review does not make a model call or consume the
+budget.
 
-## Monitoring snapshot
+## What the master reviews
 
-`GET /v1/master/context` returns the snapshot for the active fenced run:
+The fenced `GET /v1/master/context` snapshot contains:
 
-- Open incidents, including node, role coverage, run clock, quota, and ticket incidents.
-- Tickets in Needs owner that do not have the `owner-escalated` label.
-- Running ticket runs with elapsed minutes, project-specific `work_minutes` target/warn/hard limits, and which clocks have passed.
-- Offline nodes.
-- Accounts in cooldown, signed out, error, or with an open `account_quota` or `quota_high` incident, including quota windows and reset data.
+- Every open incident, including offline nodes, quota and account health, role coverage, stuck tickets and run clocks.
+- Tickets in `Needs owner`, including whether they were already escalated.
+- Running ticket runs with elapsed time and the project's `work_minutes` target, warn and hard limits.
+- Offline nodes and accounts out of quota, failing their check, or temporarily paused by the master.
+- Repeated TESTFLOW failure reports from the fenced scan described in [Repeated flow failures](flow-bugs.md).
 
-The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to `POST /v1/master/actions`. Tool calls are denied for master runs so all writes stay behind the control API.
+The worker runs `prompts/v4/master.md`, returns a JSON action plan, and submits each action to
+`POST /v1/master/actions`. The control API checks the active run and fence, applies the owner escalation policy,
+records accepted and refused requests in the audit log, and performs only the safe actions listed below. Tool calls
+are denied for master runs, so all effects go through the control API. The master reviews the snapshot for tickets
+beyond the applicable project hard limit. Quota, authentication, offline-node and missing-tool symptoms stay
+incidents; they are not converted into TESTFLOW Bugs.
 
-## Allowed actions and audit
+## Safe actions, escalation and audit
 
-The control API allows `jira_comment`, `jira_update`, `dev_reply`, `requeue` (only to To Do), `incident_open`, `incident_close`, `notify_owner`, and `escalate_to_owner`. Every action checks the active run and fence, records the account and run in `write_audit`, and emits a `master.action` event. Other actions are refused with a reason. Master Jira comments use the shared `AI Flow · master · …` note shape with What, Why, Result, Next, and a Run line containing account, provider/model, node, run, and fence.
+Allowed actions are:
 
-The mandatory `escalate_to_owner` policy covers infrastructure changes, secret or credential changes, and production releases. These requests are never executed by the master. The control API comments on the related Jira ticket when available, notifies the owner, records the refused request and escalation, and returns the policy reason. The policy matches what is requested: the action name, its `intent`, and an optional explicit `category` (`infrastructure`, `secret`, `production_release`, always escalated). Observation fields (`what`, `why`, `result`, `detail`, `title`) are not matched, so an `incident_open` for an offline node or a `requeue` after the hard limit stays an allowed follow-up. The default patterns need a change verb next to a protected object (for example "change … infrastructure", "rotate … API key", "release … production"); plain words such as node, server, database, or restart do not escalate. The code keeps these default rules active if `policy/default.yaml` does not define them; the control repo can add further regular-expression patterns under `escalate_to_owner`.
+- `retry` a ticket after a failed, blocked, quota or lost run, by returning it to To Do.
+- `move_to_todo` when a ticket has no active run and is not Done.
+- `pause_account` with a temporary pause of up to 24 hours for an account with a quota or health issue.
+- `restart_run` after its project hard limit; the control plane releases the target run's lease, marks it lost and
+  returns its ticket to To Do.
+- `open_bug` only for an eligible repeated TESTFLOW failure. The control API applies the threshold and tracker
+  deduplication from [Repeated flow failures](flow-bugs.md).
 
-Master monitoring does not change infrastructure, secrets, or release production. The owner decides whether and how those requests may proceed.
+Every accepted or refused request is recorded in `write_audit` and emitted as a `master.action` event with the
+reason. Lease fencing and the control-repo policy hook remain in force. No other Jira writes or infrastructure
+changes are available through the master action API.
+
+When the master needs a person to choose, it sends one alert through the configured owner channels. The alert says
+why a person is needed and lists the available choices. An observation key suppresses repeat messages after
+successful delivery; failed channels remain pending and are retried on a later master cycle without resending to
+channels that already succeeded. Protected infrastructure, secret and production-release requests continue to be
+escalated by the policy hook.
+
+## Daily budget and malformed plans
+
+The master settings table stores the daily time budget and the UTC-day usage. Only time spent in the model counts;
+an idle review has a recorded `model_time_s` of zero. The model gets one retry with a strict JSON-format reminder
+after returning malformed output. A valid plan resets the invalid-plan streak. The control plane opens the
+`master_invalid_plan` incident after three invalid cycles in a row or five invalid cycles within one hour. A later
+valid plan closes that incident.
+
+## Weekly autonomy report
+
+The Command Center autonomy panel shows AI-finished tickets, owner decisions with their reasons and options,
+repeated flow Bugs, and weekly counts over the previous eight weeks. The report is available to signed-in console
+readers through `GET /v1/master/autonomy` and `GET /v1/master/report`; only owners and super administrators can
+change the budget.
+
+## Lease and provider handoff
+
+The global `master:global` Redis lease allows one cycle at a time and uses the normal run heartbeat and fencing
+checks. Any ready account with the master role may take the next cycle. A cooldown, signed-out or error account,
+offline node, temporary master pause, exhausted daily budget or expired lease excludes that account. After a quota
+or lost-lease failure, a ready account from another provider is preferred for one cycle; when none is available,
+any other ready master account may continue. Successful cycles remain at least one minute apart, while other
+failures use the usual run backoff.

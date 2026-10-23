@@ -49,6 +49,7 @@ class Account:
     roles: list[str] = field(default_factory=list)
     explicit_only: bool = False
     parallel: int = 1          # workers of this account on its node (sessions of one account can run side by side)
+    paused: bool = False       # console-managed accounts stay assigned but do not receive new work
 
 
 @dataclass
@@ -190,6 +191,15 @@ class ControlRepo:
 
         accounts = [Account(**{k: v for k, v in a.items() if k in Account.__dataclass_fields__})
                     for a in (y("accounts.yaml", {}).get("accounts") or [])]
+        # A configured senior account is the default master on a fresh control repo. Keep an explicit
+        # master assignment authoritative; this fallback only fills the role when nobody has it.
+        if accounts and not any("master" in (a.roles or []) for a in accounts):
+            senior = next((a for a in accounts if a.tier == "senior"), None)
+            if senior:
+                # Empty/omitted roles otherwise mean the normal dev and verify roles in the control API.
+                # Materialize those defaults before adding master so that this default does not erase them.
+                defaults = senior.roles or ["dev", "verify"]
+                senior.roles = list(dict.fromkeys([*defaults, "master"]))
         nodes: dict[str, Node] = {}
         for p in sorted((r / "nodes").glob("*.yaml")):
             d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}

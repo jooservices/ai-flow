@@ -3,6 +3,7 @@
 Outcomes:
   done     changes committed and pushed, draft PR open, ticket in In Verify
   blocked  the AI reported a requirement conflict: ticket to Needs owner with the question
+  tool_missing  a tool or service is missing on this machine: ticket back to To Do, parked for a capable machine
   quota    the account cannot work now: ticket back to To Do, account cooling down (control API)
   failed   anything else: ticket back to To Do with the reason (the branch keeps the work for the next run)
 """
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
+from ..core.toolchains import parse_missing_requirements
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
@@ -53,6 +55,8 @@ class Claimed:
     triage_question: str = ""
     related: list[dict] = field(default_factory=list)
     project_tickets: list[dict] = field(default_factory=list)
+    context_pack: dict = field(default_factory=dict)
+    machine_tools: dict = field(default_factory=dict)
 
 
 class LeaseLost(Exception):
@@ -96,9 +100,44 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None) ->
         rework += ("\nThe latest " + c.project["base"] + " was merged into the branch and these files have conflict"
                    " markers (<<<<<<<, =======, >>>>>>>): " + ", ".join(conflicts) + ". Resolve them so both sides'"
                    " intent is kept; AI Flow commits the merge with your work.\n")
-    return tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
+    prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
-                      rework=rework, related=related_block(c.related))
+                      rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools))
+    return with_knowledge_context(prompt, c.context_pack)
+
+
+def with_knowledge_context(prompt: str, pack: dict | None) -> str:
+    """Append the stored, project-isolated context pack to any AI worker prompt."""
+    if not pack or not pack.get("items"):
+        return prompt
+    labels = {"study_case": "Study case", "decision": "Decision", "convention": "Convention",
+              "skill": "Skill", "guide": "Guide"}
+    lines = ["\nKnowledge context pack (stored AI Flow knowledge; check the ticket if details conflict):"]
+    for item in pack["items"]:
+        scope = "general" if item.get("scope") == "general" else item.get("project", "")
+        if item.get("epic"):
+            scope += f" / epic {item['epic']}"
+        stale = " [flagged for review]" if item.get("status") == "stale" else ""
+        lines.append(f"- [{labels.get(item.get('kind'), item.get('kind'))}; {scope}{stale}] {item.get('title', '')}: "
+                     f"{item.get('content', '')}")
+    return prompt + "\n".join(lines) + "\n"
+
+
+def machine_block(tools: dict) -> str:
+    """'Tools on this machine' section of the prompt, so the AI does not try what is not installed."""
+    if not tools:
+        return ""
+    available = ", ".join(f"{n} ({v})" if v else n for n, v in (tools.get("available") or {}).items())
+    lines = ["\nTools on this machine (reported by its node agent just now):",
+             f"- available: {available or 'none reported'}"]
+    if tools.get("services"):
+        lines.append(f"- test services running: {', '.join(tools['services'])}")
+    if tools.get("missing"):
+        lines.append(f"- not available: {', '.join(tools['missing'])}")
+    lines.append("Do not try a tool that is not available. If a check of the ticket needs one, stop and report\n"
+                 "`RESULT: BLOCKED: MISSING-TOOL: <tool>[, <tool>] - <what could not run>`; AI Flow then waits for a machine\n"
+                 "that has it. Never ask the owner to install or fix a tool.")
+    return "\n".join(lines) + "\n"
 
 
 RELATED_KIND = {"ticket": "ticket", "run_summary": "run summary", "finding": "verify finding", "answer": "answer"}
@@ -151,11 +190,24 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         token = credential["token"]
         mirror = git.mirror(repo, token, credential.get("transport_url", ""))
         wt = Path(srv_root) / "work" / project["key"] / branch
+        moved = git.foreign_worktree(mirror, wt, branch)
+        if moved:  # the ticket's repository changed since the worktree was made: never reuse it
+            log.warning("%s: repository changed from %s to %s; replacing worktree %s", key, moved["old_repo"], repo, wt)
+            work = (f"{len(moved['commits'])} committed change(s) on branch {branch} in {moved['old_repo']}"
+                    + (" (the branch is also pushed there):\n" if moved["pushed"] else " (not pushed anywhere):\n")
+                    + "\n".join(f"- {x}" for x in moved["commits"][:20])) if moved["commits"] else "no committed work on the old branch"
+            jira("comment", body=note(c, "repository changed", what=f"The ticket's repository changed from {moved['old_repo']} to {repo}",
+                                      why="The old worktree belongs to the old repository, so the AI could not find the code in it",
+                                      result=f"Old worktree and branch {branch} removed; {work}",
+                                      next_=f"A new worktree is created from {repo} {project['base']}", node=api_node(api)))
+            git.drop_foreign_worktree(wt, branch, Path(moved["old_mirror"]))
         start = git.worktree(mirror, wt, branch, project["base"])
         conflicts: list[str] = []
         if start != f"origin/{project['base']}":  # continuing the branch: bring in the latest base first
             conflicts = git.merge_base_in(wt, project["base"], c.identity)
         hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
+        if moved:
+            hb.progress["repo_change"] = f"{moved['old_repo']} -> {repo}"
         jira("transition", to="In Progress")
         jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
@@ -202,6 +254,17 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
+        missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
+        if missing:
+            result["outcome"] = "tool_missing"
+            result["details"]["missing_tools"] = missing
+            jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
+                                      why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
+                                      result="No question goes to the owner; the machine and the tool are recorded",
+                                      next_="Back to To Do; AI Flow offers it again when a machine with the tool is available",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
         if res.verdict == "BLOCKED":
             result["outcome"] = "blocked"
             jira("comment", body=note(c, "question for the owner", what="The developer AI stopped before changing code",
@@ -210,6 +273,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="Needs owner")
             return result
         changed = git.changed(wt)
+        result.setdefault("details", {})["changed_files"] = changed[:100]
         if conflicts and any(CONFLICT_MARKER.search((wt / f).read_text(errors="ignore")) for f in conflicts if (wt / f).is_file()):
             res.error_kind = res.error_kind or "unresolved conflicts"
         if res.error_kind or not changed:

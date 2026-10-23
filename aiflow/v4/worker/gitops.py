@@ -93,6 +93,43 @@ class Git:
             self.run("worktree", "add", "-q", "-B", branch, str(path), start, cwd=mirror)
         return start
 
+    @staticmethod
+    def worktree_mirror(path: Path) -> Path | None:
+        """Mirror a worktree belongs to, read from its .git pointer file ('gitdir: <mirror>/worktrees/<name>')."""
+        try:
+            text = (path / ".git").read_text()
+        except OSError:
+            return None
+        if not text.startswith("gitdir:"):
+            return None
+        return Path(text.split(":", 1)[1].strip()).parent.parent
+
+    def foreign_worktree(self, mirror: Path, path: Path, branch: str) -> dict | None:
+        """Describe a worktree that belongs to another repository's mirror than `mirror`; None when it is the
+        right one (or there is none). `commits` lists the old branch's work that no other remote branch holds."""
+        if not (path / ".git").is_file():
+            return None
+        old = self.worktree_mirror(path)
+        if old is None or old.resolve() == mirror.resolve():
+            return None
+        commits: list[str] = []
+        refs = self.run("for-each-ref", "--format=%(refname)", "refs/remotes", cwd=path, check=False).split()
+        others = [r for r in refs if r != f"refs/remotes/origin/{branch}" and not r.endswith("/HEAD")]
+        out = self.run("log", "--format=%h %s", "HEAD", "--not", *others, cwd=path, check=False) if others else \
+            self.run("log", "--format=%h %s", "HEAD", cwd=path, check=False)
+        commits = [x for x in out.splitlines() if x.strip()]
+        pushed = bool(self.run("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}", cwd=path, check=False).strip())
+        return {"old_repo": old.name.removesuffix(".git").replace("__", "/"), "old_mirror": str(old), "commits": commits,
+                "pushed": pushed}
+
+    def drop_foreign_worktree(self, path: Path, branch: str, old_mirror: Path) -> None:
+        """Remove the old worktree directory and its branch from the old repository's mirror."""
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        if (old_mirror / "HEAD").exists():
+            self.run("worktree", "prune", "--expire=now", cwd=old_mirror, check=False)
+            self.run("branch", "-D", branch, cwd=old_mirror, check=False)
+
     def scrub(self, path: Path) -> None:
         """Drop whatever a previous run left in a reused worktree: an unfinished merge, edits, untracked files."""
         self.run("merge", "--abort", cwd=path, check=False)

@@ -914,6 +914,24 @@ def _function_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
     return spans
 
 
+def _changed_navigation_views(old_line: str, new_line: str, all_views: set[str]) -> set[str]:
+    """Map edits to shared navigation tables to the view entries that actually changed."""
+    item = r"([a-z]+)\s*:\s*(['\"])(.*?)\2"
+    old_items = {name: value for name, _, value in re.findall(item, old_line) if name in all_views}
+    new_items = {name: value for name, _, value in re.findall(item, new_line) if name in all_views}
+    changed = {name for name in old_items.keys() | new_items.keys()
+               if old_items.get(name) != new_items.get(name)}
+
+    # VIEW_GROUPS and the renderer list are inline arrays. Compare screen names so adding one
+    # screen does not make every existing screen require an unrelated documentation edit.
+    if old_line.lstrip().startswith("[") and new_line.lstrip().startswith("["):
+        quoted = re.compile(r"['\"]([a-z]+)['\"]")
+        old_names = {name for name in quoted.findall(old_line) if name in all_views}
+        new_names = {name for name in quoted.findall(new_line) if name in all_views}
+        changed |= old_names ^ new_names
+    return changed
+
+
 def changed_views(base: str) -> set[str]:
     """Screens whose section or JavaScript renderer changed; fail when a UI hunk cannot be mapped."""
     rel = UI.relative_to(ROOT).as_posix()
@@ -923,6 +941,9 @@ def changed_views(base: str) -> set[str]:
     # shift those coordinates, so map against the exact file version used by the diff.
     source = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
     lines = source.splitlines()
+    base_source = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT, text=True,
+                                 capture_output=True, check=True).stdout
+    base_lines = base_source.splitlines()
     all_views = set(console_views())
     hints_start = next((i for i, line in enumerate(lines) if line.startswith("var HINTS = {")), None)
     hints_end = next((i for i in range(hints_start + 1, len(lines)) if lines[i] == "};"), None) \
@@ -937,14 +958,31 @@ def changed_views(base: str) -> set[str]:
     help_end = functions.get("renderHelp", (0, 0))[1] - 1
     touched: set[str] = set()
     unmapped: set[int] = set()
-    for m in re.finditer(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.M):
-        first, count = int(m.group(1)), int(m.group(2) or 1)
+    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
+        old_first, old_count = int(m.group(1)), int(m.group(2) or 1)
+        first, count = int(m.group(3)), int(m.group(4) or 1)
+        if count == 0 and 1 <= old_first <= len(base_lines):
+            removed_section = re.search(r'<section class="view" id="view-([a-z]+)"',
+                                        base_lines[old_first - 1])
+            if removed_section:
+                # Old console snapshots can contain a duplicate empty panel. Removing the duplicate
+                # does not change the screen while its other section remains in the current console.
+                view = removed_section.group(1)
+                if view not in all_views:
+                    touched.add(view)
+                continue
         last = first + max(count, 1) - 1
         for line_no in range(max(first, 1), last + 1):
             line_views = {v for lo, hi, v in spans if lo <= line_no <= hi}
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
             specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
                               if (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            # Navigation objects are kept on one line. Compare the base and current lines so one
+            # added or edited view entry does not make all existing screens require doc changes.
+            if old_count == count and 1 <= old_first <= len(base_lines):
+                old_index = old_first - 1 + (line_no - first)
+                if old_index < len(base_lines):
+                    specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
             hint_view = None
             unmapped_renderer = False
             for name, (lo, hi) in functions.items():
@@ -966,7 +1004,8 @@ def changed_views(base: str) -> set[str]:
                     line_views |= all_views
             if (help_start is not None and help_start <= line_no - 1 <= help_end and hint_view is None):
                 line_views |= all_views
-            if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
+            shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
+            if shared_ui_change and not specific_views:
                 line_views |= all_views
             if "rh-form" in changed_line:
                 line_views.add("machines")

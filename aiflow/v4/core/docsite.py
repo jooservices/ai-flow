@@ -49,6 +49,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderGitHubIntegrations": ("integrations",),
     "renderLive": None,
     "renderDashboard": ("cc",),
+    "flowDoctorPanel": ("cc",),
     "dashboardProjectCounts": ("cc",),
     "providerUsageChart": ("cc",),
     "dashboardSpark": ("cc",),

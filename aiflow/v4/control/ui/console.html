@@ -128,6 +128,7 @@ main{padding-block:20px 48px; display:flex; flex-direction:column; gap:16px}
 @media(max-width:900px){.review-breakdown{grid-template-columns:minmax(0,1fr)}}
 .panel-h{display:flex; align-items:center; gap:10px 12px; flex-wrap:wrap}
 .panel-h h2{margin:0; font-family:var(--f-cond); font-size:17px; font-weight:600; letter-spacing:.01em; text-wrap:balance}
+.firstuse{display:flex; gap:12px; align-items:center; justify-content:space-between; margin:12px 0; padding:10px 14px; border:1px solid var(--accent); background:var(--accent-weak); border-radius:9px}
 .panel-h .hint{color:var(--muted); font-size:13px}
 .grid-2{display:grid; grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); gap:16px; align-items:start}
 .stack{display:flex; flex-direction:column; gap:16px; min-width:0}
@@ -507,6 +508,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
+    <a class="iconbtn" id="help-link" href="/help/screens/cc.html" target="_blank" rel="noopener" title="Help for this screen">Help</a>
     <a class="iconbtn" href="/o2/" target="_blank" rel="noopener" title="Logs and metrics (OpenObserve)">Logs</a>
     <a class="iconbtn" href="/mail/" target="_blank" rel="noopener" title="Alert emails (Mailpit)">Alerts mail</a>
     <button class="iconbtn" data-act="search-open" aria-keyshortcuts="Control+K Meta+K" aria-label="Search views, projects, and tickets (Ctrl K)" title="Search · Ctrl K">Search <kbd>Ctrl K</kbd></button>
@@ -515,6 +517,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
 </header>
 <main class="wrap">
   <div class="license-warning" id="license-warning" role="status" hidden></div>
+  <div id="firstuse"></div>
   <section class="view" id="view-cc" role="tabpanel" aria-labelledby="tab-cc"></section>
   <section class="view" id="view-work" role="tabpanel" aria-labelledby="tab-work" hidden>
     <div class="dhead" id="work-head"></div>
@@ -3892,11 +3895,45 @@ function tick() {
   });
   renderLive();
 }
+/* Help: every screen has a page in the documentation site (docs/guide/screens/<view>.md, served at /help/) and a
+   short hint for first use that stays away once dismissed. */
+var HELP_BASE = '/help/screens/';
+var HINTS = {
+  cc: 'Start here: nodes, AI accounts, runs and incidents. Open an incident for its detail and a runbook.',
+  work: 'Pick a project to see its tickets by state. Open a ticket for its runs, questions and links.',
+  machines: 'Machines that run AI work and the AI accounts on them: heartbeat, slots and sign-in state.',
+  users: 'See the role and screen permissions for your signed-in account. User invitations and role changes use the configured console login process.',
+  delivery: 'Pick a project to see its board. "Needs attention" lists tickets that wait on a person or did not finish.',
+  sa: 'Read-only health of nodes and accounts, with advice on capacity. Nothing here changes the fleet.',
+  lead: 'Choose a project to check that each epic has enough tasks for its acceptance criteria, then export a report.',
+  business: 'Epics, questions waiting for your answer and change requests. Answer questions in Jira.',
+  review: 'Tickets waiting for a person before merge. Enter the reviewer access token to approve or send back.',
+  stakeholder: 'Open the test environment of a project, try the change, then record acceptance or feedback.',
+  knowledge: 'Study cases, skills, guides and policies the AI workers read. Every save creates a new version.',
+  backup: 'Review backup and weekly restore status, set a schedule and destination, and save the encryption key separately.',
+  integrations: 'Connect Jira and GitHub first. Secrets are stored on the control machine and never shown.',
+  projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
+  licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
+  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.',
+  support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.'
+};
+function helpUrl(view) { return HELP_BASE + view + '.html'; }
+function hintSeen(view) { try { return localStorage.getItem('aiflow4-hint-' + view) === '1'; } catch (e) { return false; } }
+function renderHelp() {
+  var link = document.getElementById('help-link');
+  if (link) link.setAttribute('href', helpUrl(S.view));
+  var box = document.getElementById('firstuse');
+  if (!box) return;
+  box.innerHTML = (HINTS[S.view] && !hintSeen(S.view))
+    ? '<div class="firstuse" role="note"><span>' + esc(HINTS[S.view]) + ' <a href="' + helpUrl(S.view) + '" target="_blank" rel="noopener">Read more in Help</a></span><button class="btn sm" data-act="hint-dismiss">Got it</button></div>'
+    : '';
+}
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
   ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
+  renderHelp();
 }
 function setView(v) {
   if (S.consoleUser && !viewAllowed(v, S.consoleUser.role)) v = 'cc';
@@ -3930,6 +3967,7 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
   else if (act === 'support-build') buildSupportBundle();
   else if (act === 'support-clear') { S.support.bundle = null; S.support.error = ''; renderSupport(); }
   else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }

@@ -445,6 +445,37 @@ def _container_command_allowed(segment: str, worktree: str) -> bool:
     return False
 
 
+_WRAPPERS = {"env", "sudo", "command", "exec", "nohup", "time", "nice", "xargs"}
+_SHELLS = {"bash", "sh", "zsh", "dash"}
+
+
+def _invokes(segment: str, name: str) -> bool:
+    """True when the segment's executable (after VAR=val and wrappers like env/sudo/bash -c) is `name`."""
+    if "$(" in segment or "`" in segment:
+        return re.search(rf"\b{name}\b", segment) is not None
+    try:
+        argv = shlex.split(segment, posix=True)
+    except ValueError:
+        return re.search(rf"\b{name}\b", segment) is not None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        base = os.path.basename(tok)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok) or (base in _WRAPPERS and i < len(argv) - 1):
+            i += 1
+        elif base in _SHELLS:
+            rest = argv[i + 1:]
+            for j, a in enumerate(rest):
+                if a.startswith("-") and not a.startswith("--") and "c" in a and j + 1 < len(rest):
+                    return _invokes(rest[j + 1], name)
+            return False
+        elif tok.startswith("-") and i > 0 and os.path.basename(argv[i - 1]) in _WRAPPERS:
+            i += 1
+        else:
+            return base == name
+    return False
+
+
 def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktree: str,
            *, containers: bool = False) -> Decision:
     cmds = policy.get("commands") or {}
@@ -462,13 +493,13 @@ def decide(policy: dict[str, Any], tool: str, tool_input: dict[str, Any], worktr
             hit = next((p for p in deny if fnmatch.fnmatch(seg, p)), None)
             if hit:
                 return Decision("deny", f"policy denies '{hit}' (in: {seg[:80]})")
-            if re.search(r"\bdocker\b", seg):
+            if _invokes(seg, "docker"):
                 if not containers:
                     return Decision("deny", "this project has not enabled the safe container runtime")
                 if not seg.startswith("docker ") or not _container_command_allowed(seg, worktree):
                     return Decision("deny", "container command is outside the safe build, compose, and mounted-run policy")
                 continue
-            if re.search(r"\bpodman\b", seg):
+            if _invokes(seg, "podman"):
                 return Decision("deny", "call the brokered Docker-compatible command; direct Podman access is disabled")
             if any(seg == ro or seg.startswith(ro + " ") for ro in READ_ONLY):
                 try:

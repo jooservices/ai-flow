@@ -7,8 +7,11 @@ the owner can then download and inspect the ZIP before sharing it.
 The general bundle includes the AI Flow, Python and node release versions; selected non-secret control settings;
 machine and account states; up to 100 incidents opened in the last seven days; and control-service logs from the last
 24 hours. Incident subject, title and detail are free-form text, so they are replaced with redaction markers before
-scanning; the structured incident metadata remains available. Logs are scrubbed for recognizable credentials and
-personal identifiers, then scanned again.
+scanning; the structured incident metadata remains available. Log messages are free text too (a lowercase name such as
+"jane doe called support" cannot be found by patterns), so every log line keeps only its timestamp, level, logger and
+`key=value` pairs whose value is a number, boolean or ticket key; the message is replaced with `[REDACTED_FREEFORM]`.
+The result is still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` style fields) and scanned
+again.
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
 bundle is rejected and no download is made available. Secret values and free-form account/provider error state are
 not selected from settings or registry records.
@@ -17,7 +20,8 @@ Control API and loop processes write rotated logs to `/srv/aiflow/control/logs` 
 Only entries with timestamps in the preceding 24 hours are included. Other deployments retain a bounded in-memory
 log ring for the running API process. Each included log file is capped at 5 MiB.
 
-To create a ticket bundle, select a ticket before building. It adds the ticket's registry summary and any run logs
+To create a ticket bundle, select a ticket before building. It adds the ticket's key, project, status and type (the summary is free text and is replaced with a redaction marker)
+and any run logs
 from the preceding 24 hours. Workers attach the newest 5 MiB of a run log to that run's result, so the control plane
 can collect logs from remote nodes. The completed archive is scanned with the same gate as the general bundle, and
 every log file remains capped at 5 MiB.

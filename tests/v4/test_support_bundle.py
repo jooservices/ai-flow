@@ -48,7 +48,7 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
                "now()-interval '8 days')")
 
     logs = support_bundle.SupportLogBuffer()
-    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "x" * (support_bundle.MAX_LOG_BYTES + 10),
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "items=1\n" * (support_bundle.MAX_LOG_BYTES // 7),
                                 (), None))
     archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=logs)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
@@ -353,7 +353,7 @@ def test_run_result_keeps_raw_logs_out_of_the_runs_table_and_stores_a_sanitized_
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-240")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-240", "account": "claude-01"}, headers=cc).json()
-    raw = "started\npassword=hunter2hunter2\ncontact alice@example.test\n"
+    raw = "started attempt=3\npassword=hunter2hunter2\ncontact alice@example.test\n"
     res = client.post(f"/v1/runs/{r['run_id']}/result", headers=cc,
                       json={"fence": r["fence"], "outcome": "done",
                             "details": {"support_log_text": raw, "support_log_truncated": False, "kept": 1}})
@@ -361,7 +361,7 @@ def test_run_result_keeps_raw_logs_out_of_the_runs_table_and_stores_a_sanitized_
     details = ctx.db.one("SELECT details FROM runs WHERE id=%s", (r["run_id"],))["details"]
     assert details.get("kept") == 1 and "support_log_text" not in details and "support_log_truncated" not in details
     stored = support_bundle.load_run_log(ctx, r["run_id"])
-    assert "started" in stored and "hunter2" not in stored and "alice@example.test" not in stored
+    assert "attempt=3" in stored and "hunter2" not in stored and "alice@example.test" not in stored
     assert 0 < ctx.leases.r.ttl(support_bundle._run_log_key(ctx, r["run_id"])) <= support_bundle.RUN_LOG_TTL_S
 
 def test_persistent_control_logs_are_filtered_to_the_last_24_hours(tmp_path, ctx):
@@ -370,14 +370,14 @@ def test_persistent_control_logs_are_filtered_to_the_last_24_hours(tmp_path, ctx
     recent = now.strftime("%Y-%m-%d %H:%M:%S")
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    (log_dir / "control-api-a.log").write_text(f"{stale} INFO aiflow4.api old entry\n{recent} INFO aiflow4.api recent entry\n",
+    (log_dir / "control-api-a.log").write_text(f"{stale} INFO aiflow4.api old entry n=1\n{recent} INFO aiflow4.api recent entry n=2\n",
                                                  encoding="utf-8")
     ctx.settings.support_log_dir = str(log_dir)
     archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         log_text = bundle.read("logs/control-service.log").decode()
-    assert "recent entry" in log_text
-    assert "old entry" not in log_text
+    assert "n=2" in log_text
+    assert "n=1" not in log_text
 
 
 def test_control_loops_installs_support_log_capture(tmp_path, ctx, monkeypatch):
@@ -413,7 +413,7 @@ def test_ticket_bundle_includes_only_selected_ticket_runs_from_last_24_hours_and
     sign_in_owner(client, ctx)
     ctx.db.run("INSERT INTO tickets (key,project,status,type,summary) VALUES ('TESTWP-235','TESTWP','To Do','Bug',%s)",
                ("Support regression",))
-    run_id = add_run(ctx, "TESTWP-235", "ticket log " + "x" * (support_bundle.MAX_LOG_BYTES + 50))
+    run_id = add_run(ctx, "TESTWP-235", "items=1\n" * (support_bundle.MAX_LOG_BYTES // 7))
     add_run(ctx, "TESTWP-235", "too old", age_hours=25)
     add_run(ctx, "TESTWP-236", "other ticket")
 
@@ -462,3 +462,35 @@ def test_log_cap_drops_partial_utf8_codepoints_without_exceeding_byte_limit():
     assert truncated is True
     assert capped == "€"
     assert len(capped.encode("utf-8")) <= 5
+
+
+JANE = "jane doe called support yesterday"
+
+
+def test_free_form_text_is_absent_from_every_file_of_ticket_bundle(ctx):
+    ctx.db.run("INSERT INTO tickets (key,project,status,type,summary) VALUES ('TESTWP-300','TESTWP','To Do','Bug',%s)",
+               (f"fix login for jane doe; {JANE}",))
+    ctx.db.run("INSERT INTO incidents (kind,subject,severity,title,detail) VALUES ('test',%s,'warning',%s,%s)",
+               (JANE, JANE, JANE))
+    add_run(ctx, "TESTWP-300", f"2026-10-23 10:00:00 INFO worker {JANE} status=200\n{JANE}\npwd=hunter2hunter2\n")
+    logs = support_bundle.SupportLogBuffer()
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, JANE + " code=7", (), None))
+
+    archive, inventory = support_bundle.build_support_bundle(ctx, "TESTWP-300", log_buffer=logs)
+    assert inventory["scan"] == "passed" and inventory["ticket_run_log_count"] == 1
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        assert any(name.startswith("logs/ticket-runs/") for name in bundle.namelist())
+        for name in bundle.namelist():
+            text = bundle.read(name).decode("utf-8").lower()
+            assert "jane" not in text and "doe" not in text and "yesterday" not in text, name
+            assert "hunter2" not in text, name
+        assert json.loads(bundle.read("ticket.json"))["summary"] == support_bundle.FREEFORM
+        assert "code=7" in bundle.read("logs/control-service.log").decode()
+
+
+@pytest.mark.parametrize("raw", ["pwd=hunter2hunter2", "pass: hunter2hunter2", "PASSPHRASE=hunter2hunter2",
+                                 'db_pwd="hunter2hunter2"'])
+def test_pwd_and_pass_style_fields_are_redacted_and_flagged(raw):
+    assert "credential" in support_bundle.sensitive_findings(raw)
+    clean = support_bundle.sanitize_text(raw)
+    assert "hunter2" not in clean and not support_bundle.sensitive_findings(clean)

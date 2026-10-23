@@ -29,7 +29,7 @@ RUN_LOG_TTL_S = int(RETENTION.total_seconds()) + 3600
 
 _log = logging.getLogger("aiflow4.support_bundle")
 
-_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*|key)"
+_SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*|key|pass|pin)"
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?im)(?P<prefix>\b{_SECRET_NAME}\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*)"
     r"(?P<value>\[REDACTED\]|\\?\"(?:\\.|[^\"\\\r\n])*?\\?\"|\\?'(?:\\.|[^'\\\r\n])*?\\?'|[^\r\n]*?)"
@@ -297,7 +297,7 @@ def _run_log_key(ctx, run_id: str) -> str:
 
 def store_run_log(ctx, run_id: str, text: str) -> bool:
     """Keep a sanitized, scanned run log in Redis for the 24 hour window; never in the runs table."""
-    safe, _ = cap_log_bytes(sanitize_text(text))
+    safe = _safe_log(text)
     if sensitive_findings(safe):
         _log.warning("run log for %s dropped: sensitive content remained after sanitization", run_id)
         return False
@@ -314,6 +314,43 @@ def load_run_log(ctx, run_id: str) -> str | None:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+_LOG_PREFIX = re.compile(
+    r"^(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
+    r"(?:\s+(?P<level>DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL))?"
+    r"(?:\s+(?P<logger>[A-Za-z_][\w.]*))?")
+_LOG_PAIR = re.compile(
+    r"(?<![\w.-])(?P<key>[A-Za-z_][\w.]{0,40})=(?P<value>\d{1,9}(?:\.\d{1,6})?|true|false|True|False|None|"
+    r"[A-Z][A-Z0-9_]{1,31}-\d{1,9})(?![\w.@-])")
+FREEFORM = "[REDACTED_FREEFORM]"
+
+
+def structured_log_text(text: str) -> str:
+    """Reduce log text to timestamp, level, logger and key=value pairs with numeric or id values.
+
+    Log messages are free text whose personal names no pattern can reliably find, so the message
+    itself is never exported; only its structured parts are.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if re.fullmatch(r"--- [A-Za-z0-9_.-]+ ---", line):
+            out.append(line)
+            continue
+        head = _LOG_PREFIX.match(line)
+        rest = line[head.end():] if head else line
+        parts = [part for part in (head.group("stamp"), head.group("level"), head.group("logger")) if part] if head else []
+        pairs = [f"{m.group('key')}={m.group('value')}" for m in _LOG_PAIR.finditer(rest)
+                 if not re.fullmatch(_SECRET_NAME, m.group("key"), re.I)]
+        out.append(" ".join(parts + [FREEFORM] + pairs))
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def _safe_log(text: str) -> str:
+    capped, _ = cap_log_bytes(text)
+    return cap_log_bytes(sanitize_text(structured_log_text(capped)))[0]
 
 
 def _safe_json(value: Any) -> str:
@@ -365,7 +402,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
 
     log_text = _persistent_control_logs(ctx.settings.support_log_dir, now) or log_buffer.text()
     log_text = log_text or "No control service log records were captured in the last 24 hours.\n"
-    safe_log, _ = cap_log_bytes(sanitize_text(log_text))
+    safe_log = _safe_log(log_text)
     files["logs/control-service.log"] = safe_log.encode("utf-8")
 
     if ticket_key:
@@ -373,6 +410,8 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
         if not ticket:
             raise KeyError(ticket_key)
         ticket_data = dict(ticket)
+        # Ticket summaries are free text like incident prose; no pattern screens them reliably.
+        ticket_data["summary"] = FREEFORM
         ticket_data["ticket_key"] = ticket_data.pop("key")
         files["ticket.json"] = _safe_json(ticket_data).encode("utf-8")
         rows = ctx.db.all("SELECT id,step,started_at FROM runs WHERE ticket_key=%s"
@@ -381,7 +420,7 @@ def _file_payloads(ctx, ticket_key: str | None, log_buffer: SupportLogBuffer) ->
             run_log = load_run_log(ctx, row["id"])
             if run_log is None:
                 continue
-            safe_log, _ = cap_log_bytes(sanitize_text(run_log))
+            safe_log = _safe_log(run_log)
             files[f"logs/ticket-runs/{row['id']}-{row['step']}.log"] = safe_log.encode("utf-8")
     return files
 

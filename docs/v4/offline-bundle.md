@@ -48,6 +48,12 @@ file on the target host, then transfer the bundle and token through the site's a
 installer has no calls to public package, image or release services; its only network requests are to the
 configured control API to inspect and redeem that token.
 
+Before it redeems the one-use token, the installer calls `POST /v1/nodes/join-tokens/inspect` to confirm the
+target release and project stacks. Unsupported stacks are rejected at this point, leaving the token valid for
+an online installation. It then redeems the token with `POST /v1/nodes/join`; the response lists all assigned
+`accounts` separately from `worker_accounts`, which contains only active accounts expected to have worker units.
+The installer waits for those worker units, so paused accounts do not make an offline install time out.
+
 ```sh
 (cd /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64 && sha256sum --check SHA256SUMS)
 sudo /media/aiflow4-offline-v4.1.0-ubuntu-24.04-amd64/installer/aiflow4-offline \
@@ -111,7 +117,7 @@ refuses a project with any other stack, before redeeming the token, so the token
 
 ## Install success means a healthy node
 
-After the systemd units are active, `install` polls the node-authenticated `GET /v1/nodes/<name>/health`. It
+After the systemd units are active, `install` polls the node-authenticated `GET /v1/nodes/{name}/health`. It
 returns success only when the node is `online`, its last heartbeat is at most 60 seconds old and
 `preflight_ok` is true (no required tool missing or off its `versions.lock` pin, and every test service a project
 declares — PostgreSQL, Redis — reported healthy; the bundle carries their images in `image/services.tar` and the

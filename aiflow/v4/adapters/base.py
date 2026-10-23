@@ -142,6 +142,10 @@ def quota_from_event(event: dict, provider: str) -> dict:
         for key in ("quota_tokens", "limit_tokens", "total_tokens", "window_duration_minutes", "windowDurationMins"):
             if raw.get(key) is not None:
                 item[key] = raw[key]
+        if raw.get("limit") is not None and "limit_tokens" not in item:
+            item["limit_tokens"] = raw["limit"]
+        if raw.get("total") is not None and "total_tokens" not in item:
+            item["total_tokens"] = raw["total"]
         duration = raw.get("window_duration_mins")
         if duration is not None:
             item["window_duration_minutes"] = duration

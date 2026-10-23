@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aiflow.v4.control import version_release
+from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Account, Project
 from aiflow.v4.worker import version_release as release_worker
@@ -178,6 +179,34 @@ def test_quota_risk_keeps_release_available_when_same_provider_peer_lacks_projec
 
     assert [item["version_id"] for item in candidates["versions"]] == ["101"]
     assert claim.status_code == 200, claim.text
+
+
+def test_stopped_machine_gets_no_version_release_candidates_or_claim(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-24")
+    joined = join_node(client, "cc")
+    headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
+    heartbeat = client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 8}, headers=headers)
+    assert heartbeat.status_code == 200
+
+    secret = "test-console-session-secret-at-least-32-bytes"
+    ctx.settings.console_session_secret = secret
+    client.cookies.set(COOKIE_NAME, issue_session("owner@example.test", "owner", 4_000_000_000, secret))
+    stopped = client.put("/v1/nodes/cc/work-acceptance?accepting_work=false", json={"confirm": True})
+    assert stopped.status_code == 200 and stopped.json()["accepting_work"] is False
+
+    candidates = client.get("/v1/version-releases/candidates?account=claude-01", headers=headers).json()
+    claim = claim_release(client, headers)
+
+    assert candidates["versions"] == []
+    assert candidates["reason"] == "machine is not accepting new work"
+    assert claim.status_code == 409
+    assert "not accepting new work" in claim.text
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE step='version_release'")["n"] == 0
+    assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
+    assert getattr(ctx.github, "merges", []) == []
+    assert getattr(ctx.github, "tags", {}) == {}
+    assert getattr(ctx.github, "releases", {}) == {}
 
 
 def test_release_claim_is_fenced_and_stale_completion_cannot_publish(client, ctx):

@@ -86,11 +86,13 @@ def _seal_config(kind: str, config: dict) -> dict:
 
 
 def _reveal_config(kind: str, config: dict | None) -> dict:
-    """The channel configuration with its credentials decrypted; legacy plaintext values pass through."""
+    """The channel configuration with its credentials decrypted; refuse any legacy plaintext value."""
     revealed = dict(config or {})
     for field in SECRET_FIELDS.get(kind, ()):
         value = str(revealed.get(field) or "")
         if value:
+            if not secretbox.is_encrypted(value):
+                raise secretbox.SecretBoxError("a notification credential is still stored as plaintext")
             revealed[field] = secretbox.decrypt(value, context=f"notification:{field}")
     return revealed
 
@@ -98,14 +100,26 @@ def _reveal_config(kind: str, config: dict | None) -> dict:
 def migrate_plaintext_credentials(db) -> int:
     """Encrypt credentials that older releases stored as plain text in `notification_channels.config`.
 
-    Runs at control startup; does nothing until an external key is configured (new writes fail closed meanwhile)."""
-    if secretbox.load_key() is None:
-        return 0
+    Runs at control startup. Any stored credential requires a valid external key; startup fails if it is missing or
+    cannot decrypt existing ciphertext. All migrations happen in one transaction before the control API is served."""
+    key = secretbox.load_key()
     changed = 0
     with db.transaction() as c:
         for row in c.execute("SELECT id, kind, config FROM notification_channels").fetchall():
-            config = row["config"] or {}
-            sealed = _seal_config(row["kind"], config)
+            config = dict(row["config"] or {})
+            sealed = dict(config)
+            for field in SECRET_FIELDS.get(row["kind"], ()):
+                value = str(sealed.get(field) or "")
+                if not value:
+                    continue
+                if secretbox.is_encrypted(value):
+                    # Fail during startup for a missing/wrong key or damaged ciphertext, before delivery is attempted.
+                    secretbox.decrypt(value, key, f"notification:{field}")
+                else:
+                    if key is None:
+                        raise secretbox.SecretBoxError(
+                            "notification credentials exist but no external secret encryption key is configured")
+                    sealed[field] = secretbox.encrypt(value, key, f"notification:{field}")
             if sealed != config:
                 c.execute("UPDATE notification_channels SET config=%s WHERE id=%s", (J(sealed), row["id"]))
                 changed += 1

@@ -422,6 +422,11 @@ SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
+    # JAIF-231's security screen guide lives in the v4 feature docs, which are the allowed documentation scope for
+    # that ticket. Keep its console Help page available without adding a file under docs/guide/screens/.
+    security_page = ROOT / "docs" / "v4" / "security.md"
+    if guide.resolve() == GUIDE.resolve() and security_page.is_file():
+        pages[SCREEN_PAGE.format(view="security")] = security_page.read_text(encoding="utf-8")
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages

@@ -153,25 +153,16 @@ jobs:
               "dist/aiflow4-$VERSION.tar.gz" "dist/aiflow4-$VERSION.tar.gz.sigstore.json"
           fi
 
-      - name: Build and push control-api image to GHCR
+      - name: Build control-api image locally
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           IMAGE="ghcr.io/jooservices/ai-flow/control-api:$VERSION"
-          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker build \
             --build-arg "AIFLOW4_VERSION=$VERSION" \
             --build-arg "AIFLOW4_REVISION=$GITHUB_SHA" \
             -f deploy/v4/control/Dockerfile -t "$IMAGE" .
-          docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-
-      - name: Sign control-api image with GitHub OIDC
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          cosign sign --yes "$IMAGE"
 
       - name: Security scan and release security report
         env:
@@ -179,7 +170,7 @@ jobs:
           SECURITY_SEVERITY_THRESHOLD: ${{ vars.SECURITY_SEVERITY_THRESHOLD || 'HIGH' }}
         run: |
           scan=0
-          bash deploy/v4/ci/security-scan.sh dist/security-report "$IMAGE" || scan=1
+          bash deploy/v4/ci/security-scan.sh dist/security-report "$IMAGE" || scan=$?
           python3 -m aiflow.v4.core.security_report report --version "$VERSION" --revision "$GITHUB_SHA" \
             --threshold "$SECURITY_SEVERITY_THRESHOLD" \
             --check "Dependencies (uv.lock)=dist/security-report/dependencies.json" \
@@ -187,9 +178,34 @@ jobs:
             --check "Container image=dist/security-report/image.json" \
             --note "v4 unit and integration tests=passed" \
             --note "Release install, upgrade and rollback smoke test=passed" \
-            --note "Tarball and image signed (Sigstore)=passed" > dist/SECURITY-REPORT.md
+            --note "Release tarball signed (Sigstore)=passed" > dist/SECURITY-REPORT.md
           cat dist/SECURITY-REPORT.md >> "$GITHUB_STEP_SUMMARY"
           exit "$scan"
+
+      - name: Publish control-api image to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+
+      - name: Sign control-api image with GitHub OIDC
+        run: cosign sign --yes "$IMAGE"
+
+      - name: Finalize release security report
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SECURITY_SEVERITY_THRESHOLD: ${{ vars.SECURITY_SEVERITY_THRESHOLD || 'HIGH' }}
+        run: |
+          python3 -m aiflow.v4.core.security_report report --version "$VERSION" --revision "$GITHUB_SHA" \
+            --threshold "$SECURITY_SEVERITY_THRESHOLD" \
+            --check "Dependencies (uv.lock)=dist/security-report/dependencies.json" \
+            --check "Repository (secrets, misconfiguration)=dist/security-report/repository.json" \
+            --check "Container image=dist/security-report/image.json" \
+            --note "v4 unit and integration tests=passed" \
+            --note "Release install, upgrade and rollback smoke test=passed" \
+            --note "Tarball and control-api image signed (Sigstore)=passed" > dist/SECURITY-REPORT.md
+          cat dist/SECURITY-REPORT.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub Release and upload assets
         env:

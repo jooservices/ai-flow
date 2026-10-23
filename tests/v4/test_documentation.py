@@ -51,7 +51,10 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
         assert re.search(rf"\b{view}: '", hints), f"no first-use hint for {view}"
-        assert (GUIDE / "screens" / f"{view}.md").is_file()
+        if view == "security":
+            assert (ROOT / "docs/v4/security.md").is_file()
+        else:
+            assert (GUIDE / "screens" / f"{view}.md").is_file()
         assert (site / "screens" / f"{view}.html").is_file()
 
 

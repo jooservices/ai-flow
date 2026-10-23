@@ -17,9 +17,12 @@ def test_release_publication_waits_for_systemd_install_smoke():
     assert release["needs"] == "v4-tests"
     names = [step.get("name", "") for step in release["steps"]]
     smoke = names.index("Install release on Ubuntu systemd control and two nodes")
-    image = names.index("Build and push control-api image to GHCR")
+    build = names.index("Build control-api image locally")
+    scan = names.index("Security scan and release security report")
+    publish_image = names.index("Publish control-api image to GHCR")
+    sign_image = names.index("Sign control-api image with GitHub OIDC")
     publish = names.index("Create GitHub Release and upload assets")
-    assert smoke < image < publish
+    assert smoke < build < scan < publish_image < sign_image < publish
     assert "install-smoke.sh" in release["steps"][smoke]["run"]
     validate = next(step for step in release["steps"] if step.get("name") == "Validate tag and master ancestry")
     assert "gh release list" in validate["run"]

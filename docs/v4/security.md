@@ -1,14 +1,25 @@
 # Security hardening (JAIF-231)
 
+**Assumes:** you are signed in to the installed v4 release. Settings and the user list need the Super Administrator role;
+everyone can manage their own two-factor sign-in.
+
 AI Flow holds code access and AI credentials. This page lists what protects them, where to set it, and how it is tested
 (`tests/v4/test_security.py`, `tests/v4/test_security_report.py`, `tests/v4/test_console_escaping.py`).
-The coordinated disclosure policy is published in [`.github/SECURITY.md`](../../.github/SECURITY.md).
+The coordinated disclosure policy is published in [`.github/SECURITY.md`](https://github.com/jooservices/ai-flow/blob/master/.github/SECURITY.md).
 
 ## Where people manage it: the Security screen
 
 Console > **Security** (`/security`). Everybody who is signed in sees their own two-factor panel. People with the
 `security.manage` permission (Super Administrator) also see session settings, signed-in sessions and people; the audit log
 needs `security.audit` (also Super Administrator). All of it is also available as API under `/v1/security/*`.
+
+### Security screen quick guide
+
+- Set up two-factor sign-in with an authenticator app and receive single-use recovery codes. Store the codes safely;
+  they are shown only when issued.
+- Set how long a session lasts.
+- See active sessions and sign one out. A forced sign-out ends that session and its next request is rejected.
+- Read the audit log of changes to settings, people, roles and credentials. The audit log is read-only in the console.
 
 ## AC1 Two-factor sign-in, recovery codes, sessions
 
@@ -35,13 +46,15 @@ key is configured. The key is **not** in the database:
 
 - `AIFLOW4_SECRET_KEY` (urlsafe base64 of 32 random bytes) or `AIFLOW4_SECRET_KEY_FILE` (a file, mode 0600, same format).
   Generate with `python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`.
-- The Jira credential and OAuth app secret files, the GitHub App private key, and the
-  authenticator secrets in `console_users`. Recovery codes are keyed hashes. Console passwords were already salted scrypt
-  hashes. If `AIFLOW4_SECRET_KEY` is absent, authenticator secrets use a key derived from the console session secret (also
-  outside the database). On first access with a key configured, existing plaintext Jira and GitHub secret files are
-  upgraded in place; legacy plaintext authenticator secrets and notification channel credentials (email password, bot
-  token, webhook URLs and tokens in `notification_channels.config`) are migrated when the control API starts. Keep the key with
-  the other secrets and back it up separately: without it encrypted secrets cannot be read.
+- The Jira credential and OAuth app secret files, the GitHub App private key, and the authenticator secrets in
+  `console_users`. Recovery codes are keyed hashes. Console passwords were already salted scrypt hashes. If
+  `AIFLOW4_SECRET_KEY` is absent, authenticator secrets use a key derived from the console session secret (also outside the
+  database). On first access with a key configured, existing plaintext Jira and GitHub secret files are upgraded in place;
+  legacy plaintext authenticator secrets are migrated at startup. Notification channel credentials (email password, bot
+  token, webhook URLs and tokens in `notification_channels.config`) require a valid external key: startup migrates legacy
+  values transactionally and fails closed if the key is missing, invalid or cannot decrypt stored ciphertext. Delivery also
+  refuses any plaintext notification credential. Keep the key with the other secrets and back it up separately: without
+  it encrypted secrets cannot be read.
 
 ## AC3 Rate limits and sign-in guessing protection
 
@@ -86,7 +99,7 @@ throw-away CI test machine that needs PID 1 as root and is never deployed.
 Every release runs the same scan on the release image and publishes `SECURITY-REPORT.md` with the release: the blocking
 level, each check with counts per severity and PASS or FAIL, the test and install checks, and the disclosure policy link
 (`aiflow/v4/core/security_report.py`). A failing scan stops the release before it is published. The coordinated disclosure
-policy is [`.github/SECURITY.md`](../../.github/SECURITY.md): report privately through GitHub, acknowledgement in 3
+policy is [`.github/SECURITY.md`](https://github.com/jooservices/ai-flow/blob/master/.github/SECURITY.md): report privately through GitHub, acknowledgement in 3
 working days, fixes in 30 or 90 days by severity.
 
 ## AC7 Audit log

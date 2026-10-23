@@ -356,6 +356,29 @@ def test_notification_credentials_are_encrypted_and_legacy_ones_are_migrated(ctx
     assert "new-BOT" not in json.dumps(ctx.db.one("SELECT config FROM notification_channels WHERE kind='telegram'")["config"])
 
 
+@pytest.mark.parametrize("key_value", [None, "not-a-valid-key"])
+def test_existing_plaintext_notification_credentials_fail_startup_without_a_valid_key(
+        ctx, admin, monkeypatch, key_value):
+    from aiflow.v4.control import notify
+    from aiflow.v4.control.db import J
+
+    ctx.db.run("INSERT INTO notification_channels (name, kind, config) VALUES ('Legacy hook','webhook',%s)",
+               (J({"url": "https://hooks.example.test/legacy", "auth_token": "legacy-token"}),))
+    if key_value is None:
+        monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)
+        monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+    else:
+        monkeypatch.setenv("AIFLOW4_SECRET_KEY", key_value)
+        monkeypatch.delenv("AIFLOW4_SECRET_KEY_FILE", raising=False)
+
+    with pytest.raises(secretbox.SecretBoxError):
+        make_client(ctx)
+    with pytest.raises(secretbox.SecretBoxError, match="plaintext"):
+        notify._reveal_config("webhook", {"auth_token": "legacy-token"})
+    stored = ctx.db.one("SELECT config FROM notification_channels WHERE name='Legacy hook'")["config"]
+    assert stored["auth_token"] == "legacy-token"  # the service refused startup instead of serving this value
+
+
 def test_notification_credentials_are_not_written_without_an_external_key(ctx, monkeypatch):
     from aiflow.v4.control import notify
     monkeypatch.delenv("AIFLOW4_SECRET_KEY", raising=False)

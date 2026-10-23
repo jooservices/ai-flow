@@ -56,10 +56,8 @@ class CodeBody(BaseModel):
 def install_security(app: FastAPI, ctx) -> None:
     settings = ctx.settings
     mfa.migrate_plaintext_secrets(ctx.db, settings.console_session_secret)
-    try:
-        notify.migrate_plaintext_credentials(ctx.db)
-    except secretbox.SecretBoxError:
-        log.exception("notification credentials could not be encrypted at startup")
+    # The API must not serve while a notification credential remains plaintext or cannot be decrypted.
+    notify.migrate_plaintext_credentials(ctx.db)
     secret = lambda: settings.console_session_secret  # noqa: E731 - read late: tests and the CLI set it after startup
 
     def session(request: Request, allow_pending: bool = False) -> ConsoleUser | None:

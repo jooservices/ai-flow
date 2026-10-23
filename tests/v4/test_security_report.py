@@ -63,6 +63,11 @@ def test_release_workflow_generates_and_uploads_the_security_report():
     release = (ROOT / ".github/workflows/release-v4.yml").read_text()
     assert "security_report report" in release and "SECURITY-REPORT.md" in release
     assert release.index("security_report report") < release.index("gh release upload")
+    build = release.index("docker build")
+    scan = release.index("security-scan.sh dist/security-report")
+    push = release.index('docker push "$IMAGE"')
+    sign = release.index('cosign sign --yes "$IMAGE"')
+    assert build < scan < push < sign < release.index("gh release upload")
 
 
 def test_the_disclosure_policy_is_published():

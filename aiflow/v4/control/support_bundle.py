@@ -28,9 +28,9 @@ MAX_INCIDENTS = 100
 
 _SECRET_NAME = r"(?:[A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|session|cookie)[A-Za-z0-9_-]*)"
 _SECRET_ASSIGNMENT = re.compile(
-    rf"(?i)(?P<prefix>\b{_SECRET_NAME}\b\s*\\?[\"']?\s*[:=]\s*)"
-    r"(?P<value>\[REDACTED\]|\\?\"(?:\\.|[^\"\\])*?\\?\"|\\?'(?:\\.|[^'\\])*?\\?'|[^\r\n]*?)"
-    r"(?P<suffix>(?:\\?[\"'{}\[\],]\s*)*)$"
+    rf"(?im)(?P<prefix>\b{_SECRET_NAME}\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*)"
+    r"(?P<value>\[REDACTED\]|\\?\"(?:\\.|[^\"\\\r\n])*?\\?\"|\\?'(?:\\.|[^'\\\r\n])*?\\?'|[^\r\n]*?)"
+    r"(?P<suffix>(?:\\?[\"'{}\[\],][ \t]*)*)(?=\r?\n|\Z)"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _KNOWN_TOKEN = re.compile(
@@ -114,21 +114,29 @@ def sensitive_findings(text: str) -> list[str]:
     """Return names of sensitive-data classes still present after sanitization."""
     findings = []
     if (_PRIVATE_KEY.search(text) or _BEARER.search(text) or _URL_CREDENTIALS.search(text)
-            or any(not _redacted_secret_value(match.group("value")) for match in _SECRET_ASSIGNMENT.finditer(text))):
+            or _unredacted_secret_line(text)):
         findings.append("credential")
     if _KNOWN_TOKEN.search(text) or _JWT.search(text):
         findings.append("token")
     has_ip = any(_is_valid_ip(match.group(0)) for match in _IP.finditer(text))
-    has_name = (any(_redact_name(match) != match.group(0) for match in _NAME.finditer(text))
-                or bool(_PERSON_FIELD.search(text)))
+    has_name = bool(_NAME.search(text) or _PERSON_FIELD.search(text))
     if _EMAIL.search(text) or _PHONE.search(text) or _SSN.search(text) or _ADDRESS.search(text) or has_ip or has_name:
         findings.append("personal_data")
     return findings
 
 
-def _redacted_secret_value(value: str) -> bool:
-    """Recognize only a complete redaction marker, optionally surrounded by quote syntax."""
-    return value == "[REDACTED]" or bool(re.fullmatch(r"\\?[\"']\[REDACTED\]\\?[\"']", value))
+_SCAN_SECRET_LINE = re.compile(rf"(?i)\b{_SECRET_NAME}\b[ \t]*\\?[\"']?[ \t]*[:=][ \t]*(?P<rest>[^\r\n]*)")
+_SCAN_REDACTED = re.compile(r"""(?:\\?["'])?\[REDACTED\](?:\\?["'])?(?:\\?["'{}\[\],]|[ \t])*""")
+
+
+def _unredacted_secret_line(text: str) -> bool:
+    """Line-by-line scan, independent of the sanitizer pattern: a secret name must be followed only by a redaction marker."""
+    for line in text.splitlines():
+        for match in _SCAN_SECRET_LINE.finditer(line):
+            rest = match.group("rest").strip()
+            if rest and not _SCAN_REDACTED.fullmatch(rest):
+                return True
+    return False
 
 
 def _is_valid_ip(value: str) -> bool:

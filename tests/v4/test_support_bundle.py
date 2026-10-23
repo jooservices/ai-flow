@@ -199,6 +199,30 @@ def test_support_sanitizer_keeps_ordinary_log_text():
     assert not support_bundle.sensitive_findings(raw)
 
 
+def test_secrets_in_the_middle_of_multiline_text_are_redacted_and_scanned():
+    cases = [
+        ("2026-10-23 12:00:00 INFO x password=hunter2\n2026-10-23 12:00:01 INFO y", "hunter2"),
+        ("token=abc123 b\nc", "abc123"),
+        ('API_KEY="abc"\nnext line', "abc"),
+        ("start\r\nsession=zz9 plural\r\nend\r\n", "zz9"),
+        ('{\n  "api_key": "k-77",\n  "state": "ok"\n}\n', "k-77"),
+    ]
+    for raw, secret in cases:
+        assert "credential" in support_bundle.sensitive_findings(raw)
+        clean = support_bundle.sanitize_text(raw)
+        assert secret not in clean
+        assert "[REDACTED]" in clean
+        assert not support_bundle.sensitive_findings(clean)
+    clean = support_bundle.sanitize_text("a password=hunter2\nnext line stays")
+    assert clean.endswith("\nnext line stays")
+
+
+def test_scan_gate_rejects_unredacted_secret_in_multiline_incident_detail(ctx):
+    detail = "line one\npassword=hunter2\nline three"
+    assert "credential" in support_bundle.sensitive_findings(detail)
+    assert "hunter2" not in support_bundle.sanitize_text(detail)
+
+
 def test_standard_deployment_routes_support_screen_to_control_api():
     compose = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
     rule = next(line for line in compose.read_text(encoding="utf-8").splitlines()

@@ -87,6 +87,23 @@ def _redact_ip(match: re.Match[str]) -> str:
 
 _IP = re.compile(r"(?<![A-Fa-f0-9])(?:\d{1,3}\.){3}\d{1,3}(?![A-Fa-f0-9])|(?<![A-Fa-f0-9:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])")
 _SAFE_MACHINE_LABEL = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*\Z")
+# A label made of lowercase words can be a person ("jane-doe"), so only words known to be technical
+# survive. Words containing a digit ("wsl-1", "node2") are also trusted.
+_TRUSTED_LABEL_WORDS = frozenset({
+    "wsl", "mac", "mini", "macbook", "pro", "air", "studio", "imac", "linux", "ubuntu", "debian", "windows",
+    "win", "macos", "darwin", "docker", "vm", "vps", "server", "worker", "node", "nodes", "control", "master",
+    "agent", "runner", "host", "box", "lab", "dev", "test", "prod", "staging", "ci", "build", "main", "local",
+    "primary", "secondary", "backup", "gpu", "cpu", "arm", "arm64", "x86", "amd64", "claude", "codex", "grok",
+    "gemini", "opencode", "openai", "anthropic", "account", "acct", "machine", "pc", "desktop", "laptop",
+    "cloud", "edge",
+})
+
+
+def _is_trusted_label(value: str) -> bool:
+    if not _SAFE_MACHINE_LABEL.fullmatch(value):
+        return False
+    return all(any(ch.isdigit() for ch in part) or part in _TRUSTED_LABEL_WORDS
+               for part in re.split(r"[-_]", value))
 
 
 def _machine_label_path(file_name: str | None, path: tuple[Any, ...]) -> bool:
@@ -98,7 +115,7 @@ def _machine_label_path(file_name: str | None, path: tuple[Any, ...]) -> bool:
     if file_name == "machine-state.json":
         return len(path) == 2 and isinstance(path[0], int) and path[1] == "name"
     if file_name == "account-state.json":
-        return len(path) == 2 and isinstance(path[0], int) and path[1] == "node"
+        return len(path) == 2 and isinstance(path[0], int) and path[1] in ("node", "id")
     return False
 
 
@@ -111,7 +128,7 @@ def _replace_machine_labels(value: Any, file_name: str | None, *, redact_unsafe:
     if _machine_label_path(file_name, path) and isinstance(value, str):
         if value == "[REDACTED_NAME]":
             return value
-        if _SAFE_MACHINE_LABEL.fullmatch(value):
+        if _is_trusted_label(value):
             marker = f"AIFLOWMACHINELABEL{len(replacements)}END"
             replacements[marker] = value
             return marker

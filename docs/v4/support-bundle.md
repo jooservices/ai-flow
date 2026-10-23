@@ -15,8 +15,10 @@ separators generated internally, while separator-shaped text from a log message 
 still scrubbed for credentials (including `password`, `pwd`, `pass` and `pin` style fields) and scanned again.
 If the scan still finds a secret, token, key, email, phone number, IP address, or name-like personal identifier, the
 bundle is rejected and no download is made available. Structured JSON is scanned for name-like identifiers too;
-only machine labels made from lowercase letters, digits, hyphens and underscores are retained in the known machine
-label fields. Other machine labels, including dotted labels such as `jane.doe`, are replaced with a redaction marker.
+only trusted technical labels are retained in the known machine and account label fields (machine names, node
+references and account ids): every hyphen- or underscore-separated word must contain a digit (`wsl-1`) or be a known
+technical word (`mac-mini`, `claude`). Anything else, such as `jane-doe` or `jane.doe`, is replaced with a redaction
+marker, and a label that would be offered unredacted fails the scan.
 Secret values and free-form account/provider error state are not selected from settings or registry records.
 
 Control API and loop processes write rotated logs to `/srv/aiflow/control/logs` in the standard Compose deployment.

@@ -149,7 +149,8 @@ def test_name_like_node_label_is_redacted_across_structured_bundle_files(ctx):
         account_states = json.loads(contents["account-state.json"])
 
     assert inventory["scan"] == "passed"
-    assert all("jane.doe" not in content for name, content in contents.items() if name.endswith(".json"))
+    assert all("jane.doe" not in content and "jane-doe" not in content
+               for name, content in contents.items() if name.endswith(".json"))
     assert [row["name"] for row in machine_states if row["status"] == "online" and row["slots_total"] == 2
             and row["release"] == "4.1.0"] == ["[REDACTED_NAME]"]
     assert any(row["name"] == "[REDACTED_NAME]" for row in versions["nodes"])
@@ -589,3 +590,17 @@ def test_pwd_and_pass_style_fields_are_redacted_and_flagged(raw):
     assert "credential" in support_bundle.sensitive_findings(raw)
     clean = support_bundle.sanitize_text(raw)
     assert "hunter2" not in clean and not support_bundle.sensitive_findings(clean)
+
+
+def test_lowercase_name_shaped_labels_are_not_offered_in_a_bundle(ctx):
+    ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version)"
+               " VALUES ('john-smith','worker','online',1,0,'4.1.0'), ('mac-mini','worker','online',1,0,'4.1.0')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,tier,roles,status)"
+               " VALUES ('jane-doe','claude','mac-mini','middle',%s,'idle'),"
+               " ('claude-01','claude','mac-mini','middle',%s,'idle')", (["dev"], ["dev"]))
+    assert support_bundle.file_findings("account-state.json", '[{"id":"jane-doe"}]') == ["personal_data"]
+    archive, _ = support_bundle.build_support_bundle(ctx, log_buffer=support_bundle.SupportLogBuffer())
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        everything = " ".join(bundle.read(n).decode() for n in bundle.namelist())
+    assert "jane-doe" not in everything and "john-smith" not in everything
+    assert "mac-mini" in everything and "claude-01" in everything

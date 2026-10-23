@@ -315,6 +315,35 @@ def test_projects_screen_shows_and_changes_the_connection_of_each_repository(cli
     assert client.delete(f"/v1/integrations/github/connections/{conn}").status_code == 409  # still assigned
 
 
+def test_projects_editor_recovers_a_stale_assignment_with_the_only_reachable_connection(
+        client, ctx, control_repo, secrets_dir):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+    connection = add_token(client).json()["id"]
+    ctx.jira.search_data = []
+    config_path = control_repo / "projects/TESTWP.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["repo"] = "person/tool"
+    config["repositories"] = [{"repo": "person/tool", "base": "develop", "checks": []}]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    api.github_connections(ctx).assign("person/tool", "default")  # the previous App no longer reaches it
+
+    loaded = client.get("/v1/projects/TESTWP/repositories")
+    assert loaded.status_code == 200, loaded.text
+    repo = loaded.json()["repositories"][0]
+    assert repo["assigned_connection"] == "default" and repo["connection_stale"] is True
+    assert repo["connection"] == connection and repo["connections"] == [connection]
+    catalog_repo = next(item for item in loaded.json()["github_repos"] if item["full_name"] == "person/tool")
+    assert catalog_repo["assigned_connection"] == "default" and catalog_repo["connection"] == ""
+
+    saved = client.put("/v1/projects/TESTWP/repositories", json={"repositories": [{
+        "repo": repo["repo"], "base": repo["base"], "checks": repo["checks"], "stack": repo["stack"],
+        "connection": repo["connection"],  # exactly the connection shown in the editor
+    }], "epic_repositories": {}})
+    assert saved.status_code == 200, saved.text
+    assert api.github_connections(ctx).assignments()["person/tool"] == connection
+
+
 def test_commands_use_assigned_token_connection_through_repository_transfer_relay_and_audit_writes(
         client, ctx, control_repo, secrets_dir, monkeypatch):
     prepare_project_control(ctx, control_repo)

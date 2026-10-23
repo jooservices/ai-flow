@@ -974,6 +974,38 @@ def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     assert "Save repository settings" in rendered and "data-epic-repository" in rendered
 
 
+def test_projects_editor_submits_the_displayed_connection_for_a_stale_assignment():
+    repo = {"repo": "person/tool", "base": "develop", "checks": [], "stack": "",
+            "connection": "personal", "assigned_connection": "default", "connection_stale": True,
+            "connections": ["personal"]}
+    editor = {"key": "TESTWP", "busy": False, "saving": False, "error": "", "data": {
+        "default_repo": "person/tool", "project_defaults": {"base": "develop", "checks": [], "stack": ""},
+        "repositories": [repo], "epic_repositories": {}, "epics": [], "github_repos": [], "stacks": [],
+        "connections": [{"id": "default", "label": "App", "account": "jooservices", "kind": "app"},
+                        {"id": "personal", "label": "Personal", "account": "person", "kind": "token"}],
+    }}
+    rendered = render_projects([], {}, repository_editor=editor)
+    assert "Previously assigned to <span class=\"mono\">default</span>" in rendered
+    assert '<option value="personal" selected>Personal · person · access token</option>' in rendered
+
+    driver = f"""
+render = function () {{}};
+toast = function () {{}};
+loadProjectList = function () {{}};
+poll = function () {{}};
+var sent = null;
+fetch = function (url, options) {{
+  sent = JSON.parse(options.body);
+  return Promise.resolve({{ok: true, json: function () {{ return Promise.resolve({{saved: true, commit: 'commit-1'}}); }}}});
+}};
+S.projectAdmin.repositoryEditor = {json.dumps(editor)};
+saveProjectRepositories();
+setTimeout(function () {{ console.log(JSON.stringify(sent)); }}, 0);
+"""
+    submitted = json.loads(run_script(driver))
+    assert submitted["repositories"][0]["connection"] == "personal"
+
+
 def test_ticket_cards_business_change_requests_and_drawer_show_selected_repository():
     node_js = shutil.which("node")
     if not node_js:

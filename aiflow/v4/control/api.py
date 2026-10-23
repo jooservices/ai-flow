@@ -2424,8 +2424,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if connections and len(failures) == len(connections):
             raise failures[0]
         for key, item in repos.items():
-            item["connection"] = assigned.get(key) if assigned.get(key) in item["connections"] else (
-                "" if key in assigned else item["connections"][0])
+            assigned_connection = assigned.get(key, "")
+            item["assigned_connection"] = assigned_connection
+            item["connection"] = assigned_connection if assigned_connection in item["connections"] else (
+                "" if assigned_connection else item["connections"][0])
         return sorted(repos.values(), key=lambda row: str(row["full_name"]).lower())
 
     def connection_summaries() -> list[dict[str, str]]:
@@ -2583,9 +2585,20 @@ def create_app(ctx: Ctx) -> FastAPI:
             log.warning("project repositories could not be loaded (%s)", type(exc).__name__)
             raise HTTPException(502, "could not load Jira epics and GitHub repositories") from exc
         by_name = {str(item["full_name"]).lower(): item for item in available}
-        repositories = [{**row, "connection": (by_name.get(row["repo"].lower()) or {}).get("connection", ""),
-                         "connections": (by_name.get(row["repo"].lower()) or {}).get("connections", [])}
-                        for row in repository_settings_payload(project)]
+        assignments = github_connections(ctx).assignments()
+        repositories = []
+        for row in repository_settings_payload(project):
+            catalog_row = by_name.get(row["repo"].lower()) or {}
+            reachable = catalog_row.get("connections", [])
+            assigned_connection = assignments.get(row["repo"].lower(), catalog_row.get("assigned_connection", ""))
+            stale_assignment = bool(assigned_connection and assigned_connection not in reachable)
+            selected_connection = catalog_row.get("connection", "")
+            if stale_assignment:
+                selected_connection = reachable[0] if reachable else ""
+            repositories.append({**row, "connection": selected_connection,
+                                 "assigned_connection": assigned_connection,
+                                 "connection_stale": stale_assignment,
+                                 "connections": reachable})
         return {"project": key, "default_repo": project.repo, "connections": connection_summaries(),
                 "project_defaults": {"base": project.base, "checks": project.checks, "stack": project.stack},
                 "repositories": repositories,

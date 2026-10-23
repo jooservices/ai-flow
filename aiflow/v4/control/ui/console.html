@@ -886,7 +886,8 @@ function saveProjectRepositories() {
   var ed = S.projectAdmin.repositoryEditor; if (!ed || !ed.data || ed.saving) return;
   ed.saving = true; ed.error = ''; renderProjects();
   var body = { repositories: ed.data.repositories.map(function (r) { return { repo: r.repo, base: r.base || '',
-    checks: r.checks || [], stack: r.stack || '', connection: r.connection_picked ? (r.connection || '') : '' }; }), epic_repositories: ed.data.epic_repositories || {} };
+    checks: r.checks || [], stack: r.stack || '',
+    connection: (r.connection_picked || r.connection_stale) ? (r.connection || '') : '' }; }), epic_repositories: ed.data.epic_repositories || {} };
   fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/repositories', { method: 'PUT',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function (r) { return projectResponseError(r); })
@@ -3506,6 +3507,7 @@ function renderProjects() {
       configured.forEach(function (r) {
         h += '<section class="project-checks"><strong class="mono">' + esc(r.repo) + (r.repo === data.default_repo ? ' · default' : '') + '</strong>';
         var reach = r.connections || [], conns = data.connections || [];
+        if (r.connection_stale) h += '<div class="bad">Previously assigned to <span class="mono">' + esc(r.assigned_connection) + '</span>, which can no longer reach this repository. The available connection is selected below.</div>';
         h += '<div class="project-form"><label>GitHub connection<select data-repository-config="connection" data-repo="' + esc(r.repo) + '">';
         if (!reach.length) h += '<option value="">No connection can reach this repository</option>';
         conns.filter(function (c) { return reach.indexOf(c.id) >= 0; }).forEach(function (c) {

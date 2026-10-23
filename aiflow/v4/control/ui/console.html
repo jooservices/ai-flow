@@ -662,6 +662,7 @@ var S = {
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
     loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '' },
   autonomy: { data: null, error: '', busy: false, saving: false },
+  esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null,
@@ -813,6 +814,102 @@ function saveMasterBudget() {
     .then(function () { S.autonomy.saving = false; loadMasterAutonomy(true); });
 }
 
+function escCall(method, url, body) {
+  S.esc.saving = true; S.esc.error = ''; renderDashboard();
+  var options = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (body) options.body = JSON.stringify(body);
+  fetch(url, options).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).catch(function (err) { S.esc.error = String(err.message || err); })
+    .then(function () { S.esc.saving = false; loadEscalations(true); });
+}
+function loadEscalations(force) {
+  if (!consoleReader() || S.esc.busy || (S.esc.data && !force)) return;
+  S.esc.busy = true;
+  fetch('/v1/escalations', { cache: 'no-store' }).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  }).then(function (d) { S.esc.data = d; })
+    .catch(function (err) { S.esc.error = String(err.message || err); })
+    .then(function () { S.esc.busy = false; if (S.view === 'cc') renderDashboard(); });
+}
+function answerDecision(id, choice) { escCall('POST', '/v1/decisions/' + encodeURIComponent(id) + '/answer', { choice: choice || 'recommended' }); }
+function retireDecision(id) { escCall('POST', '/v1/decisions/' + encodeURIComponent(id) + '/retire'); }
+function addDecision() {
+  var title = $('[data-esc-title]'), text = $('[data-esc-decision]'), words = $('[data-esc-keywords]');
+  if (!title || !text || title.value.trim().length < 3 || text.value.trim().length < 3) {
+    S.esc.error = 'Enter a title and the decision.'; renderDashboard(); return;
+  }
+  var keywords = (words ? words.value : '').split(',').map(function (w) { return w.trim(); }).filter(Boolean);
+  escCall('POST', '/v1/decisions', { title: title.value.trim(), decision: text.value.trim(), keywords: keywords });
+}
+function escalationsPanel() {
+  if (!consoleReader()) return '';
+  if (!S.esc.data && !S.esc.busy) loadEscalations(false);
+  var data = S.esc.data, h = '<section class="panel" id="p-escalations"><div class="panel-h"><h2>Escalations and owner decisions</h2><span class="hint">Only a new business decision or an irreversible or production action reaches a person</span></div>';
+  if (S.esc.error) h += '<div class="stakeholder-error">' + esc(S.esc.error) + '</div>';
+  if (!data) return h + '<div class="muted">' + (S.esc.busy ? 'Loading escalations…' : 'Escalations unavailable.') + '</div></section>';
+  var m = data.metrics, reg = data.register, labels = m.labels || {}, person = m.person_classes || [];
+  var now = m.this_week || {};
+  h += '<div class="grid-2"><div class="review-fact"><div class="label">This week</div><div class="value">' + esc(now.total || 0) + ' escalations · ' + (now.share_without_person_pct == null ? 'no data' : esc(now.share_without_person_pct) + '% resolved without a person') + '</div><div class="muted">Target: a falling line' + (m.falling ? ' · falling since last week' : '') + '</div></div>';
+  h += '<div class="review-fact"><div class="label">Top three causes · the fix for each</div>';
+  if (!(m.top_causes || []).length) h += '<div class="muted">No escalations recorded yet.</div>';
+  (m.top_causes || []).forEach(function (c) { h += '<div class="value">' + esc(c.label) + ' · ' + esc(c.count) + '</div><div class="muted">' + esc(c.fix) + '</div>'; });
+  h += '</div></div>';
+  h += '<div class="tablebox"><table><thead><tr><th>Week</th>';
+  (m.classes || []).forEach(function (c) { h += '<th>' + esc(labels[c] || c) + (person.indexOf(c) >= 0 ? ' (person)' : '') + '</th>'; });
+  h += '<th>Total</th><th>Without a person</th></tr></thead><tbody>';
+  (m.weeks || []).forEach(function (w) {
+    h += '<tr><td class="mono">' + esc(w.week_start) + '</td>';
+    (m.classes || []).forEach(function (c) { h += '<td>' + esc((w.by_class || {})[c] || 0) + '</td>'; });
+    h += '<td>' + esc(w.total) + '</td><td>' + (w.share_without_person_pct == null ? '—' : esc(w.share_without_person_pct) + '%') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  var projectRows = [];
+  (m.weeks || []).forEach(function (w) {
+    Object.keys(w.by_project || {}).sort().forEach(function (p) {
+      projectRows.push({ week: w.week_start, project: p, counts: w.by_project[p] || {} });
+    });
+  });
+  if (projectRows.length) {
+    h += '<div class="tablebox"><table><thead><tr><th>Week</th><th>Project</th>';
+    (m.classes || []).forEach(function (c) { h += '<th>' + esc(labels[c] || c) + '</th>'; });
+    h += '</tr></thead><tbody>';
+    projectRows.forEach(function (row) {
+      h += '<tr><td class="mono">' + esc(row.week) + '</td><td class="mono">' + esc(row.project) + '</td>';
+      (m.classes || []).forEach(function (c) { h += '<td>' + esc(row.counts[c] || 0) + '</td>'; });
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  var writer = consoleCan('console.write');
+  h += '<h3>Waiting for the owner</h3>';
+  if (!(reg.asked || []).length) h += '<div class="muted">No open question. A new kind of decision is asked once, with options and a recommended default.</div>';
+  (reg.asked || []).forEach(function (d) {
+    h += '<div class="review-fact"><div class="label mono">D' + esc(d.id) + ' · ' + esc((d.waiting_tickets || []).join(', ')) + '</div><div class="value">' + esc(d.title) + '</div><div class="muted">' + esc(d.question) + '</div>';
+    if (writer) {
+      (d.options || []).forEach(function (o) { h += '<button class="btn sm' + (o === d.recommended ? ' primary' : '') + '" data-act="esc-answer" data-id="' + esc(d.id) + '" data-choice="' + esc(o) + '"' + (S.esc.saving ? ' disabled' : '') + '>' + esc(o) + (o === d.recommended ? ' (recommended)' : '') + '</button> '; });
+    } else h += '<div class="muted">Options: ' + esc((d.options || []).join(' · ')) + ' · Recommended: ' + esc(d.recommended) + '</div>';
+    h += '</div>';
+  });
+  if ((reg.resuming || []).length) {
+    h += '<h3>Applying saved owner decisions</h3><div class="muted">Jira updates retry automatically; the saved owner choice is retained.</div>';
+    (reg.resuming || []).forEach(function (d) {
+      h += '<div class="review-fact"><div class="label mono">D' + esc(d.id) + ' · ' + esc((d.resuming_tickets || []).join(', ')) + '</div>';
+      h += '<div class="value">' + esc(d.title) + '</div><div class="muted">Saved answer: ' + esc(d.decision) + '</div></div>';
+    });
+  }
+  h += '<h3>Owner decision register</h3><div class="tablebox"><table><thead><tr><th>#</th><th>Decision</th><th>Applied</th><th>By</th><th></th></tr></thead><tbody>';
+  if (!(reg.decisions || []).length) h += '<tr><td colspan="5" class="empty">No decision recorded.</td></tr>';
+  (reg.decisions || []).forEach(function (d) {
+    h += '<tr><td class="mono">D' + esc(d.id) + '</td><td><b>' + esc(d.title) + '</b><div class="small">' + esc(d.decision) + '</div></td><td>' + esc(d.cited_count) + '×</td><td>' + esc(d.decided_by || '') + '</td><td>' + (writer ? '<button class="btn sm" data-act="esc-retire" data-id="' + esc(d.id) + '">Retire</button>' : '') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  if (writer) h += '<div class="review-fact"><div class="label">Record a decision</div><input data-esc-title placeholder="Title" aria-label="Decision title" style="width:30%;min-height:36px"> <input data-esc-decision placeholder="The decision" aria-label="The decision" style="width:40%;min-height:36px"> <input data-esc-keywords placeholder="Keywords that match the question (two or more, comma separated)" aria-label="Keywords" style="width:25%;min-height:36px"> <button class="btn sm primary" data-act="esc-add"' + (S.esc.saving ? ' disabled' : '') + '>Add</button></div>';
+  h += '<h3>Ticket amendments for review</h3><div class="muted">Amendments never block; they are listed here and in the weekly report.</div>';
+  if (!(m.amendments || []).length) h += '<div class="muted">No criterion was amended.</div>';
+  (m.amendments || []).forEach(function (a) { h += '<div class="review-fact"><b class="mono">' + esc(a.ticket_key) + '</b> · ' + esc(a.title) + '<div class="muted">' + esc(a.decision) + '</div></div>'; });
+  return h + '</section>';
+}
 function nodeTone(n) { return { online: 'ok', offline: 'crit', draining: 'warn', joined: 'info' }[n.status] || 'muted'; }
 function relLabel(n) {
   var p = n.version_policy || {};
@@ -1585,6 +1682,7 @@ function renderDashboard() {
   h += toolWaitsPanel(d);
   if (consoleCan('view.machines_ai')) h += masterAutonomyPanel();
   }
+  h += escalationsPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
   applyLayout('cc', root);
@@ -1684,6 +1782,7 @@ function renderCC() {
 
   h += toolWaitsPanel(d);
   h += masterAutonomyPanel();
+  h += escalationsPanel();
 
   h += '<div class="grid-2">';
   h += '<section class="panel" id="p-nodes" aria-labelledby="h-nodes"><div class="panel-h"><h2 id="h-nodes">Nodes</h2><span class="hint">Each account on a node is one worker pulling ready tickets</span><span class="spacer"></span>' + (consoleCan('nodes.manage') ? '<button class="btn sm" data-act="add-node">Add node</button>' : '') + '</div><div class="nodes">';
@@ -4513,6 +4612,9 @@ document.addEventListener('click', function (e) {
     savePrefs(); renderDHead(); var starButton = $('.star-button'); if (starButton) starButton.focus();
   }
   else if (act === 'master-budget-save') saveMasterBudget();
+  else if (act === "esc-answer") answerDecision(el.getAttribute("data-id"), el.getAttribute("data-choice"));
+  else if (act === "esc-retire") retireDecision(el.getAttribute("data-id"));
+  else if (act === "esc-add") addDecision();
   else if (act === 'project-add-open') {
     S.projectAdmin.showForm = true; S.projectAdmin.error = ''; renderProjects(); loadProjectCatalog(true);
   }

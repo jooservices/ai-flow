@@ -34,6 +34,19 @@ def add_run(ctx, ticket, log_text, *, age_hours=0, step="dev"):
     return str(run_id)
 
 
+def test_log_buffer_bounds_record_size_and_total_bytes():
+    logs = support_bundle.SupportLogBuffer(max_bytes=100_000, max_record_bytes=1_000)
+    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "x" * 50_000_000, (), None))
+    assert logs.total_bytes <= 1_100
+    assert len(logs.text().encode()) <= 1_100
+    for index in range(1_000):
+        logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "y" * 900 + str(index), (), None))
+    assert logs.total_bytes <= 100_000
+    assert len(logs.text().encode()) <= 100_000
+    assert logs.total_bytes == sum(size for _, _, size in logs.records)
+    assert str(999) in logs.text()
+
+
 def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ctx):
     ctx.db.run("INSERT INTO nodes (name,role,status,slots_total,slots_used,release_version,tools)"
                " VALUES ('node1','worker','online',4,2,'4.1.0',%s)",
@@ -48,8 +61,8 @@ def test_general_bundle_contains_diagnostics_and_caps_incidents_and_log_files(ct
                "now()-interval '8 days')")
 
     logs = support_bundle.SupportLogBuffer()
-    logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "items=1\n" * (support_bundle.MAX_LOG_BYTES // 7),
-                                (), None))
+    for index in range(support_bundle.MAX_LOG_BYTES // 4000):
+        logs.emit(logging.LogRecord("aiflow4.test", logging.INFO, __file__, 1, "items=1\n" * 500, (), None))
     archive, inventory = support_bundle.build_support_bundle(ctx, log_buffer=logs)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         assert {"versions.json", "settings.json", "machine-state.json", "account-state.json", "incidents.json",

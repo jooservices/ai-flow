@@ -34,7 +34,7 @@ SITE_ENV = "AIFLOW4_DOCS_SITE"
 API_PAGE = "reference/api.md"
 SAFE_LINK_SCHEMES = frozenset({"http", "https", "mailto"})
 
-# Console screens (`id="view-<name>"` in console.html) and the page that explains each one.
+# Console screens (`id="view-<name>"` in console.html) touched by each named renderer or screen helper.
 SCREEN_PAGE = "screens/{view}.md"
 
 # Layout controls are a cross-screen feature documented as one topic under docs/v4. Those pages may satisfy the
@@ -92,6 +92,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderUsers": ("users",),
     "renderLicensing": ("licensing",),
     "renderLicenseNotice": ("licensing",),
+    "escCall": ("cc", "machines"),
+    "loadEscalations": ("cc", "machines"),
+    "answerDecision": ("cc", "machines"),
+    "retireDecision": ("cc", "machines"),
+    "addDecision": ("cc", "machines"),
+    "escalationsPanel": ("cc", "machines"),
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
     "roleHealthPanel": ("machines",),
@@ -156,6 +162,13 @@ SCREEN_VIEW_UI_PATTERNS = (
     re.compile(r",\s*'([a-z]+)'\]\s*\.forEach"),
     re.compile(r"\b(?:S\.view|v)\s*===\s*'([a-z]+)'"),
     re.compile(r"\bact\s*===\s*'([a-z]+)-[\w-]+'"),
+)
+
+# Small pieces of shared console code live outside named renderers. Keep their screen impact explicit so the UI
+# documentation check can map escalation state and delegated click actions to the panel's screens.
+SCREEN_VIEW_PATTERNS = (
+    (re.compile(r"\besc:\s*\{\s*data:"), ("cc", "machines")),
+    (re.compile(r"\bact\s*===\s*[\"']esc-(?:answer|retire|add)[\"']"), ("cc", "machines")),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -883,13 +896,28 @@ def documentation_gaps(changed: list[str], read=_read_doc, routes: dict[str, set
     gaps = []
     if any(f.startswith(SCREEN_PATHS) for f in files):
         pages = {f for f in docs if re.fullmatch(r"docs/guide/screens/[a-z]+\.md", f)}
+        guide_views = {Path(f).stem for f in pages}
+        topic_views: set[str] = set()
+        for doc in docs:
+            if not doc.startswith("docs/v4/"):
+                continue
+            for line in read(doc).splitlines():
+                marker = re.match(r"\s*\*\*Console screens:\*\*\s*(.*?)\s*$", line, re.I)
+                if marker:
+                    topic_views.update(re.findall(r"`([a-z]+)`", marker.group(1), re.I))
         covered = set().union(*(CROSS_SCREEN_DOCS.get(f, frozenset()) for f in docs))
-        wanted = {f"docs/guide/screens/{v}.md" for v in views or ()}
-        uncovered = {path for path in wanted if path.removeprefix("docs/guide/screens/").removesuffix(".md")
-                     not in covered}
-        if not (uncovered <= pages if wanted else pages or covered):
+        documented_views = guide_views | topic_views | covered
+        if views is not None:
+            missing_views = set(views) - documented_views
+            complete = not missing_views
+        else:
+            missing_views = set()
+            complete = bool(pages or topic_views or covered)
+        if not complete:
             gaps.append("a console screen changed (aiflow/v4/control/ui) without a change in "
-                        + (", ".join(sorted(uncovered - pages)) if wanted else "its page under docs/guide/screens"))
+                        + (", ".join(f"docs/guide/screens/{view}.md" for view in sorted(missing_views))
+                           if views is not None else
+                           "its page under docs/guide/screens or a docs/v4 topic page naming its screen"))
     api_files = [f for f in files if f.endswith(".py") and f.startswith("aiflow/v4/control/")]
     if api_files:
         routes = api_routes_by_module() if routes is None else routes
@@ -1043,6 +1071,9 @@ def changed_views(base: str) -> set[str]:
             shared_ui_change = any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS)
             if shared_ui_change and not specific_views:
                 line_views |= all_views
+            for pattern, mapped in SCREEN_VIEW_PATTERNS:
+                if pattern.search(changed_line):
+                    line_views |= set(mapped)
             if "rh-form" in changed_line:
                 line_views.add("machines")
             for pattern, view in SCREEN_LINE_VIEWS:

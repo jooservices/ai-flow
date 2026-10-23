@@ -26,6 +26,7 @@ from ..core.toolchains import STACK_TOOLS, tools_for_stacks
 MAX_LOG_BYTES = 5 * 1024 * 1024
 RETENTION = timedelta(hours=24)
 MAX_INCIDENTS = 100
+MAX_RECORD_BYTES = 16 * 1024
 RUN_LOG_TTL_S = int(RETENTION.total_seconds()) + 3600
 _RELEASE_VERSION = re.compile(
     r"v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:(?:a|b|rc)\d+)?\Z"
@@ -323,9 +324,13 @@ def cap_log_bytes(text: str, max_bytes: int = MAX_LOG_BYTES) -> tuple[str, bool]
 class SupportLogBuffer(logging.Handler):
     """Thread-safe in-process ring of control service logs, limited to the last 24 hours."""
 
-    def __init__(self, max_records: int = 20_000) -> None:
+    def __init__(self, max_records: int = 20_000, max_bytes: int = MAX_LOG_BYTES,
+                 max_record_bytes: int = MAX_RECORD_BYTES) -> None:
         super().__init__(logging.INFO)
-        self.records: deque[tuple[float, str]] = deque(maxlen=max_records)
+        self.records: deque[tuple[float, str, int]] = deque(maxlen=max_records)
+        self.max_bytes = max_bytes
+        self.max_record_bytes = max_record_bytes
+        self.total_bytes = 0
         self.lock = threading.RLock()
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s", "%Y-%m-%d %H:%M:%S")
         formatter.converter = time.gmtime
@@ -334,21 +339,33 @@ class SupportLogBuffer(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             line = self.format(record)
+            if len(line) > self.max_record_bytes:
+                # Cut before encoding so a huge message is never copied whole.
+                line = line[:self.max_record_bytes]
+            line, cut = cap_log_bytes(line, self.max_record_bytes)
+            if cut:
+                line += " [truncated]"
+            size = len(line.encode("utf-8", errors="replace")) + 1
             with self.lock:
                 self._prune(time.time())
-                self.records.append((record.created, line))
+                if len(self.records) == self.records.maxlen and self.records:
+                    self.total_bytes -= self.records[0][2]
+                self.records.append((record.created, line, size))
+                self.total_bytes += size
+                while self.records and self.total_bytes > self.max_bytes:
+                    self.total_bytes -= self.records.popleft()[2]
         except Exception:
             self.handleError(record)
 
     def _prune(self, now: float) -> None:
         cutoff = now - RETENTION.total_seconds()
         while self.records and self.records[0][0] < cutoff:
-            self.records.popleft()
+            self.total_bytes -= self.records.popleft()[2]
 
     def text(self) -> str:
         with self.lock:
             self._prune(time.time())
-            lines = [line for _, line in self.records]
+            lines = [line for _, line, _ in self.records]
         return "\n".join(lines) + ("\n" if lines else "")
 
 

@@ -146,6 +146,21 @@ console.log(projectsView.innerHTML);
     return result.stdout
 
 
+ESCALATIONS = {"metrics": {"classes": ["missing_tool_or_environment", "new_business_decision"],
+                           "labels": {"missing_tool_or_environment": "Missing tool or environment",
+                                      "new_business_decision": "New business decision"},
+                           "person_classes": ["new_business_decision"], "falling": True,
+                           "this_week": {"total": 3, "share_without_person_pct": 66.7},
+                           "weeks": [{"week_start": "2026-10-19", "total": 3, "share_without_person_pct": 66.7,
+                                      "by_class": {"missing_tool_or_environment": 2, "new_business_decision": 1},
+                                      "by_project": {"JAIF": {"missing_tool_or_environment": 2, "new_business_decision": 1}}}],
+                           "top_causes": [{"label": "Missing tool or environment", "count": 2, "fix": "Provision the tool."}],
+                           "amendments": [{"ticket_key": "JOOWP-301", "title": "AC3 of JOOWP-301 amended", "decision": "AC3 narrowed"}]},
+               "register": {"decisions": [{"id": 1, "title": "No Docker for AI runs", "decision": "No.", "cited_count": 2, "decided_by": "owner"}],
+                            "asked": [{"id": 9, "title": "Default plan", "question": "q", "waiting_tickets": ["JAIF-1"],
+                                       "options": ["Free", "Team"], "recommended": "Free"}], "amendments": []}}
+
+
 def render_dashboard(state: dict, analytics: list[dict] | None = None,
                      weekly_report: dict | None = None) -> str:
     node_js = shutil.which("node")
@@ -164,6 +179,7 @@ S.analytics = {json.dumps(analytics or [])};
 S.project = {json.dumps(project_key)};
 S.consoleUser = {json.dumps(console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
+S.esc.data = {json.dumps(ESCALATIONS)};
 renderDashboard();
 console.log(dashboard.innerHTML);
 """
@@ -1302,6 +1318,13 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
                  "Needs owner", "Human review", "ALPHA-2", "provider-codex", "Master autonomy", "Daily budget",
                  "Weekly quota and usage", "Largest context run"):
         assert text in rendered
+    # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
+    for text in ("Escalations and owner decisions", "66.7% resolved without a person", "falling since last week",
+                 "Top three causes", "Provision the tool.", "New business decision (person)", "JAIF",
+                 "No Docker for AI runs", "Owner decision register", "Default plan", "Free (recommended)",
+                 'data-act="esc-answer" data-id="9" data-choice="Free"', 'data-act="esc-retire" data-id="1"',
+                 "AC3 of JOOWP-301 amended", "Amendments never block", 'data-act="esc-add"'):
+        assert text in rendered
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
@@ -1407,6 +1430,27 @@ renderDBody(); console.log(body.innerHTML);
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-3"' in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="ALPHA-4"' not in result.stdout
     assert 'class="card" data-act="open-ticket" data-key="BETA-4"' not in result.stdout
+
+
+def test_escalation_project_breakdown_keeps_each_week_separate():
+    rendered = run_script(r"""
+S.consoleUser = {permissions: ['console.read', 'console.write']};
+S.esc.data = {metrics: {classes: ['missing_tool_or_environment', 'policy_message'],
+  labels: {missing_tool_or_environment: 'Missing tool', policy_message: 'Policy message'},
+  person_classes: [], this_week: {total: 4, share_without_person_pct: 100}, falling: true, top_causes: [],
+  weeks: [
+    {week_start: '2026-10-12', total: 3, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 2, policy_message: 0}, BETA: {missing_tool_or_environment: 1, policy_message: 0}}},
+    {week_start: '2026-10-19', total: 4, by_class: {}, by_project: {
+      ALPHA: {missing_tool_or_environment: 1, policy_message: 2}, BETA: {missing_tool_or_environment: 0, policy_message: 1}}}
+  ]}, register: {asked: [], resuming: [], decisions: [], amendments: []}};
+console.log(escalationsPanel());
+""")
+    assert '<th>Week</th><th>Project</th>' in rendered
+    assert '<td class="mono">2026-10-12</td><td class="mono">ALPHA</td><td>2</td><td>0</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">ALPHA</td><td>1</td><td>2</td>' in rendered
+    assert '<td class="mono">2026-10-19</td><td class="mono">BETA</td><td>0</td><td>1</td>' in rendered
+    assert 'Project (all weeks shown)' not in rendered
 
 
 def test_warm_themes_keyboard_controls_phone_layout_and_old_blue_theme_removal():

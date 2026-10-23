@@ -14,6 +14,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
+- [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
@@ -51,6 +52,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
 - [Issue types and labels](../../docs/v4/issue-types.md): intake selects a per-type ticket template and recognizes AI Flow labels
 - [Project toolchains on every node](../../docs/v4/project-toolchains.md): node agents install and preflight stack-pinned host tools, then pause only projects with unhealthy toolchains
+- [Safe containers for project checks](../../docs/v4/container-runtime.md): projects opt in to a rootless, hard-quota Docker-compatible runtime with pinned worktree paths, per-node image caching and missing-tool gating
 - [Jira project versions](../../docs/v4/jira-versions.md): mirror Jira versions and Fix versions, with per-version ticket progress
 - [Release readiness](../../docs/v4/release-readiness.md): a Jira version is ready only when every ticket now in it is Done, verified, out of rework and free of release-qa Bugs, with reasons in Command Center and Business
 - [Release progress screen](../../docs/v4/release-progress.md): per Jira version Done of total, open and late-added tickets, reasons not ready, release steps with run ID and node, tag and GitHub Release link in Command Center and Business
@@ -91,6 +93,11 @@ terminal `end` events; see [Grok adapter notes](../../docs/v4/grok-adapter.md).
 
 Supporting tools reported by the node agent are `git`, `gh`, `node`, `uv` and `docker`; install the ones the
 projects and release commands on the node need.
+
+Projects that enable container checks also require the separately reported `safe-container-runtime`: rootless
+Podman plus `podman-compose` on a filesystem with project quotas. This runtime is configured by the node
+operator; a regular host Docker daemon does not satisfy the requirement. See [safe containers for project
+checks](../../docs/v4/container-runtime.md) for limits and the node preflight behavior.
 
 ### Project stacks and missing tools
 

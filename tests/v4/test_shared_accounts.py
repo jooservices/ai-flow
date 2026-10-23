@@ -442,6 +442,36 @@ def test_auth_failure_reported_by_a_run_does_not_cool_down_healthy_machine(clien
     assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
 
 
+def test_failed_sign_in_can_be_retried_with_a_fresh_request(client, ctx):
+    import threading
+    from unittest.mock import patch
+
+    from aiflow.v4.node import agent
+    sign_in(client, ctx)
+    node1 = join(client, "node1")
+    client.post("/v1/shared-accounts", json={"id": "shared-01", "provider": "claude"})
+    client.post("/v1/shared-accounts/shared-01/machines", json={"node": "node1"})
+    first = beat(client, "node1", node1)["signin"][0]
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()  # the provider login exited without success: its thread is dead
+    active = {"shared-01": (first["request_id"], threading.Event(), dead)}
+    started = []
+    with patch.object(agent, "run_provider_sign_in", lambda *a, **k: started.append(a[2]["request_id"])):
+        agent.sync_provider_sign_ins(None, "node1", [first], active)
+        assert started == []  # same attempt: not restarted by itself
+        retried = client.post("/v1/shared-accounts/shared-01/machines/node1/signin")
+        assert retried.status_code == 200
+        second = beat(client, "node1", node1)["signin"][0]
+        assert second["request_id"] != first["request_id"]
+        agent.sync_provider_sign_ins(None, "node1", [second], active)
+        active["shared-01"][2].join(timeout=2)
+    assert started == [second["request_id"]]
+    # a machine that is signed in has nothing to retry
+    client.post("/v1/accounts/shared-01/probe", json={"ok": True}, headers=node1)
+    assert client.post("/v1/shared-accounts/shared-01/machines/node1/signin").status_code == 409
+
+
 def test_quota_exhaustion_stays_an_account_wide_cooldown(client, ctx):
     cc, _node1 = two_machines(client, ctx, limit=2)
     client.post("/v1/accounts/shared-01/probe", json={"ok": False, "error_kind": "quota", "summary": "q"}, headers=cc)

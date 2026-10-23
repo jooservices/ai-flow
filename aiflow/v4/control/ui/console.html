@@ -1226,6 +1226,9 @@ function removeAccountMachine(account, node, last) {
   if (!window.confirm(text)) return;
   sharedAccountRequest('DELETE', '/v1/shared-accounts/' + encodeURIComponent(account) + '/machines/' + encodeURIComponent(node) + (last ? '?confirm=true' : ''), null, 'Account removed from ' + node);
 }
+function retryAccountSignin(account, node) {
+  sharedAccountRequest('POST', '/v1/shared-accounts/' + encodeURIComponent(account) + '/machines/' + encodeURIComponent(node) + '/signin', null, 'New sign-in started on ' + node);
+}
 function removeAccountEverywhere(account, count) {
   if (!window.confirm('Remove ' + account + ' from all ' + count + ' machines? Running sessions finish; no new ones start. Credentials stay on the machines until you sign out there.')) return;
   sharedAccountRequest('DELETE', '/v1/shared-accounts/' + encodeURIComponent(account) + '?confirm=true', null, 'Account removed');
@@ -1243,7 +1246,8 @@ function accountMachinesSection(a) {
       if (manage && m.removable) b += '<button class="btn sm" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(m.node) + '" data-last="' + (ms.length === 1 ? '1' : '') + '">Remove</button>';
       b += '</td></tr>';
       if (m.signin) b += '<tr><td colspan="5" class="small">Sign in on <b>' + esc(m.node) + '</b>: open <a href="' + esc(m.signin.link) + '" target="_blank" rel="noopener noreferrer">' + esc(m.signin.link) + '</a> and enter the code <code>' + esc(m.signin.code) + '</code>.</td></tr>';
-      else if (!m.signed_in) b += '<tr><td colspan="5" class="small">Waiting for ' + esc(m.node) + ' to show its sign-in link and code.</td></tr>';
+      else if (!m.signed_in) b += '<tr><td colspan="5" class="small">Waiting for ' + esc(m.node) + ' to show its sign-in link and code.'
+        + (manage ? ' <button class="btn sm" data-act="acc-retry-signin" data-account="' + esc(a.id) + '" data-node="' + esc(m.node) + '">Get a new link</button>' : '') + '</td></tr>';
     });
     b += '</tbody></table></div>';
   }
@@ -4317,7 +4321,8 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'close') closeAll();
   else if (act === 'acc-create') createSharedAccount();
-  else if (act === 'acc-enable') enableAccountMachine(el.getAttribute('data-account'));
+  else if (act === 'acc-retry-signin') retryAccountSignin(el.getAttribute('data-account'), el.getAttribute('data-node'));
+  else if (act === 'acc-enable')enableAccountMachine(el.getAttribute('data-account'));
   else if (act === 'acc-limit') saveAccountLimit(el.getAttribute('data-account'));
   else if (act === 'acc-remove-machine') removeAccountMachine(el.getAttribute('data-account'), el.getAttribute('data-node'), !!el.getAttribute('data-last'));
   else if (act === 'acc-remove-all') removeAccountEverywhere(el.getAttribute('data-account'), el.getAttribute('data-count'));

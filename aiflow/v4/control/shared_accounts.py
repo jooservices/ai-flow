@@ -224,7 +224,7 @@ def mark_pending(db, acc: Account, node: str) -> bool:
     Returns True when another machine of the account is still signed in."""
     db.run("INSERT INTO account_machines (account_id, node, status) VALUES (%s,%s,'pending')"
            " ON CONFLICT (account_id, node) DO UPDATE SET status='pending', signed_in_at=NULL,"
-           " signin_link='', signin_code='', signin_expires_at=NULL", (acc.id, node))
+           " signin_attempt=account_machines.signin_attempt + 1, signin_link='', signin_code='', signin_expires_at=NULL", (acc.id, node))
     pending = pending_nodes(db, acc.id)
     return any(m not in pending for m in acc.machines)
 
@@ -383,6 +383,20 @@ def install(app: FastAPI, ctx, console_user, audit, node_auth) -> None:
         sync()
         audit("account", "enable_machine", acc.id, "", None, user.subject, True, body.node)
         ctx.events.emit("account.machine_enabled", account=acc.id, node=body.node, outcome="pending")
+        return view(account_or_404(account_id), include_signin=True)
+
+    @app.post("/v1/shared-accounts/{account_id}/machines/{node}/signin")
+    def retry_signin(account_id: str, node: str, request: Request) -> dict:
+        """Start a fresh sign-in attempt on one machine: a new request id makes its agent run the provider login
+        again (a failed or expired attempt otherwise leaves the machine waiting without a link)."""
+        user = console_user(request, {"nodes.manage"}, target="account", action="retry_signin", node=account_id)
+        acc = account_or_404(account_id)
+        changed = ctx.db.run(
+            "UPDATE account_machines SET signin_attempt=signin_attempt + 1, signin_link='', signin_code='',"
+            " signin_expires_at=NULL WHERE account_id=%s AND node=%s AND status='pending'", (acc.id, node))
+        if not changed:
+            raise HTTPException(409, f"{acc.id} has no pending sign-in on {node}")
+        audit("account", "retry_signin", acc.id, "", None, user.subject, True, node)
         return view(account_or_404(account_id), include_signin=True)
 
     @app.delete("/v1/shared-accounts/{account_id}/machines/{node}")

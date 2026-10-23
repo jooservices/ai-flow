@@ -2870,12 +2870,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         # Shared accounts are signed in independently on each machine. The node agent starts their provider CLI
         # login and reports only the provider's short-lived link and code; credentials stay in its account home.
         shared_signins = []
-        for row in ctx.db.all("SELECT account_id FROM account_machines WHERE node=%s AND status='pending'"
-                              " ORDER BY account_id", (node,)):
+        for row in ctx.db.all("SELECT account_id, signin_attempt FROM account_machines WHERE node=%s"
+                              " AND status='pending' ORDER BY account_id", (node,)):
             account = repo.account(row["account_id"])
             if account:
                 shared_signins.append({"account": account.id, "provider": account.provider,
-                                       "request_id": f"shared:{node}:{account.id}", "shared_account": True})
+                                       "request_id": f"shared:{node}:{account.id}:{row['signin_attempt']}",
+                                       "shared_account": True})
         # Legacy agents may execute an installer from an archive before verifying that archive. Keep their
         # automatic release target empty until a trusted signed-release verifier has been bootstrapped manually.
         # Signed-release agents follow the fleet rollout (canary, waves, rollback: docs/v4/fleet-upgrade.md).

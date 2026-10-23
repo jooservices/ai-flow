@@ -9,8 +9,12 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
+- [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
+- [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
+- [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, Chromium and its libraries go into a shared folder, and a headless launch as the AI user proves it
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
@@ -33,7 +37,9 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Fleet installation](../../docs/v4/fleet-install.md): cloud-init samples and Ansible roles prepare hosts and enroll a node fleet
 - [Repeated flow failures](../../docs/v4/flow-bugs.md): the fenced master cycle reports recurring TESTFLOW errors as prioritized Bug tickets
 - [Knowledge and Skills screen](../../docs/v4/knowledge.md): manage versioned study cases, knowledge, skills, agents, guides and owner-approved policies in aiflow-control
+- [Persistent learning and run context](../../docs/v4/knowledge-learning.md): automatically capture run, ticket and incident learning, then hand scoped semantic context to each run
 - [Project management](../../docs/v4/projects.md): add, preflight, pause, resume and remove Jira projects from the console
+- [Machines and AI management](../../docs/v4/machines-and-ai.md): enroll machines and add, pause, resume, sign in, edit and remove AI accounts on screen
 - [Repositories by Jira epic](../../docs/v4/epic-repositories.md): map Jira epics to connected GitHub App repositories with per-repository defaults in Projects
 - [Connect GitHub from the console](../../docs/v4/github-connect.md): create or import a GitHub App, choose its installation and refresh accessible repositories
 - [Open pull request title sync](../../docs/v4/github-pr-title.md): update an existing open PR title when a development run requests a changed Jira summary
@@ -55,6 +61,9 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
+- [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
+- [Account quota awareness](../../docs/v4/quota-awareness.md): record account usage, forecast burn and reset risk, route around accounts likely to run out, and show estimates and seven-day history
+- [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 
 ## Tools on a node
 

@@ -478,7 +478,16 @@ def test_probe_sets_account_state_and_quota_alerts(client, ctx):
     assert client.get("/v1/accounts/codex-01/spec", headers=cc).status_code == 403
     q = {"windows": {"five_hour": {"utilization": 0.2, "resets_at": 1792561800},
                      "seven_day": {"utilization": 0.93, "resets_at": 1792638000}}}
-    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True, "quota": q, "summary": "OK"}, headers=cc).status_code == 200
+    assert client.post("/v1/accounts/claude-01/probe", json={"ok": True, "quota": q, "summary": "OK",
+                                                            "model": "opus", "tokens_in": 123,
+                                                            "tokens_out": 45, "cost_usd": .02,
+                                                            "duration_ms": 900}, headers=cc).status_code == 200
+    sample = ctx.db.one("SELECT provider,model,tokens_in,tokens_out,cost_usd,duration_ms,quota"
+                        " FROM account_quota_samples WHERE account_id='claude-01'")
+    assert (sample["provider"], sample["model"], sample["tokens_in"], sample["tokens_out"],
+            float(sample["cost_usd"]), sample["duration_ms"]) == ("claude", "opus", 123, 45, .02, 900)
+    account = next(a for a in client.get("/v1/state").json()["accounts"] if a["id"] == "claude-01")
+    assert account["quota_awareness"]["windows"][0]["source"] == "reported"
     assert ctx.db.one("SELECT status FROM accounts WHERE id='claude-01'")["status"] == "idle"
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='quota_high' AND closed_at IS NULL")
@@ -494,6 +503,111 @@ def test_probe_sets_account_state_and_quota_alerts(client, ctx):
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='account_quota' AND subject='opencode-01'"
                       " AND closed_at IS NULL")["n"] == 0
+
+
+def test_predicted_runout_alerts_owner_and_routes_account_work_to_its_provider_peers(
+        client, ctx, monkeypatch):
+    from aiflow.v4.control import incidents
+    from aiflow.v4.control.loops import watchdog
+    from aiflow.v4.core.controlrepo import Account
+
+    notifications = []
+    monkeypatch.setattr(incidents.notify, "send", lambda *args, **kwargs: notifications.append(args) or ["email"])
+    headers = join(client, "node1")
+    client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=headers)
+    ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node1", tier="middle", roles=["dev"]))
+    client.app.state.sync_accounts()
+    add_ticket(ctx.db, "TESTWP-QUOTA-1")
+    now = datetime.now(timezone.utc)
+    quota = {"windows": {"five_hour": {"utilization": .8,
+                                         "resets_at": (now + timedelta(hours=3)).isoformat()}}}
+    ctx.db.run("UPDATE accounts SET quota=%s WHERE id='codex-01'", (J(quota),))
+    for index in range(20):
+        started = now - timedelta(hours=2) + timedelta(minutes=index * 5)
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,model,node,fence,status,outcome,"
+                    "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+                    " VALUES (%s,%s,'TESTWP','dev','codex-01','codex','gpt-6-luna','node1',%s,'finished','done',"
+                    "%s,%s,1000,0,.01)",
+                    (str(uuid.uuid4()), f"TESTWP-HIST-{index}", index + 1,
+                     started, started + timedelta(minutes=1)))
+
+    watchdog(ctx)
+    assert ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id='codex-01'")["quota_at_risk"] is True
+    assert client.get("/v1/work/candidates?account=codex-01", headers=headers).json()["tickets"] == []
+    assert [ticket["key"] for ticket in client.get("/v1/work/candidates?account=codex-02",
+                                                   headers=headers).json()["tickets"]] == ["TESTWP-QUOTA-1"]
+    incident = ctx.db.one("SELECT severity,title,notified FROM incidents WHERE kind='quota_prediction' AND subject='codex-01'"
+                          " AND closed_at IS NULL")
+    assert incident["severity"] == "warning" and "run out before reset" in incident["title"]
+    assert incident["notified"] is True
+    assert any("codex-01 may run out before reset" in call[1] for call in notifications)
+
+    # A replenished report clears the forecast and makes that account eligible again.
+    quota["windows"]["five_hour"]["utilization"] = .1
+    ctx.db.run("UPDATE accounts SET quota=%s WHERE id='codex-01'", (J(quota),))
+    watchdog(ctx)
+    assert ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id='codex-01'")["quota_at_risk"] is False
+    assert [ticket["key"] for ticket in client.get("/v1/work/candidates?account=codex-01",
+                                                   headers=headers).json()["tickets"]] == ["TESTWP-QUOTA-1"]
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='quota_prediction' AND subject='codex-01'"
+                      " AND closed_at IS NULL")["n"] == 0
+
+
+def test_at_risk_account_falls_back_to_its_own_work_when_no_peer_is_available(client, ctx, monkeypatch):
+    headers = join(client, "cc")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
+    add_ticket(ctx.db, "TESTWP-QUOTA-SOLO")
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+    # Routing reads the watchdog's stored flag and must not rebuild the historical quota assessment per poll.
+    monkeypatch.setattr(control_api.quota_reporting, "account_assessment",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("history queried per poll")))
+
+    tickets = client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"]
+
+    assert [ticket["key"] for ticket in tickets] == ["TESTWP-QUOTA-SOLO"]
+
+
+def test_quota_exhaustion_routes_ticket_to_peer_and_returns_it_after_reset(client, ctx):
+    from aiflow.v4.control.loops import watchdog
+    from aiflow.v4.core.controlrepo import Account
+
+    headers = join(client, "cc")
+    client.post("/v1/nodes/cc/heartbeat", json={"slots_total": 2}, headers=headers)
+    ctx.repo().accounts.append(Account(id="claude-02", provider="claude", node="cc", tier="senior", roles=["dev"]))
+    client.app.state.sync_accounts()
+    add_ticket(ctx.db, "TESTWP-QUOTA-RESET")
+
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-01"},
+                          headers=headers).json()
+    reset_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    result = client.post(f"/v1/runs/{claimed['run_id']}/result", json={
+        "fence": claimed["fence"], "outcome": "quota", "error_kind": "quota", "reset_at": reset_at.isoformat(),
+        "quota": {"windows": {"five_hour": {"utilization": 1.0, "resets_at": reset_at.isoformat()}}},
+    }, headers=headers)
+    assert result.status_code == 200
+    assert client.post(f"/v1/runs/{claimed['run_id']}/release", json={"fence": claimed["fence"]},
+                       headers=headers).json()["released"] is True
+
+    assert client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"] == []
+    peer_tickets = client.get("/v1/work/candidates?account=claude-02", headers=headers).json()["tickets"]
+    assert [ticket["key"] for ticket in peer_tickets] == ["TESTWP-QUOTA-RESET"]
+    peer_claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-QUOTA-RESET", "account": "claude-02"},
+                             headers=headers).json()
+    assert ctx.db.one("SELECT account_id FROM runs WHERE id=%s", (peer_claim["run_id"],))["account_id"] == "claude-02"
+    assert client.post(f"/v1/runs/{peer_claim['run_id']}/result",
+                       json={"fence": peer_claim["fence"], "outcome": "blocked"}, headers=headers).status_code == 200
+    assert client.post(f"/v1/runs/{peer_claim['run_id']}/release", json={"fence": peer_claim["fence"]},
+                       headers=headers).json()["released"] is True
+
+    recovered_quota = {"windows": {"five_hour": {"utilization": 0.0,
+                                                    "resets_at": (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()}}}
+    recovered = client.post("/v1/accounts/claude-01/probe", json={"ok": True, "quota": recovered_quota},
+                            headers=headers)
+    assert recovered.status_code == 200
+    watchdog(ctx)
+
+    returned_tickets = client.get("/v1/work/candidates?account=claude-01", headers=headers).json()["tickets"]
+    assert [ticket["key"] for ticket in returned_tickets] == ["TESTWP-QUOTA-RESET"]
 
 
 def test_grok_recorded_stream_restores_probe_status_and_empty_answer_is_provider_failure(
@@ -1051,7 +1165,7 @@ def test_node_back_online_resolves_and_alerts(client, ctx, monkeypatch):
     from aiflow.v4.control import notify
     from aiflow.v4.control.loops import watchdog
     sent = []
-    monkeypatch.setattr(notify, "send", lambda sev, title, detail="", link="": sent.append((sev, title)) or ["test"])
+    monkeypatch.setattr(notify, "send", lambda sev, title, detail="", link="", **kwargs: sent.append((sev, title)) or ["test"])
     n1 = join(client, "node1")
     client.post("/v1/nodes/node1/heartbeat", json={"slots_total": 2}, headers=n1)
     ctx.db.run("UPDATE nodes SET last_heartbeat = now() - interval '5 minutes' WHERE name='node1'")

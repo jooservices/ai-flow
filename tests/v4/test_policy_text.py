@@ -68,3 +68,10 @@ def test_adf_roundtrip_and_slug():
     assert "AC1: one" in back and "- AC2: two" in back and "Business requirement: X" in back
     assert slug("Thêm trang Portfolio cho theme!") == "them-trang-portfolio-cho-theme"
     assert len(slug("x" * 200)) <= 40
+
+
+def test_compose_up_allows_abort_on_container_exit():
+    wt = "/srv/aiflow/work/TESTWP/TESTWP-1-x"
+    command = "docker compose up --abort-on-container-exit"
+    assert decide(POLICY, "Bash", {"command": command}, wt, containers=True).decision == "allow"
+    assert decide(POLICY, "Bash", {"command": command}, wt).decision == "deny"

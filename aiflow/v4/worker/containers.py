@@ -759,6 +759,29 @@ def _compose_snapshot(data: dict[str, Any], compose_file: Path, project_dir: Pat
     return snapshot
 
 
+def _compose_env_snapshot(env_files: list[Path], project_dir: Path, runtime_dir: Path, read_worktree_file) -> Path:
+    """Write the env file Compose interpolates from: the given files, else the project's default .env, else none."""
+    def read(path: Path) -> str:
+        try:
+            text = read_worktree_file(path) if read_worktree_file else path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ContainerPolicyError("compose environment file could not be read") from exc
+        return text if not text or text.endswith("\n") else text + "\n"
+
+    sources = list(env_files)
+    default = project_dir / ".env"
+    if not sources and os.path.lexists(default):
+        if default.is_symlink():
+            raise ContainerPolicyError("the compose .env file must not be a symbolic link")
+        sources = [default]
+    snapshot = runtime_dir / f"compose-env-{secrets.token_hex(6)}.env"
+    snapshot.write_text("".join(read(path) for path in sources), encoding="utf-8")
+    uid, gid, _ = _engine_identity()
+    os.chown(snapshot, uid, gid)
+    snapshot.chmod(0o600)
+    return snapshot
+
+
 def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
                      project_name: str, *, map_worktree_path=None,
                      read_worktree_file=None) -> tuple[list[str], list[Path], str]:
@@ -776,10 +799,8 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
                 project_args.extend(["-f", str(files[-1])])
             elif arg == "--env-file":
                 env_files.append(_inside_file(value, root, base=cwd))
-                project_args.extend(["--env-file", str(env_files[-1])])
             else:
                 project_dir = _inside_directory(value, root, base=cwd)
-                project_args.extend(["--project-directory", str(project_dir)])
             i += 2
         elif arg.startswith("--file=") or arg.startswith("--env-file=") or arg.startswith("--project-directory="):
             name, value = arg.split("=", 1)
@@ -788,10 +809,8 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
                 project_args.extend(["-f", str(files[-1])])
             elif name == "--env-file":
                 env_files.append(_inside_file(value, root, base=cwd))
-                project_args.extend(["--env-file", str(env_files[-1])])
             else:
                 project_dir = _inside_directory(value, root, base=cwd)
-                project_args.extend(["--project-directory", str(project_dir)])
             i += 1
         elif arg in {"-p", "--project-name"}:
             raise ContainerPolicyError("compose project names are assigned per run")
@@ -904,14 +923,13 @@ def _compose_command(argv: list[str], root: Path, cwd: Path, runtime_dir: Path,
                       for compose_file, data in compose_documents]
     snapshots = dict(zip(files, snapshot_files))
     for index, option in enumerate(project_args[:-1]):
-        value_index = index + 1
         if option == "-f":
-            project_args[value_index] = str(snapshots[Path(project_args[value_index])])
-        elif option in {"--env-file", "--project-directory"} and map_worktree_path:
-            project_args[value_index] = str(map_worktree_path(Path(project_args[value_index])))
-    if not any(option == "--project-directory" for option in project_args):
-        project_args.extend(["--project-directory", str(map_worktree_path(project_dir)
-                                                            if map_worktree_path else project_dir)])
+            project_args[index + 1] = str(snapshots[Path(project_args[index + 1])])
+    # podman-compose has no --project-directory, and it would read an implicit <project>/.env through a path the run
+    # can swap for a symlink. Always hand it an explicit snapshot read through the pinned worktree instead.
+    env_snapshot = _compose_env_snapshot(env_files, project_dir, runtime_dir, read_worktree_file)
+    snapshot_files.append(env_snapshot)
+    project_args.extend(["--env-file", str(env_snapshot)])
     override = runtime_dir / f"compose-{secrets.token_hex(6)}.yaml"
     service_names = list(all_services)
     services_override: dict[str, dict[str, Any]] = {}

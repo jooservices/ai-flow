@@ -941,3 +941,77 @@ def test_real_podman_creates_a_named_volume_rootless(tmp_path):
                                           runtime_dir=runtime_dir, project_name="aiflow-it-volume")
     assert code == 0
     assert "ok" in stdout
+
+
+def _compose_worktree(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (worktree / "compose.yaml").write_text("services:\n  composer:\n    image: composer:2\n")
+    monkeypatch.setattr(containers, "_active_containers", lambda: [])
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
+    return worktree
+
+
+def _flag_value(argv, flag):
+    return argv[argv.index(flag) + 1]
+
+
+def test_compose_never_passes_project_directory_and_always_pins_an_env_snapshot(monkeypatch, tmp_path):
+    worktree = _compose_worktree(monkeypatch, tmp_path)
+    (worktree / ".env").write_text("TAG=1")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    pin = containers._WorktreePin(worktree)
+    try:
+        argv, snapshots, _ = containers._compose_command(
+            ["compose", "up", "-d"], pin.path, pin.path, runtime, "aiflow-run",
+            map_worktree_path=pin.map_path, read_worktree_file=pin.read_text)
+        explicit, _, _ = containers._compose_command(
+            ["compose", "--project-directory", str(worktree), "up"], pin.path, pin.path, runtime, "aiflow-run",
+            map_worktree_path=pin.map_path, read_worktree_file=pin.read_text)
+    finally:
+        pin.close()
+    for command in (argv, explicit):
+        assert "--project-directory" not in command
+    env_snapshot = Path(_flag_value(argv, "--env-file"))
+    assert env_snapshot in snapshots and env_snapshot.parent == runtime
+    assert env_snapshot.read_text() == "TAG=1\n"
+
+
+def test_compose_default_env_symlink_to_another_worktree_is_refused(monkeypatch, tmp_path):
+    worktree = _compose_worktree(monkeypatch, tmp_path)
+    other = tmp_path / "other-run"
+    other.mkdir()
+    (other / ".env").write_text("SECRET=other-run")
+    (worktree / ".env").symlink_to(other / ".env")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    pin = containers._WorktreePin(worktree)
+    try:
+        with pytest.raises(containers.ContainerPolicyError):
+            containers._compose_command(["compose", "up"], pin.path, pin.path, runtime, "aiflow-run",
+                                        map_worktree_path=pin.map_path, read_worktree_file=pin.read_text)
+        # A swap between the existence check and the read is caught by the pinned, no-follow read.
+        (worktree / ".env").unlink()
+        (worktree / ".env").write_text("TAG=1")
+        real_lexists = os.path.lexists
+
+        def swap_then_check(path):
+            found = real_lexists(path)
+            if str(path).endswith(".env") and found and not os.path.islink(path):
+                os.unlink(path)
+                os.symlink(other / ".env", path)
+            return found
+
+        monkeypatch.setattr(containers.os.path, "lexists", swap_then_check)
+        with pytest.raises(containers.ContainerPolicyError):
+            containers._compose_command(["compose", "up"], pin.path, pin.path, runtime, "aiflow-run",
+                                        map_worktree_path=pin.map_path, read_worktree_file=pin.read_text)
+    finally:
+        pin.close()
+
+
+def test_compose_without_env_gets_an_empty_snapshot(monkeypatch, tmp_path):
+    worktree = _compose_worktree(monkeypatch, tmp_path)
+    argv, _, _ = containers._compose_command(["compose", "up"], worktree, worktree, tmp_path, "aiflow-run")
+    assert Path(_flag_value(argv, "--env-file")).read_text() == ""

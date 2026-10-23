@@ -8,6 +8,10 @@ Docker containers** when adding a project. Existing projects can enable the runt
 **Projects → Repositories**; choose **Inherit project setting**, **Require safe runtime**, or **Not required**.
 The setting is saved as `containers: true` in the project or repository entry in `aiflow-control/projects/`.
 
+Compose runs never use `--project-directory` (`podman-compose` does not support it) and never load an implicit
+`.env`: the broker reads the given `--env-file` files, or the project's default `.env`, through the pinned worktree
+descriptor and passes the snapshot as the only `--env-file`. A symbolic-link `.env` is refused.
+
 ## Node requirements
 
 The node must provide rootless Podman, the `podman-compose` provider, `xfs_quota` from xfsprogs, `setfacl` from

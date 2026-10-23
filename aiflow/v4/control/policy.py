@@ -414,7 +414,7 @@ def _container_command_allowed(segment: str, worktree: str) -> bool:
         if not tail and args[i] == "run":
             return False
         if subcommand == "up":
-            safe_flags = {"-d", "--detach", "--build", "--no-build", "--pull", "--remove-orphans",
+            safe_flags = {"-d", "--detach", "--abort-on-container-exit", "--build", "--no-build", "--pull", "--remove-orphans",
                           "--force-recreate", "--no-recreate", "--no-deps", "--wait", "--quiet-pull",
                           "--renew-anon-volumes", "--timestamps"}
             value_flags = {"--timeout", "-t"}

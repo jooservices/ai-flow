@@ -292,6 +292,7 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .project-form textarea{min-height:82px;resize:vertical;font-family:var(--f-mono);font-size:12px}
 .project-form .wide{grid-column:1/-1}
 .project-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.machine-list{display:grid;gap:14px}.machine-card{border:1px solid var(--line);border-radius:12px;background:var(--surface-2);padding:16px}.machine-head,.machine-actions,.account-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.machine-head h3{margin:0}.machine-facts{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0;color:var(--muted);font-size:13px}.machine-facts strong{color:var(--fg)}.machine-accounts{display:grid;gap:8px;margin-top:12px}.managed-account{border-top:1px solid var(--line);padding:12px 0 0;display:grid;gap:8px}.managed-account h4{margin:0}.signin-result{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.machine-form{margin-top:12px}.job-options{display:flex;gap:12px;flex-wrap:wrap}.job-options label{display:flex;gap:6px;align-items:center}.machine-empty{padding:12px;color:var(--muted)}
 .project-checks{display:grid;gap:7px;border:1px solid var(--line-soft);border-radius:10px;padding:12px;background:var(--surface-2)}
 .project-checks ul{margin:0;padding-left:20px}.project-checks .bad{color:var(--crit)}.project-checks .good{color:var(--good)}
 .project-table{overflow:auto}.project-table table{min-width:720px}
@@ -413,6 +414,11 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
 .lead-controls{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.lead-controls label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .lead-controls select{min-width:210px;min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.notify-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.notify-channel{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--surface)}
+.notify-meta{font-size:12px;color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.notify-routing{display:grid;grid-template-columns:minmax(180px,1fr) repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:center}
+.notify-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.notify-form-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.notify-form-grid input,.notify-form-grid select{min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--fg)}
+.notify-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.notify-state{white-space:pre-wrap;font-size:12px;color:var(--muted);margin-top:8px}
 .lead-tablebox{width:100%;overflow:auto;border:1px solid var(--line);border-radius:9px}.lead-table{width:100%;border-collapse:collapse;min-width:920px}.lead-table th,.lead-table td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft)}
 .lead-table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--surface-2);white-space:nowrap}.lead-table ul{margin:0;padding-left:18px}.lead-table li{margin:2px 0}.lead-gap{color:var(--crit);font-weight:600}.lead-ac{white-space:normal;min-width:300px}.lead-tools{display:flex;gap:8px;flex-wrap:wrap}
 .empty{font-size:13px; color:var(--muted); padding:8px 0}
@@ -495,6 +501,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
+      <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -536,6 +543,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
+  <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -615,6 +623,10 @@ var S = {
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
+  notifications: { data: null, error: '', notice: '', busy: false, editId: null,
+    form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
+  machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
+    addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
   view: viewOf(location.pathname),
   project: null, search: '', typeFilter: 'all', aiFilter: 'all', epic: 'all', accFilter: 'all', starredProjects: [],
@@ -635,6 +647,7 @@ var S = {
 };
 function viewOf(path) {
   if (path.indexOf('/licensing') === 0) return 'licensing';
+  if (path.indexOf('/notifications') === 0) return 'notifications';
   if (path.indexOf('/work') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
@@ -670,7 +683,8 @@ var MENU_ITEMS = [
   { view: 'backup', label: 'Backup & Restore', permission: 'backup.read' },
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
   { view: 'projects', label: 'Projects', permission: 'projects.manage' },
-  { view: 'licensing', label: 'Licence', permission: 'licensing.manage' }
+  { view: 'licensing', label: 'Licence', permission: 'licensing.manage' },
+  { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' }
 ];
 // Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
 function viewAllowed(view, role) {
@@ -818,6 +832,7 @@ function pollConsoleSession() {
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'users' && consoleCan('users.manage') && Date.now() - S.users.loadedAt > 30000 && !S.users.busy) loadUsers();
+    if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
   }).catch(function () { S.consoleUser = null; syncMenuVisibility(); render(); })
@@ -1066,7 +1081,7 @@ function copyJoinCommand(name) {
 function pollServices() {
   fetch('/v1/services', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
     S.services = d.services || []; S.svcError = d.error || '';
-    if (S.view === 'machines' && S.data) renderCC();
+    if (S.view === 'machines' && S.data) renderMachines();
   }).catch(function (e) { S.svcError = String(e.message || e); })
     .then(function () { setTimeout(pollServices, SVC_MS); });
 }
@@ -1281,6 +1296,8 @@ function renderDashboard() {
     h += '<tr><td class="mono">' + esc(a.id) + '<div class="small">' + esc(a.node) + '</div></td><td><span class="provider-name provider-' + esc(a.provider) + '">' + esc(PROVIDER[a.provider] || a.provider) + '</span></td><td>' + pill(accTone(a), accLabel(a), a.status === 'working') + '</td><td>' + qwin(a) + '<span class="qnote">Next reported reset: ' + esc(reset) + '</span></td></tr>';
   });
   h += '</tbody></table></div></section></section>';
+  h += toolWaitsPanel(d);
+  h += masterAutonomyPanel();
   root.innerHTML = h;
   if (focusSearch) { var next = $('#dash-project-search'); if (next) { next.focus(); if (next.setSelectionRange && cursor != null) next.setSelectionRange(cursor, cursor); } }
 }
@@ -2354,6 +2371,14 @@ function renderJiraIntegrations() {
   return h;
 }
 function loadIntegrations() { loadGitHubIntegrations(); loadJiraIntegrations(); }
+function loadNotifications() {
+  if (!consoleCan('notifications.manage')) return;
+  var state = S.notifications; state.busy = true; state.error = ''; renderNotifications();
+  fetch('/v1/notifications', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.data = d; state.error = ''; if (!state.preferencesDraft || !state.preferencesDirty) state.preferencesDraft = JSON.parse(JSON.stringify(d.preferences)); })
+    .catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderNotifications(); });
+}
 function renderIntegrations() {
   var root = $('#view-integrations'); if (!root) return;
   root.innerHTML = renderGitHubIntegrations() + renderJiraIntegrations();
@@ -3102,6 +3127,190 @@ function renderFooter() {
   [['#f-o2', links.o2], ['#f-mail', links.mail], ['#f-gatus', links.gatus]].forEach(function (l) { if (l[1]) $(l[0]).setAttribute('href', l[1]); });
 }
 
+function machineRequest(url, options) {
+  return fetch(url, options || {}).then(function (r) {
+    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
+  });
+}
+function openMachineForm() { S.machines.addMachine = !S.machines.addMachine; S.machines.error = ''; renderMachines(); }
+function submitMachineJoin() {
+  var form = $('#machines-join-form'); if (!form || S.machines.join.busy) return;
+  var j = S.machines.join;
+  j.name = $('#machine-name', form).value.trim(); j.role = $('#machine-role', form).value;
+  j.project = $('#machine-project', form).value; j.error = ''; j.busy = true; j.command = '';
+  renderMachines();
+  machineRequest('/v1/nodes/' + encodeURIComponent(j.name) + '/join-command', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: j.name, role: j.role, project: j.project})
+  }).then(function (d) { j.command = d.command; j.expires_at = d.expires_at; j.error = ''; })
+    .catch(function (e) { j.error = String(e.message || e); })
+    .then(function () { j.busy = false; renderMachines(); });
+}
+function copyMachineCommand() {
+  var command = S.machines.join.command; if (!command) return;
+  if (new Date(S.machines.join.expires_at).getTime() <= Date.now()) { toast('Join command expired', 'Create a new command to add this machine.', 'warn'); return; }
+  if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+    window.navigator.clipboard.writeText(command).then(function () { toast('Join command copied', '', 'ok'); })
+      .catch(function () { toast('Select and copy the command', '', 'info'); });
+  } else toast('Select and copy the join command', '', 'info');
+}
+function addMachineAccount(name) {
+  var form = $('#account-add-' + CSS.escape(name)); if (!form) return;
+  var jobs = $$('[data-new-job]:checked', form).map(function (item) { return item.value; });
+  var sessions = Number($('[name="sessions"]', form).value || 0), provider = $('[name="provider"]', form).value;
+  machineRequest('/v1/machines/' + encodeURIComponent(name) + '/accounts', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({provider: provider, sessions: sessions, jobs: jobs})
+  }).then(function (d) { S.machines.signIns[d.account] = d; S.machines.signInRefreshAt[d.account] = Date.now(); S.machines.addAccount = ''; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function startAccountSignIn(id) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in', {method: 'POST'})
+    .then(function (d) { S.machines.signIns[id] = d; S.machines.signInRefreshAt[id] = Date.now(); S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function completeAccountSignIn(id) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in/complete', {method: 'POST'})
+    .then(function () { delete S.machines.signIns[id]; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function loadAccountSignIn(id) {
+  if (S.machines.signInLoading[id] || Date.now() - (S.machines.signInRefreshAt[id] || 0) < 2000) return;
+  S.machines.signInLoading[id] = true;
+  machineRequest('/v1/accounts/' + encodeURIComponent(id) + '/sign-in')
+    .then(function (d) { S.machines.signIns[id] = d; })
+    .catch(function (e) { S.machines.signIns[id] = {account: id, error: String(e.message || e)}; })
+    .then(function () { S.machines.signInRefreshAt[id] = Date.now(); delete S.machines.signInLoading[id]; if (S.view === 'machines') renderMachines(); });
+}
+function saveAccountSettings(id) {
+  var form = $('#account-edit-' + CSS.escape(id)); if (!form) return;
+  var jobs = $$('[data-edit-job]:checked', form).map(function (item) { return item.value; });
+  var sessions = Number($('[name="sessions"]', form).value || 0);
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sessions: sessions, jobs: jobs})})
+    .then(function () { S.machines.accountEditor = null; S.machines.error = ''; poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function setAccountPaused(id, paused) {
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: paused ? 'pause' : 'resume'})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function removeMachineAccount(id) {
+  if (!window.confirm('Remove AI account ' + id + '? Its provider credentials remain on the machine.')) return;
+  machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function toggleMachineWork(name, accepting) {
+  if (!accepting && !window.confirm('Stop ' + name + ' from taking new work? Running sessions can finish.')) return;
+  machineRequest('/v1/nodes/' + encodeURIComponent(name) + '/work-acceptance?accepting_work=' + String(accepting), {
+    method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: !accepting})
+  }).then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function removeMachine(name) {
+  if (!window.confirm('Remove machine ' + name + '? Its node credential will stop working and its AI accounts will be removed from AI Flow.')) return;
+  machineRequest('/v1/nodes/' + encodeURIComponent(name), {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: true})})
+    .then(function () { poll(); renderMachines(); })
+    .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
+}
+function jobChecks(selected, attr) {
+  return ['develop', 'verify', 'intake', 'master'].map(function (job) {
+    return '<label><input type="checkbox" ' + attr + ' value="' + job + '"' + (selected.indexOf(job) >= 0 ? ' checked' : '') + '> ' + job + '</label>';
+  }).join('');
+}
+function renderMachines() {
+  var root = $('#view-machines'); if (!root) return;
+  var state = S.machines, data = D(), nodes = (data.nodes || []).filter(function (n) { return n.has_agent || n.status !== 'joined'; });
+  var h = '<section class="panel"><div class="panel-h"><h2>Machines and AI</h2><span class="hint">Add machines and manage AI accounts, sessions, jobs and quota.</span><span class="spacer"></span>';
+  if (consoleCan('nodes.manage')) h += '<button class="btn primary" data-act="machine-add-toggle">Add a machine</button>';
+  h += '</div>';
+  if (state.error) h += '<div class="stakeholder-error" role="alert">' + esc(state.error) + '</div>';
+  h += '<div class="machine-list">';
+  if (!nodes.length) h += '<div class="machine-empty">No machine has joined yet.</div>';
+  nodes.forEach(function (n) {
+    var machineAccounts = (data.accounts || []).filter(function (a) { return a.node === n.name; });
+    var pendingAccounts = machineAccounts.filter(function (a) { return a.sign_in_pending; });
+    var accounts = machineAccounts.filter(function (a) { return !a.sign_in_pending; });
+    var assignedSessions = machineAccounts.reduce(function (total, a) { return total + Number(a.parallel || 1); }, 0);
+    var availableSessions = Math.max(0, 8 - assignedSessions);
+    var metrics = n.metrics || {}, editorId = state.accountEditor;
+    h += '<article class="machine-card"><div class="machine-head"><h3>' + esc(n.name) + '</h3>' + pill(nodeTone(n), nodeLabel(n)) +
+      (!n.accepting_work ? pill('warn', 'Not taking new work') : '') + '<span class="spacer"></span>';
+    h += '<button class="btn sm" data-act="open-node" data-id="' + esc(n.name) + '">Machine details</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-add-account" data-name="' + esc(n.name) + '">Add AI account</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="machine-work" data-name="' + esc(n.name) + '" data-accept="' + String(!n.accepting_work) + '">' + (n.accepting_work ? 'Stop new work' : 'Resume work') + '</button>';
+    if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="machine-remove" data-name="' + esc(n.name) + '">Remove machine</button>';
+    h += '</div><div class="machine-facts"><span>Memory <strong>' + gib(metrics.mem_used) + ' / ' + gib(metrics.mem_total) + '</strong></span>';
+    h += '<span>Processors <strong>' + esc(metrics.cpus == null ? '—' : metrics.cpus) + '</strong></span>';
+    h += '<span>Sessions busy <strong>' + esc(n.sessions_busy || 0) + ' / ' + esc(n.slots_total || 0) + '</strong></span>';
+    h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
+    h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
+    if (state.addAccount === n.name && consoleCan('nodes.manage')) {
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
+      h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
+      h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
+    }
+    h += '<div class="machine-accounts">';
+    pendingAccounts.forEach(function (a) {
+      var signIn = state.signIns[a.id];
+      if (consoleCan('nodes.manage') && (!signIn || (state.signInRefreshAt[a.id] && Date.now() - state.signInRefreshAt[a.id] >= 2000))) loadAccountSignIn(a.id);
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill('warn', 'Sign-in pending') +
+        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + '</span><span class="spacer"></span>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">Start sign-in again</button>';
+      var signInReady = signIn && signIn.status === 'completed' && (a.status === 'idle' || a.status === 'working');
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm primary" data-act="account-signin-complete" data-id="' + esc(a.id) + '"' + (signInReady ? '' : ' disabled') + '>Finish sign-in</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      h += '</div>';
+      if (signIn && signIn.error) h += '<div class="small">' + esc(signIn.error) + ' · Start sign-in again to retry.</div>';
+      else if (signIn && signIn.status === 'failed') h += '<div class="small">' + esc(signIn.error || 'Provider sign-in failed.') + ' · Start sign-in again to retry.</div>';
+      else if (signIn && signIn.sign_in_url) h += '<div class="signin-result"><a href="' + esc(signIn.sign_in_url) + '" target="_blank" rel="noopener">Open provider authorization</a>' +
+        (signIn.code ? ' · provider code <span class="mono">' + esc(signIn.code) + '</span>' : '') +
+        (signIn.expires_at ? ' · expires ' + esc(when(signIn.expires_at)) : '') +
+        '<p class="small">Complete the provider authorization for this account on ' + esc(n.name) + '. The machine stores the resulting credentials in this account’s private home. After its check succeeds, choose Finish sign-in.</p></div>';
+      else if (signIn && signIn.status === 'completed') h += '<div class="small">Provider authorization completed. Waiting for the machine to check the account.</div>';
+      else h += '<div class="small">' + (consoleCan('nodes.manage') ? 'Starting provider sign-in on ' + esc(n.name) + '…' : 'Sign-in is pending owner action.') + '</div>';
+      h += '</section>';
+    });
+    if (!accounts.length && !pendingAccounts.length) h += '<div class="machine-empty">No AI accounts on this machine.</div>';
+    accounts.forEach(function (a) {
+      var windows = (a.quota || {}).windows || {}, quota = a.quota_used == null ? '—' : pctText(a.quota_used * 100);
+      h += '<section class="managed-account"><div class="machine-head"><h4>' + esc(a.id) + '</h4>' + pill(accTone(a), a.paused ? 'Paused' : accLabel(a)) +
+        '<span class="muted">' + esc(PROVIDER[a.provider] || a.provider) + ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
+        ' · ' + esc((a.jobs || []).join(', ') || 'no jobs') + '</span><span class="spacer"></span>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
+      h += '</div><div class="machine-facts"><span>Quota used <strong>' + quota + '</strong></span><span>Limit resets <strong>' + esc(a.quota_resets_at ? when(typeof a.quota_resets_at === 'number' ? new Date(a.quota_resets_at * 1000).toISOString() : a.quota_resets_at) : '—') + '</strong></span>';
+      h += '<span>Today <strong>' + esc(tok(a.tokens_today)) + ' tokens · ' + esc(usd(a.cost_today)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
+      if (state.accountEditor === a.id) {
+        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
+        h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
+      }
+      h += '</section>';
+    });
+    h += '</div></article>';
+  });
+  h += '</div></section>';
+  if (state.addMachine && consoleCan('nodes.manage')) {
+    var j = state.join, projects = data.projects || [];
+    h += '<section class="panel"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
+    h += '<form class="project-form" id="machines-join-form" onsubmit="return false"><label>Machine name<input id="machine-name" required maxlength="63" value="' + esc(j.name) + '"></label>';
+    h += '<label>Role<select id="machine-role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
+    h += '<label>Project<select id="machine-project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
+    h += '<div><button class="btn primary" data-act="machine-join-create"' + (j.busy || !projects.length ? ' disabled' : '') + '>' + (j.busy ? 'Creating…' : 'Show one-time command') + '</button></div>';
+    if (j.error) h += '<div class="err wide" role="alert">' + esc(j.error) + '</div>';
+    if (j.command) h += '<label class="wide">Command expires in <span class="mono" data-countdown="' + esc(j.expires_at) + '"></span><textarea rows="2" readonly onclick="this.select()">' + esc(j.command) + '</textarea></label><div><button class="btn" data-act="machine-copy-join">Copy command</button></div>';
+    h += '<div class="small wide">This screen checks for the machine through live heartbeats. It will appear in the machine list after its agent joins.</div></form></section>';
+  }
+  root.innerHTML = h;
+}
 /* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
 function projectChecksCell(c) {
   if (!c || !c.has_checks) return '<span class="muted">no checks</span>';
@@ -3304,6 +3513,142 @@ function submitLicense(path, payload, successText) {
     .then(function () { S.licensing.busy = false; if (!S.licensing.error) loadLicensing(); else renderLicensing(); });
 }
 
+function notificationField(field, label, type, placeholder) {
+  var value = S.notifications.form[field];
+  return '<label>' + esc(label) + '<input type="' + esc(type || 'text') + '" data-notify-field="' + esc(field) + '" value="' +
+    esc(value || '') + '" placeholder="' + esc(placeholder || '') + '" autocomplete="' +
+    (type === 'password' ? 'new-password' : 'off') + '"></label>';
+}
+function renderNotifications() {
+  var root = $('#view-notifications'); if (!root) return;
+  var state = S.notifications, data = state.data || {}, channels = data.channels || [], prefs = data.preferences || { routes: {} };
+  prefs = state.preferencesDraft || prefs;
+  if (!consoleCan('notifications.manage')) { root.innerHTML = '<section class="panel"><p>Notifications are available to administrators.</p></section>'; return; }
+  var kindLabels = { email: 'Email', telegram: 'Telegram', slack: 'Slack', teams: 'Microsoft Teams', webhook: 'Generic webhook' };
+  var h = '<section class="panel"><div class="panel-h"><h2>Notifications</h2><button class="btn sm" data-act="notifications-refresh"' +
+    (state.busy ? ' disabled' : '') + '>Refresh</button></div><p class="muted">Configure stored delivery channels, choose which alerts use them, and review recent results. Saved credentials stay hidden.</p>';
+  if (state.error) h += '<div class="alert"><span class="a-detail">' + esc(state.error) + '</span></div>';
+  if (state.notice) h += '<div class="notify-state">' + esc(state.notice) + '</div>';
+  h += '<h3>Channels</h3><div class="notify-grid">';
+  channels.forEach(function (c) {
+    var last = c.last_delivery || {}, destination = '';
+    if (c.kind === 'email') destination = (c.config.from || '') + ' → ' + (c.config.to || '') + ' · ' + (c.config.host || '') + ':' + (c.config.port || '');
+    else if (c.kind === 'telegram') destination = 'Chat ' + (c.config.chat_id || '');
+    else destination = 'Endpoint saved and hidden';
+    var secretCount = Object.keys(c.secrets || {}).filter(function (k) { return c.secrets[k]; }).length;
+    h += '<article class="notify-channel"><div class="panel-h"><h3>' + esc(c.name) + '</h3><span class="pill" data-tone="' +
+      (c.enabled ? 'ok' : 'muted') + '">' + (c.enabled ? 'Enabled' : 'Disabled') + '</span></div>' +
+      '<div class="notify-meta">' + esc(kindLabels[c.kind] || c.kind) + ' · ' + esc(destination) + '<br>Credentials: ' +
+      (secretCount ? 'saved, hidden' : 'not set') + '<br>Last delivery: ' + esc(last.status || 'never') +
+      (last.at ? ' · ' + esc(when(last.at)) : '') + (last.error ? '<br>Result: ' + esc(last.error) : '') + '</div>' +
+      '<div class="notify-actions"><button class="btn sm" data-act="notification-test" data-id="' + c.id + '">Send test message</button>' +
+      '<button class="btn sm" data-act="notification-edit" data-id="' + c.id + '">Edit</button>' +
+      '<button class="btn sm" data-act="notification-toggle" data-id="' + c.id + '">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '<button class="btn sm" data-act="notification-delete" data-id="' + c.id + '">Remove</button></div></article>';
+  });
+  if (!channels.length) h += '<div class="empty">No alert channels configured yet.</div>';
+  h += '</div><h3>' + (state.editId ? 'Edit channel' : 'Add a channel') + '</h3><form id="notification-channel-form" class="panel">' +
+    '<div class="notify-form-grid">' + notificationField('name', 'Channel name', 'text', 'Operations email') +
+    '<label>Channel kind<select id="notification-kind" data-notify-kind-select' + (state.editId ? ' disabled' : '') + '>' + Object.keys(kindLabels).map(function (k) {
+      return '<option value="' + k + '"' + (state.form.kind === k ? ' selected' : '') + '>' + esc(kindLabels[k]) + '</option>';
+    }).join('') + '</select></label>';
+  var selectedKind = state.form.kind || 'email';
+  var fieldHtml = {
+    email: notificationField('host', 'SMTP or hosted sender host', 'text', 'smtp.example.com') +
+      notificationField('port', 'Port', 'number', '587') + notificationField('username', 'Username (optional)', 'text', '') +
+      notificationField('password', 'Password (leave blank to keep saved password)', 'password', 'Hidden after saving') +
+      notificationField('from', 'From address', 'email', 'aiflow@example.com') + notificationField('to', 'To address', 'email', 'owner@example.com') +
+      '<label>Connection security<select data-notify-field="tls_mode"><option value="starttls"' + (state.form.tls_mode !== 'ssl' && state.form.tls_mode !== 'none' ? ' selected' : '') + '>STARTTLS</option><option value="ssl"' + (state.form.tls_mode === 'ssl' ? ' selected' : '') + '>TLS (SSL)</option><option value="none"' + (state.form.tls_mode === 'none' ? ' selected' : '') + '>None</option></select></label>',
+    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Chat ID', 'text', '-100…'),
+    slack: notificationField('webhook_url', 'Slack incoming webhook URL', 'password', 'Hidden after saving'),
+    teams: notificationField('webhook_url', 'Microsoft Teams webhook URL', 'password', 'Hidden after saving'),
+    webhook: notificationField('url', 'Webhook URL', 'password', 'Hidden after saving') + notificationField('auth_token', 'Bearer token (optional)', 'password', 'Hidden after saving')
+  };
+  h += fieldHtml[selectedKind] || fieldHtml.email;
+  h += '</div><div class="notify-actions"><button class="btn primary" type="submit"' + (state.busy ? ' disabled' : '') + '>' +
+    (state.editId ? 'Save channel' : 'Add channel') + '</button>' + (state.editId ? '<button class="btn" type="button" data-act="notification-cancel">Cancel</button>' : '') + '</div></form>';
+  h += '<h3>Alert routing</h3><p class="muted">Quiet hours use UTC. Critical incidents still send during quiet hours so urgent failures reach an administrator.</p>';
+  h += '<div class="notify-routing"><strong>Alert kind</strong>' + channels.map(function (c) { return '<strong>' + esc(c.name) + '</strong>'; }).join('') + '</div>';
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) {
+    h += '<div class="notify-routing"><span>' + esc(data.alert_kinds[kind]) + '</span>' + channels.map(function (c) {
+      var checked = ((prefs.routes || {})[kind] || []).indexOf(c.id) >= 0;
+      return '<label><input type="checkbox" data-route-kind="' + esc(kind) + '" data-route-channel="' + c.id + '"' +
+        (checked ? ' checked' : '') + (!c.enabled ? ' disabled' : '') + '></label>';
+    }).join('') + '</div>';
+  });
+  if (!channels.length) h += '<div class="empty">Add a channel before setting alert routes.</div>';
+  h += '<div class="notify-actions"><label>Quiet hours start (UTC) <input type="time" id="notification-quiet-start" value="' + esc(prefs.quiet_start || '') + '"></label>' +
+    '<label>Quiet hours end (UTC) <input type="time" id="notification-quiet-end" value="' + esc(prefs.quiet_end || '') + '"></label>' +
+    '<button class="btn primary" data-act="notification-preferences-save">Save routing</button></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Recent deliveries</h2></div>';
+  var deliveries = data.deliveries || [];
+  if (!deliveries.length) h += '<div class="empty">No deliveries recorded.</div>';
+  deliveries.slice(0, 15).forEach(function (d) {
+    h += '<div class="alert"><span class="pill" data-tone="' + (d.status === 'sent' ? 'ok' : d.status === 'failed' ? 'crit' : 'warn') + '">' + esc(d.status) +
+      '</span><span class="a-title">' + esc(d.channel_name) + ' · ' + esc(d.title) + '</span><span class="a-detail">' +
+      esc(d.attempts + '/' + d.max_attempts + (d.last_error ? ' · ' + d.last_error : '')) + '</span></div>';
+  });
+  h += '</section><section class="panel"><div class="panel-h"><h2>Open delivery incidents</h2></div>';
+  var incidents = data.incidents || [];
+  if (!incidents.length) h += '<div class="empty">No open delivery incidents.</div>';
+  incidents.forEach(function (i) { h += '<div class="alert"><span class="pill" data-tone="crit">Critical</span><span class="a-title">' +
+    esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span></div>'; });
+  root.innerHTML = h + '</section>';
+}
+function notificationConfigFromForm(form) {
+  var keys = { email: ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode'],
+    telegram: ['bot_token', 'chat_id'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
+  var config = {}; keys.forEach(function (key) { if (form[key] !== undefined) config[key] = form[key]; }); return config;
+}
+function notificationFormSubmit() {
+  var state = S.notifications, form = state.form;
+  if (!consoleCan('notifications.manage') || state.busy) return;
+  state.busy = true; state.error = ''; renderNotifications();
+  var payload = { name: form.name || '', kind: form.kind || 'email', enabled: form.enabled !== false,
+    config: notificationConfigFromForm(form) };
+  if (state.editId) payload.id = state.editId;
+  fetch('/v1/notifications/channels', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function () { state.editId = null; state.notice = 'Channel saved. Credentials remain hidden after saving.';
+      state.form = { kind: 'email', name: '', enabled: true }; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderNotifications(); });
+}
+function notificationPreferencesSubmit() {
+  var state = S.notifications, data = state.data || {}, routes = {};
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) { routes[kind] = (state.preferencesDraft.routes || {})[kind] || []; });
+  var start = state.preferencesDraft.quiet_start || '', end = state.preferencesDraft.quiet_end || '';
+  fetch('/v1/notifications/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ routes: routes, quiet_start: start, quiet_end: end }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.preferencesDraft = d.preferences; state.preferencesDirty = false; state.notice = 'Alert routing and quiet hours saved.'; state.error = ''; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); renderNotifications(); });
+}
+function notificationTest(id) {
+  var state = S.notifications; state.error = ''; state.notice = 'Sending test message…'; renderNotifications();
+  fetch('/v1/notifications/channels/' + encodeURIComponent(id) + '/test', { method: 'POST' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.notice = 'Test result: ' + d.result.status + (d.result.error ? ' (' + d.result.error + ')' : ''); loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); state.notice = ''; renderNotifications(); });
+}
+function notificationDelete(id) {
+  if (!window.confirm('Remove this channel and its saved credentials?')) return;
+  var state = S.notifications;
+  fetch('/v1/notifications/channels/' + encodeURIComponent(id), { method: 'DELETE' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function () { state.notice = 'Channel removed.'; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); renderNotifications(); });
+}
+function captureNotificationPreferences() {
+  var state = S.notifications, data = state.data || {}, routes = {};
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) {
+    routes[kind] = $$('[data-route-kind="' + kind + '"]:checked').map(function (box) { return Number(box.getAttribute('data-route-channel')); });
+  });
+  var start = $('#notification-quiet-start'), end = $('#notification-quiet-end');
+  state.preferencesDraft = { routes: routes, quiet_start: start ? start.value : '', quiet_end: end ? end.value : '', timezone: 'UTC' };
+  state.preferencesDirty = true;
+}
+
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
@@ -3419,7 +3764,7 @@ function render() {
   renderLicenseNotice();
   if (S.view === 'cc') renderDashboard();
   else if (S.view === 'work' || S.view === 'delivery') { renderDHead(); renderDBody(); }
-  else if (S.view === 'machines') renderCC();
+  else if (S.view === 'machines') renderMachines();
   else if (S.view === 'sa') renderSA();
   else if (S.view === 'users') renderUsers();
   else if (S.view === 'lead') renderLead();
@@ -3431,6 +3776,7 @@ function render() {
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
   else if (S.view === 'licensing') renderLicensing();
+  else if (S.view === 'notifications') renderNotifications();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -3446,11 +3792,15 @@ function tick() {
     var sec = Number(el.getAttribute('data-clock')) + s, hard = Number(el.getAttribute('data-hard')) || 3600, p = Math.min(100, 100 * sec / hard);
     el.style.width = p.toFixed(1) + '%'; el.setAttribute('data-tone', p >= 75 ? 'crit' : p >= 50 ? 'warn' : 'ok');
   });
+  $$('[data-countdown]').forEach(function (el) {
+    var left = Math.max(0, Math.ceil((new Date(el.getAttribute('data-countdown')).getTime() - Date.now()) / 1000));
+    el.textContent = left ? mmss(left) + ' remaining' : 'Expired';
+  });
   renderLive();
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
 }
@@ -3470,6 +3820,7 @@ function setView(v) {
   if (v === 'projects') loadProjectList();
   if (v === 'licensing') loadLicensing();
   if (v === 'users') loadUsers();
+  if (v === 'notifications') loadNotifications();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -3510,6 +3861,37 @@ document.addEventListener('click', function (e) {
     S.licensing.limitsPlan = limitPlan;
     submitLicense('/v1/licensing/limits', { plan: limitPlan, limits: limits }, 'Plan limits saved');
   }
+  else if (act === 'notifications-refresh') loadNotifications();
+  else if (act === 'notification-test') notificationTest(el.getAttribute('data-id'));
+  else if (act === 'notification-preferences-save') notificationPreferencesSubmit();
+  else if (act === 'notification-edit') {
+    var editChannel = (S.notifications.data && S.notifications.data.channels || []).filter(function (c) { return String(c.id) === el.getAttribute('data-id'); })[0];
+    if (editChannel) { S.notifications.editId = editChannel.id; S.notifications.form = Object.assign({ enabled: editChannel.enabled }, editChannel.config, { name: editChannel.name, kind: editChannel.kind }); renderNotifications(); }
+  }
+  else if (act === 'notification-cancel') { S.notifications.editId = null; S.notifications.form = { kind: 'email', name: '', enabled: true }; S.notifications.error = ''; renderNotifications(); }
+  else if (act === 'notification-delete') notificationDelete(el.getAttribute('data-id'));
+  else if (act === 'notification-toggle') {
+    var toggleChannel = (S.notifications.data && S.notifications.data.channels || []).filter(function (c) { return String(c.id) === el.getAttribute('data-id'); })[0];
+    if (toggleChannel) fetch('/v1/notifications/channels', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: toggleChannel.id, name: toggleChannel.name, kind: toggleChannel.kind, enabled: !toggleChannel.enabled, config: {} }) })
+      .then(function (r) { return projectResponseError(r); }).then(function () { loadNotifications(); })
+      .catch(function (err) { S.notifications.error = String(err.message || err); renderNotifications(); });
+  }
+  else if (act === 'machine-add-toggle') openMachineForm();
+  else if (act === 'machine-join-create') submitMachineJoin();
+  else if (act === 'machine-copy-join') copyMachineCommand();
+  else if (act === 'machine-add-account') { S.machines.addAccount = el.getAttribute('data-name'); S.machines.error = ''; renderMachines(); }
+  else if (act === 'machine-account-save') addMachineAccount(el.getAttribute('data-name'));
+  else if (act === 'machine-account-cancel') { S.machines.addAccount = ''; S.machines.error = ''; renderMachines(); }
+  else if (act === 'machine-work') toggleMachineWork(el.getAttribute('data-name'), el.getAttribute('data-accept') === 'true');
+  else if (act === 'machine-remove') removeMachine(el.getAttribute('data-name'));
+  else if (act === 'account-pause') setAccountPaused(el.getAttribute('data-id'), el.getAttribute('data-paused') === 'true');
+  else if (act === 'account-edit') { S.machines.accountEditor = el.getAttribute('data-id'); S.machines.error = ''; renderMachines(); }
+  else if (act === 'account-edit-save') saveAccountSettings(el.getAttribute('data-id'));
+  else if (act === 'account-edit-cancel') { S.machines.accountEditor = null; S.machines.error = ''; renderMachines(); }
+  else if (act === 'account-signin') startAccountSignIn(el.getAttribute('data-id'));
+  else if (act === 'account-signin-complete') completeAccountSignIn(el.getAttribute('data-id'));
+  else if (act === 'account-remove') removeMachineAccount(el.getAttribute('data-id'));
   else if (act === 'search-open') openCommandSearch();
   else if (act === 'search-close') closeCommandSearch();
   else if (act === 'search-result') chooseSearchResult(el.getAttribute('data-kind'), el.getAttribute('data-key'), el);
@@ -3653,7 +4035,7 @@ document.addEventListener('click', function (e) {
     }
   }
   else if (act === 'close') closeAll();
-  else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderCC(); }
+  else if (act === 'accfilter') { S.accFilter = el.getAttribute('data-f'); renderDashboard(); }
   else if (act === 'project') { S.project = el.getAttribute('data-p'); S.epic = 'all'; S.sh.renderKey = ''; savePrefs(); render(); }
   else if (act === 'type') { S.typeFilter = el.getAttribute('data-t'); savePrefs(); renderDHead(); renderDBody(); tick(); }
   else if (act === 'epic') { S.epic = el.getAttribute('data-key'); savePrefs(); renderDHead(); renderDBody(); tick(); flash('d-board'); }
@@ -3702,6 +4084,8 @@ function downloadBackupKey() {
   }).catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
 }
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
   if (e.target && e.target.id === 'work-project') {
     S.projectQuery = e.target.value; S.projectPickerOpen = true; renderProjectPickerOptions();
@@ -3737,6 +4121,13 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
+  if (e.target && e.target.matches('[data-notify-kind-select]')) {
+    S.notifications.form.kind = e.target.value;
+    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
+    renderNotifications();
+  }
+  if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
   if (e.target && e.target.matches('[data-backup-field]')) {
     var backupField = e.target.getAttribute('data-backup-field');
@@ -3853,6 +4244,7 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
+  if (e.target.id === 'notification-channel-form') { e.preventDefault(); notificationFormSubmit(); }
   if (e.target.id === 'rh-form') { e.preventDefault(); saveRoleHealth(); }
   if (e.target.id === 'users-create-form') { e.preventDefault(); submitConsoleUser(e.target); }
 });
@@ -3876,6 +4268,7 @@ if (S.view === 'integrations') {
   if (githubResult === 'error') S.integrations.error = 'GitHub could not complete the connection. Return to Integrations and try again.';
   loadIntegrations();
 }
+if (S.view === 'notifications') loadNotifications();
 poll(); pollServices(); pollAnalytics(); pollConsoleSession(); pollReviews();
 setInterval(tick, 1000);
 })();

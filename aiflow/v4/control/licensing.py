@@ -222,11 +222,16 @@ def save_limits(db, plan: str, limits: dict[str, Any], public_key: str) -> dict[
     return snapshot(db, public_key)
 
 
+# Accounts removed from the console (or whose machine was removed) stay in the table but no longer count.
+_ACTIVE_ACCOUNTS = ("SELECT id FROM accounts WHERE id NOT IN (SELECT id FROM managed_ai_accounts WHERE removed_at IS NOT NULL)"
+                    " AND node NOT IN (SELECT name FROM nodes WHERE removed_at IS NOT NULL)")
+
+
 def resource_counts(ctx) -> dict[str, int]:
-    registered_account_ids = {str(row["id"]) for row in ctx.db.all("SELECT id FROM accounts")}
+    registered_account_ids = {str(row["id"]) for row in ctx.db.all(_ACTIVE_ACCOUNTS)}
     configured_account_ids = {str(account.id) for account in ctx.repo().accounts}
     return {
-        "machines": int(ctx.db.one("SELECT count(*) AS count FROM nodes")["count"]),
+        "machines": int(ctx.db.one("SELECT count(*) AS count FROM nodes WHERE removed_at IS NULL")["count"]),
         "ai_accounts": len(registered_account_ids | configured_account_ids),
         "projects": len(ctx.repo().projects),
         "users": int(ctx.db.one("SELECT count(*) AS count FROM console_users WHERE disabled=false")["count"]),
@@ -270,7 +275,7 @@ def enforce_account_entitlement(ctx, account_id: str, *, public_key: str,
     limit = state["limits"]["ai_accounts"]
     # A configured account can be intentionally absent from the database when startup sync skipped it at
     # capacity. Count the union so that this resource still cannot claim work through the node API.
-    account_ids = sorted({str(row["id"]) for row in ctx.db.all("SELECT id FROM accounts ORDER BY id")}
+    account_ids = sorted({str(row["id"]) for row in ctx.db.all(_ACTIVE_ACCOUNTS + " ORDER BY id")}
                          | {str(account.id) for account in ctx.repo().accounts})
     if account_id in account_ids and account_ids.index(account_id) >= limit:
         raise LicenseError(f"AI accounts limit of {limit} reached ({len(account_ids)}/{limit}). Disable or remove extra AI accounts or raise the limit in the Licence screen.")
@@ -280,7 +285,7 @@ def enforce_machine_entitlement(ctx, node: str, *, public_key: str,
                                 state: dict[str, Any] | None = None) -> None:
     """Keep machines beyond the current plan from starting new work; active runs remain unaffected."""
     state = state or require_writable(ctx.db, public_key)
-    node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes ORDER BY name")]
+    node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NULL ORDER BY name")]
     limit = state["limits"]["machines"]
     if node in node_names and node_names.index(node) >= limit:
         raise LicenseError(f"Machines limit of {limit} reached ({len(node_names)}/{limit}). Disable or remove extra machines or raise the limit in the Licence screen.")

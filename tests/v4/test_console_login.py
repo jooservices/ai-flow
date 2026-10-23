@@ -290,6 +290,7 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
     r = client.get("/cc")
     assert r.status_code == 302 and r.headers["location"] == "/login?next=%2Fcc"
     assert client.get("/delivery?x=1").headers["location"] == "/login?next=%2Fdelivery%3Fx%3D1"
+    assert client.get("/machines").headers["location"] == "/login?next=%2Fmachines"
     assert client.get("/v1/state").status_code == 401
     assert client.get("/v1/state", headers={"Authorization": "Bearer not-a-token-route"}).status_code == 401
     client.cookies.set(COOKIE_NAME, "forged.cookie.value")

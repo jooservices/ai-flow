@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..core.services import ALIASES, SERVICES, service_gaps
-from ..core.toolchains import tool_present, tools_for_stacks_in_project
+from ..core.toolchains import (CATALOG_TOOLS, NODE_TOOLS, STACK_TOOLS, pinned_version, tool_present,
+                               normalize_stacks, tools_for_stacks_in_project)
 from .db import J
 
 log = logging.getLogger("aiflow4.tooling")
@@ -53,31 +54,64 @@ def machine_tools(node_row: dict) -> dict[str, list[str]]:
 
 def record_missing(ctx, run: dict, requirements: list[str], detail: str) -> list[str]:
     """Park the run's ticket on the requirements it lacks on the run's machine. Returns the recorded names."""
-    names = list(dict.fromkeys(normalize(r) for r in requirements if str(r).strip()))[:10]
+    node = ctx.db.one("SELECT tools,metrics FROM nodes WHERE name=%s", (run["node"],)) or {}
+    names = list(dict.fromkeys(name for raw in requirements if str(raw).strip()
+                               if (name := normalize(raw))
+                               and requirement_is_accepted(ctx, run["project"], name)))[:10]
+    recorded: list[str] = []
     for name in names:
+        if machine_has(node, name):
+            ctx.db.run("UPDATE tool_waits SET resolved_at=now(), resolution=%s WHERE ticket_key=%s"
+                       " AND requirement=%s AND resolved_at IS NULL",
+                       (f"already present on {run['node']}", run["ticket_key"], name))
+            continue
         ctx.db.run("INSERT INTO tool_waits (ticket_key, project, requirement, machine, run_id, detail)"
                    " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (ticket_key, requirement) WHERE resolved_at IS NULL"
                    " DO UPDATE SET machine=EXCLUDED.machine, run_id=EXCLUDED.run_id, detail=EXCLUDED.detail",
                    (run["ticket_key"], run["project"], name, run["node"], str(run["id"]), detail[:1000]))
-    if names:
+        recorded.append(name)
+    if recorded:
         ctx.events.emit("ticket.waiting_for_tool", ticket=run["ticket_key"], project=run["project"],
                         run_id=str(run["id"]), node=run["node"], outcome="waiting",
-                        reason="missing on the machine: " + ", ".join(names))
-    return names
+                        reason="missing on the machine: " + ", ".join(recorded))
+    return recorded
 
 
 def resolve_ticket(ctx, ticket_key: str, machine: str) -> None:
     """The ticket was offered to a machine that has what it waited for."""
-    ctx.db.run("UPDATE tool_waits SET resolved_at=now(), resolution=%s WHERE ticket_key=%s AND resolved_at IS NULL",
+    ctx.db.run("UPDATE tool_waits SET resolved_at=coalesce(resolved_at,now()), resolution=%s WHERE ticket_key=%s"
+               " AND (resolved_at IS NULL OR resolution LIKE 'available on %%')",
                (f"offered to {machine}", ticket_key))
+
+
+def resolve_available(ctx, node: str, node_row: dict) -> int:
+    """A fresh heartbeat resolves waits this project-serving machine can now satisfy."""
+    repo = ctx.repo()
+    node_config = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
+    projects = set(repo.projects_for_node(node, node_config.get("projects") or [], node_config.get("dynamic", False)))
+    projects.update(node_config.get("projects") or [])
+    projects.update(key for key, project in repo.projects.items() if node in project.nodes)
+    resolved = 0
+    for wait in ctx.db.all("SELECT ticket_key,project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
+        if (not requirement_is_accepted(ctx, wait["project"], wait["requirement"])
+                or wait["project"] not in projects
+                or not machine_has(node_row, wait["requirement"])):
+            continue
+        ctx.db.run("UPDATE tool_waits SET resolved_at=now(),resolution=%s WHERE ticket_key=%s AND requirement=%s"
+                   " AND resolved_at IS NULL", (f"available on {node}", wait["ticket_key"], wait["requirement"]))
+        resolved += 1
+    return resolved
 
 
 def parked_tickets(ctx, node_row: dict) -> set[str]:
     """Tickets waiting for a requirement this machine does not have (they are not offered to it)."""
     parked: set[str] = set()
     cache: dict[str, bool] = {}
-    for row in ctx.db.all("SELECT ticket_key, requirement FROM tool_waits WHERE resolved_at IS NULL"):
+    for row in ctx.db.all("SELECT ticket_key, project, requirement FROM tool_waits WHERE resolved_at IS NULL"
+                          " OR resolution LIKE 'available on %'"):
         req = row["requirement"]
+        if not requirement_is_accepted(ctx, row["project"], req):
+            continue
         if req not in cache:
             cache[req] = machine_has(node_row, req)
         if not cache[req]:
@@ -87,15 +121,23 @@ def parked_tickets(ctx, node_row: dict) -> set[str]:
 
 def waiting_summary(ctx) -> list[dict[str, Any]]:
     """Tickets waiting per missing requirement, for Command Center."""
-    rows = ctx.db.all("SELECT w.ticket_key, w.project, w.requirement, w.machine, w.created_at, t.summary"
+    rows = ctx.db.all("SELECT w.ticket_key, w.project, w.requirement, w.machine, w.created_at, w.detail, t.summary"
                       " FROM tool_waits w LEFT JOIN tickets t ON t.key = w.ticket_key"
                       " WHERE w.resolved_at IS NULL ORDER BY w.created_at, w.ticket_key")
     gaps = {g["requirement"]: g for g in ctx.db.all("SELECT * FROM tooling_gaps")}
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
+        if not requirement_is_accepted(ctx, r["project"], r["requirement"]):
+            continue
+        project = ctx.repo().projects.get(r["project"])
+        stacks = project.stacks if project else []
+        action = system_action(r["requirement"], stacks)
         item = out.setdefault(r["requirement"], {"requirement": r["requirement"], "tickets": [], "projects": [],
-                                                 "machines": [], "since": r["created_at"].isoformat()})
-        item["tickets"].append({"key": r["ticket_key"], "summary": r["summary"] or "", "machine": r["machine"]})
+                                                 "machines": [], "since": r["created_at"].isoformat(),
+                                                 "action": system_action(r["requirement"])})
+        item["tickets"].append({"key": r["ticket_key"], "summary": r["summary"] or "", "machine": r["machine"],
+                                "requirement": r["requirement"], "since": r["created_at"].isoformat(),
+                                "action": action, "detail": r["detail"] or ""})
         if r["project"] and r["project"] not in item["projects"]:
             item["projects"].append(r["project"])
         if r["machine"] and r["machine"] not in item["machines"]:
@@ -105,6 +147,60 @@ def waiting_summary(ctx) -> list[dict[str, Any]]:
         gap = gaps.get(name) or {}
         item["maintenance_ticket"] = gap.get("maintenance_key") or ""
     return sorted(out.values(), key=lambda i: (-i["count"], i["requirement"]))
+
+
+def requirement_catalogue() -> set[str]:
+    """Reportable catalogue tools and services; other stack tools require an explicit pin."""
+    return set(NODE_TOOLS) | set(CATALOG_TOOLS) | set(SERVICES)
+
+
+def requirement_is_accepted(ctx, project_key: str, requirement: str) -> bool:
+    """Catalogue tools/services are always valid; other stack tools need a project pin."""
+    name = normalize(requirement)
+    from ..core.services import EXTERNAL_REQUIREMENTS
+    if name in EXTERNAL_REQUIREMENTS:
+        return False
+    if name in requirement_catalogue():
+        return True
+    repo = ctx.repo()
+    project = repo.projects.get(project_key)
+    if not project:
+        return False
+    stacks = project.stacks
+    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())}
+    return name in stack_tools and bool(pinned_version(repo.versions, name, stacks))
+
+
+def system_action(requirement: str, stacks: str | list[str] | tuple[str, ...] | None = None) -> str:
+    """Human-readable next action for a validated wait, shown in the Command Center and idle incident."""
+    if requirement in SERVICES:
+        return "Starting the declared test service on the next heartbeat"
+    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())}
+    if requirement in stack_tools:
+        return "Installing the pinned project stack tool on the next heartbeat"
+    if requirement in set(NODE_TOOLS) | set(CATALOG_TOOLS):
+        return "Installing automatically on the next heartbeat on machines that report it missing"
+    return "Waiting for a project machine to report it present"
+
+
+def install_requests(ctx, node: str, node_row: dict, repo) -> list[dict[str, str]]:
+    """Server-authored, whitelist-bound tool installs to include in this node's heartbeat response."""
+    installable = set(NODE_TOOLS) | set(CATALOG_TOOLS) | {tool for tools in STACK_TOOLS.values() for tool in tools}
+    waits = ctx.db.all("SELECT DISTINCT requirement,project FROM tool_waits WHERE resolved_at IS NULL"
+                       " OR resolution LIKE 'available on %' ORDER BY requirement")
+    requests: dict[str, str] = {}
+    for wait in waits:
+        name = wait["requirement"]
+        if (name not in installable or not requirement_is_accepted(ctx, wait["project"], name)
+                or machine_has(node_row, name)):
+            continue
+        project = repo.projects.get(wait["project"])
+        stacks = project.stacks if project else []
+        version = "" if name == "cosign" else pinned_version(repo.versions, name, stacks)
+        if name in {"claude", "codex", "grok", "opencode", "codex-code-mode-host"} and not version:
+            continue  # these signed-off CLI installers require a versions.lock pin
+        requests[name] = version
+    return [{"name": name, "version": requests[name]} for name in sorted(requests)]
 
 
 def _online(ctx, rows: list[dict]) -> list[dict]:
@@ -125,6 +221,11 @@ def declared_requirements(repo) -> set[str]:
 
 def sweep(ctx) -> list[str]:
     """Close finished waits, keep the 24 hour clocks and open the maintenance tickets. Returns the keys opened."""
+    for wait in ctx.db.all("SELECT ticket_key,project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
+        if not requirement_is_accepted(ctx, wait["project"], wait["requirement"]):
+            ctx.db.run("UPDATE tool_waits SET resolved_at=now(),resolution='unknown requirement ignored'"
+                       " WHERE ticket_key=%s AND requirement=%s AND resolved_at IS NULL",
+                       (wait["ticket_key"], wait["requirement"]))
     ctx.db.run("UPDATE tool_waits SET resolved_at=now(), resolution='ticket is done' WHERE resolved_at IS NULL"
                " AND ticket_key IN (SELECT key FROM tickets WHERE status='Done')")
     waiting = {r["requirement"]: r["since"] for r in ctx.db.all(
@@ -148,6 +249,30 @@ def sweep(ctx) -> list[str]:
         if key:
             opened.append(key)
     return opened
+
+
+def check_stalled_waits(ctx) -> None:
+    """Warn once per ticket and requirement when a parked wait has made no progress for two hours."""
+    from .incidents import close_incident, open_incident
+
+    rows = ctx.db.all("SELECT ticket_key,project,requirement,machine,created_at,detail FROM tool_waits"
+                      " WHERE resolved_at IS NULL AND created_at < now() - interval '2 hours'")
+    current: set[str] = set()
+    for row in rows:
+        subject = f"tool_wait:{row['ticket_key']}:{row['requirement']}"
+        current.add(subject)
+        project = ctx.repo().projects.get(row["project"])
+        action = system_action(row["requirement"], project.stacks if project else [])
+        open_incident(ctx, "ticket_stuck", subject, "warning",
+                      f"{row['ticket_key']} has waited over two hours for {row['requirement']}",
+                      f"Project {row['project']}; missing on {row['machine'] or 'an unknown machine'} since "
+                      f"{row['created_at']:%Y-%m-%d %H:%M} UTC. The system is {action.lower()}."
+                      + (f" Last report: {row['detail'][:300]}" if row["detail"] else ""))
+    for incident in ctx.db.all("SELECT subject FROM incidents WHERE kind='ticket_stuck'"
+                               " AND subject LIKE 'tool_wait:%' AND closed_at IS NULL"):
+        if incident["subject"] not in current:
+            close_incident(ctx, "ticket_stuck", incident["subject"],
+                           "the wait was resolved or the ticket was completed")
 
 
 def open_maintenance_ticket(ctx, requirement: str, since: datetime) -> str:

@@ -1,6 +1,6 @@
 # Licence
 
-**Assumes:** You are signed in to an installed AI Flow v4 control plane as an Owner or Super Administrator, the
+**Assumes:** You are signed in to an installed AI Flow v4 control plane as an Administrator, the
 roles that hold `licensing.manage`, and an administrator has configured the licence issuer.
 
 Open **Licence** from the console menu. The page shows the installation ID, the current plan, the expiry date, the

@@ -18,7 +18,8 @@ from aiflow.v4.core.settings import Settings
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 BOOT = "/* ---------- boot ---------- */"
 STUBS = """
-var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {}},
+var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
+  classList: {add: function () {}, remove: function () {}}},
   getElementById: function () { return null; }, querySelector: function () { return null; },
   querySelectorAll: function () { return []; }};
 var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
@@ -53,7 +54,8 @@ def console_session(role: str) -> dict:
             "permissions": sorted(ROLE_PERMISSIONS[role])}
 
 
-def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None) -> str:
+def render_drawer(node: dict, console_user: dict | None = None, operations: list[dict] | None = None,
+                 accounts: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the console drawer")
@@ -64,7 +66,7 @@ def render_drawer(node: dict, console_user: dict | None = None, operations: list
                         else OWNER_PERMISSIONS}
     driver = f"""
 var node = {json.dumps(node)};
-S.data = {{nodes: [node], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [],
+S.data = {{nodes: [node], accounts: {json.dumps(accounts or [])}, active_runs: [], recent_runs: [], projects: [], tickets: [],
           incidents: [], events: [], totals: {{}}, versions: {{}}}};
 S.consoleUser = {json.dumps(console_user)};
 S.nodeOperations = {{[node.name]: {json.dumps(operations or [])}}};
@@ -163,6 +165,29 @@ S.consoleUser = {json.dumps(console_session('owner'))};
 S.autonomy.data = {{budget: {{used_minutes: 12, daily_budget_minutes: 90, remaining_minutes: 78}}, report: {json.dumps(report)}}};
 renderDashboard();
 console.log(dashboard.innerHTML);
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def render_machine_overview(state: dict) -> str:
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the Command Center")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = f"""
+var machineOverview = {{innerHTML: ''}};
+document.querySelector = function (selector) {{ return selector === '#view-machines' ? machineOverview : null; }};
+S.data = {json.dumps(state)};
+S.consoleUser = {json.dumps(console_session('owner'))};
+S.services = []; S.analytics = [];
+S.autonomy.data = {{budget: {{used_minutes: 0, daily_budget_minutes: 60, remaining_minutes: 60}}, report: {{
+  week_start: '2026-10-19', trend: [], finished_without_person: [], needed_person: [], repeated_failures: [], quota_accounts: []}}}};
+renderCC();
+console.log(machineOverview.innerHTML);
 """
     result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
                             text=True, capture_output=True)
@@ -528,8 +553,11 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
+    assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']];"
+            ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert "['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']" in page
+    assert "['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications']" in page
 
 
 def test_integrations_view_shows_the_connected_site_and_never_renders_secret_values():
@@ -592,7 +620,7 @@ def test_super_admin_session_shows_github_connect_and_project_resume_controls(ct
     session = client.get("/v1/console/session")
     assert session.status_code == 200
     user = session.json()
-    assert user["role"] == "super_admin"
+    assert user["role"] == "administrator"
     assert "*" in user["permissions"]
 
     jira = {"connected": False, "source": "none", "state": "disconnected", "needs_reconnect": False,
@@ -647,6 +675,8 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
         app = create_app(ctx)
+        from aiflow.v4.control.ui import mount_ui
+        mount_ui(app, ctx)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(("127.0.0.1", 0))
@@ -666,15 +696,87 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
             page.get_by_label("Email").fill("browser-admin@example.test")
             page.get_by_label("Password").fill(password)
             page.get_by_role("button", name="Sign in").click()
-            page.wait_for_url("**/integrations")
-            page.get_by_role("button", name="Connect GitHub").wait_for(state="visible", timeout=10000)
+            page.wait_for_url("**/cc")
+            page.get_by_role("tab", name="Integrations").click()
+            github_app_setup = page.locator(
+                "#view-integrations summary, #view-integrations a[href*='installation-settings']")
+            github_app_setup.first.wait_for(state="visible", timeout=10000)
             existing_app = page.locator("#view-integrations summary").filter(has_text="Use an existing GitHub App")
-            existing_app.click()
-            page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
-            page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            if existing_app.count():
+                existing_app.click()
+                page.locator("#view-integrations [data-github-app-id]").wait_for(state="visible")
+                page.locator("#view-integrations [data-github-key-file]").wait_for(state="visible")
+            else:
+                page.get_by_role("link", name="Add repositories on GitHub").wait_for(state="visible", timeout=10000)
 
             page.get_by_role("tab", name="Projects").click()
             page.get_by_role("button", name="Resume", exact=True).wait_for(state="visible", timeout=10000)
+        finally:
+            browser.close()
+            server.should_exit = True
+            if server_thread.is_alive():
+                server_thread.join(timeout=5)
+            server_socket.close()
+    finally:
+        playwright.stop()
+
+
+def test_role_navigation_and_forbidden_pages_in_a_browser_for_three_roles(ctx):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error, sync_playwright
+    import uvicorn
+
+    from aiflow.v4.control import login
+    from aiflow.v4.control.api import create_app
+
+    try:
+        playwright = sync_playwright().start()
+    except Error as exc:
+        pytest.skip(f"Playwright cannot start on this node: {exc}")
+    try:
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Error as exc:
+            pytest.skip(f"Playwright Chromium cannot launch on this node: {exc}")
+        ctx.settings.console_login = True
+        ctx.settings.console_session_secret = "browser-role-test-secret-at-least-32-bytes"
+        people = [
+            ("delivery@example.test", "delivery", "/delivery", ["Dashboard", "Work board", "Delivery", "Human review"], "/sa"),
+            ("ba@example.test", "ba", "/business", ["Dashboard", "Work board", "Business", "Knowledge"], "/review"),
+            ("stakeholder@example.test", "stakeholder", "/stakeholder",
+             ["Dashboard", "Work board", "Stakeholder"], "/integrations"),
+        ]
+        passwords = {email: login.seed_user(ctx.db, email, role, role.title()) for email, role, *_ in people}
+        app = create_app(ctx)
+        from aiflow.v4.control.ui import mount_ui
+        mount_ui(app, ctx)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("127.0.0.1", 0))
+        server_socket.listen(128)
+        base_url = f"http://127.0.0.1:{server_socket.getsockname()[1]}"
+        server = uvicorn.Server(uvicorn.Config(app, log_level="critical", access_log=False))
+        server_thread = threading.Thread(target=server.run, kwargs={"sockets": [server_socket]}, daemon=True)
+        try:
+            server_thread.start()
+            deadline = time.monotonic() + 10
+            while not server.started and server_thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert server.started, "console test server did not start"
+            for email, _role, landing, visible, forbidden in people:
+                page = browser.new_page()
+                page.goto(base_url + "/login", wait_until="domcontentloaded")
+                page.get_by_label("Email").fill(email)
+                page.get_by_label("Password").fill(passwords[email])
+                page.get_by_role("button", name="Sign in").click()
+                page.wait_for_url("**" + landing)
+                for label in visible:
+                    page.get_by_role("tab", name=label).wait_for(state="visible", timeout=10000)
+                for label in ("SA", "Machines and AI", "Integrations", "Projects", "Users and roles"):
+                    assert page.get_by_role("tab", name=label).count() == 0 or not page.get_by_role("tab", name=label).is_visible()
+                page.goto(base_url + forbidden, wait_until="domcontentloaded")
+                assert "This view is not available for your role." in page.locator("body").inner_text()
+                page.close()
         finally:
             browser.close()
             server.should_exit = True
@@ -1017,9 +1119,13 @@ def test_command_center_menu_order_and_role_visibility():
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
-    required = {"sa": "console.write", "machines": "node.operations.read", "users": "users.manage",
-                "knowledge": "knowledge.read", "backup": "backup.read", "integrations": "integrations.manage",
-                "projects": "projects.manage", "licensing": "licensing.manage", "notifications": "notifications.manage"}
+    permission_for_view = {
+        "cc": "view.dashboard", "work": "view.work_board", "delivery": "view.delivery", "sa": "view.sa",
+        "lead": "view.team_lead", "business": "view.business", "review": "view.human_review",
+        "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
+        "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
+        "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
+    }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,
   getAttribute: function () { return item.view; }, setAttribute: function () {}}; });
@@ -1032,13 +1138,12 @@ Object.keys(sessions).forEach(function (role) {
 console.log(JSON.stringify(roles));
 """ % json.dumps({role: console_session(role) for role in ROLE_PERMISSIONS})))
     for role, granted in ROLE_PERMISSIONS.items():
-        expected = [view for view, _label in tabs
-                    if view not in required or "*" in granted or required[view] in granted]
+        expected = [view for view, _label in tabs if "*" in granted or permission_for_view[view] in granted]
         assert visible[role] == expected, role
         assert visible[role][:2] == ["cc", "work"]
-    # A lead keeps the read-only views it could open before.
-    assert {"knowledge", "machines"} <= set(visible["lead"])
-    assert "users" in visible["super_admin"] and "users" in visible["owner"] and "sa" not in visible["lead"]
+    assert {"knowledge", "delivery", "lead", "review"} <= set(visible["team_lead"])
+    assert "users" in visible["super_admin"] and "users" in visible["owner"]
+    assert "machines" not in visible["team_lead"] and "sa" not in visible["lead"]
 
 
 def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
@@ -1072,8 +1177,12 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
         ],
         "nodes": [{"name": "worker-1", "status": "online", "has_agent": True,
                    "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
-                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}}],
+                   "metrics": {"mem_used": 1073741824, "mem_total": 8589934592, "cpus": 8}},
+                  {"name": "worker-2", "ip": "192.0.2.56", "role": "worker", "status": "online",
+                   "has_agent": True, "accepting_work": True, "slots_total": 8, "sessions_busy": 0,
+                   "metrics": {"mem_used": 0, "mem_total": 8589934592, "cpus": 8}}],
         "accounts": [{"id": "codex-alpha", "provider": "codex", "node": "worker-1", "status": "idle",
+                      "machines": [{"node": "worker-1"}, {"node": "worker-2"}], "parallel": 4,
                       "quota": {"windows": {"five_hour": {"utilization": 0.5, "resets_at": reset}}},
                       "quota_awareness": awareness}],
         "active_runs": [{"ticket": "ALPHA-3", "project": "ALPHA", "summary": "Building story",
@@ -1099,11 +1208,20 @@ def test_dashboard_combines_work_roadmap_waiting_usage_quotas_tokens_and_cost():
     assert 'data-act="epic-dashboard" data-key="ALPHA-2"' in rendered
     assert "aria-label=\"Open Work board filtered by epic ALPHA-2\"" in rendered
     assert 'id="dash-project-search"' in rendered and 'data-act="dashboard-sort" data-key="open"' in rendered
+    overview = render_machine_overview(state)
+    second_card_start = overview.index('data-id="worker-2"')
+    second_card = overview[second_card_start:overview.index("</button>", second_card_start)]
+    assert "codex-alpha" in second_card
 
     machines = render_machines(state)
     assert "codex-alpha" in machines and "quota-history" in machines and "comfortable" in machines
     assert "used 40% quota" in machines and "left 60%" in machines
     assert "Largest context run" in machines and "Burn tokens/hour: 1h 1k, 24h 800, window 700" in machines
+    second_machine_start = machines.index('<article class="machine-card"><div class="machine-head"><h3>worker-2')
+    second_machine = machines[second_machine_start:machines.index("</article>", second_machine_start)]
+    assert "codex-alpha" in second_machine and "Configured AI sessions <strong>4 / 8</strong>" in second_machine
+    drawer = render_drawer(state["nodes"][1], console_session("owner"), accounts=state["accounts"])
+    assert "aiflow4-worker@codex-alpha" in drawer
 
 
 def test_account_without_provider_limits_is_labeled_as_an_estimate_in_the_console():

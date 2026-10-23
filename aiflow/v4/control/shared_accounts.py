@@ -15,7 +15,6 @@ Design (docs/v4/shared-accounts.md):
 """
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -122,6 +121,25 @@ def machine_capacities(queryable, machines: list[str] | set[str], account_id: st
     return out
 
 
+def capacity_shares(session_limit: int, capacities: dict[str, int]) -> dict[str, int]:
+    """Apportion the account limit in whole sessions, proportional to machine capacity.
+
+    Largest-remainder apportionment keeps the integer shares close to their capacity weights while guaranteeing
+    that their sum never exceeds the account limit. Ties are stable by machine name.
+    """
+    weights = {node: max(0, int(capacity)) for node, capacity in capacities.items() if int(capacity) > 0}
+    total_capacity = sum(weights.values())
+    if session_limit <= 0 or total_capacity <= 0:
+        return {}
+    allocated = min(int(session_limit), total_capacity)
+    shares = {node: allocated * weight // total_capacity for node, weight in weights.items()}
+    remaining = allocated - sum(shares.values())
+    order = sorted(weights, key=lambda node: (-(allocated * weights[node] % total_capacity), node))
+    for node in order[:remaining]:
+        shares[node] += 1
+    return shares
+
+
 def may_take(db, acc: Account, node: str) -> tuple[bool, str]:
     """Whether `node` has free worker capacity and may start its capacity-weighted account share."""
     pending = pending_nodes(db, acc.id)
@@ -139,10 +157,9 @@ def may_take(db, acc: Account, node: str) -> tuple[bool, str]:
     if acc.session_limit and sum(running.values()) >= acc.sessions:
         return False, f"account is at its limit of {acc.sessions} concurrent sessions"
     if acc.session_limit:
-        eligible_capacities = [c["account"] for c in capacities.values() if c["free"] > 0]
-        capacity_total = sum(eligible_capacities)
-        share_capacity = capacities[node]["account"]
-        share = min(share_capacity, math.ceil(acc.sessions * share_capacity / capacity_total))
+        eligible_capacities = {machine: values["account"] for machine, values in capacities.items()
+                               if values["free"] > 0}
+        share = capacity_shares(acc.sessions, eligible_capacities).get(node, 0)
         if running.get(node, 0) >= share:
             return False, "other machines of the account have free capacity"
     return True, ""
@@ -192,12 +209,9 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
                     return False
                 if sum(counts.values()) >= acc.sessions:
                     return False
-                eligible_capacities = [c["account"] for c in capacities.values() if c["free"] > 0]
-                capacity_total = sum(eligible_capacities)
-                if capacity_total <= 0:
-                    return False
-                share_capacity = capacities[node]["account"]
-                share = min(share_capacity, math.ceil(acc.sessions * share_capacity / capacity_total))
+                eligible_capacities = {machine: values["account"] for machine, values in capacities.items()
+                                       if values["free"] > 0}
+                share = capacity_shares(acc.sessions, eligible_capacities).get(node, 0)
                 if counts.get(node, 0) >= share:
                     return False
             conn.execute("INSERT INTO runs (id, ticket_key, project, step, account_id, provider, model, node, fence,"

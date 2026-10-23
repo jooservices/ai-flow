@@ -29,9 +29,10 @@ breakdown per machine below: online or offline, sessions now, sessions in the la
   release, checks the account total, machine share and free worker slots while holding account and machine database
   locks. Concurrent workers cannot exceed the account limit or overfill a machine (`409`, ticket lease released).
 - Each online, signed-in machine's share is weighted by its worker capacity remaining after other accounts' active
-  runs: `ceil(limit × machine capacity / total eligible capacity)`, capped by that machine's capacity. A machine with
-  no free worker slot cannot claim work. Offline machines (no heartbeat for 75 s) and machines at capacity stop
-  holding up work; the other machines can take the remaining sessions.
+  runs. The total limit is apportioned in whole sessions with the largest-remainder method, so shares sum to at most
+  the account limit and follow machine capacity weights (for example, capacities 4:1 with a limit of 4 allocate 3:1).
+  A machine with no free worker slot cannot claim work. Offline machines (no heartbeat for 75 s) and machines at
+  capacity stop holding up work; the other machines can take the remaining sessions.
 - Every machine can run as many worker instances as the limit (`desired.workers`), so any machine can carry the whole
   account when the others are away. The worker checks the local credentials; only a passing check makes that machine
   eligible to claim work.

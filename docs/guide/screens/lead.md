@@ -1,6 +1,6 @@
 # Team Lead
 
-**Assumes:** you are signed in with any console role and the project has epics in Jira that AI Flow has synced.
+**Assumes:** you are signed in as an Administrator, Product owner or Team Lead, and the project has epics in Jira that AI Flow has synced.
 
 Team Lead (`/lead`) shows requirement coverage and progress for the epics of one project.
 

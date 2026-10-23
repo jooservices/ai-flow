@@ -321,6 +321,30 @@ def test_free_machine_capacity_moves_shared_work_and_weighted_share(client, ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 2
 
 
+def test_integer_machine_shares_respect_unequal_capacity_and_the_total_limit(client, ctx):
+    from aiflow.v4.control.shared_accounts import capacity_shares, claim_run
+
+    cc, node1 = two_machines(client, ctx, limit=4)
+    ctx.db.run("UPDATE nodes SET slots_total=4 WHERE name='cc'")
+    ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='node1'")
+    add_ticket(ctx.db, "TESTWP-4")
+    add_ticket(ctx.db, "TESTWP-5")
+
+    assert capacity_shares(4, {"cc": 4, "node1": 1}) == {"cc": 3, "node1": 1}
+    for key in ("TESTWP-1", "TESTWP-2", "TESTWP-3"):
+        response = claim(client, cc, key)
+        assert response.status_code == 200 and response.json()["claimed"]
+
+    assert candidates(client, cc) == []  # three of four sessions is cc's integer share
+    acc = ctx.repo().account("shared-01")
+    fourth_on_cc = claim_run(ctx.db, acc, ("00000000-0000-0000-0000-000000000041", "TESTWP-4", "TESTWP", "dev",
+                                            "shared-01", "claude", "", "cc", 41, "test"))
+    assert fourth_on_cc is False  # locked claim enforces the same allocation as eligibility
+    assert claim(client, node1, "TESTWP-4").json()["claimed"]
+    assert claim(client, node1, "TESTWP-5").status_code == 409
+    assert ctx.db.one("SELECT count(*) AS n FROM runs WHERE account_id='shared-01' AND status='running'")["n"] == 4
+
+
 def test_machine_capacity_is_rechecked_atomically_during_claims(client, ctx):
     from aiflow.v4.control import shared_accounts
 
@@ -381,8 +405,8 @@ def test_console_read_can_see_shared_account_usage_but_not_sign_in_prompts(clien
     assert next(m for m in readonly_machine if m["node"] == "node1")["signin"] is None
     readonly_state = client.get("/v1/state")
     assert readonly_state.status_code == 200
-    readonly_shared = next(a for a in readonly_state.json()["accounts"] if a["id"] == "shared-01")
-    assert next(m for m in readonly_shared["machines"] if m["node"] == "node1")["signin"] is None
+    # Team Lead cannot see the Machines and AI view; the shared account is omitted from its state snapshot.
+    assert not any(a["id"] == "shared-01" for a in readonly_state.json()["accounts"])
     assert "ABCD-2345" not in readonly_accounts.text + readonly_state.text
 
 
@@ -403,10 +427,43 @@ def test_auth_failure_on_one_machine_only_marks_that_machine_pending(client, ctx
     assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
 
 
+def test_auth_failure_reported_by_a_run_does_not_cool_down_healthy_machine(client, ctx):
+    cc, node1 = two_machines(client, ctx, limit=2)
+    claimed = claim(client, node1, "TESTWP-1")
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+    result = client.post(f"/v1/runs/{claimed.json()['run_id']}/result",
+                         json={"fence": claimed.json()["fence"], "outcome": "failed", "error_kind": "auth",
+                               "summary": "provider rejected this machine's credentials"}, headers=node1)
+    assert result.status_code == 200
+    assert ctx.leases.cooling("shared-01") is None
+    assert ctx.db.one("SELECT status FROM account_machines WHERE account_id='shared-01' AND node='node1'")["status"] == "pending"
+    assert claim(client, cc, "TESTWP-2").json()["claimed"]
+    assert claim(client, cc, "TESTWP-3").json()["claimed"]
+    assert beat(client, "node1", node1)["signin"][0]["account"] == "shared-01"
+
+
 def test_quota_exhaustion_stays_an_account_wide_cooldown(client, ctx):
     cc, _node1 = two_machines(client, ctx, limit=2)
     client.post("/v1/accounts/shared-01/probe", json={"ok": False, "error_kind": "quota", "summary": "q"}, headers=cc)
     assert ctx.db.one("SELECT cooldown_until FROM accounts WHERE id='shared-01'")["cooldown_until"] is not None
+
+
+def test_quota_routing_finds_shared_peer_enabled_only_on_a_secondary_machine(client, ctx):
+    sign_in(client, ctx)
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    beat(client, "cc", cc)
+    beat(client, "node1", node1)
+    created = client.post("/v1/shared-accounts", json={"id": "secondary-peer", "provider": "claude",
+                                                       "roles": ["dev"], "session_limit": 1})
+    assert created.status_code == 201
+    assert client.post("/v1/shared-accounts/secondary-peer/machines", json={"node": "node1"}).status_code == 201
+    assert client.post("/v1/accounts/secondary-peer/probe", json={"ok": True}, headers=node1).status_code == 200
+    add_ticket(ctx.db, "TESTWP-QUOTA-SECONDARY")
+    ctx.db.run("UPDATE accounts SET quota_at_risk=true WHERE id='claude-01'")
+
+    assert ctx.db.one("SELECT node FROM accounts WHERE id='secondary-peer'")["node"] == ""
+    assert candidates(client, cc, "claude-01") == []
+    assert candidates(client, node1, "secondary-peer") == ["TESTWP-QUOTA-SECONDARY"]
 
 
 def test_session_limit_cannot_drop_below_active_sessions(client, ctx):

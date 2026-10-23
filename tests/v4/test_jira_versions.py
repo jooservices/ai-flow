@@ -40,7 +40,7 @@ def test_jira_reads_project_versions_and_normalizes_fix_version_ids():
     assert Jira.normalize(jira_issue("TESTWP-1", "To Do", ("100", "200")))["fix_versions"] == ["100", "200"]
 
 
-def test_jira_reads_edit_and_transition_permissions_without_writing():
+def test_jira_reads_edit_transition_and_comment_permissions_without_writing():
     requests = []
 
     def respond(request):
@@ -48,19 +48,22 @@ def test_jira_reads_edit_and_transition_permissions_without_writing():
         return httpx.Response(200, json={"permissions": {
             "EDIT_ISSUES": {"havePermission": False},
             "TRANSITION_ISSUES": {"havePermission": True},
+            "ADD_COMMENTS": {"havePermission": False},
         }})
 
     jira = Jira("https://jira.example.test", "person@example.test", "token",
                 client=httpx.Client(transport=httpx.MockTransport(respond), base_url="https://jira.example.test"))
 
     assert jira.project_write_permissions("TESTWP") == {
-        "EDIT_ISSUES": False, "TRANSITION_ISSUES": True,
+        "EDIT_ISSUES": False, "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
     }
     assert len(requests) == 1
     assert requests[0].method == "GET"
     assert requests[0].url.path == "/rest/api/3/mypermissions"
     assert requests[0].url.params["projectKey"] == "TESTWP"
-    assert set(requests[0].url.params["permissions"].split(",")) == {"EDIT_ISSUES", "TRANSITION_ISSUES"}
+    assert set(requests[0].url.params["permissions"].split(",")) == {
+        "EDIT_ISSUES", "TRANSITION_ISSUES", "ADD_COMMENTS",
+    }
 
 
 def test_releasing_a_jira_version_sets_released_flag_and_release_date():

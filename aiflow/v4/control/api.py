@@ -222,8 +222,10 @@ def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[
     email = assignee.get("email") if isinstance(assignee, dict) else ""
     title = f"{key} is ready for human review"
     detail = ticket.get("summary") or key
-    link = f"{ctx.settings.jira_site.rstrip('/')}/browse/{key}" if ctx.settings.jira_site else ""
-    sent = notify.send("info", title, detail, link, recipient=email or "")
+    link = ctx.settings.public_url.rstrip("/") + "/review"
+    sent = notify.send("info", title, detail, link, recipient=email or "", ctx=ctx,
+                       alert_kind="review_before_merge", project=ticket.get("project", ""), ticket=key,
+                       needed="Review the ticket before merge.")
     ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                " VALUES ('notify','human-review',%s,'control',true,%s,%s)",
                (key, ",".join(sent) or "no channel configured", J({"assignee": bool(email)})))
@@ -1195,6 +1197,56 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, None)
         return {"authenticated": True, "user": user.subject, "role": user.role,
                 "permissions": sorted(ROLE_PERMISSIONS.get(user.role, frozenset()))}
+
+    def notification_admin(request: Request, action: str = "read") -> ConsoleUser:
+        return console_user(request, {"notifications.manage"}, target="notifications", action=action)
+
+    async def notification_json(request: Request) -> dict:
+        try:
+            payload = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(400, "invalid notification settings") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid notification settings")
+        return payload
+
+    @app.get("/v1/notifications")
+    def notification_settings(request: Request) -> dict:
+        notification_admin(request)
+        return notify.public_settings(ctx.db)
+
+    @app.put("/v1/notifications/channels")
+    async def notification_channel_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            channel = notify.save_channel(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"channel": channel}
+
+    @app.delete("/v1/notifications/channels/{channel_id}")
+    def notification_channel_delete(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        if not notify.delete_channel(ctx.db, channel_id):
+            raise HTTPException(404, "notification channel was not found")
+        return {"deleted": True}
+
+    @app.put("/v1/notifications/preferences")
+    async def notification_preferences_save(request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            preferences = notify.save_preferences(ctx.db, await notification_json(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"preferences": preferences}
+
+    @app.post("/v1/notifications/channels/{channel_id}/test")
+    def notification_channel_test(channel_id: int, request: Request) -> dict:
+        notification_admin(request, "write")
+        try:
+            return notify.send_test(ctx, channel_id)
+        except ValueError:
+            raise HTTPException(404, "notification channel was not found") from None
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -3507,7 +3559,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     observation_key = f"ticket:{ticket}:{updated['jira_updated'].isoformat() if updated and updated['jira_updated'] else 'current'}"
                 else:
                     observation_key = f"master:{body.action}:{body.intent[:200]}"
-            configured_channels = notify.configured_channels()
+            configured_channels = notify.configured_channels(ctx, "ticket_needs_person")
             created_row = ctx.db.one(
                 "INSERT INTO master_escalations"
                 " (observation_key,ticket,reason,options,run_id,pending_channels,delivered_channels,intent)"
@@ -3541,7 +3593,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             attempt_channels = sorted(pending_channels.intersection(configured_channels))
             try:
                 sent = (notify.send("warning", f"{ticket or 'AI Flow'} requires an owner decision", message, link,
-                                    channels=attempt_channels) if attempt_channels else [])
+                                    ctx=ctx, alert_kind="ticket_needs_person", project=policy_project or "AI Flow",
+                                    ticket=ticket, needed=why, channels=attempt_channels, queued_ok=True)
+                        if attempt_channels else [])
             except Exception as exc:  # Persist the pending channels and retry them on a later master cycle.
                 log.warning("master escalation notification failed: %s", type(exc).__name__)
                 sent = []
@@ -3739,7 +3793,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         severity = "critical" if blocks else "warning"
         sent = notify.send(severity, f"{run['ticket_key']} needs owner decision", body.detail[:3000],
                            ctx.settings.jira_site.rstrip("/") + f"/browse/{run['ticket_key']}"
-                           if ctx.settings.jira_site else "")
+                           if ctx.settings.jira_site else "", ctx=ctx, alert_kind="ticket_needs_person",
+                           ticket=run["ticket_key"], needed="Review the question and provide an owner decision.")
         audit("notify", "triage-alert", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
               ",".join(sent) or "no channel configured", {"severity": severity})
         return {"ok": True, "severity": severity, "sent": sent}

@@ -210,7 +210,9 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
 
 
 def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx):
-    ctx.jira.project_permissions["TESTWP"] = {"EDIT_ISSUES": False, "TRANSITION_ISSUES": False}
+    ctx.jira.project_permissions["TESTWP"] = {
+        "EDIT_ISSUES": False, "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
+    }
     joined = join_node(client, "cc").json()
     readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
     conditions = {item["id"]: item for item in readiness["projects"]["TESTWP"]}
@@ -224,6 +226,22 @@ def test_jira_browse_access_without_issue_write_permissions_needs_action(client,
     assert permission["action"] == (
         "Grant the connected Jira account Edit Issues and Transition Issues permissions in project TESTWP.")
     assert joined["node"] == "cc"
+
+
+def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx):
+    ctx.jira.project_permissions["TESTWP"] = {
+        "EDIT_ISSUES": True, "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
+    }
+    join_node(client, "cc")
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    conditions = {item["id"]: item for item in readiness["projects"]["TESTWP"]}
+
+    permission = conditions["jira-write-permissions"]
+    assert permission["result"] == "needs_action"
+    assert permission["detail"] == (
+        "The connected Jira account is missing Add Comments permission in project TESTWP.")
+    assert permission["action"] == (
+        "Grant the connected Jira account Add Comments permission in project TESTWP.")
 
 
 def test_projects_readiness_shows_account_failures_but_blocks_only_without_a_usable_account(client, ctx):

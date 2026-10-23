@@ -164,7 +164,10 @@ def open_incident(ctx, kind: str, subject: str, severity: str, title: str, detai
             import logging
             logging.getLogger("aiflow4.incidents").warning("incident knowledge capture failed: %s", type(exc).__name__)
         if severity in ("critical", "warning"):
-            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc")
+            channels = notify.send(severity, title, detail, ctx.settings.public_url + "/cc", ctx=ctx,
+                                   alert_kind="critical_incident" if severity == "critical" else "ticket_needs_person",
+                                   ticket=subject if _TICKET_KEY.fullmatch(subject or "") else "",
+                                   needed=detail or title)
             ctx.db.run("UPDATE incidents SET notified=%s WHERE id=%s", (bool(channels), row["id"]))
     return bool(row)
 
@@ -186,7 +189,8 @@ def close_incident(ctx, kind: str, subject: str, note: str = "") -> None:
                     import logging
                     logging.getLogger("aiflow4.incidents").warning("incident resolution capture failed: %s", type(exc).__name__)
         ctx.events.emit("incident.closed", reason=note or row["title"], kind=kind, subject=subject)
-        notify.send("info", f"resolved: {row['title']}", note)
+        notify.send("info", f"resolved: {row['title']}", note, ctx=ctx,
+                    alert_kind="critical_incident", needed=note or "The incident has been resolved.")
 
 
 # --- a flow that stands still -------------------------------------------------------------------------------

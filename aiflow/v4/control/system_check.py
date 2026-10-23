@@ -337,7 +337,8 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
                          "Jira write permissions could not be verified.",
                          "Restore control-plane access to Jira and rerun the System check.")
 
-    required = {"EDIT_ISSUES": "Edit Issues", "TRANSITION_ISSUES": "Transition Issues"}
+    required = {"EDIT_ISSUES": "Edit Issues", "TRANSITION_ISSUES": "Transition Issues",
+                "ADD_COMMENTS": "Add Comments"}
     missing = [label for permission, label in required.items() if permissions.get(permission) is not True]
     if missing:
         labels = " and ".join(missing)
@@ -346,7 +347,7 @@ def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dic
                          f"The connected Jira account is missing {labels} {permission_word} in project {project_key}.",
                          f"Grant the connected Jira account {labels} {permission_word} in project {project_key}.")
     return condition("jira-write-permissions", name, "ready",
-                     f"The connected Jira account can edit and transition issues in project {project_key}.")
+                     f"The connected Jira account can edit, transition and comment on issues in project {project_key}.")
 
 
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,

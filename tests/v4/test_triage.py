@@ -74,7 +74,7 @@ def test_done_dependents_do_not_make_triage_alert_critical(client, ctx, monkeypa
     claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-72", "account": "codex-01", "step": "triage"},
                         headers=headers).json()
     sent = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link: sent.append(
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link, **kwargs: sent.append(
         (severity, title, detail, link)) or ["fake"])
 
     response = client.post("/v1/notify/triage", json={"run_id": claim["run_id"], "fence": claim["fence"],
@@ -116,7 +116,7 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
     monkeypatch.setattr(triage, "Git", lambda *args, **kwargs: checkout)
     monkeypatch.setattr(triage, "get_adapter", lambda _provider: adapter)
     alerts = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link: alerts.append(
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail, link, **kwargs: alerts.append(
         (severity, title, detail, link)) or ["fake"])
     claimed = Claimed(run_id=claim["run_id"], fence=claim["fence"], run_token=claim["run_token"],
                       account="codex-01", provider="codex", model=claim["model"], effort=claim["effort"],

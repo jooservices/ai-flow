@@ -7,6 +7,7 @@
   aiflow4 canary record-rollback ...      record a canary rollback in the registry and Jira
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
+  aiflow4 notify --severity S --title T --detail D   deliver through saved notification channels
   aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
@@ -183,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--measurements", required=True)
     pp.add_argument("--minimum-runs", type=int, default=5)
     canary_sub.add_parser("retry-tickets")
+    pnotify = sub.add_parser("notify", help="send a system alert using saved notification channels")
+    pnotify.add_argument("--severity", choices=("info", "warning", "critical"), required=True)
+    pnotify.add_argument("--title", required=True)
+    pnotify.add_argument("--detail", default="")
+    pnotify.add_argument("--link", default="")
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -287,6 +293,16 @@ def main(argv: list[str] | None = None) -> int:
         ctx = build_ctx(s)
         ctx.db.migrate()
         run_loops(ctx)
+        return 0
+    if a.cmd == "notify":
+        from types import SimpleNamespace
+        from .control.db import DB
+        from .control import notify
+        db = DB(s.database_url, max_size=2)
+        try:
+            notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
+        finally:
+            db.close()
         return 0
     if a.cmd == "canary":
         from datetime import datetime, timezone

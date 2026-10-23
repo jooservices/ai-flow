@@ -56,7 +56,9 @@ def _deliver(ctx, project: str, scope: str, subject: str, result: dict[str, Any]
     title = f"{label} closed — study case v{result['version']}" if scope == "project" else \
         f"{label} completed — study case v{result['version']}"
     try:
-        sent = notify.send("info", title, result["markdown"], f"/v1/projects/{project}/study-cases")
+        sent = notify.send("info", title, result["markdown"], "/knowledge", ctx=ctx,
+                           alert_kind="daily_summary", project=project, ticket=f"{project} project report",
+                           needed="Review the completed project report and study case.")
     except Exception as exc:  # noqa: BLE001
         log.warning("project report notification failed for %s: %s", project, exc)
         sent = []

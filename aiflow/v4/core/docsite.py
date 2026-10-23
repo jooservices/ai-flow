@@ -77,6 +77,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderSystemCheck": ("system-check",),
+    "loadSystemCheck": ("system-check",),
+    "runSystemCheck": ("system-check",),
     "renderNotifications": ("notifications",),
     "renderProjects": ("projects",),
     "addProjectRepository": ("projects",),

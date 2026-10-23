@@ -499,7 +499,8 @@ def test_system_check_screen_and_clean_install_acceptance_include_results():
     assert "Ready" in page and "Fixed automatically" in page and "Needs an action" in page
     assert "Not possible on this machine" in page and "/v1/support-bundle" in page
     assert "esc(c.name || c.id) + ' — ' + esc(c.action || c.detail)" in page
-    run_handler = page.split("else if (act === 'system-check-run') {", 1)[1].split("\n  else if", 1)[0]
+    assert "else if (act === 'system-check-run') runSystemCheck();" in page
+    run_handler = page.split("function runSystemCheck() {", 1)[1].split("\n}\n", 1)[0]
     assert "fetch('/v1/system-check/run'" in run_handler
     assert "fetch('/v1/system-check', { cache: 'no-store' })" in run_handler
     assert "S.systemCheck = d" in run_handler

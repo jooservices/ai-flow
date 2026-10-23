@@ -952,6 +952,14 @@ function loadSystemCheck() {
     .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; if (S.view === 'system-check') renderSystemCheck(); })
     .catch(function (e) { S.systemCheckError = String(e.message || e); if (S.view === 'system-check') renderSystemCheck(); });
 }
+function runSystemCheck() {
+  S.systemCheckBusy = true; renderSystemCheck();
+  fetch('/v1/system-check/run', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
+    .then(function () { return fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); }); })
+    .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
+    .catch(function (err) { S.systemCheckError = String(err.message || err); })
+    .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });
+}
 function renderSystemCheck() {
   var root = $('#view-system-check'); if (!root) return;
   var data = S.systemCheck, h = '<section class="panel"><div class="panel-h"><h2>System check</h2>';
@@ -4435,14 +4443,7 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
-  else if (act === 'system-check-run') {
-    S.systemCheckBusy = true; renderSystemCheck();
-    fetch('/v1/system-check/run', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
-      .then(function () { return fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); }); })
-      .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
-      .catch(function (err) { S.systemCheckError = String(err.message || err); })
-      .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });
-  }
+  else if (act === 'system-check-run') runSystemCheck();
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);
   else if (act === 'hint-dismiss') { try { localStorage.setItem('aiflow4-hint-' + S.view, '1'); } catch (x) { /* storage off */ } renderHelp(); }
   else if (act === 'license-refresh') { S.licensing.data = null; S.licensing.error = ''; loadLicensing(); }

@@ -336,6 +336,21 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
             assert response.status_code == 200, f"{path} did not load for a signed-in user"
 
 
+def test_console_theme_preference_is_dark_by_default_and_saved_per_person(ctx):
+    client = make_client(ctx, gate=True)
+    assert client.get("/v1/console/preferences").status_code == 401
+
+    client.cookies.set(COOKIE_NAME, issue_session("alex@example.test", "owner", EXP, SECRET))
+    assert client.get("/v1/console/preferences").json() == {"theme": "dark"}
+    assert client.put("/v1/console/preferences", json={"theme": "light"}).json() == {"theme": "light"}
+    assert client.get("/v1/console/preferences").json() == {"theme": "light"}
+    assert ctx.db.one("SELECT theme FROM console_preferences WHERE email=%s", ("alex@example.test",))["theme"] == "light"
+    assert client.put("/v1/console/preferences", json={"theme": "system"}).status_code == 400
+
+    client.cookies.set(COOKIE_NAME, issue_session("blair@example.test", "owner", EXP, SECRET))
+    assert client.get("/v1/console/preferences").json() == {"theme": "dark"}
+
+
 def test_gate_lets_node_tokens_through_on_token_routes(ctx):
     client = make_client(ctx, gate=True)
     assert client.get("/v1/work/candidates", params={"account": "claude-01"}).status_code == 401

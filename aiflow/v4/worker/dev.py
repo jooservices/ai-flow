@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
 from ..core.text import slug
-from ..core.toolchains import parse_missing_requirements
+from ..core.toolchains import has_missing_marker, parse_missing_requirements
 from .client import Conflict, ControlClient
 from .gitops import Git
 from .notes import note, project_env
@@ -89,6 +89,8 @@ class Heartbeat(threading.Thread):
 def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "") -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "dev.md").read_text(encoding="utf-8")
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
+    if c.project.get("containers"):
+        checks += "\n  - Docker commands go through the run's rootless, worktree-confined runtime"
     t = c.ticket
     rework = ""
     if c.findings:
@@ -271,10 +273,16 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        res = adapter.run(spec, on_progress, stop=hb.lost)
+        if project.get("containers"):
+            from .containers import ContainerRuntime
+            with ContainerRuntime(spec, run_as):
+                res = adapter.run(spec, on_progress, stop=hb.lost)
+        else:
+            res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
                       details={"verdict": res.verdict, "permission_denials": res.permission_denials,
+                               "verdict_reason": (res.verdict_reason or "")[:2000],
                                "exit_code": res.exit_code, "duration_s": int(res.duration_s), "log": res.log_path})
         if hb.lost.is_set():
             raise LeaseLost()
@@ -292,6 +300,21 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("transition", to="To Do")
             return result
         missing = parse_missing_requirements(res.verdict_reason) if res.verdict == "BLOCKED" else []
+        machine = c.machine_tools or {}
+        available_tools = set(machine.get("available") or {})
+        available_services = set(machine.get("services") or [])
+        missing = [name for name in missing if name not in available_tools and name not in available_services]
+        if res.verdict == "BLOCKED" and has_missing_marker(res.verdict_reason) and not missing:
+            # A marker containing an unknown name, or a requirement the heartbeat said was present, is a normal
+            # failure. Keep the AI's exact reason on the run and return the ticket to the ordinary retry path.
+            reason = f"unaccepted missing requirement report: {res.verdict_reason}"[:1000]
+            result.update(outcome="failed", summary=reason)
+            jira("comment", body=note(c, "check could not run", what="The run ended without a change AI Flow can push",
+                                      why=reason[:600], result=(res.final_text or summary)[:600],
+                                      next_="Back to To Do; the next run retries after a short wait",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
         if missing:
             # Record the class through the same fenced path as every other developer stop. The run result below
             # still carries all missing requirements so the normal tool-wait path is preserved.

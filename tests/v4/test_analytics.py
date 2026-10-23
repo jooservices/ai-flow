@@ -114,6 +114,26 @@ def test_no_runs_gives_no_rows(client):
     assert client.get("/v1/analytics/daily", params={"days": 14}).json()["rows"] == []
 
 
+def test_daily_usage_groups_real_tokens_and_cost_by_provider_and_utc_day(client, ctx):
+    add_run(ctx.db, back=0, account="claude-01", tokens_in=100, tokens_out=25, cost=.02)
+    now = day(0)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+               " VALUES (%s,'TESTWP-2','TESTWP','verify','codex-01','codex','node1',1,'finished','done',%s,%s,300,75,.03)",
+               (str(uuid.uuid4()), now, now + timedelta(seconds=60)))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,ended_at,tokens_in,tokens_out,cost_usd)"
+               " VALUES (%s,'TESTWP-3','TESTWP','qa','reviewer-console','human','control',1,'finished','done',%s,%s,90,10,.01)",
+               (str(uuid.uuid4()), now, now + timedelta(seconds=60)))
+    rows = client.get("/v1/analytics/usage/daily", params={"days": 1}).json()["rows"]
+    by_provider = {row["key"]: row for row in rows}
+    assert set(by_provider) == {"claude", "codex"}
+    assert by_provider["claude"]["day"] == day(0).date().isoformat()
+    assert (by_provider["claude"]["tokens"], by_provider["claude"]["runs"], by_provider["claude"]["cost_usd"]) == (125, 1, .02)
+    assert (by_provider["codex"]["tokens"], by_provider["codex"]["runs"], by_provider["codex"]["cost_usd"]) == (375, 1, .03)
+    assert client.get("/v1/analytics/usage/daily", params={"days": 0}).status_code == 422
+
+
 def test_delivery_view_has_analytics_panel_with_table_and_inline_svg_chart():
     page = PAGE.read_text()
     assert "/v1/analytics/daily?days=' + ANALYTICS_DAYS" in page and "ANALYTICS_DAYS = 14" in page

@@ -23,7 +23,8 @@ from urllib.parse import quote
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
+                               tools_for_stacks)
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -38,7 +39,10 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],
          "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
-         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"]}
+         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"],
+         "gitleaks": ["gitleaks", "version"],
+         "xdebug": ["php", "-r", "echo extension_loaded('xdebug') ? 'Xdebug ' . phpversion('xdebug') : 'missing';"],
+         "cosign": ["cosign", "version"], "podman": ["podman", "--version"]}
 REPORTED_TOOLS = tools_for_stacks(STACK_TOOLS)
 SIGN_IN_COMMANDS = {
     "claude": ["claude", "auth", "login"],
@@ -101,6 +105,10 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
     """One version line per tool, or `missing`; names default to the node tools and every stack tool."""
     out = {}
     for name in names if names is not None else REPORTED_TOOLS:
+        if name == CONTAINER_RUNTIME_TOOL:
+            from ..worker.containers import safe_container_runtime_version
+            out[name] = safe_container_runtime_version()
+            continue
         cmd = TOOLS.get(name)
         if not cmd:
             out[name] = "missing"
@@ -740,6 +748,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     service_names: list[str] = []
     service_at = 0.0
     service_lock = threading.Lock()
+    container_cleanup_thread: threading.Thread | None = None
+    container_cleanup_at = 0.0
     sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
     probe_thread: threading.Thread | None = None
     probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
@@ -773,7 +783,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),
                              "project_stacks": desired.get("project_stacks", {}),
-                             "versions": desired.get("versions", {})}
+                             "versions": desired.get("versions", {}),
+                             "requested_tools": desired.get("tool_repairs", [])}
             signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
             if signature != toolchain_signature and (toolchain_thread is None or not toolchain_thread.is_alive()):
                 from .operations import prepare_project_toolchains
@@ -782,7 +793,11 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
 
                 def prepare(request=stack_request):
                     try:
-                        result = prepare_project_toolchains(request["project_stacks"], request["versions"])
+                        if request["requested_tools"]:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                                request["requested_tools"])
+                        else:
+                            result = prepare_project_toolchains(request["project_stacks"], request["versions"])
                         with toolchain_lock:
                             toolchain_result.clear()
                             toolchain_result.update(result)
@@ -797,9 +812,13 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 # so tools fixed by hand or by repair are reported again.
                 with toolchain_lock:
                     prepared_tools = toolchain_result.pop("tools", None)
+                    request_gaps = toolchain_result.pop("request_gaps", [])
                 if isinstance(prepared_tools, dict) and prepared_tools:
                     tools.update({str(k): str(v) for k, v in prepared_tools.items()})
                     tools_at = time.time()
+                if request_gaps:
+                    # A failed install is retried at the next heartbeat while the control plane still requests it.
+                    toolchain_signature = ""
             wanted = sorted({str(s) for services in (desired.get("project_services") or {}).values()
                              for s in services})
             if wanted != service_names:
@@ -854,6 +873,15 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     clean_scratch()
                     clean_worktrees(api, name)
                     sweep_test_databases()
+                    if (tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
+                            and time.time() - container_cleanup_at >= 24 * 60 * 60
+                            and (container_cleanup_thread is None or not container_cleanup_thread.is_alive())):
+                        from ..worker.containers import prune_image_cache
+
+                        container_cleanup_at = time.time()
+                        container_cleanup_thread = threading.Thread(
+                            target=prune_image_cache, name=f"aiflow4-container-prune-{name}", daemon=True)
+                        container_cleanup_thread.start()
                 if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
                     self_update(api, desired.get("release", ""), name)
             except Exception as e:  # noqa: BLE001

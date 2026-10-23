@@ -276,7 +276,7 @@ def test_machines_policy_calls_and_heartbeats_work_with_sign_in_on(fresh):
 
 # --- AC3: the deploy and canary scripts with sign-in on ---------------------------------------------------------------
 class MockControl:
-    """A control endpoint with sign-in on: /healthz and /cc are open, /v1/state needs the owner token."""
+    """A control endpoint with sign-in on: /healthz and /cc are open; deploy registry reads need the owner token."""
 
     def __init__(self, token):
         self.token, self.requests = token, []
@@ -286,9 +286,11 @@ class MockControl:
             def do_GET(self):  # noqa: N802
                 auth = self.headers.get("Authorization", "")
                 mock.requests.append((self.path, auth))
-                if self.path == "/v1/state" and auth != f"Bearer {mock.token}":
+                if self.path == "/v1/state":
                     code, body = 401, b'{"detail":"sign-in required"}'
-                elif self.path == "/v1/state":
+                elif self.path == "/v1/deploy/state" and auth != f"Bearer {mock.token}":
+                    code, body = 401, b'{"detail":"deploy authorization required"}'
+                elif self.path == "/v1/deploy/state":
                     code, body = 200, json.dumps({"nodes": [{"name": "node1", "status": "online"}]}).encode()
                 else:
                     code, body = 200, b"ok"
@@ -308,8 +310,8 @@ class MockControl:
         self.server.shutdown()
         self.server.server_close()
 
-    def state_auth(self):
-        return [auth for path, auth in self.requests if path == "/v1/state"]
+    def deploy_state_auth(self):
+        return [auth for path, auth in self.requests if path == "/v1/deploy/state"]
 
 
 def run_promotion(tmp_path, script, env_file, control, previous="v4.1.0", target="v4.2.0"):
@@ -345,7 +347,8 @@ def test_deploy_and_canary_scripts_read_the_state_with_the_owner_token_when_sign
         done, calls = run_promotion(tmp_path, script, env_file, control)
         assert done.returncode == 0, done.stdout + done.stderr
         assert "deployed" in done.stdout and "rolling back" not in done.stdout, done.stdout
-        assert control.state_auth() and set(control.state_auth()) == {f"Bearer {token}"}  # every read carried the token
+        assert control.deploy_state_auth() and set(control.deploy_state_auth()) == {f"Bearer {token}"}
+        assert all(path != "/v1/state" for path, _ in control.requests)  # scripts use the protected deploy route
         assert [c for c in calls if c.startswith(f"{deploy} ")][0].endswith("v4.2.0")
         assert not [c for c in calls if c.endswith("v4.1.0") and c.startswith(deploy)]  # no rollback
         assert token not in done.stdout + done.stderr  # the token is never printed

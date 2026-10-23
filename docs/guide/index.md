@@ -10,9 +10,8 @@ is shown at the bottom of each page and in the console footer.
 
 | You are | Start here |
 |---|---|
-| A Super Administrator | [User guide: Super Administrator](user/super_admin.md) and the [administrator guide](admin/install.md) |
-| An Owner | [User guide: Owner](user/owner.md) |
-| A Lead | [User guide: Lead](user/lead.md) |
+| An Administrator (formerly Super Administrator or Owner) | [User guide: Administrator](user/administrator.md) and the [administrator guide](admin/install.md) |
+| A Product owner, Delivery, Team Lead, SA, BA, Business, Reviewer or Stakeholder | [Product owner](user/product_owner.md), [Delivery](user/delivery.md), [Team Lead](user/team_lead.md), [SA](user/sa.md), [BA](user/ba.md), [Business](user/business.md), [Reviewer](user/reviewer.md), [Stakeholder](user/stakeholder.md) |
 | An operator with an alert | [Runbooks](runbooks/index.md) |
 | A developer integrating | [API reference](reference/api.md) |
 

@@ -1,12 +1,10 @@
 # Console login
 
-People sign in to Command Center with an email and a password. Roles map to permission identifiers in
-`ROLE_PERMISSIONS` in `control/console_auth.py`. The session endpoint returns that permission list, and the UI
-shows each control when the session grants its permission; the API independently checks the same map before
-accepting protected actions. `super_admin` has every permission, including integration, project, node and Knowledge
-management. `owner` has those explicit management grants too, while `lead` can read the console, node operation
-history and Knowledge resources without management controls. To change what a role sees and can do, update its
-permissions in `ROLE_PERMISSIONS`.
+People sign in to Command Center with an email and a password. Their assigned roles map to permissions in
+`ROLE_PERMISSIONS` in `control/console_auth.py`; multiple roles combine their grants. The session endpoint returns
+the effective permission list, and the UI builds its menu from that list. The API independently checks the same
+table for direct view URLs and protected actions. See [Role-based console views](role-based-views.md) for the role
+table, landing page priority, people management and view-as behavior.
 
 ## Installation turns it on
 
@@ -17,7 +15,7 @@ permissions in `ROLE_PERMISSIONS`.
   `/etc/aiflow/secrets/control/aiflow4.env` (an owner's explicit login setting `0` is kept); the signing key
   `AIFLOW4_CONSOLE_SESSION_SECRET` is generated there too;
 - in its `admin` step runs `aiflow4 console-user seed --role super_admin` from the release image, after the
-  migrations and before the deploy. The generated password is written once to
+  migrations and before the deploy. The installed account is shown as Administrator. The generated password is written once to
   `/etc/aiflow/secrets/console/super-admin-password` (0600) and is never printed;
 - remembers the email in `/etc/aiflow/control.env` (`AIFLOW4_CONSOLE_ADMIN_EMAIL`), so later runs and upgrades need
   no `--admin-email` and change nothing for an existing user.
@@ -29,8 +27,9 @@ installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cook
 
 ## What the gate does
 
-- Console pages (`/cc`, `/delivery`, `/business`, ...) without a session redirect to `/login?next=...`.
-- Every other path, including every console read API, answers 401 without a session.
+- Console pages (`/cc`, `/board`, `/delivery`, `/business`, ...) without a session redirect to `/login?next=...`.
+- A signed-in person who lacks a view permission receives a clear 403 page; a forbidden API call receives 403 and is recorded.
+- Unauthenticated API paths answer 401 without a session.
 - A request with an `Authorization` header passes only to routes that verify a bearer token themselves: a
   dependency or handler with an `authorization` header parameter (nodes, workers, reviewer, owner, release files,
   `POST /v1/policy/decide`) or a handler marked `@checks_bearer` (the owner-token Jira routes). The route still
@@ -47,10 +46,10 @@ installer sets `AIFLOW4_PUBLIC_URL` to the public `https://` address so the cook
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |
-| `GET /v1/console/session` | the signed-in user, role and permission identifiers from `ROLE_PERMISSIONS` (including `*` for every permission) |
+| `GET /v1/console/session` | the signed-in user, assigned roles, effective permissions, role options and sign-in landing page |
 
 Because the cookie is Strict, a console page reached from another site arrives without it; the sign-in page then
-asks `/v1/auth/me` (a same-site request that carries the cookie) and continues to `next` without a new sign-in.
+asks `/v1/auth/me` (a same-site request that carries the cookie) and continues to the user's landing page without a new sign-in.
 
 ## Sign-in protection
 
@@ -74,7 +73,10 @@ asks `/v1/auth/me` (a same-site request that carries the cookie) and continues t
 ## Users
 
 Passwords are stored only as salted scrypt hashes (`hashlib.scrypt`, no new dependency) in the table
-`console_users` (migration `009_console_users.sql`).
+`console_users` (migrations `009_console_users.sql` and `011_console_role_views.sql`). Administrators add and
+manage people from the **Users and roles** view. Adding a person shows a generated one-time password once; role,
+project and account changes are audited. The last active Administrator cannot lose the Administrator role or be
+disabled.
 
 ```sh
 aiflow4 console-user seed --email you@example.com --role super_admin --password-file /root/you.pw

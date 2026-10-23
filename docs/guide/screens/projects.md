@@ -1,6 +1,6 @@
 # Projects
 
-**Assumes:** you are signed in with the `projects.manage` permission (Owner or Super Administrator) to change
+**Assumes:** you are signed in with the `projects.manage` permission (Administrator) to change
 projects; other roles can read. Jira and GitHub are connected on [Integrations](integrations.md).
 
 Projects (`/projects`) lists the Jira projects AI Flow works on.

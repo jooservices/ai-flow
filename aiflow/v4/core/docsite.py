@@ -86,6 +86,19 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "hintSeen": None,
     "renderHelp": None,
     "showView": None,
+    "setView": None,
+    "viewOf": None,
+    "viewAllowed": None,
+    "syncMenuVisibility": None,
+    "applyRoleNavigation": None,
+    "pollConsoleSession": None,
+    "adminRequest": ("users",),
+    "projectChoices": ("users", "projects"),
+    "pollServices": ("machines", "cc"),
+    "loadUsers": ("users",),
+    "roleChecks": ("users",),
+    "reviewByRole": ("review",),
+    "submitReview": ("review",),
 }
 
 # These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
@@ -95,6 +108,13 @@ SCREEN_SHARED_UI_PATTERNS = (
     re.compile(r"^\s*\.firstuse\{"),
     re.compile(r'\bid="(?:help-link|firstuse)"'),
     re.compile(r"\bhint-dismiss\b"),
+    # The role-based menu: which view each permission opens, the tabs and the "view as" switch. It shows or hides
+    # every screen, so each screen page says which roles can open it.
+    re.compile(r"role-loading|\.tab-divider|view-as-switch|consoleUser|userAdmin:|autonomy: \{ data"),
+    re.compile(r"\b(?:VIEW_PERMISSION|VIEW_PATH|VIEW_GROUPS)\b|^\s+(?:lead|review|machines|projects|backup): '"),
+    re.compile(r"^\s+\{ view: '[a-z]+', label: '"),
+    re.compile(r"editing: '', temporaryPassword|^\s+\['machines', 'users'|// Visibility reads the effective"),
+    re.compile(r"ROLE_VIEW_LABELS|^\s+'view\.[a-z_]+': '"),
 )
 
 # View-specific navigation, state and event branches live outside the section/render functions. Infer their
@@ -149,8 +169,8 @@ def console_views(page: Path = UI) -> list[str]:
 
 
 def role_names() -> list[str]:
-    from ..control.console_auth import ROLE_PERMISSIONS
-    return sorted(ROLE_PERMISSIONS)
+    from ..control.console_auth import CANONICAL_ROLES
+    return sorted(CANONICAL_ROLES)
 
 
 def _mounted_control_app():
@@ -931,6 +951,12 @@ def changed_views(base: str) -> set[str]:
                 line_views |= all_views
             if any(pattern.search(changed_line) for pattern in SCREEN_SHARED_UI_PATTERNS):
                 line_views |= all_views
+            if "rh-form" in changed_line:
+                line_views.add("machines")
+            if "A signed-in person whose roles grant review.actions" in changed_line:
+                line_views.add("review")
+            if not changed_line.strip():
+                continue
             if not unmapped_renderer:
                 line_views |= specific_views
             if line_views:

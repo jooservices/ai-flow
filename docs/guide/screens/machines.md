@@ -1,6 +1,6 @@
 # Machines and AI
 
-**Assumes:** you are signed in with the `node.operations.read` permission and at least one node has sent a heartbeat.
+**Assumes:** you are signed in as an Administrator or SA (the roles that can open Machines and AI) and at least one node has sent a heartbeat.
 
 Machines and AI (`/machines`) lists the machines that run AI work and the AI accounts on each of them.
 

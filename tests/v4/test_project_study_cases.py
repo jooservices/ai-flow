@@ -19,7 +19,7 @@ def test_manual_close_saves_and_emails_a_searchable_versioned_report(client, ctx
     ctx.db.run("INSERT INTO incidents (severity,kind,subject,title,opened_at)"
                " VALUES ('warning','ticket_stuck','TESTWP-601','Repeated failed run',%s)", (done,))
     sent = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="":
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="", **kwargs:
                         sent.append((severity, title, detail, link)) or ["email"])
 
     response = client.post("/v1/projects/TESTWP/close", json={"actor": "lead"})
@@ -35,7 +35,7 @@ def test_manual_close_saves_and_emails_a_searchable_versioned_report(client, ctx
     assert report["lessons"] and "rework" in report["lessons"][0]
     assert "## Lessons" in data["markdown"] and "## Tokens and cost" in data["markdown"]
     assert sent[0][0] == "info" and "TESTWP" in sent[0][1] and data["markdown"] in sent[0][2]
-    assert sent[0][3] == "/v1/projects/TESTWP/study-cases"
+    assert sent[0][3] == "/knowledge"
 
     state = client.get("/v1/state").json()
     project = next(row for row in state["projects"] if row["key"] == "TESTWP")
@@ -78,7 +78,7 @@ def test_done_epic_generates_an_epic_report_and_email_once(ctx, monkeypatch):
     ctx.jira.search = lambda _jql: [issue]
     ctx.jira.normalize = Jira.normalize
     sent = []
-    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="":
+    monkeypatch.setattr(notify, "send", lambda severity, title, detail="", link="", **kwargs:
                         sent.append((severity, title, detail)) or ["email"])
 
     assert jira_sync(ctx, full=True) == 1

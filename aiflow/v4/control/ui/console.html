@@ -412,6 +412,11 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .prose{white-space:pre-wrap; font-size:13px; line-height:1.55; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:9px; padding:10px 12px; max-height:340px; overflow:auto}
 .lead-controls{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.lead-controls label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .lead-controls select{min-width:210px;min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.notify-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.notify-channel{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--surface)}
+.notify-meta{font-size:12px;color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.notify-routing{display:grid;grid-template-columns:minmax(180px,1fr) repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:center}
+.notify-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.notify-form-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.notify-form-grid input,.notify-form-grid select{min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--fg)}
+.notify-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.notify-state{white-space:pre-wrap;font-size:12px;color:var(--muted);margin-top:8px}
 .lead-tablebox{width:100%;overflow:auto;border:1px solid var(--line);border-radius:9px}.lead-table{width:100%;border-collapse:collapse;min-width:920px}.lead-table th,.lead-table td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft)}
 .lead-table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--surface-2);white-space:nowrap}.lead-table ul{margin:0;padding-left:18px}.lead-table li{margin:2px 0}.lead-gap{color:var(--crit);font-weight:600}.lead-ac{white-space:normal;min-width:300px}.lead-tools{display:flex;gap:8px;flex-wrap:wrap}
 .empty{font-size:13px; color:var(--muted); padding:8px 0}
@@ -493,6 +498,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-backup" aria-controls="view-backup" aria-selected="false" data-act="view" data-menu-view data-view="backup">Backup &amp; Restore</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
+      <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
     </div>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
@@ -532,6 +538,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
+  <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
 </main>
 <footer class="footer" id="footer">
   <div class="wrap">
@@ -610,6 +617,8 @@ var S = {
     repositoryEditor: null,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
+  notifications: { data: null, error: '', notice: '', busy: false, editId: null,
+    form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
   machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
     addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
@@ -629,6 +638,7 @@ var S = {
   integ: { jira: null, error: '', loading: false, busy: false, ownerToken: '', notice: '' }
 };
 function viewOf(path) {
+  if (path.indexOf('/notifications') === 0) return 'notifications';
   if (path.indexOf('/work') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
   if (path.indexOf('/projects') === 0) return 'projects';
@@ -663,7 +673,8 @@ var MENU_ITEMS = [
   { view: 'knowledge', label: 'Knowledge', permission: 'knowledge.read' },
   { view: 'backup', label: 'Backup & Restore', permission: 'backup.read' },
   { view: 'integrations', label: 'Integrations', permission: 'integrations.manage' },
-  { view: 'projects', label: 'Projects', permission: 'projects.manage' }
+  { view: 'projects', label: 'Projects', permission: 'projects.manage' },
+  { view: 'notifications', label: 'Notifications', permission: 'notifications.manage' }
 ];
 // Visibility follows the signed-in user's permissions (console_auth.py), the same ones the API enforces.
 function viewAllowed(view, role) {
@@ -808,6 +819,7 @@ function pollConsoleSession() {
     if (consoleReader() && !S.autonomy.data && !S.autonomy.busy) loadMasterAutonomy(false);
     if (S.drawer && S.drawer.kind === 'node' && consoleCan('console.read')) loadNodeOperations(S.drawer.id);
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
+    if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
   }).catch(function () { S.consoleUser = null; syncMenuVisibility(); render(); })
@@ -2346,6 +2358,14 @@ function renderJiraIntegrations() {
   return h;
 }
 function loadIntegrations() { loadGitHubIntegrations(); loadJiraIntegrations(); }
+function loadNotifications() {
+  if (!consoleCan('notifications.manage')) return;
+  var state = S.notifications; state.busy = true; state.error = ''; renderNotifications();
+  fetch('/v1/notifications', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.data = d; state.error = ''; if (!state.preferencesDraft || !state.preferencesDirty) state.preferencesDraft = JSON.parse(JSON.stringify(d.preferences)); })
+    .catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderNotifications(); });
+}
 function renderIntegrations() {
   var root = $('#view-integrations'); if (!root) return;
   root.innerHTML = renderGitHubIntegrations() + renderJiraIntegrations();
@@ -3391,6 +3411,142 @@ function renderProjects() {
   root.innerHTML = h;
 }
 
+function notificationField(field, label, type, placeholder) {
+  var value = S.notifications.form[field];
+  return '<label>' + esc(label) + '<input type="' + esc(type || 'text') + '" data-notify-field="' + esc(field) + '" value="' +
+    esc(value || '') + '" placeholder="' + esc(placeholder || '') + '" autocomplete="' +
+    (type === 'password' ? 'new-password' : 'off') + '"></label>';
+}
+function renderNotifications() {
+  var root = $('#view-notifications'); if (!root) return;
+  var state = S.notifications, data = state.data || {}, channels = data.channels || [], prefs = data.preferences || { routes: {} };
+  prefs = state.preferencesDraft || prefs;
+  if (!consoleCan('notifications.manage')) { root.innerHTML = '<section class="panel"><p>Notifications are available to administrators.</p></section>'; return; }
+  var kindLabels = { email: 'Email', telegram: 'Telegram', slack: 'Slack', teams: 'Microsoft Teams', webhook: 'Generic webhook' };
+  var h = '<section class="panel"><div class="panel-h"><h2>Notifications</h2><button class="btn sm" data-act="notifications-refresh"' +
+    (state.busy ? ' disabled' : '') + '>Refresh</button></div><p class="muted">Configure stored delivery channels, choose which alerts use them, and review recent results. Saved credentials stay hidden.</p>';
+  if (state.error) h += '<div class="alert"><span class="a-detail">' + esc(state.error) + '</span></div>';
+  if (state.notice) h += '<div class="notify-state">' + esc(state.notice) + '</div>';
+  h += '<h3>Channels</h3><div class="notify-grid">';
+  channels.forEach(function (c) {
+    var last = c.last_delivery || {}, destination = '';
+    if (c.kind === 'email') destination = (c.config.from || '') + ' → ' + (c.config.to || '') + ' · ' + (c.config.host || '') + ':' + (c.config.port || '');
+    else if (c.kind === 'telegram') destination = 'Chat ' + (c.config.chat_id || '');
+    else destination = 'Endpoint saved and hidden';
+    var secretCount = Object.keys(c.secrets || {}).filter(function (k) { return c.secrets[k]; }).length;
+    h += '<article class="notify-channel"><div class="panel-h"><h3>' + esc(c.name) + '</h3><span class="pill" data-tone="' +
+      (c.enabled ? 'ok' : 'muted') + '">' + (c.enabled ? 'Enabled' : 'Disabled') + '</span></div>' +
+      '<div class="notify-meta">' + esc(kindLabels[c.kind] || c.kind) + ' · ' + esc(destination) + '<br>Credentials: ' +
+      (secretCount ? 'saved, hidden' : 'not set') + '<br>Last delivery: ' + esc(last.status || 'never') +
+      (last.at ? ' · ' + esc(when(last.at)) : '') + (last.error ? '<br>Result: ' + esc(last.error) : '') + '</div>' +
+      '<div class="notify-actions"><button class="btn sm" data-act="notification-test" data-id="' + c.id + '">Send test message</button>' +
+      '<button class="btn sm" data-act="notification-edit" data-id="' + c.id + '">Edit</button>' +
+      '<button class="btn sm" data-act="notification-toggle" data-id="' + c.id + '">' + (c.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '<button class="btn sm" data-act="notification-delete" data-id="' + c.id + '">Remove</button></div></article>';
+  });
+  if (!channels.length) h += '<div class="empty">No alert channels configured yet.</div>';
+  h += '</div><h3>' + (state.editId ? 'Edit channel' : 'Add a channel') + '</h3><form id="notification-channel-form" class="panel">' +
+    '<div class="notify-form-grid">' + notificationField('name', 'Channel name', 'text', 'Operations email') +
+    '<label>Channel kind<select id="notification-kind" data-notify-kind-select' + (state.editId ? ' disabled' : '') + '>' + Object.keys(kindLabels).map(function (k) {
+      return '<option value="' + k + '"' + (state.form.kind === k ? ' selected' : '') + '>' + esc(kindLabels[k]) + '</option>';
+    }).join('') + '</select></label>';
+  var selectedKind = state.form.kind || 'email';
+  var fieldHtml = {
+    email: notificationField('host', 'SMTP or hosted sender host', 'text', 'smtp.example.com') +
+      notificationField('port', 'Port', 'number', '587') + notificationField('username', 'Username (optional)', 'text', '') +
+      notificationField('password', 'Password (leave blank to keep saved password)', 'password', 'Hidden after saving') +
+      notificationField('from', 'From address', 'email', 'aiflow@example.com') + notificationField('to', 'To address', 'email', 'owner@example.com') +
+      '<label>Connection security<select data-notify-field="tls_mode"><option value="starttls"' + (state.form.tls_mode !== 'ssl' && state.form.tls_mode !== 'none' ? ' selected' : '') + '>STARTTLS</option><option value="ssl"' + (state.form.tls_mode === 'ssl' ? ' selected' : '') + '>TLS (SSL)</option><option value="none"' + (state.form.tls_mode === 'none' ? ' selected' : '') + '>None</option></select></label>',
+    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Chat ID', 'text', '-100…'),
+    slack: notificationField('webhook_url', 'Slack incoming webhook URL', 'password', 'Hidden after saving'),
+    teams: notificationField('webhook_url', 'Microsoft Teams webhook URL', 'password', 'Hidden after saving'),
+    webhook: notificationField('url', 'Webhook URL', 'password', 'Hidden after saving') + notificationField('auth_token', 'Bearer token (optional)', 'password', 'Hidden after saving')
+  };
+  h += fieldHtml[selectedKind] || fieldHtml.email;
+  h += '</div><div class="notify-actions"><button class="btn primary" type="submit"' + (state.busy ? ' disabled' : '') + '>' +
+    (state.editId ? 'Save channel' : 'Add channel') + '</button>' + (state.editId ? '<button class="btn" type="button" data-act="notification-cancel">Cancel</button>' : '') + '</div></form>';
+  h += '<h3>Alert routing</h3><p class="muted">Quiet hours use UTC. Critical incidents still send during quiet hours so urgent failures reach an administrator.</p>';
+  h += '<div class="notify-routing"><strong>Alert kind</strong>' + channels.map(function (c) { return '<strong>' + esc(c.name) + '</strong>'; }).join('') + '</div>';
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) {
+    h += '<div class="notify-routing"><span>' + esc(data.alert_kinds[kind]) + '</span>' + channels.map(function (c) {
+      var checked = ((prefs.routes || {})[kind] || []).indexOf(c.id) >= 0;
+      return '<label><input type="checkbox" data-route-kind="' + esc(kind) + '" data-route-channel="' + c.id + '"' +
+        (checked ? ' checked' : '') + (!c.enabled ? ' disabled' : '') + '></label>';
+    }).join('') + '</div>';
+  });
+  if (!channels.length) h += '<div class="empty">Add a channel before setting alert routes.</div>';
+  h += '<div class="notify-actions"><label>Quiet hours start (UTC) <input type="time" id="notification-quiet-start" value="' + esc(prefs.quiet_start || '') + '"></label>' +
+    '<label>Quiet hours end (UTC) <input type="time" id="notification-quiet-end" value="' + esc(prefs.quiet_end || '') + '"></label>' +
+    '<button class="btn primary" data-act="notification-preferences-save">Save routing</button></div></section>';
+  h += '<section class="panel"><div class="panel-h"><h2>Recent deliveries</h2></div>';
+  var deliveries = data.deliveries || [];
+  if (!deliveries.length) h += '<div class="empty">No deliveries recorded.</div>';
+  deliveries.slice(0, 15).forEach(function (d) {
+    h += '<div class="alert"><span class="pill" data-tone="' + (d.status === 'sent' ? 'ok' : d.status === 'failed' ? 'crit' : 'warn') + '">' + esc(d.status) +
+      '</span><span class="a-title">' + esc(d.channel_name) + ' · ' + esc(d.title) + '</span><span class="a-detail">' +
+      esc(d.attempts + '/' + d.max_attempts + (d.last_error ? ' · ' + d.last_error : '')) + '</span></div>';
+  });
+  h += '</section><section class="panel"><div class="panel-h"><h2>Open delivery incidents</h2></div>';
+  var incidents = data.incidents || [];
+  if (!incidents.length) h += '<div class="empty">No open delivery incidents.</div>';
+  incidents.forEach(function (i) { h += '<div class="alert"><span class="pill" data-tone="crit">Critical</span><span class="a-title">' +
+    esc(i.title) + '</span><span class="a-detail">' + esc(i.detail) + '</span></div>'; });
+  root.innerHTML = h + '</section>';
+}
+function notificationConfigFromForm(form) {
+  var keys = { email: ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode'],
+    telegram: ['bot_token', 'chat_id'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
+  var config = {}; keys.forEach(function (key) { if (form[key] !== undefined) config[key] = form[key]; }); return config;
+}
+function notificationFormSubmit() {
+  var state = S.notifications, form = state.form;
+  if (!consoleCan('notifications.manage') || state.busy) return;
+  state.busy = true; state.error = ''; renderNotifications();
+  var payload = { name: form.name || '', kind: form.kind || 'email', enabled: form.enabled !== false,
+    config: notificationConfigFromForm(form) };
+  if (state.editId) payload.id = state.editId;
+  fetch('/v1/notifications/channels', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function () { state.editId = null; state.notice = 'Channel saved. Credentials remain hidden after saving.';
+      state.form = { kind: 'email', name: '', enabled: true }; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderNotifications(); });
+}
+function notificationPreferencesSubmit() {
+  var state = S.notifications, data = state.data || {}, routes = {};
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) { routes[kind] = (state.preferencesDraft.routes || {})[kind] || []; });
+  var start = state.preferencesDraft.quiet_start || '', end = state.preferencesDraft.quiet_end || '';
+  fetch('/v1/notifications/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ routes: routes, quiet_start: start, quiet_end: end }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.preferencesDraft = d.preferences; state.preferencesDirty = false; state.notice = 'Alert routing and quiet hours saved.'; state.error = ''; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); renderNotifications(); });
+}
+function notificationTest(id) {
+  var state = S.notifications; state.error = ''; state.notice = 'Sending test message…'; renderNotifications();
+  fetch('/v1/notifications/channels/' + encodeURIComponent(id) + '/test', { method: 'POST' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.notice = 'Test result: ' + d.result.status + (d.result.error ? ' (' + d.result.error + ')' : ''); loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); state.notice = ''; renderNotifications(); });
+}
+function notificationDelete(id) {
+  if (!window.confirm('Remove this channel and its saved credentials?')) return;
+  var state = S.notifications;
+  fetch('/v1/notifications/channels/' + encodeURIComponent(id), { method: 'DELETE' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function () { state.notice = 'Channel removed.'; loadNotifications(); })
+    .catch(function (e) { state.error = String(e.message || e); renderNotifications(); });
+}
+function captureNotificationPreferences() {
+  var state = S.notifications, data = state.data || {}, routes = {};
+  Object.keys(data.alert_kinds || {}).forEach(function (kind) {
+    routes[kind] = $$('[data-route-kind="' + kind + '"]:checked').map(function (box) { return Number(box.getAttribute('data-route-channel')); });
+  });
+  var start = $('#notification-quiet-start'), end = $('#notification-quiet-end');
+  state.preferencesDraft = { routes: routes, quiet_start: start ? start.value : '', quiet_end: end ? end.value : '', timezone: 'UTC' };
+  state.preferencesDirty = true;
+}
+
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   var roleLabels = { super_admin: 'Super Administrator', owner: 'Owner', lead: 'Lead' };
@@ -3471,6 +3627,7 @@ function render() {
   else if (S.view === 'backup') renderBackup();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
+  else if (S.view === 'notifications') renderNotifications();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
   tick();
@@ -3494,7 +3651,7 @@ function tick() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'machines', 'users', 'lead', 'business', 'review', 'stakeholder', 'knowledge', 'backup', 'integrations', 'projects', 'notifications'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
 }
@@ -3512,6 +3669,7 @@ function setView(v) {
   if (v === 'backup') loadBackups(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
+  if (v === 'notifications') loadNotifications();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -3526,6 +3684,22 @@ document.addEventListener('click', function (e) {
   if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
+  else if (act === 'notifications-refresh') loadNotifications();
+  else if (act === 'notification-test') notificationTest(el.getAttribute('data-id'));
+  else if (act === 'notification-preferences-save') notificationPreferencesSubmit();
+  else if (act === 'notification-edit') {
+    var editChannel = (S.notifications.data && S.notifications.data.channels || []).filter(function (c) { return String(c.id) === el.getAttribute('data-id'); })[0];
+    if (editChannel) { S.notifications.editId = editChannel.id; S.notifications.form = Object.assign({ enabled: editChannel.enabled }, editChannel.config, { name: editChannel.name, kind: editChannel.kind }); renderNotifications(); }
+  }
+  else if (act === 'notification-cancel') { S.notifications.editId = null; S.notifications.form = { kind: 'email', name: '', enabled: true }; S.notifications.error = ''; renderNotifications(); }
+  else if (act === 'notification-delete') notificationDelete(el.getAttribute('data-id'));
+  else if (act === 'notification-toggle') {
+    var toggleChannel = (S.notifications.data && S.notifications.data.channels || []).filter(function (c) { return String(c.id) === el.getAttribute('data-id'); })[0];
+    if (toggleChannel) fetch('/v1/notifications/channels', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: toggleChannel.id, name: toggleChannel.name, kind: toggleChannel.kind, enabled: !toggleChannel.enabled, config: {} }) })
+      .then(function (r) { return projectResponseError(r); }).then(function () { loadNotifications(); })
+      .catch(function (err) { S.notifications.error = String(err.message || err); renderNotifications(); });
+  }
   else if (act === 'machine-add-toggle') openMachineForm();
   else if (act === 'machine-join-create') submitMachineJoin();
   else if (act === 'machine-copy-join') copyMachineCommand();
@@ -3733,6 +3907,8 @@ function downloadBackupKey() {
   }).catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
 }
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
   if (e.target && e.target.id === 'work-project') {
     S.projectQuery = e.target.value; S.projectPickerOpen = true; renderProjectPickerOptions();
@@ -3768,6 +3944,13 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
+  if (e.target && e.target.matches('[data-notify-kind-select]')) {
+    S.notifications.form.kind = e.target.value;
+    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
+    renderNotifications();
+  }
+  if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
   if (e.target && e.target.matches('[data-backup-field]')) {
     var backupField = e.target.getAttribute('data-backup-field');
@@ -3883,6 +4066,7 @@ document.addEventListener('change', function (e) {
 document.addEventListener('submit', function (e) {
   if (e.target.id === 'cr-form') { e.preventDefault(); submitCR(); }
   if (e.target.id === 'node-join-form') { e.preventDefault(); submitNodeJoin(); }
+  if (e.target.id === 'notification-channel-form') { e.preventDefault(); notificationFormSubmit(); }
   if (e.target.id === 'rh-form') { e.preventDefault(); saveRoleHealth(); }
 });
 window.addEventListener('popstate', function () {
@@ -3905,6 +4089,7 @@ if (S.view === 'integrations') {
   if (githubResult === 'error') S.integrations.error = 'GitHub could not complete the connection. Return to Integrations and try again.';
   loadIntegrations();
 }
+if (S.view === 'notifications') loadNotifications();
 poll(); pollServices(); pollAnalytics(); pollConsoleSession(); pollReviews();
 setInterval(tick, 1000);
 })();

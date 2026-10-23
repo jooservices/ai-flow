@@ -121,7 +121,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
         usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else a["node"]),
+            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
             "tier": a["tier"], "roles": acc.roles,
             "machines": machines_view(db, acc, node_status, include_signin=include_signin),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,

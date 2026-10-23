@@ -235,6 +235,16 @@ console.log(machines.innerHTML);
     return result.stdout
 
 
+def render_account(account: dict) -> str:
+    driver = f"""
+S.data = {{nodes: [], accounts: [{json.dumps(account)}], active_runs: [], recent_runs: [], incidents: [], events: [],
+          totals: {{}}, versions: {{}}}};
+S.consoleUser = {json.dumps(console_session('owner'))};
+console.log(drawerAcc({json.dumps(account['id'])}));
+"""
+    return run_script(driver)
+
+
 def test_machines_screen_uses_assignment_state_and_shared_actions():
     account = {"id": "shared-01", "provider": "claude", "node": "node1", "shared": False,
                "shared_managed": True, "sign_in_pending": False, "status": "signed_out", "paused": False,
@@ -276,6 +286,43 @@ def test_machines_screen_uses_assignment_state_and_shared_actions():
     assert 'data-act="account-pause"' not in rendered_assignment
     assert 'data-act="account-edit"' not in rendered_assignment
     assert 'data-act="account-signin"' not in rendered_assignment
+
+
+def test_unassigned_shared_account_does_not_reappear_on_its_original_machine():
+    account = {"id": "claude-01", "provider": "claude", "node": "node1", "machines": [],
+               "shared": False, "shared_managed": False, "sign_in_pending": True, "status": "signed_out",
+               "paused": False, "session_limit": 1, "parallel": 1, "jobs": ["develop"]}
+    machine = {"name": "node1", "status": "online", "has_agent": True, "accepting_work": True,
+               "sessions_busy": 0, "slots_total": 4, "metrics": {}}
+
+    rendered = render_machines({"nodes": [machine], "accounts": [account]})
+
+    assert "No AI accounts on this machine." in rendered
+    assert "claude-01" not in rendered
+    assert 'data-act="account-signin"' not in rendered
+    assert 'data-act="account-remove"' not in rendered
+
+
+def test_unassigned_shared_account_has_a_confirmed_remove_action():
+    account = {"id": "new-account", "provider": "claude", "node": "", "machines": [],
+               "shared": False, "shared_managed": True, "status": "signed_out", "provider_status": "signed_out",
+               "paused": False, "session_limit": 2, "parallel": 2, "runs_active": 0, "jobs": [], "roles": [],
+               "tier": "middle", "explicit_only": False, "quota": {}, "quota_awareness": {}, "worker": {},
+               "recent_runs": []}
+    rendered = render_account(account)
+
+    assert 'data-act="acc-remove-all" data-account="new-account" data-count="0">Remove account</button>' in rendered
+    outcome = run_script("""
+var prompt = '';
+var request = null;
+window.confirm = function (text) { prompt = text; return true; };
+fetch = function (url, options) { request = {url: url, method: options.method}; return new Promise(function () {}); };
+removeAccountEverywhere('new-account', 0);
+console.log(JSON.stringify({prompt: prompt, request: request}));
+""")
+    result = json.loads(outcome)
+    assert "not enabled on any machine" in result["prompt"]
+    assert result["request"] == {"url": "/v1/shared-accounts/new-account?confirm=true", "method": "DELETE"}
 
 
 def render_integrations(user: dict, jira: dict | None = None) -> str:

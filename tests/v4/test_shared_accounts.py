@@ -351,6 +351,9 @@ def test_account_from_the_control_repo_can_be_shared_with_another_machine(client
     all_removed = client.delete("/v1/shared-accounts/claude-01", params={"confirm": "true"})
     assert all_removed.status_code == 200 and all_removed.json()["source_retained"] is True
     assert ctx.repo().account("claude-01").machines == []
+    detached = next(a for a in snapshot(ctx)["accounts"] if a["id"] == "claude-01")
+    assert detached["machines"] == []
+    assert detached["node"] == ""
 
 
 def test_free_machine_capacity_moves_shared_work_and_weighted_share(client, ctx):

@@ -754,7 +754,7 @@ function syncMenuVisibility() { applyRoleNavigation(); }
 function D() { return S.data || { nodes: [], accounts: [], active_runs: [], recent_runs: [], projects: [], tickets: [], incidents: [], events: [], totals: {}, versions: {} }; }
 function accountAssignedTo(a, node) {
   var machines = a && Array.isArray(a.machines) ? a.machines : [];
-  if (machines.length) return machines.some(function (machine) {
+  if (a && Array.isArray(a.machines)) return machines.some(function (machine) {
     return (typeof machine === 'string' ? machine : machine && machine.node) === node;
   });
   return !!a && a.node === node;
@@ -762,8 +762,8 @@ function accountAssignedTo(a, node) {
 function accountPendingOnMachine(a, node) {
   var machines = a && Array.isArray(a.machines) ? a.machines : [];
   var machine = machines.filter(function (item) { return item && typeof item === 'object' && item.node === node; })[0];
-  return !!(machine && (machine.sign_in_pending || machine.signed_in === false)) ||
-    !!(a && a.sign_in_pending && (a.node === node || !machine));
+  if (a && Array.isArray(a.machines)) return !!(machine && (machine.sign_in_pending || machine.signed_in === false));
+  return !!(a && a.sign_in_pending && a.node === node);
 }
 function since() { return (Date.now() - S.fetchedAt) / 1000; }
 function loadPrefs() {
@@ -1418,7 +1418,10 @@ function retryAccountSignin(account, node) {
   sharedAccountRequest('POST', '/v1/shared-accounts/' + encodeURIComponent(account) + '/machines/' + encodeURIComponent(node) + '/signin', null, 'New sign-in started on ' + node);
 }
 function removeAccountEverywhere(account, count) {
-  if (!window.confirm('Remove ' + account + ' from all ' + count + ' machines? Running sessions finish; no new ones start. Credentials stay on the machines until you sign out there.')) return;
+  var text = Number(count) > 0
+    ? 'Remove ' + account + ' from all ' + count + ' machines? Running sessions finish; no new ones start. Credentials stay on the machines until you sign out there.'
+    : 'Remove ' + account + '? It is not enabled on any machine. This removes the account from Command Center. Continue?';
+  if (!window.confirm(text)) return;
   sharedAccountRequest('DELETE', '/v1/shared-accounts/' + encodeURIComponent(account) + '?confirm=true', null, 'Account removed');
 }
 function accountMachinesSection(a) {
@@ -1445,7 +1448,8 @@ function accountMachinesSection(a) {
       b += '<div class="flexrow"><label for="sa-machine-' + esc(a.id) + '" class="small">Enable on</label> <select id="sa-machine-' + esc(a.id) + '">' + free.map(function (n) { return '<option>' + esc(n.name) + '</option>'; }).join('') + '</select> <button class="btn sm" data-act="acc-enable" data-account="' + esc(a.id) + '">Enable</button></div>';
     }
     b += '<div class="flexrow"><label for="sa-limit-' + esc(a.id) + '" class="small">Total sessions</label> <input id="sa-limit-' + esc(a.id) + '" type="number" min="1" max="50" value="' + a.session_limit + '" style="width:5em"> <button class="btn sm" data-act="acc-limit" data-account="' + esc(a.id) + '">Save</button>';
-    if (ms.length > 1) b += ' <button class="btn sm" data-act="acc-remove-all" data-account="' + esc(a.id) + '" data-count="' + ms.length + '">Remove from all machines</button>';
+    if (!ms.length && a.shared_managed) b += ' <button class="btn sm danger" data-act="acc-remove-all" data-account="' + esc(a.id) + '" data-count="0">Remove account</button>';
+    else if (ms.length > 1) b += ' <button class="btn sm" data-act="acc-remove-all" data-account="' + esc(a.id) + '" data-count="' + ms.length + '">Remove from all machines</button>';
     b += '</div>';
   }
   return b + '</div>';

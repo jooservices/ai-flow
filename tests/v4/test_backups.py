@@ -235,7 +235,7 @@ def test_real_postgres_tools_backup_restore_share_snapshot(ctx, db, test_databas
     if not shutil.which("pg_dump") or not shutil.which("pg_restore"):
         pytest.skip("PostgreSQL client tools are not installed")
     version_line = subprocess.run(["pg_dump", "--version"], capture_output=True, text=True, check=True).stdout
-    client_major = int(re.search(r"(\d+)", version_line.split(")")[-1]).group(1))
+    client_major = int(re.search(r"PostgreSQL\)?\s+(\d+)", version_line).group(1))
     with psycopg.connect(test_database_url) as probe:
         server_major = probe.info.server_version // 10000
     if client_major < server_major:  # pg_dump refuses to dump a server newer than itself

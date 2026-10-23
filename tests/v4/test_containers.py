@@ -48,7 +48,7 @@ def test_broker_builds_and_runs_through_rootless_podman_with_layer_limits(monkey
                                            runtime_dir=tmp_path, project_name="aiflow-test")
     assert code == 0 and "ok" in stdout
     commands = calls.read_text().splitlines()
-    assert commands[0].startswith("build --storage-opt size=2g -t sample .")
+    assert commands[0].startswith(f"build --storage-opt size=2g -t sample {worktree}")
     assert commands[1].startswith("run --label aiflow4.run=aiflow-test --storage-opt size=1g --rm --volume ")
 
 
@@ -94,11 +94,15 @@ volumes:
   vendor: {}
 """)
     monkeypatch.setattr(containers, "_active_containers", lambda: [])
+    monkeypatch.setattr(containers, "_volume_quota_supported", lambda: True)
     monkeypatch.setattr(containers, "_engine_identity", lambda: (os.getuid(), os.getgid(), str(tmp_path)))
     up, _, _ = containers._compose_command(["compose", "up", "-d"], worktree, worktree, tmp_path, "aiflow-run")
     assert up[-3:] == ["-p", "aiflow-run", "up", "-d"][-3:]
-    override = Path(up[up.index("-f", 2) + 1])
-    assert "size: 1g" in override.read_text()
+    file_flags = [index for index, item in enumerate(up) if item == "-f"]
+    override = Path(up[file_flags[-1] + 1])
+    override_data = __import__("yaml").safe_load(override.read_text())
+    assert override_data["services"]["composer"]["storage_opt"]["size"] == "1g"
+    assert override_data["volumes"]["vendor"]["driver_opts"]["o"] == "size=1g"
     run, _, _ = containers._compose_command(["compose", "run", "composer", "composer", "ci"],
                                              worktree, worktree, tmp_path, "aiflow-run")
     assert run[run.index("run") + 1:run.index("run") + 3] == ["--rm", "composer"]
@@ -153,6 +157,16 @@ def test_compose_cannot_escalate_or_mount_outside_worktree(tmp_path):
         data = __import__("yaml").safe_load(compose.read_text())
         with pytest.raises(containers.ContainerPolicyError):
             containers._validate_compose_document(data, compose, worktree, worktree)
+
+
+def test_compose_rejects_anonymous_unbounded_volumes(tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    compose = worktree / "compose.yaml"
+    compose.write_text("services:\n  test:\n    image: alpine\n    volumes:\n      - /cache\n")
+    import yaml
+    with pytest.raises(containers.ContainerPolicyError, match="anonymous compose volumes"):
+        containers._validate_compose_document(yaml.safe_load(compose.read_text()), compose, worktree, worktree)
 
 
 def test_compose_cannot_join_external_or_custom_networks(tmp_path):
@@ -229,6 +243,10 @@ def test_runtime_preflight_requires_rootless_podman_compose_project_quota_and_ca
 
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
                         subprocess.CompletedProcess(argv, 0, "xfs rw,relatime", ""))
+    assert containers.safe_container_runtime_version() == "missing"
+
+    monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
+                        subprocess.CompletedProcess(argv, 0, "ext4 rw,relatime,pquota", ""))
     assert containers.safe_container_runtime_version() == "missing"
 
     monkeypatch.setattr(containers.subprocess, "run", lambda argv, **kwargs:
@@ -441,6 +459,57 @@ def test_run_watcher_stops_detached_compose_when_worktree_storage_limit_is_reach
     assert fake.cancel_commands.is_set() and fake.cleaned
 
 
+def test_run_watcher_keeps_enforcing_storage_after_detached_compose_up(monkeypatch, tmp_path):
+    class ImmediateEvent:
+        def __init__(self, state=False):
+            self.state = state
+
+        def wait(self, timeout=None):
+            return self.state
+
+        def is_set(self):
+            return self.state
+
+        def set(self):
+            self.state = True
+
+    class StopAfterOnePoll(ImmediateEvent):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if self.calls > 1:
+                self.state = True
+            return self.state
+
+    class FakeServer:
+        worktree = tmp_path
+        allowed_root_pid = 77
+        run_start_time = 123
+        compose_used = True
+        bound_event = ImmediateEvent(True)
+        stop_requested = StopAfterOnePoll()
+        cancel_commands = ImmediateEvent()
+        storage_exceeded = ImmediateEvent()
+        commands_idle = ImmediateEvent(True)
+
+        def cleanup(self):
+            self.cleaned = True
+
+        def shutdown(self):
+            self.stopped = True
+
+    fake = FakeServer()
+    monkeypatch.setattr(containers, "_proc_identity", lambda pid: 123)
+    monkeypatch.setattr(containers, "_worktree_storage_limit_reached", lambda path: False)
+    monkeypatch.setattr(containers, "_runtime_storage_limit_reached", lambda: True)
+    containers._watch_run(fake)
+    assert fake.storage_exceeded.is_set()
+    assert fake.cancel_commands.is_set() and fake.cleaned
+
+
 def test_compose_custom_volume_names_are_rejected(tmp_path):
     worktree = tmp_path / "checkout"
     worktree.mkdir()
@@ -460,6 +529,84 @@ def test_runtime_is_missing_when_the_run_account_can_execute_podman(monkeypatch,
     monkeypatch.setattr(containers, "_worker_can_run_podman", lambda: False)
     monkeypatch.setattr(containers, "_identity", lambda user: (1001, 1, str(tmp_path)))
     assert containers.safe_container_runtime_version() == "missing"
+
+
+def test_broker_startup_as_engine_user_checks_engine_health_without_worker_uid_switch(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    worktree_info = worktree.stat()
+    socket_path = tmp_path / "broker.sock"
+    socket_path.write_text("")
+    engine_uid, worker_uid = 1002, 1001
+    monkeypatch.setattr(containers.sys, "argv", ["containers.py", "--broker", "--socket", str(socket_path),
+                        "--worktree", str(worktree), "--worktree-device", str(worktree_info.st_dev),
+                        "--worktree-inode", str(worktree_info.st_ino), "--runtime-dir", str(tmp_path),
+                        "--project", "aiflow-test", "--token", "token"])
+    monkeypatch.setattr(containers.os, "geteuid", lambda: engine_uid)
+    monkeypatch.setattr(containers, "_engine_identity", lambda: (engine_uid, engine_uid, str(tmp_path)))
+    monkeypatch.setattr(containers, "_identity", lambda user: (worker_uid, 1, str(tmp_path))
+                        if user == containers.WORKER_USER else (engine_uid, 1, str(tmp_path)))
+    checks = []
+    monkeypatch.setattr(containers, "_engine_container_runtime_version",
+                        lambda: checks.append("engine") or "rootless Podman 5")
+    monkeypatch.setattr(containers, "_worker_can_run_podman",
+                        lambda: pytest.fail("broker must not attempt to switch to the worker UID"))
+    monkeypatch.setattr(containers, "_watch_run", lambda server: None)
+
+    class ReadyServer:
+        def __init__(self, *args):
+            self.socket_path = args[0]
+
+        def serve_forever(self, **kwargs):
+            return None
+
+        def server_close(self):
+            return None
+
+    monkeypatch.setattr(containers, "_BrokerServer", ReadyServer)
+    assert containers._broker_main() == 0
+    assert checks == ["engine"]
+
+
+def test_broker_rejects_checkout_replacement_and_uses_the_pinned_mount_source(monkeypatch, tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    (worktree / "marker").write_text("run checkout")
+    outside = tmp_path / "host-root"
+    outside.mkdir()
+    pin = containers._WorktreePin(worktree)
+    try:
+        calls = _fake_runtime(monkeypatch, tmp_path)
+        code, _, _ = containers._execute(["run", "--volume", f"{worktree}:/workspace", "alpine", "true"],
+                                         worktree, worktree, runtime_dir=tmp_path, project_name="aiflow-test",
+                                         worktree_pin=pin)
+        assert code == 0
+        command = calls.read_text()
+        assert f"/proc/{os.getpid()}/fd/{pin.fd}:/workspace" in command
+        assert f"{worktree}:/workspace" not in command
+
+        moved = tmp_path / "original-checkout"
+        worktree.rename(moved)
+        worktree.symlink_to(outside, target_is_directory=True)
+        assert not pin.is_current()
+        with pytest.raises(containers.ContainerPolicyError, match="path was replaced"):
+            containers._execute(["build", "."], worktree, worktree, runtime_dir=tmp_path,
+                                project_name="aiflow-test", worktree_pin=pin)
+    finally:
+        pin.close()
+
+
+def test_broker_start_rejects_checkout_replaced_before_pin(tmp_path):
+    worktree = tmp_path / "checkout"
+    worktree.mkdir()
+    original_identity = (worktree.stat().st_dev, worktree.stat().st_ino)
+    moved = tmp_path / "original-checkout"
+    outside = tmp_path / "host-root"
+    outside.mkdir()
+    worktree.rename(moved)
+    worktree.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(containers.ContainerPolicyError, match="changed while the broker started"):
+        containers._WorktreePin(worktree, original_identity)
 
 
 def test_worker_probe_uses_run_groups_and_flags_reachable_engine_sockets(monkeypatch):

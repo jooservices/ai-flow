@@ -496,6 +496,8 @@ def install_login(app: FastAPI, ctx) -> None:
             return "view.stakeholder"
         if path.startswith(("/v1/nodes/", "/v1/accounts/", "/v1/services", "/v1/sa/")):
             return "view.machines_ai"
+        if path == "/v1/logs" or path.startswith(("/v1/log-sources", "/v1/logs/")):
+            return "view.logs"
         if path.startswith("/v1/projects"):
             if "/study-cases" in path:
                 return "view.knowledge"

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Host and service logs · AI Flow</title>
+  <style>
+    :root{color-scheme:dark;--bg:#151719;--panel:#1e2225;--line:#343a3e;--text:#edf0f1;--muted:#a5afb4;--accent:#7dd3c7;--warn:#f1c87a;--bad:#f18c8c}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+    header{display:flex;gap:14px;align-items:center;padding:16px max(20px,calc((100vw - 1240px)/2));border-bottom:1px solid var(--line);background:var(--panel)}
+    header strong{font-size:18px}header a{color:var(--accent);margin-left:auto;text-decoration:none}main{max-width:1240px;margin:auto;padding:24px 20px 48px}
+    h1{font-size:26px;margin:0 0 4px}p{color:var(--muted);margin:0 0 18px}.layout{display:grid;grid-template-columns:minmax(260px,360px) minmax(0,1fr);gap:16px;align-items:start}
+    section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}h2{font-size:16px;margin:0}.head{display:flex;align-items:center;gap:10px;margin-bottom:12px}.head button{margin-left:auto}
+    button{border:1px solid var(--line);border-radius:8px;background:#292f33;color:var(--text);padding:8px 12px;font:inherit;cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:wait}
+    .source-list{display:grid;gap:8px}.source{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:9px;padding:10px}
+    .source.selected{border-color:var(--accent)}.source-name{font-weight:650;overflow-wrap:anywhere}.source-meta{color:var(--muted);font-size:12px}.source button{font-size:12px;padding:6px 9px}
+    .state{color:var(--muted);min-height:24px;margin:0 0 10px}.state.bad{color:var(--bad)}.state.warn{color:var(--warn)}pre{margin:0;max-height:70vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#111416;border:1px solid var(--line);border-radius:9px;padding:12px;font:12px/1.55 ui-monospace,monospace;color:var(--text)}
+    .empty{color:var(--muted);padding:12px 0}.marker{color:var(--warn)}@media(max-width:760px){.layout{grid-template-columns:1fr}header{padding-inline:16px}main{padding-inline:14px}}
+  </style>
+</head>
+<body>
+  <header><strong>AI Flow · Host and service logs</strong><a href="/cc">Command Center</a></header>
+  <main>
+    <h1>Host and service logs</h1>
+    <p>Read the latest 100 lines from an approved source. Secret values are redacted before they reach this screen.</p>
+    <div class="layout">
+      <section aria-labelledby="sources-title">
+        <div class="head"><h2 id="sources-title">Available sources</h2><button id="refresh" type="button">Refresh</button></div>
+        <div id="sources-status" class="state" role="status" aria-live="polite">Loading sources…</div>
+        <div id="sources" class="source-list"></div>
+      </section>
+      <section aria-labelledby="lines-title">
+        <div class="head"><h2 id="lines-title">Recent lines</h2></div>
+        <div id="lines-status" class="state" role="status" aria-live="polite">Choose a source to read its recent lines.</div>
+        <pre id="lines" hidden></pre>
+      </section>
+    </div>
+  </main>
+  <script>
+    'use strict';
+    const state = { sources: [], selected: '', busy: false, request: 0 };
+    const byId = id => document.getElementById(id);
+    const escapeHtml = value => String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    async function jsonRequest(url, options) {
+      const response = await fetch(url, Object.assign({ cache: 'no-store' }, options || {}));
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || 'The request could not be completed.');
+      return data;
+    }
+    function renderSources() {
+      const root = byId('sources');
+      if (!state.sources.length) { root.innerHTML = '<div class="empty">No log sources are registered.</div>'; return; }
+      root.innerHTML = state.sources.map(source => '<div class="source' + (source.id === state.selected ? ' selected' : '') + '">' +
+        '<div><div class="source-name">' + escapeHtml(source.name) + '</div><div class="source-meta">' + escapeHtml(source.node) + ' · ' +
+        (source.available ? 'Available' : 'Node unavailable') + '</div></div><button type="button" data-source="' + escapeHtml(source.id) + '"' +
+        (source.available && !state.busy ? '' : ' disabled') + '>Read logs</button></div>').join('');
+    }
+    function showLines(data) {
+      const output = byId('lines'), status = byId('lines-status');
+      output.hidden = true; output.textContent = '';
+      status.className = 'state' + (data.available === false ? ' warn' : '');
+      status.textContent = data.message || '';
+      if (data.available && data.lines && data.lines.length) {
+        output.textContent = data.lines.join('\n'); output.hidden = false; status.textContent = data.lines.length + ' recent log lines.';
+      }
+    }
+    async function loadSources() {
+      const status = byId('sources-status'); status.className = 'state'; status.textContent = 'Loading sources…';
+      try {
+        const data = await jsonRequest('/v1/log-sources'); state.sources = data.sources || [];
+        status.textContent = state.sources.length ? '' : 'No log sources are registered.';
+        if (state.selected && !state.sources.some(source => source.id === state.selected)) state.selected = '';
+      } catch (error) {
+        state.sources = []; status.className = 'state bad'; status.textContent = 'Log sources could not be loaded. ' + error.message;
+      }
+      renderSources();
+    }
+    async function pollRequest(id, attempt) {
+      if (id !== state.request) return;
+      if (attempt >= 35) {
+        showLines({ available: false, message: 'The node agent did not return logs. Try again when the node is available.' });
+        state.busy = false; renderSources(); return;
+      }
+      let pending = false;
+      try {
+        const data = await jsonRequest('/v1/logs/requests/' + encodeURIComponent(id));
+        if (data.status === 'queued' || data.status === 'running') {
+          showLines({ available: null, message: 'Waiting for the node agent to read this source…' });
+          pending = true; window.setTimeout(() => pollRequest(id, attempt + 1), 1000); return;
+        }
+        showLines(data);
+      } catch (error) { showLines({ available: false, message: 'Log source could not be read. ' + error.message }); }
+      finally { if (!pending && id === state.request) { state.busy = false; renderSources(); } }
+    }
+    async function readSource(sourceId) {
+      const source = state.sources.find(item => item.id === sourceId);
+      if (!source || !source.available || state.busy) return;
+      state.selected = sourceId; state.busy = true; state.request++;
+      renderSources();
+      showLines({ available: null, message: 'Requesting recent log lines…' });
+      try {
+        const data = await jsonRequest('/v1/logs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source_id: sourceId }) });
+        pollRequest(data.id, 0);
+      } catch (error) {
+        state.busy = false; renderSources();
+        showLines({ available: false, message: 'Log source could not be read. ' + error.message });
+      }
+    }
+    byId('sources').addEventListener('click', event => { const button = event.target.closest('[data-source]'); if (button) readSource(button.dataset.source); });
+    byId('refresh').addEventListener('click', loadSources);
+    loadSources();
+  </script>
+</body>
+</html>

@@ -70,6 +70,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
+- [Host and service log viewer](../../docs/v4/log-viewer.md): administrators read recent host, systemd service and fixed control-container logs from the Command Center with server-side secret redaction
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
 - [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV

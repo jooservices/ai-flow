@@ -13,9 +13,9 @@ view for the people who follow tickets day to day.
 
 ## Page addresses
 
-Console pages include `/dashboard`, `/work`, and `/lead`; `/cc` is an alias for the Dashboard. The Traefik
-catch-all routes console pages and `/v1` requests to the control API, excluding `/o2` and `/gatus`, so new pages
-need no individual path entry.
+Every console page opens at its own address (for example `/dashboard`, `/work`, `/lead`), and `/cc` opens the
+Dashboard. Reloading the browser keeps the page you were on. Without a session, each address sends you to `/login`.
+New pages need no change to the proxy rule: only `/o2` and `/gatus` are kept away from the control API.
 
 ## Common tasks
 

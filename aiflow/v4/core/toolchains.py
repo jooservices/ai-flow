@@ -16,12 +16,12 @@ NODE_TOOLS = ("claude", "codex", "codex-code-mode-host", "grok", "opencode", "do
 # Supported catalogue tools the control plane can recognize and arrange on a node when a developer run needs one.
 # Stack membership and pins remain explicit in STACK_TOOLS; a tool absent from this catalogue must be pinned by its
 # project's stack before a missing-tool report can create a wait.
-CATALOG_TOOLS = ("php", "composer", "wp", "python3", "playwright", "playwright-browser",
+CATALOG_TOOLS = ("php", "composer", "wp", "python3", "playwright", "chromium", "firefox", "webkit",
                  "gitleaks", "xdebug", "cosign", "podman")
 
-# Shared folder for Playwright's browsers: installed by root, readable by the AI user, handed to runs through
-# PLAYWRIGHT_BROWSERS_PATH (see worker/notes.py project_env).
-PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/aiflow4/playwright-browsers"
+# Shared browser folder, installed by root and handed to AI runs through PLAYWRIGHT_BROWSERS_PATH. The name
+# `playwright-browser` is a folder name, never a command or a missing-tool requirement.
+PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/aiflow4/playwright-browser"
 
 # Required on every worker node, and per AI provider of the accounts the node runs.
 BASE_TOOLS = ("git", "uv")
@@ -32,16 +32,17 @@ PROVIDER_TOOLS: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode",),
 }
 
+# The rootless, quota-backed broker that safely exposes a Docker-compatible command set to one AI run.
+CONTAINER_RUNTIME_TOOL = "safe-container-runtime"
+
 # Extra tools per project stack. Add a stack here when a project starts using it.
 STACK_TOOLS: dict[str, tuple[str, ...]] = {
     "php-8.3": ("php", "composer", "wp"),
     "python-3.12": ("python3", "uv"),
     "node-24": ("node",),
-    "playwright": ("node", "playwright", "playwright-browser"),
+    "playwright": ("node", "playwright", "chromium", "firefox", "webkit"),
+    "wordpress": (CONTAINER_RUNTIME_TOOL, "node", "playwright", "chromium", "firefox", "webkit"),
 }
-
-# The rootless, quota-backed broker that safely exposes a Docker-compatible command set to one AI run.
-CONTAINER_RUNTIME_TOOL = "safe-container-runtime"
 
 # `versions.lock` names used by the control repo. Keep aliases here so installation and verification use the
 # same pins as the console's version display.
@@ -60,7 +61,9 @@ VERSION_KEYS: dict[str, tuple[str, ...]] = {
     "gh": ("gh",),
     "python3": ("python3", "python"),
     "playwright": ("playwright",),
-    "playwright-browser": ("playwright_browser", "playwright-browser", "playwright"),
+    "chromium": ("chromium", "playwright_browser", "playwright"),
+    "firefox": ("firefox", "playwright_browser", "playwright"),
+    "webkit": ("webkit", "playwright_browser", "playwright"),
     "gitleaks": ("gitleaks",),
     "xdebug": ("xdebug",),
     "cosign": ("cosign",),
@@ -109,7 +112,7 @@ def locked_version(versions: dict[str, object] | None, tool: str) -> str:
                 value = value.get("version")
             if value not in (None, ""):
                 return str(value)
-    if tool == "playwright-browser":
+    if tool in {"chromium", "firefox", "webkit"}:
         return locked_version(versions, "playwright")
     return ""
 
@@ -188,7 +191,9 @@ def toolchain_gaps(tools: dict[str, object] | None, required: Iterable[str],
                    stacks: str | Iterable[str] | None = (), *, require_pins: bool = False) -> list[str]:
     """Required tools absent, outside their lock pin, or unpinned for a declared stack."""
     reported = tools or {}
-    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())}
+    # The container runtime is configured on the node, not pinned or installed by version.
+    stack_tools = {tool for stack in normalize_stacks(stacks) for tool in STACK_TOOLS.get(stack, ())
+                   if tool != CONTAINER_RUNTIME_TOOL}
     gaps = []
     for tool in required:
         if require_pins and tool in stack_tools and not locked_version(versions, tool):

@@ -581,7 +581,13 @@ def dev_question(ctx, run: dict, question: str) -> dict:
             text = ENVIRONMENT_ANSWERS[c.environment]
             settle(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason, "machine", None, text)
             return {**base, "resolved": True, "outcome": "auto_answered", "answer": text}
-        requirement = {"browser": "playwright-browser"}.get(c.environment, c.environment.replace("_", "-"))
+        if c.environment == "browser":
+            from ..core.toolchains import parse_missing_requirements
+            browser_tools = {"chromium", "firefox", "webkit"}
+            requirement = next((name for name in parse_missing_requirements(question) if name in browser_tools),
+                               "chromium")
+        else:
+            requirement = c.environment.replace("_", "-")
         if not tooling.requirement_is_accepted(ctx, project, requirement):
             text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked. "
                     f"The run failed with the original report: {question[:1200]}")

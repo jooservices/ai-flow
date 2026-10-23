@@ -92,8 +92,8 @@ Routes used by this feature, all on the control API:
 
 ## Acceptance drill
 
-The 72-hour drill is a post-merge fleet run, as authorized for JAIF-260. Run it on `aiflow4-cc`, `aiflow4-node1`,
-`aiflow4-node2`, and `aiflow4-node3`; do not use shared `workspaces-*` containers. Keep a steady real-ticket stream,
+The 72-hour drill is a post-merge fleet run, as authorized for JAIF-260. Its environment comes from the project
+environment configuration (JAIF-266); this document names no machines. Keep a steady real-ticket stream,
 and inject one fault every six hours, rotating through worker kill, missing/broken catalogue tool, expired account,
 impossible dependency, and machine restart. Capture the intervention Dashboard counts at start and end, every idle
 interval, each fault and recovery action, and the resulting ticket/run IDs. Attach the timestamped report to the pull

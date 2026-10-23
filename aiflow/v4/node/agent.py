@@ -41,7 +41,6 @@ TOOLS = {"claude": ["claude", "--version"], "codex": ["codex", "--version"],
          "node": ["node", "--version"], "uv": ["uv", "--version"], "gh": ["gh", "--version"],
          "php": ["php", "--version"], "composer": ["composer", "--version"], "wp": ["wp", "--version", "--allow-root"],
          "python3": ["python3", "--version"], "playwright": ["playwright", "--version"],
-         "playwright-browser": ["playwright", "install", "--dry-run", "chromium"],
          "gitleaks": ["gitleaks", "version"],
          "xdebug": ["php", "-r", "echo extension_loaded('xdebug') ? 'Xdebug ' . phpversion('xdebug') : 'missing';"],
          "cosign": ["cosign", "version"], "podman": ["podman", "--version"]}
@@ -59,9 +58,6 @@ _SIGN_IN_CODE = re.compile(
     r"([A-Z0-9][A-Z0-9-]{3,31})\b")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _SIGN_IN_RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
-
-
-_MISSING_LIBRARY = re.compile(r"error while loading shared libraries:\s*([^\s:]+)", re.IGNORECASE)
 _AUDIT_EVENT_ID = re.compile(rb"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
 _AUDIT_TYPE = re.compile(rb"type=([A-Z_]+)")
 _AUDIT_AUID = re.compile(rb"\bauid=(\d+)\b")
@@ -167,49 +163,13 @@ def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/va
     return len(events)
 
 
-def _headless_launch_problem(binary: Path) -> str:
-    """Start the browser headless once; return why it cannot start (a machine tool problem), or an empty string."""
-    try:
-        p = subprocess.run([str(binary), "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom", "about:blank"],
-                           capture_output=True, text=True, timeout=30)
-    except subprocess.TimeoutExpired:
-        return ""  # a busy node answers slowly; that says nothing about the browser
-    except OSError as exc:
-        return f"cannot start ({type(exc).__name__})"
-    if p.returncode == 0:
-        return ""
-    library = _MISSING_LIBRARY.search(p.stderr or "")
-    if library:
-        return f"missing system library {library.group(1)}"
-    return f"headless launch failed (exit {p.returncode})"
-
-
-def _playwright_browser_version(dry_run: str, playwright_version: str) -> str:
-    """Report the browser only when this Playwright release's expected Chromium build is installed and starts.
-
-    A build that is installed but cannot start headless (usually a missing system library) is reported as
-    `broken: <reason>`: a problem of this machine's toolchain, not of any ticket.
-    """
-    package = re.search(r"\d+(?:\.\d+){1,2}", playwright_version)
-    location = re.search(r"^\s*Install location:\s*(.+?)\s*$", dry_run, re.MULTILINE | re.IGNORECASE)
-    if not package or not location:
-        return "missing"
-    root = Path(location.group(1))
-    binaries = (root / "chrome-linux" / "chrome", root / "chrome-linux64" / "chrome",
-                root / "chrome-headless-shell-linux64" / "chrome-headless-shell")
-    binary = next((path for path in binaries if path.is_file()), None)
-    if binary is None:
-        return "missing"
-    problem = _headless_launch_problem(binary)
-    if problem:
-        return f"{BROKEN_PREFIX} {problem}"[:80]
-    return f"Playwright Chromium {package.group(0)}"
-
-
 def tool_versions(names: list[str] | None = None) -> dict[str, str]:
     """One version line per tool, or `missing`; names default to the node tools and every stack tool."""
     out = {}
     for name in names if names is not None else REPORTED_TOOLS:
+        if name in {"chromium", "firefox", "webkit"}:
+            out[name] = _playwright_browser_status(name, out.get("playwright", ""))
+            continue
         if name == CONTAINER_RUNTIME_TOOL:
             from ..worker.containers import safe_container_runtime_version
             out[name] = safe_container_runtime_version()
@@ -219,22 +179,42 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             out[name] = "missing"
             continue
         try:
-            env = ({**os.environ, "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR}
-                   if name == "playwright-browser" else None)  # the shared folder the installer fills
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             output = (p.stdout or p.stderr).strip()
             version = output.splitlines()[0][:80] if output else ""
-            if name == "playwright-browser":
-                # A dry run returns the expected directory for this package release; this rejects stale browsers.
-                out[name] = (_playwright_browser_version(output, out.get("playwright", ""))
-                             if p.returncode == 0 else "missing")
-            else:
-                out[name] = version if p.returncode == 0 and version else "missing"
+            out[name] = version if p.returncode == 0 and version else "missing"
         except subprocess.TimeoutExpired:  # a busy node answers slowly; that says nothing about the tool
             out[name] = "timeout"
         except OSError:
             out[name] = "missing"
     return out
+
+
+def _playwright_browser_status(name: str, playwright_version: str) -> str:
+    """Launch one installed browser as the node agent and report its browser name on a machine gap."""
+    browser = {"chromium": "Chromium", "firefox": "Firefox", "webkit": "WebKit"}[name]
+    package = re.search(r"\d+(?:\.\d+){1,2}", playwright_version)
+    executable = shutil.which("playwright")
+    if not package or not executable or not shutil.which("node"):
+        return "missing"
+    package_dir = Path(executable).resolve().parent
+    script = ("const p=require(process.argv[1]); const b=p[process.argv[2]]; "
+              "(async()=>{const x=await b.launch({headless:true}); await x.close();})()"
+              ".catch(e=>{console.error(e.message||String(e));process.exit(1)})")
+    try:
+        result = subprocess.run(["node", "-e", script, str(package_dir), name], capture_output=True, text=True,
+                                timeout=45, env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR})
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except OSError:
+        return "missing"
+    if result.returncode == 0:
+        return f"{browser} Playwright {package.group(0)}"
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    message = detail[-1][:160] if detail else "could not launch"
+    if "Executable doesn't exist" in message or "Please run" in message:
+        return "missing"
+    return f"{BROKEN_PREFIX} {browser} cannot start: {message}"[:200]
 
 
 def _cpu_times() -> tuple[int, int]:

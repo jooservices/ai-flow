@@ -250,6 +250,50 @@ console.log(JSON.stringify(layoutMerge(model, present).map(function (b) { return
     assert out == ["c", "editor", "a", "b"]
 
 
+def test_hidden_conditional_block_is_listed_even_when_it_is_not_rendered():
+    out = run_js("""
+var model = [
+  {id: 'header', title: 'Knowledge and Skills', hidden: false},
+  {id: 'editor', title: 'Create or edit a resource', hidden: true},
+  {id: 'resources', title: 'Resources', hidden: false}
+];
+var rendered = [{id: 'header'}, {id: 'resources'}];
+var hidden = layoutHidden(model);
+console.log(JSON.stringify({
+  rendered: rendered.map(function (b) { return b.id; }),
+  hidden: hidden.map(function (b) { return b.id; }),
+  show: layoutBarHtml(true, hidden, 'knowledge').indexOf('data-id="editor"') >= 0
+}));""")
+    assert out == {"rendered": ["header", "resources"], "hidden": ["editor"], "show": True}
+
+
+def test_script_queues_reset_after_a_pending_layout_save():
+    out = run_js("""
+var calls = [], releaseSave;
+fetch = function (url, options) {
+  calls.push(options.method);
+  if (options.method === 'PUT') return new Promise(function (resolve) { releaseSave = function () { resolve({ok: true}); }; });
+  return Promise.resolve({ok: true, json: function () { return Promise.resolve({blocks: []}); }});
+};
+S.view = 'users';
+S.layouts.pages.users = {blocks: [{id: 'users', title: 'Console users', size: 'small', hidden: false}]};
+window.confirm = function () { return true; };
+render = function () {};
+layoutAnnounce = function () {};
+toast = function () {};
+layoutPersist('users', S.layouts.pages.users);
+layoutAction('layout-reset', {getAttribute: function () { return null; }});
+var reset = S.layouts.chain;
+Promise.resolve().then(function () {
+  var before = calls.slice();
+  releaseSave();
+  return reset.then(function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }).then(function () {
+    console.log(JSON.stringify({before: before, after: calls}));
+  });
+});""")
+    assert out == {"before": ["PUT"], "after": ["PUT", "DELETE"]}
+
+
 def test_every_layout_page_maps_to_a_known_view_and_container():
     out = run_js("console.log(JSON.stringify(LAYOUT_PAGES));")
     assert set(out.values()) == set(layouts.PAGES)

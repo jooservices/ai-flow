@@ -3980,13 +3980,14 @@ function layoutRoot(view) { return view === 'delivery' ? $('#dbody') : $('#view-
 function layoutBlocksIn(container) {
   return Array.prototype.filter.call(container.children, function (el) { return el.hasAttribute && el.hasAttribute('data-block'); });
 }
+function layoutHidden(blocks) { return (blocks || []).filter(function (b) { return b.hidden; }); }
 /* Dashboard keeps independent order groups for Work, AI and machines, and its additional panels. Blocks stay under
    their section heading; the saved page order is applied within each visible group. Other pages use the view root. */
 function applyLayout(view, root) {
   var page = LAYOUT_PAGES[view], model = layoutModel(view);
   if (!page || !root || !model || !root.children) return;
   var groups = [root].concat(root.querySelectorAll ? Array.prototype.slice.call(root.querySelectorAll('.dash-section')) : []);
-  var editing = S.layouts.mode === page, meta = {}, hidden = [], anchor = null;
+  var editing = S.layouts.mode === page, meta = {}, hidden = layoutHidden(model.blocks), anchor = null;
   model.blocks.forEach(function (b) { meta[b.id] = b; });
   groups.forEach(function (group) {
     var els = layoutBlocksIn(group), byId = {};
@@ -4003,7 +4004,6 @@ function applyLayout(view, root) {
       cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden;
       if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, shown.indexOf(id) + 1, shown.length));
       cell.appendChild(byId[id]); grid.appendChild(cell);
-      if (b.hidden) hidden.push(b);
     });
     if (!anchor) anchor = group === root ? grid : group;
   });
@@ -4044,12 +4044,23 @@ function layoutAnnounce(text) {
   setTimeout(function () { el.textContent = text; }, 30);
 }
 function layoutTitle(model, id) { var b = model.blocks.filter(function (x) { return x.id === id; })[0]; return b ? (b.title || b.id) : id; }
+function layoutRequest(page, method, payload) {
+  var options = { method: method };
+  if (payload != null) { options.headers = { 'Content-Type': 'application/json' }; options.body = payload; }
+  var request = S.layouts.chain.then(function () {
+    return fetch('/v1/console/layouts/' + page, options).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return method === 'DELETE' ? r.json() : null;
+    });
+  });
+  S.layouts.chain = request.catch(function () {});
+  return request;
+}
 function layoutPersist(page, model) {
   var payload = JSON.stringify({ blocks: model.blocks.map(function (b) { return { id: b.id, size: b.size, hidden: !!b.hidden }; }) });
-  S.layouts.chain = S.layouts.chain.then(function () {
-    return fetch('/v1/console/layouts/' + page, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: payload })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); });
-  }).catch(function () { toast('Layout not saved', 'The change is shown here but could not be stored. Try it again.', 'warn'); });
+  layoutRequest(page, 'PUT', payload).catch(function () {
+    toast('Layout not saved', 'The change is shown here but could not be stored. Try it again.', 'warn');
+  });
 }
 /* Apply a changed block list: store it, redraw, announce it and put the focus where the person was working. */
 function layoutCommit(blocks, say, focus) {
@@ -4080,10 +4091,7 @@ function layoutAction(act, el) {
     layoutCommit(next, layoutTitle(model, id) + (hide ? ' is hidden. It is listed under hidden blocks.' : ' is shown again.'), hide ? '[data-act="layout-show"][data-id="' + id + '"], [data-layout-handle]' : handle);
   } else if (act === 'layout-reset') {
     if (typeof window.confirm === 'function' && !window.confirm('Return this page to the default layout for your role?')) return;
-    fetch('/v1/console/layouts/' + page, { method: 'DELETE' }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    }).then(function (d) {
+    layoutRequest(page, 'DELETE').then(function (d) {
       S.layouts.pages[page] = d; render();
       layoutAnnounce('This page is back to the default layout for your role.');
       var done = $('[data-act="layout-done"]'); if (done && done.focus) done.focus();

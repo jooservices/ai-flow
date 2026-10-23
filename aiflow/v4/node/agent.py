@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from .. import VERSION
-from ..core.toolchains import BROKEN_PREFIX, STACK_TOOLS, tools_for_stacks
+from ..core.toolchains import BROKEN_PREFIX, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS, tools_for_stacks
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -89,7 +89,9 @@ def tool_versions(names: list[str] | None = None) -> dict[str, str]:
             out[name] = "missing"
             continue
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            env = ({**os.environ, "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR}
+                   if name == "playwright-browser" else None)  # the shared folder the installer fills
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
             output = (p.stdout or p.stderr).strip()
             version = output.splitlines()[0][:80] if output else ""
             if name == "playwright-browser":

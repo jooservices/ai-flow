@@ -63,18 +63,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DO $$
-DECLARE t record;
+-- Attach the audit trigger to every table that lacks it. Database.migrate runs this again after every pass, so
+-- tables created by later migrations are audited too.
+CREATE OR REPLACE FUNCTION aiflow4_attach_audit_triggers() RETURNS integer AS $fn$
+DECLARE t record; attached integer := 0;
 BEGIN
-    FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public'
-             AND tablename NOT IN ('operator_interventions', 'flow_doctor_actions', 'flow_doctor_findings',
+    FOR t IN SELECT c.relname AS tablename FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relkind = 'r'
+             AND c.relname NOT IN ('operator_interventions', 'flow_doctor_actions', 'flow_doctor_findings',
                                    'schema_migrations')
+             AND NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid = c.oid AND g.tgname = 'aiflow4_operator_audit')
     LOOP
-        EXECUTE format('DROP TRIGGER IF EXISTS aiflow4_operator_audit ON %I', t.tablename);
         EXECUTE format('CREATE TRIGGER aiflow4_operator_audit AFTER INSERT OR UPDATE OR DELETE ON %I '
                        'FOR EACH STATEMENT EXECUTE FUNCTION aiflow4_capture_direct_sql_intervention()', t.tablename);
+        attached := attached + 1;
     END LOOP;
+    RETURN attached;
 END;
-$$;
+$fn$ LANGUAGE plpgsql;
+SELECT aiflow4_attach_audit_triggers();
 
 ALTER TABLE role_health ADD COLUMN IF NOT EXISTS probation_unlimited boolean NOT NULL DEFAULT false;

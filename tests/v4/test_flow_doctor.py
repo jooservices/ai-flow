@@ -217,6 +217,42 @@ def test_api_and_database_actions_are_recorded_and_create_a_bug_ticket(client, c
     assert {"flow-bug", "operator-intervention"} <= set(ctx.jira.created[0]["labels"])
 
 
+def test_one_session_of_many_commands_creates_one_bug_and_a_new_session_another(ctx):
+    start = datetime.now(timezone.utc) - timedelta(hours=3)
+    for n in range(5):
+        flow_doctor.record_operator_intervention(ctx, source_key=f"s1:{n}", source="shell", actor="ops",
+                                                 action="execute", target=f"cmd{n}",
+                                                 happened_at=start + timedelta(minutes=n))
+    flow_doctor.record_operator_intervention(ctx, source_key="s2:0", source="shell", actor="ops", action="execute",
+                                             target="later", happened_at=start + timedelta(hours=2))
+    flow_doctor.record_operator_intervention(ctx, source_key="o:0", source="shell", actor="other", action="execute",
+                                             target="x", happened_at=start)
+    assert flow_doctor.create_intervention_bugs(ctx) == 3
+    assert len(ctx.jira.created) == 3
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions WHERE bug_ticket_key=''")["n"] == 0
+
+
+def test_node_agent_collapses_a_session_of_commands_into_one_intervention():
+    from aiflow.v4.node import agent
+    events = [{"source": "shell", "actor": "ops", "action": "execute", "target": f"c{n}",
+               "happened_at": f"2026-10-23T10:0{n}:00+00:00", "source_key": f"k{n}", "reason": "r"}
+              for n in range(4)]
+    grouped = agent._group_interventions(events)
+    assert len(grouped) == 1 and grouped[0]["details"]["events"] == 4 and grouped[0]["source_key"] == "k0"
+
+
+def test_tables_created_by_later_migrations_get_the_audit_trigger(ctx):
+    ctx.db.run("CREATE TABLE later_table (id int)")
+    try:
+        ctx.db.migrate()
+        with psycopg.connect(ctx.db.url, application_name="psql") as connection:
+            connection.execute("INSERT INTO later_table VALUES (1)")
+        row = ctx.db.one("SELECT target FROM operator_interventions WHERE source='database' AND target='later_table'")
+        assert row == {"target": "later_table"}
+    finally:
+        ctx.db.run("DROP TABLE later_table")
+
+
 def test_direct_database_writes_and_jira_changes_enter_the_intervention_ledger(ctx):
     add_ticket(ctx.db, "TESTWP-269")
     with psycopg.connect(ctx.db.url, application_name="psql") as connection:

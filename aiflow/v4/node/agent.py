@@ -118,7 +118,25 @@ def _audit_interventions(raw: bytes) -> list[dict]:
                                 "actor": actor, "action": "write", "target": filename[:120],
                                 "happened_at": happened_at,
                                 "reason": "Interactive host file change captured by audit; no reason was supplied"})
-    return results
+    return _group_interventions(results)
+
+
+def _group_interventions(events: list[dict]) -> list[dict]:
+    """One intervention per actor and source in a batch: an SSH session or a deploy is one intervention, not one
+    per command or file written. The first event names the group; the others are counted and sampled."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for event in sorted(events, key=lambda e: e["happened_at"]):
+        groups.setdefault((event["actor"], event["source"]), []).append(event)
+    out = []
+    for members in groups.values():
+        first = dict(members[0])
+        targets = list(dict.fromkeys(m["target"] for m in members))
+        first["details"] = {"events": len(members), "targets": targets[:10], "last_at": members[-1]["happened_at"]}
+        if len(members) > 1:
+            first["action"] = "session"
+            first["target"] = ", ".join(targets[:3])[:300]
+        out.append(first)
+    return out
 
 
 def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/var/log/audit/audit.log",

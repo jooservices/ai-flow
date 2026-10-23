@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import role_health, tooling
@@ -452,32 +452,53 @@ def record_operator_intervention(ctx, *, source_key: str, source: str, actor: st
     return int(existing["id"]) if existing else None
 
 
-def create_intervention_bugs(ctx, limit: int = 30) -> int:
+INTERVENTION_WINDOW = timedelta(minutes=30)
+
+
+def _intervention_groups(rows: list[dict]) -> list[list[dict]]:
+    """Group pending interventions by actor and source; a gap of 30 minutes starts a new session."""
+    groups: list[list[dict]] = []
+    open_group: dict[tuple[str, str], list[dict]] = {}
+    for row in sorted(rows, key=lambda r: r["happened_at"]):
+        key = (row["actor"], row["source"])
+        group = open_group.get(key)
+        if group is None or row["happened_at"] - group[-1]["happened_at"] > INTERVENTION_WINDOW:
+            group = open_group[key] = []
+            groups.append(group)
+        group.append(row)
+    return groups
+
+
+def create_intervention_bugs(ctx, limit: int = 200) -> int:
+    """One Bug per actor session, not per command or file write, so an SSH session or deploy cannot flood Jira."""
     if not ctx.jira:
         return 0
     made = 0
     rows = ctx.db.all("SELECT id,happened_at,source,actor,action,target,reason,details FROM operator_interventions"
                       " WHERE bug_ticket_key='' ORDER BY id LIMIT %s", (limit,))
-    for row in rows:
-        summary = f"[Operator intervention] {row['source']} {row['action']}"[:240]
-        details = row["details"] if isinstance(row["details"], dict) else {}
+    for group in _intervention_groups(rows):
+        row = group[0]
+        ids = [r["id"] for r in group]
+        summary = f"[Operator intervention] {row['source']} {row['action']} by {row['actor']}"[:240]
+        evidence = "\n".join(f"- {r['happened_at'].isoformat()} {r['action']} {r['target']}" for r in group[:20])
         description = ("AI Flow detected a manual intervention. Fix the product path so this action is no longer "
                        "needed.\n\n"
-                       f"When: {row['happened_at'].isoformat()}\nWho: {row['actor']}\nWhat: {row['action']}\n"
+                       f"When: {row['happened_at'].isoformat()} ({len(group)} recorded action(s))\n"
+                       f"Who: {row['actor']}\nWhat: {row['action']}\n"
                        f"Where: {row['source']} {row['target']}\nWhy: {row['reason'] or 'Reason not supplied'}\n"
-                       f"Evidence: {details}\n\nAcceptance: reproduce the manual step, then make the flow "
+                       f"Evidence:\n{evidence}\n\nAcceptance: reproduce the manual step, then make the flow "
                        "detect and recover from the underlying cause automatically.")
         try:
             key = ctx.jira.create_issue(getattr(ctx.settings, "maintenance_project", "JAIF"), summary, description,
                                         issuetype="Bug", labels=["flow-bug", "operator-intervention"])
-            ctx.db.run("UPDATE operator_interventions SET bug_ticket_key=%s WHERE id=%s AND bug_ticket_key=''",
-                       (key, row["id"]))
+            ctx.db.run("UPDATE operator_interventions SET bug_ticket_key=%s WHERE id = ANY(%s) AND bug_ticket_key=''",
+                       (key, ids))
             ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
                        " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
                        (key, key.split("-", 1)[0], ["flow-bug", "operator-intervention"], summary, description))
             ctx.events.emit("operator.intervention_bug", ticket=key, outcome="created",
-                            reason=f"intervention {row['id']} requires a product fix",
-                            data={"intervention_id": row["id"]})
+                            reason=f"{len(ids)} intervention(s) require a product fix",
+                            data={"intervention_ids": ids})
             made += 1
         except Exception as exc:  # noqa: BLE001 - persisted rows retry automatically on the next pass
             log.warning("could not create intervention Bug %s (%s)", row["id"], type(exc).__name__)

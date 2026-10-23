@@ -327,6 +327,9 @@ def test_a_new_decision_is_asked_once_then_becomes_a_register_entry(client, ctx)
     entry = ctx.db.one("SELECT * FROM owner_decisions WHERE id=%s", (first["decision_id"],))
     assert entry["status"] == "decided" and entry["decision"] == "Email after 24 hours (see support)"
     assert entry["decided_by"] == "owner@example.test"
+    # the owner's business answer is the product working, never an operator intervention (JAIF-260 AC6)
+    assert ctx.db.one("SELECT count(*) AS n FROM write_audit WHERE action='decision-answer' AND accepted")["n"] == 1
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions")["n"] == 0
     resolved_waiting = ctx.db.one("SELECT resolution,reached_person,answer FROM escalations WHERE ticket_key='JOOWP-323'")
     assert resolved_waiting == {"resolution": "person", "reached_person": True,
                                 "answer": "Email after 24 hours (see support)"}

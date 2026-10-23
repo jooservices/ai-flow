@@ -35,14 +35,18 @@ Only a new business decision or protected irreversible/production action can rea
 
 ## Intervention audit
 
-The control API records accepted human API writes. Jira sync compares changelog authors with AI Flow's Jira identity
-and records non-flow edits by field name only. Migration `017_flow_doctor.sql` installs statement-level audit triggers
-on existing registry tables; direct SQL changes outside an `aiflow4-*` application connection record the database
+Writes through the control API (review approve, rework or reject, owner answers to business decisions, console
+configuration) are product paths: they stay in the write audit and are never operator interventions. Interventions
+come only from out-of-band paths. Jira sync compares changelog authors with AI Flow's Jira identity
+and records non-flow edits by field name only. Migration `018_flow_doctor.sql` installs statement-level audit triggers,
+and every migration pass attaches the trigger to any table that lacks it, so tables added later are audited too; direct SQL changes outside an `aiflow4-*` application connection record the database
 user, table and operation, but never the SQL text or row values. Control and node installs enable Linux `auditd`
 rules for interactive commands, `/etc/aiflow`, `/etc/systemd/system`, and (on the control host) the control repo.
 The node agent forwards only the executable basename and changed filename, actor and time; it never forwards shell
-arguments or file contents. Audit records are de-duplicated and each pending intervention creates a Bug in the
-configured maintenance Jira project with the `flow-bug` and `operator-intervention` labels.
+arguments or file contents. The agent collapses one batch into one intervention per actor and source. Audit records are
+de-duplicated and the doctor creates one Bug per actor and source session (a gap of 30 minutes starts a new session)
+in the configured maintenance Jira project with the `flow-bug` and `operator-intervention` labels, so an SSH session
+or a deploy never floods the project.
 
 Each row records who, what, where and why. For actions where the system cannot recover a human-supplied reason, the
 record says that no reason was supplied. The Dashboard counts all captured interventions over rolling 24-hour and

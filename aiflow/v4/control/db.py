@@ -62,6 +62,9 @@ class DB:
                         c.execute("INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
                                   (f.stem, migration_checksum(f)))
                     applied.append(f.stem)
+                # tables added by later migrations get the operator audit trigger too (AC6)
+                if c.execute("SELECT to_regproc('aiflow4_attach_audit_triggers') AS f").fetchone()["f"]:
+                    c.execute("SELECT aiflow4_attach_audit_triggers()")
             finally:
                 c.execute("SELECT pg_advisory_unlock(424204)")
         return applied

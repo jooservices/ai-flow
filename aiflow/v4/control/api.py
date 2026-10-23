@@ -1412,18 +1412,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500],
              J(with_connection(target, payload))))
-        automated = actor in {"control", "node-agent", "flow-doctor", "aiflow4-autodeploy", "deploy"}
-        if actor and accepted and not automated:
-            automated = bool(connection.execute("SELECT 1 FROM accounts WHERE id=%s", (actor,)).fetchone())
-        if actor and accepted and not automated:
-            source = "configuration" if target in {"aiflow-control", "project", "knowledge", "node",
-                                                         "ai-account", "console"} else target[:40]
-            connection.execute(
-                "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
-                (f"api:{uuid.uuid4()}", source, actor[:200], action[:120], (ticket or target)[:300],
-                 (result or "Manual API action; reason not supplied")[:1000],
-                 J({"target": target[:80], "action": action[:100]})))
+        # Writes through the API are product paths (review decisions, owner answers, console setup), not
+        # operator interventions. Interventions come only from out-of-band paths: the host audit forwarded by the
+        # node agent, direct SQL (database trigger) and non-flow Jira edits.
 
     def with_connection(target: str, payload: dict | None) -> dict:
         """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""

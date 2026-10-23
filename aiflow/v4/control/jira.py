@@ -164,6 +164,17 @@ class Jira:
                 return out
             start += len(values)
 
+    def project_write_permissions(self, project: str) -> dict[str, bool]:
+        """Read the permissions needed to edit and transition issues in one Jira project."""
+        from urllib.parse import quote
+
+        key = quote(project, safe="")
+        data = self.call("GET", f"/rest/api/3/mypermissions?projectKey={key}"
+                         "&permissions=EDIT_ISSUES,TRANSITION_ISSUES")
+        permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
+        return {name: (permissions.get(name) or {}).get("havePermission") is True
+                for name in ("EDIT_ISSUES", "TRANSITION_ISSUES")}
+
     def project_statuses(self, key: str) -> list[str]:
         """Return distinct workflow status names used by the issue types in a Jira project."""
         data = self.call("GET", f"/rest/api/3/project/{key}/statuses")

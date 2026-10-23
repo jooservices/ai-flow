@@ -663,6 +663,17 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "owner role required")
         raise HTTPException(401, "owner authorization required", headers={"WWW-Authenticate": "Bearer"})
 
+    def deploy_auth(authorization: str = Header(default="")) -> str:
+        """The deploy scripts on the control machine sign in with the owner token (a bearer token, never a cookie)."""
+        configured = ctx.settings.owner_token
+        if not configured:
+            raise HTTPException(503, "deploy access is not configured")
+        scheme, separator, token = authorization.partition(" ")
+        if (not separator or scheme.lower() != "bearer" or not token.strip()
+                or not secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
+            raise HTTPException(401, "deploy authorization required", headers={"WWW-Authenticate": "Bearer"})
+        return "deploy"
+
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
               result: str, payload: dict | None = None) -> None:
         with ctx.db.pool.connection() as connection:
@@ -1590,8 +1601,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack,
                               "node_readiness": [{"name": node["name"],
-                                  "blocked": bool(system_check.blocking_reasons(node.get("readiness"), project.key)),
-                                  "conditions": system_check.blocking_reasons(node.get("readiness"), project.key)}
+                                  **system_check.project_node_readiness(
+                                      node.get("readiness"), project.key,
+                                      [account.id for account in repo.accounts_on(node["name"])])}
                                   for node in nodes if project.key in repo.projects_for_node(
                                       node["name"], node.get("projects") or [], node.get("dynamic", False))],
                               "checks": probes.get(project.key, {})}
@@ -4144,6 +4156,21 @@ def create_app(ctx: Ctx) -> FastAPI:
             "Content-Disposition": 'attachment; filename="aiflow4-support.json"',
             "Cache-Control": "no-store",
         })
+    @app.get("/v1/deploy/state")
+    def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:
+        """The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token."""
+        from .state import snapshot
+        return snapshot(ctx)
+
+    @app.get("/v1/deploy/ci-state")
+    def deploy_ci_state(repo: str = Query(pattern=r"^[\w.-]+/[\w.-]+$"), sha: str = Query(pattern=r"^[0-9a-fA-F]{7,64}$"),
+                        _deploy: str = Depends(deploy_auth)) -> dict:
+        """CI state of a commit (pending|failed|ok|none) through the connected GitHub App, read-only permissions."""
+        from .canary import ci_state
+        gateway = github_gateway(ctx)
+        if gateway is None:
+            raise HTTPException(503, "GitHub App is not connected")
+        return {"repo": repo, "sha": sha, "state": ci_state(gateway, repo, sha)}
 
     @app.get("/v1/tickets/{key}/timeline")
     def ticket_timeline(key: str) -> dict:

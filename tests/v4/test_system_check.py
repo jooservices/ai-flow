@@ -209,6 +209,47 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
         "jira-credentials"}
 
 
+def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx):
+    ctx.jira.project_permissions["TESTWP"] = {"EDIT_ISSUES": False, "TRANSITION_ISSUES": False}
+    joined = join_node(client, "cc").json()
+    readiness = client.get("/v1/system-check").json()["nodes"][0]["readiness"]
+    conditions = {item["id"]: item for item in readiness["projects"]["TESTWP"]}
+
+    assert ctx.jira.project_permission_reads == ["TESTWP"]
+    assert conditions["jira-credentials"]["result"] == "ready"  # the browse/list request still succeeds
+    permission = conditions["jira-write-permissions"]
+    assert permission["result"] == "needs_action"
+    assert permission["detail"] == (
+        "The connected Jira account is missing Edit Issues and Transition Issues permissions in project TESTWP.")
+    assert permission["action"] == (
+        "Grant the connected Jira account Edit Issues and Transition Issues permissions in project TESTWP.")
+    assert joined["node"] == "cc"
+
+
+def test_projects_readiness_shows_account_failures_but_blocks_only_without_a_usable_account(client, ctx):
+    joined = join_node(client, "cc").json()
+    headers = {"Authorization": f"Bearer {joined['node_token']}"}
+    response = client.post("/v1/nodes/cc/heartbeat", headers=headers, json={
+        "credential_checks": {
+            "claude-01": {"present": True, "valid": True},
+            "opencode-01": {"present": True, "valid": False},
+        },
+    })
+    assert response.status_code == 200
+
+    project = next(item for item in client.get("/v1/projects").json()["projects"] if item["key"] == "TESTWP")
+    node_result = next(item for item in project["node_readiness"] if item["name"] == "cc")
+    account_failure = next(item for item in node_result["conditions"] if item["id"] == "credential:opencode-01")
+    assert account_failure["result"] == "needs_action"
+    assert account_failure["detail"] == "Credential is invalid."
+    assert node_result["blocked"] is False
+
+    add_ticket(ctx.db, "TESTWP-249")
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+    assert candidates.status_code == 200
+    assert "TESTWP-249" in [ticket["key"] for ticket in candidates.json()["tickets"]]
+
+
 def test_support_bundle_omits_untrusted_heartbeat_maps(client):
     joined = join_node(client, "cc").json()
     headers = {"Authorization": f"Bearer {joined['node_token']}"}

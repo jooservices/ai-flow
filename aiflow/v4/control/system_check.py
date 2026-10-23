@@ -315,6 +315,40 @@ def _jira_credential_condition(ctx, trigger: str) -> dict[str, object]:
     return _cached_integration_probe(ctx, ("jira-credentials", site), trigger, lambda: _check_jira_credential(ctx))
 
 
+def _jira_write_permission_condition(ctx, project_key: str, trigger: str) -> dict[str, object]:
+    """Check the Jira write permissions this project needs using Jira's read-only permissions endpoint."""
+    jira = getattr(ctx, "jira", None)
+    if jira is None or not jira:
+        return condition("jira-write-permissions", f"Jira write permissions · {project_key}", "needs_action",
+                         "Jira write permissions could not be checked because Jira is not connected.",
+                         "Connect Jira on the Integrations screen and rerun the System check.")
+
+    site = str(getattr(ctx.settings, "jira_site", ""))
+    try:
+        permissions = _cached_integration_probe(
+            ctx, ("jira-write-permissions", site, project_key), trigger,
+            lambda: jira.project_write_permissions(project_key))
+    except Exception:  # noqa: BLE001 - discard Jira response bodies and request details
+        permissions = None
+
+    name = f"Jira write permissions · {project_key}"
+    if not isinstance(permissions, dict):
+        return condition("jira-write-permissions", name, "needs_action",
+                         "Jira write permissions could not be verified.",
+                         "Restore control-plane access to Jira and rerun the System check.")
+
+    required = {"EDIT_ISSUES": "Edit Issues", "TRANSITION_ISSUES": "Transition Issues"}
+    missing = [label for permission, label in required.items() if permissions.get(permission) is not True]
+    if missing:
+        labels = " and ".join(missing)
+        permission_word = "permission" if len(missing) == 1 else "permissions"
+        return condition("jira-write-permissions", name, "needs_action",
+                         f"The connected Jira account is missing {labels} {permission_word} in project {project_key}.",
+                         f"Grant the connected Jira account {labels} {permission_word} in project {project_key}.")
+    return condition("jira-write-permissions", name, "ready",
+                     f"The connected Jira account can edit and transition issues in project {project_key}.")
+
+
 def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, metrics: dict,
                         auto_fixed_tools: set[str], credentials: dict[str, dict],
                         trigger: str = "heartbeat") -> list[dict[str, object]]:
@@ -376,6 +410,7 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
 
     out.extend(_github_project_conditions(ctx, project, trigger))
     out.append(_jira_credential_condition(ctx, trigger))
+    out.append(_jira_write_permission_condition(ctx, project_key, trigger))
 
     account_rows = {row["id"]: row for row in ctx.db.all(
         "SELECT id,status,worker_state FROM accounts WHERE node=%s ORDER BY id", (node,))}
@@ -599,9 +634,10 @@ def refresh_all(ctx, trigger: str = "hourly") -> list[dict]:
             for row in ctx.db.all("SELECT name FROM nodes ORDER BY name")]
 
 
-def blocking_reasons(readiness: dict | None, project: str, account: str = "") -> list[dict]:
+def blocking_reasons(readiness: dict | None, project: str, account: str = "",
+                     assigned_accounts: list[str] | None = None) -> list[dict]:
     """Return work-blocking failures, restricting account conditions to the requesting worker account."""
-    safe = _safe_readiness(readiness)
+    safe = _safe_readiness(readiness, assigned_accounts)
     projects = safe.get("projects")
     if not safe.get("checked_at"):
         return [condition("system-check-snapshot", "System check", "needs_action",
@@ -616,6 +652,26 @@ def blocking_reasons(readiness: dict | None, project: str, account: str = "") ->
             and item.get("affects_work", True)
             and (not str(item.get("id", "")).startswith("credential:")
                  or not account or str(item.get("id", "")) == f"credential:{account}")]
+
+
+def project_node_readiness(readiness: dict | None, project: str, accounts: list[str]) -> dict[str, object]:
+    """Summarize a node for Projects while keeping credential failures tied to their assigned accounts.
+
+    A failed account is still shown in the returned conditions, but it blocks the machine only when every
+    assigned account is unable to serve this project. Machine and project conditions apply to all accounts.
+    """
+    account_ids = list(dict.fromkeys(account for account in accounts if isinstance(account, str) and account))
+    reasons = blocking_reasons(readiness, project, assigned_accounts=account_ids)
+    global_reasons = [item for item in reasons if not str(item.get("id", "")).startswith("credential:")]
+    failed_accounts = {
+        str(item.get("id", "")).removeprefix("credential:")
+        for item in reasons if str(item.get("id", "")).startswith("credential:")
+    }
+    account_reasons = [item for item in reasons
+                       if str(item.get("id", "")).startswith("credential:")
+                       and str(item.get("id", "")).removeprefix("credential:") in account_ids]
+    blocked = bool(global_reasons) or not account_ids or all(account in failed_accounts for account in account_ids)
+    return {"blocked": blocked, "conditions": global_reasons + account_reasons}
 
 
 def support_bundle(ctx) -> dict:

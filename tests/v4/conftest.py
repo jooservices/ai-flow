@@ -111,6 +111,8 @@ class FakeJira:
                               {"key": "NEWAPP", "name": "New App"}]
         self.project_workflows: dict[str, list[str]] = {}
         self.project_reads: list[str] = []
+        self.project_permission_reads: list[str] = []
+        self.project_permissions: dict[str, dict[str, bool]] = {}
         self.versions_data: dict[str, list[dict]] = {}
         self.version_reads: list[str] = []
         self.search_data: list[dict] = []
@@ -130,6 +132,10 @@ class FakeJira:
         self.project_reads.append(key)
         return self.project_workflows.get(key, ["Backlog", "Intake", "To Do", "In Progress", "In Verify",
                                                 "Needs owner", "Done"])
+
+    def project_write_permissions(self, key: str) -> dict[str, bool]:
+        self.project_permission_reads.append(key)
+        return self.project_permissions.get(key, {"EDIT_ISSUES": True, "TRANSITION_ISSUES": True})
 
     def project_versions(self, key: str) -> list[dict]:
         self.version_reads.append(key)

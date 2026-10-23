@@ -810,16 +810,35 @@ def project_node_readiness(readiness: dict | None, project: str, accounts: list[
     return {"blocked": blocked, "conditions": global_reasons + account_reasons}
 
 
-def support_bundle(ctx) -> dict:
-    """Safe, compact support snapshot with credential rows rebuilt from allowlisted status only."""
-    nodes = ctx.db.all("SELECT name,status,release_version,readiness,readiness_checked_at"
-                       " FROM nodes ORDER BY name")
+def report_nodes(ctx, project_scope: tuple[str, ...] | list[str] | None = None, *, include_release: bool = False) -> list[dict]:
+    """Build safe system-check rows, limited to projects the requesting user may see when scoped."""
+    columns = "name,status,readiness,readiness_checked_at,projects,dynamic"
+    if include_release:
+        columns += ",release_version"
+    nodes = ctx.db.all(f"SELECT {columns} FROM nodes ORDER BY name")
     repo = ctx.repo()
+    visible = set(project_scope) if project_scope is not None else None
+    out = []
+    for row in nodes:
+        assigned = repo.projects_for_node(row["name"], row.get("projects") or [], row.get("dynamic", False))
+        if visible is not None and not visible.intersection(assigned):
+            continue
+        readiness = _safe_readiness(row["readiness"] or {},
+                                    [account.id for account in repo.accounts_on(row["name"])])
+        if visible is not None and isinstance(readiness.get("projects"), dict):
+            readiness["projects"] = {key: value for key, value in readiness["projects"].items() if key in visible}
+        result = {"name": row["name"], "status": row["status"], "readiness": readiness,
+                  "checked_at": row["readiness_checked_at"].isoformat() if row["readiness_checked_at"] else None}
+        if include_release:
+            result["release"] = row["release_version"]
+        out.append(result)
+    return out
+
+
+def support_bundle(ctx, project_scope: tuple[str, ...] | list[str] | None = None) -> dict:
+    """Safe, compact support snapshot with credential rows rebuilt from allowlisted status only."""
+    visible = set(project_scope) if project_scope is not None else None
+    projects = sorted(key for key in ctx.repo().projects if visible is None or key in visible)
     return {"generated_at": datetime.now(timezone.utc).isoformat(),
-            "system_check": {"nodes": [
-                {"name": row["name"], "status": row["status"], "release": row["release_version"],
-                 "readiness": _safe_readiness(row["readiness"] or {},
-                                              [account.id for account in repo.accounts_on(row["name"])]),
-                 "checked_at": row["readiness_checked_at"].isoformat() if row["readiness_checked_at"] else None}
-                for row in nodes]},
-            "projects": sorted(repo.projects)}
+            "system_check": {"nodes": report_nodes(ctx, project_scope, include_release=True)},
+            "projects": projects}

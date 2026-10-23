@@ -468,7 +468,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .roadmap-row .roadmap-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.roadmap-track{height:12px;border-radius:6px;background:var(--track);overflow:hidden}.roadmap-track i{display:block;height:100%;background:var(--good)}
 .provider-legend{display:flex;gap:8px 14px;flex-wrap:wrap;color:var(--muted);font-size:12px}.provider-legend span{display:inline-flex;align-items:center;gap:6px}.provider-swatch{width:9px;height:9px;border-radius:50%;background:var(--provider-color)}
 .provider-claude{--provider-color:var(--provider-claude)}.provider-codex{--provider-color:var(--provider-codex)}.provider-grok{--provider-color:var(--provider-grok)}.provider-opencode{--provider-color:var(--provider-opencode)}
-.provider-chart{display:block;width:100%;height:auto;min-height:120px}.provider-chart .provider-claude{fill:var(--provider-claude)}.provider-chart .provider-codex{fill:var(--provider-codex)}.provider-chart .provider-grok{fill:var(--provider-grok)}.provider-chart .provider-opencode{fill:var(--provider-opencode)}
+.provider-chart{display:block;width:100%;height:auto;min-height:120px}.provider-chart text{fill:var(--muted);font-family:var(--f-mono);font-size:10px}.provider-chart .provider-claude{fill:var(--provider-claude)}.provider-chart .provider-codex{fill:var(--provider-codex)}.provider-chart .provider-grok{fill:var(--provider-grok)}.provider-chart .provider-opencode{fill:var(--provider-opencode)}
 .usage-share{display:grid;gap:8px;margin-top:16px}.usage-share h3{margin:0;color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
 .usage-share .sharebar{display:flex;height:12px;overflow:hidden;border:1px solid var(--line);border-radius:7px;background:var(--bg)}
 .usage-share .sharebar i{display:block;height:100%}.usage-share .share-legend{display:flex;gap:8px 16px;flex-wrap:wrap;color:var(--muted);font-size:12px}
@@ -1712,10 +1712,12 @@ function renderLive() {
 
 /* ---------- Command Center ---------- */
 function dashboardProjectCounts(projectKey) {
-  var rows = D().tickets.filter(function (t) { return t.project === projectKey && t.type !== 'Epic'; });
+  var allTickets = D().tickets;
+  var allRows = allTickets.filter(function (t) { return t.project === projectKey; });
+  var rows = allRows.filter(function (t) { return t.type !== 'Epic'; });
   return { total: rows.length, open: rows.filter(function (t) { return t.status !== 'Done'; }).length,
     building: rows.filter(function (t) { return ['In Progress', 'In Verify', 'Human review'].indexOf(t.status) >= 0; }).length,
-    waiting: dashboardWaitingTickets(rows).length,
+    waiting: dashboardWaitingTickets(allTickets).filter(function (t) { return t.project === projectKey; }).length,
     done: rows.filter(function (t) { return t.status === 'Done'; }).length };
 }
 function providerUsageChart(rows) {
@@ -1777,8 +1779,9 @@ function dashboardUsageShare(rows) {
   return h + '</div></div>';
 }
 function dashboardWaitingTickets(tickets) {
-  var byKey = {}; (tickets || []).forEach(function (ticket) { byKey[ticket.key] = ticket; });
-  return (tickets || []).filter(function (ticket) {
+  var allTickets = tickets || [], byKey = {};
+  allTickets.forEach(function (ticket) { byKey[ticket.key] = ticket; });
+  return allTickets.filter(function (ticket) {
     if (ticket.type === 'Epic') return false;
     if (ticket.status === 'Needs owner' || ticket.status === 'Human review') return true;
     return (ticket.blocked_by || []).some(function (key) { var blocker = byKey[key]; return !blocker || (blocker.status !== 'Done' && blocker.status !== 'Closed'); });
@@ -1799,7 +1802,7 @@ function openDashboardWorkFilter(filter) {
 }
 function openDashboardCard(card) {
   if (card === 'ai-usage') { setDashboardTab('ai'); return; }
-  if (card === 'waiting' && consoleCan('view.human_review')) { setView('review'); return; }
+  if (card === 'waiting' && consoleCan('view.human_review')) { S.reviewProject = ''; setView('review'); return; }
   openDashboardWorkFilter(card === 'done' ? 'done' : card === 'in-flight' ? 'in-flight' : 'waiting');
 }
 function renderDashboard() {
@@ -1810,7 +1813,7 @@ function renderDashboard() {
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
   var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
   var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
-  var waiting = dashboardWaitingTickets(tickets);
+  var waiting = dashboardWaitingTickets(d.tickets);
   var done = tickets.filter(function (t) { return t.status === 'Done'; }), days = utcDays(7), usage = dashboardUsageTotals(S.dashboardUsage);
   var doneTrend = days.map(function (day) { return done.filter(function (t) { return t.done_at && String(t.done_at).slice(0, 10) === day; }).length; });
   var waitingTrend = days.map(function () { return 0; }), inFlightTrend = days.map(function () { return 0; }), byWaitingDay = {};

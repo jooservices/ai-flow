@@ -1404,6 +1404,10 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
         "tickets": [
             {"key": "ALPHA-2", "project": "ALPHA", "type": "Epic", "summary": "Account roadmap",
              "status": "In Progress", "labels": []},
+            {"key": "ALPHA-1", "project": "ALPHA", "type": "Epic", "summary": "Completed roadmap",
+             "status": "Done", "labels": []},
+            {"key": "ALPHA-7", "project": "ALPHA", "type": "Story", "summary": "Blocked by completed epic",
+             "status": "To Do", "labels": [], "blocked_by": ["ALPHA-1"]},
             {"key": "ALPHA-3", "project": "ALPHA", "type": "Story", "summary": "Building story",
              "status": "In Progress", "labels": [], "parent_key": "ALPHA-2", "run": None},
             {"key": "ALPHA-4", "project": "ALPHA", "type": "Bug", "summary": "Owner question",
@@ -1442,7 +1446,7 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     cards = dict(re.findall(r'<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="([^"]+)">(.*?)</button>', rendered))
     assert set(cards) == {"done", "in-flight", "waiting", "ai-usage"}
     assert '<span class="value">1</span>' in cards["done"]
-    assert "+1 this week" in cards["done"] and "of 4 tickets · 25% complete" in cards["done"]
+    assert "+1 this week" in cards["done"] and "of 5 tickets · 20% complete" in cards["done"]
     assert '<span class="value">2</span>' in cards["in-flight"]
     assert '<span class="value">2</span>' in cards["waiting"]
     assert "2k <small>tokens</small>" in cards["ai-usage"] and "Approx. $0.1200" in cards["ai-usage"]
@@ -1451,7 +1455,7 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert rendered.count('class="flow-step"') == 8 and rendered.count('class="flow-track"') == 8
     for text in ("Work", "AI and machines", "Flow at a glance", "Projects", "What is being built", "Waiting for you",
                  "Done", "In flight", "AI usage today", "dashboard-tab-work", "dashboard-tab-ai",
-                 "data-act=\"flow-step\"", "data-act=\"dashboard-card\"", "kpi-trend", "of 4 tickets · 25% complete",
+                 "data-act=\"flow-step\"", "data-act=\"dashboard-card\"", "kpi-trend", "of 5 tickets · 20% complete",
                  "+1 this week", "In progress, verify or human review", "Questions, decisions and reviews",
                  "Approximate cost today", "AI usage", "Share of usage", "Quota by AI", "codex-alpha", "Codex", "Next quota reset:",
                  "Quota forecast", "used 40% quota", "left 60%", "comfortable", "quota-history",
@@ -1463,6 +1467,7 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
     assert 'data-dashboard-panel="work" hidden' in ai_tab
     assert 'data-dashboard-panel="ai"' in ai_tab and 'class="provider-chart"' in ai_tab
     assert "Share of usage · last 14 days" in ai_tab and "Quota by AI" in ai_tab
+    assert '.provider-chart text{fill:var(--muted)' in PAGE.read_text()
 
 
     # JAIF-255: escalations per week by class and project, the share without a person, the register and amendments
@@ -1509,23 +1514,32 @@ def test_dashboard_shows_v2_tabs_cards_links_funnel_usage_share_and_quota():
 
 def test_dashboard_card_routes_and_funnel_filters_match_board_statuses():
     result = run_script("""
-var selected = '';
-setView = function (view) { selected = view; S.view = view; };
+var selected = '', reviewProjectAtNavigation = null;
+setView = function (view) { selected = view; if (view === 'review') reviewProjectAtNavigation = S.reviewProject; S.view = view; };
 S.consoleUser = {authenticated: true, user: 'owner@example.test', permissions: ['*']};
 openDashboardCard('done'); var done = {view: selected, filter: S.workStatusFilter};
 openDashboardCard('in-flight'); var flight = {view: selected, filter: S.workStatusFilter};
-S.workStatusFilter = 'all';
+S.workStatusFilter = 'all'; S.reviewProject = 'ALPHA';
 openDashboardCard('waiting'); var waiting = {view: selected, filter: S.workStatusFilter};
-openDashboardWorkFilter('In Verify'); var flow = {view: selected, filter: S.workStatusFilter};
+var flow = STATUS_COLS.map(function (status) {
+  openDashboardWorkFilter(status[0]); return {status: status[0], view: selected, filter: S.workStatusFilter};
+});
+S.view = 'cc'; S.dashboardTab = 'work'; openDashboardCard('ai-usage');
+var usage = {view: S.view, tab: S.dashboardTab};
 S.consoleUser = {authenticated: true, user: 'business@example.test', permissions: ['view.dashboard', 'view.work_board']};
 openDashboardCard('waiting'); var fallback = {view: selected, filter: S.workStatusFilter};
-console.log(JSON.stringify({done: done, flight: flight, waiting: waiting, flow: flow, fallback: fallback, project: S.project}));
+console.log(JSON.stringify({done: done, flight: flight, waiting: waiting, reviewProject: S.reviewProject,
+  reviewProjectAtNavigation: reviewProjectAtNavigation, flow: flow, usage: usage, fallback: fallback, project: S.project}));
 """)
     assert json.loads(result) == {
         "done": {"view": "work", "filter": "done"},
         "flight": {"view": "work", "filter": "in-flight"},
         "waiting": {"view": "review", "filter": "all"},
-        "flow": {"view": "work", "filter": "In Verify"},
+        "reviewProject": "",
+        "reviewProjectAtNavigation": "",
+        "flow": [{"status": status, "view": "work", "filter": status} for status in
+                 ("Backlog", "Intake", "To Do", "In Progress", "In Verify", "Human review", "Needs owner", "Done")],
+        "usage": {"view": "cc", "tab": "ai"},
         "fallback": {"view": "work", "filter": "waiting"},
         "project": "all",
     }
@@ -1541,7 +1555,9 @@ S.data = {projects: [{key: 'ALPHA'}, {key: 'BETA'}], tickets: [
   {key: 'BETA-1', project: 'BETA', type: 'Story', status: 'Needs owner'},
   {key: 'BETA-2', project: 'BETA', type: 'Story', status: 'Human review'},
   {key: 'BETA-3', project: 'BETA', type: 'Story', status: 'To Do', blocked_by: ['BETA-4']},
-  {key: 'BETA-4', project: 'BETA', type: 'Story', status: 'In Progress'}
+  {key: 'BETA-4', project: 'BETA', type: 'Story', status: 'In Progress'},
+  {key: 'BETA-8', project: 'BETA', type: 'Epic', status: 'Closed'},
+  {key: 'BETA-9', project: 'BETA', type: 'Story', status: 'To Do', blocked_by: ['BETA-8']}
 ]};
 S.project = 'all';
 var tickets = projTickets().filter(function (t) { return t.type !== 'Epic'; });
@@ -1549,20 +1565,25 @@ var result = {total: tickets.length,
   done: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'done'); }).length,
   inFlight: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'in-flight'); }).length,
   waiting: tickets.filter(function (t) { return dashboardWorkStatusMatches(t, 'waiting'); }).length,
-  reviewQueue: dashboardWaitingTickets(tickets).length};
+  reviewQueue: dashboardWaitingTickets(S.data.tickets).length};
 console.log(JSON.stringify(result));
 """))
-    assert out == {"total": 7, "done": 1, "inFlight": 4, "waiting": 3, "reviewQueue": 3}
+    assert out == {"total": 8, "done": 1, "inFlight": 4, "waiting": 3, "reviewQueue": 3}
 
 
 def test_dashboard_ticket_counts_match_state_work_board_filters_and_human_review_api(client, ctx):
     for key, status in (("TESTWP-101", "Done"), ("TESTWP-102", "In Progress"),
                         ("TESTWP-103", "In Verify"), ("TESTWP-104", "Needs owner"),
                         ("TESTWP-105", "Human review"), ("TESTWP-106", "To Do"),
-                        ("TESTWP-107", "To Do")):
+                        ("TESTWP-107", "To Do"), ("TESTWP-108", "Done"),
+                        ("TESTWP-109", "To Do"), ("TESTWP-110", "Closed"),
+                        ("TESTWP-111", "To Do")):
         add_ticket(ctx.db, key, status=status, labels=())
+    ctx.db.run("UPDATE tickets SET type='Epic' WHERE key IN ('TESTWP-108','TESTWP-110')")
     ctx.db.run("UPDATE tickets SET done_at=now() WHERE key='TESTWP-101'")
     ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-107'", (["TESTWP-106"],))
+    ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-109'", (["TESTWP-108"],))
+    ctx.db.run("UPDATE tickets SET blocked_by=%s WHERE key='TESTWP-111'", (["TESTWP-110"],))
 
     snapshot = client.get("/v1/state").json()
     script = f"""
@@ -1577,7 +1598,10 @@ console.log(JSON.stringify({{
 """
     counts = json.loads(run_script(script))
     review_queue = client.get("/v1/reviews").json()["tickets"]
-    assert counts == {"total": 7, "done": 1, "inFlight": 3, "waiting": 3}
+    dashboard = render_dashboard(snapshot)
+    waiting_card = re.search(r'data-card="waiting">(.*?)</button>', dashboard).group(1)
+    assert '<span class="value">3</span>' in waiting_card
+    assert counts == {"total": 9, "done": 1, "inFlight": 3, "waiting": 3}
     assert counts["waiting"] == len(review_queue) == 3
 
 

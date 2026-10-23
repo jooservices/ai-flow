@@ -79,6 +79,13 @@ the fenced result and re-scores the role pool, including evidence-backed tool-mi
 
 **Console screens:** `cc`, `machines`
 
+## Retry after a clean no-change run
+
+A dev run that ends with a clean "nothing to change" result is stored as `no_changes`. Role health never scores it as
+a failure, but it counts toward the retry backoff so the ticket is not offered again at once. The master action
+`POST /v1/master/actions` with `retry` therefore accepts a latest run with outcome `no_changes` as well as `failed`,
+`timeout`, `lost`, `quota` and `blocked`.
+
 ## Thresholds
 
 Defaults: window 10 runs, failure score above 60 %. An owner (permission `console.manage`) edits both on the panel;

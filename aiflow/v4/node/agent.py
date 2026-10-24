@@ -824,7 +824,13 @@ def process_node_operation(api: ControlClient, node: str) -> None:
 
     operation_id = operation["id"]
     try:
-        result = execute(operation)
+        if operation.get("action") == "read_logs":
+            from ..core.log_sources import read_source
+            payload = operation.get("payload") or {}
+            result = read_source(str(payload.get("kind") or ""), str(payload.get("target") or ""),
+                                 payload.get("lines", 100))
+        else:
+            result = execute(operation)
         body = {"status": "completed", "result": result}
     except OperationError as exc:
         log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])

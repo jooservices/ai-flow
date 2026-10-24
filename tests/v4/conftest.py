@@ -55,7 +55,8 @@ def test_database_url():
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
     # Keep this session database visible to the node-agent sweeper between tests, even while
-    # individual test DB pools are closed.
+    # individual test DB pools are closed. The application name also makes concurrent-session
+    # protection explicit in pg_stat_activity.
     keepalive = psycopg.connect(own, autocommit=True, application_name="aiflow4-pytest-session")
     try:
         yield own

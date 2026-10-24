@@ -32,6 +32,7 @@ MAX_ATTEMPTS = 4
 RETRY_DELAYS_S = (30, 120, 600)
 SENDING_RECOVERY_AFTER_S = 60
 TICKET_KEY = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 SECRET_FIELDS = {
     "email": ("password",),
     "telegram": ("bot_token",),
@@ -95,7 +96,12 @@ def _channel_config(kind: str, incoming: dict, previous: dict | None = None) -> 
         chat_id = _text(source.get("chat_id"), 128)
         if not token or not chat_id:
             raise ValueError("Telegram bot token and chat ID are required")
-        return {"bot_token": token, "chat_id": chat_id}
+        ba_chat_enabled = bool(source.get("ba_chat_enabled", False))
+        project_key = _text(source.get("project_key"), 10).upper()
+        if ba_chat_enabled and not PROJECT_KEY.fullmatch(project_key):
+            raise ValueError("choose a Jira project key to enable BA chat")
+        return {"bot_token": token, "chat_id": chat_id, "ba_chat_enabled": ba_chat_enabled,
+                "project_key": project_key}
     if kind in ("slack", "teams"):
         webhook = _url(source.get("webhook_url", ""))
         return {"webhook_url": webhook}
@@ -141,7 +147,9 @@ def _public_config(kind: str, config: dict) -> dict:
     if kind == "email":
         return {key: config.get(key, "") for key in ("mode", "host", "port", "username", "from", "to", "tls_mode")}
     if kind == "telegram":
-        return {"chat_id": config.get("chat_id", "")}
+        return {"chat_id": config.get("chat_id", ""),
+                "ba_chat_enabled": bool(config.get("ba_chat_enabled", False)),
+                "project_key": config.get("project_key", "")}
     return {}
 
 
@@ -197,18 +205,21 @@ def public_preferences(db) -> dict:
             "updated_at": _iso(row.get("updated_at"))}
 
 
-def public_settings(db) -> dict:
+def public_settings(db, projects: list[dict] | None = None) -> dict:
     channels = db.all("SELECT * FROM notification_channels ORDER BY id")
     deliveries = db.all("SELECT id, channel_id, channel_name, channel_kind, alert_kind, title, link, project, ticket,"
                         " needed, status, attempts, max_attempts, last_error, is_test, created_at, updated_at"
                         " FROM notification_deliveries ORDER BY id DESC LIMIT 50")
     incidents = db.all("SELECT id, opened_at, severity, title, detail, subject FROM incidents"
                         " WHERE kind='notification_delivery' AND closed_at IS NULL ORDER BY opened_at DESC LIMIT 50")
-    return {"kinds": list(CHANNEL_KINDS), "alert_kinds": ALERT_LABELS,
+    result = {"kinds": list(CHANNEL_KINDS), "alert_kinds": ALERT_LABELS,
             "channels": [public_channel(row) for row in channels], "preferences": public_preferences(db),
             "deliveries": [{**row, "created_at": _iso(row["created_at"]), "updated_at": _iso(row["updated_at"])}
                            for row in deliveries],
             "incidents": [{**row, "opened_at": _iso(row["opened_at"])} for row in incidents]}
+    if projects is not None:
+        result["projects"] = projects
+    return result
 
 
 def configured_channels(ctx, alert_kind: str = "ticket_needs_person") -> list[str]:

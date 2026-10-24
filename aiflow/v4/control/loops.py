@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from . import escalations, jira_connect, knowledge, memory, notify, role_health, tooling
+from . import ba_chat, escalations, jira_connect, knowledge, memory, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -474,7 +474,7 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = last_ba_chat = 0.0
     ctx.events.start()
     while not stop.is_set():
         now = time.time()
@@ -492,6 +492,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 notify.process_retries(ctx)
                 notify.send_scheduled_summaries(ctx)
                 last_wd = now
+            if now - last_ba_chat >= 5 and ctx.leases.leader("ba_chat_poll", OWNER, 30_000):
+                ba_chat.poll(ctx)
+                last_ba_chat = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
                 last_rollout = now

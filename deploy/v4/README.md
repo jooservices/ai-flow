@@ -15,6 +15,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
+- [Telegram BA chat](../../docs/v4/telegram-ba-chat.md): private-chat follow-up questions, owner-approved epic/story/task proposals, and Jira ticket creation through the configured Telegram channel
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes

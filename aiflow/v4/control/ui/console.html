@@ -1189,8 +1189,19 @@ function projectEnvironmentPanels(state) {
     else {
       h += '<div class="project-table"><table><thead><tr><th>Ticket</th><th>Deferred criteria</th><th>Result</th><th>Release checks</th><th>Checked</th></tr></thead><tbody>';
       postMerge.forEach(function (item) {
-        var result = item.result || {}, checks = (result.checks || []).map(function (c) { return c.command + ': ' + (c.passed ? 'passed' : 'failed'); });
-        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + (item.criteria || []).map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('') + '</td>';
+        var result = item.result || {}, outcomes = result.criteria || [];
+        var criteria = (item.criteria || []).map(function (c) {
+          var criterion = typeof c === 'string' ? { text: c } : c;
+          return '<div><strong>' + esc(criterion.id || '') + '</strong> ' + esc(criterion.text || '') +
+            '<div class="hint">Configured check: ' + esc(criterion.check || 'unmapped') + '</div></div>';
+        });
+        var checks = outcomes.map(function (c) {
+          var check = c.check_result || {}, command = check.command || c.check || 'unmapped';
+          var status = check.passed === true ? 'passed' : check.passed === false ? 'failed' : (c.status || 'pending');
+          var exit = Number.isInteger(check.exit_code) ? ' (exit ' + check.exit_code + ')' : '';
+          return (c.id ? c.id + ': ' : '') + command + ': ' + status + exit;
+        });
+        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + criteria.join('') + '</td>';
         h += '<td><span class="pill" data-tone="' + (item.status === 'passed' ? 'ok' : item.status === 'failed' ? 'crit' : 'warn') + '">' + esc(item.status) + '</span></td>';
         h += '<td>' + esc(checks.join(', ') || result.error || '—') + (item.release_ticket ? ' · ' + esc(item.release_ticket) : '') + '</td><td>' + esc(item.checked_at ? when(item.checked_at) : 'waiting') + '</td></tr>';
       });

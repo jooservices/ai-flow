@@ -28,6 +28,10 @@ CLOSED_STATUSES = ("Done", "Closed", "Declined", "Cancelled", "Canceled", "Resol
 CORRECTABLE_STATUSES = ("Created", "Backlog", "To Do", "Needs owner")
 
 
+class UnmappedPostMergeCriteria(ValueError):
+    """A verify PASS cannot defer a criterion without an exact configured check."""
+
+
 def _item(ctx, project: str, name: str):
     p = ctx.repo().projects.get(project)
     return next((i for i in (p.environment_items if p else []) if i.name == name), None)
@@ -39,7 +43,8 @@ def record_missing(ctx, run: dict, names: list[str], detail: str) -> list[str]:
     recorded: list[str] = []
     for name in dict.fromkeys(str(n).strip().upper() for n in names if str(n).strip()):
         item = _item(ctx, run["project"], name)
-        if not item:
+        # A developer run cannot wait on a configured item that its run step is forbidden to receive.
+        if not item or "dev" not in item.runs:
             continue
         ctx.db.run("INSERT INTO environment_reports (ticket_key, project, item, machine, run_id, detail, fingerprint)"
                    " VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (ticket_key, item) WHERE resolved_at IS NULL"
@@ -59,14 +64,36 @@ def parked_tickets(ctx) -> set[str]:
     return {r["ticket_key"] for r in ctx.db.all("SELECT ticket_key FROM environment_reports WHERE resolved_at IS NULL")}
 
 
-def provide(ctx, project: str, item: str, how: str = "provided") -> int:
-    """The item is provided (the flow doctor of JAIF-260 calls this): the waiting tickets are offered again."""
+def provide(ctx, project: str, item: str, how: str = "provided", *, machine: str = "",
+            fingerprint: str = "") -> int:
+    """Confirm an item and offer its waiting tickets again.
+
+    Node confirmations are bound to the reporting node and the item's current configuration fingerprint, so a
+    delayed heartbeat cannot resolve a newer wait or a wait on a different node.
+    """
     rows = ctx.db.all("UPDATE environment_reports SET resolved_at=now(), resolution=%s WHERE project=%s AND item=%s"
-                      " AND resolved_at IS NULL RETURNING ticket_key", (how[:200], project, item))
+                      " AND resolved_at IS NULL AND (%s='' OR machine=%s) AND (%s='' OR fingerprint=%s)"
+                      " RETURNING ticket_key", (how[:200], project, item, machine, machine, fingerprint, fingerprint))
     for row in rows:
         ctx.events.emit("ticket.environment_provided", ticket=row["ticket_key"], project=project, outcome="provided",
                         reason=f"{item}: {how}")
     return len(rows)
+
+
+def confirm_node_environment(ctx, node: str, reported: dict[str, list[str]]) -> int:
+    """Resolve waits from the node agent's authenticated, names-only report of configured secrets it can read."""
+    repo = ctx.repo()
+    node_row = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s AND removed_at IS NULL", (node,)) or {}
+    assigned = set(repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)))
+    resolved = 0
+    for project in sorted(assigned.intersection(reported)):
+        configured = {item.name: item for item in repo.projects[project].environment_items if item.secret}
+        for name in dict.fromkeys(str(value).strip().upper() for value in reported.get(project, []) if str(value).strip()):
+            item = configured.get(name)
+            if item:
+                resolved += provide(ctx, project, name, "secret confirmed by the node agent", machine=node,
+                                    fingerprint=item.fingerprint())
+    return resolved
 
 
 def sweep(ctx) -> list[str]:
@@ -148,15 +175,36 @@ def record_removal(ctx, run: dict, removed: list[str], needs: list[str]) -> None
                     reason=f"{len(removed)} removed, {len(needs)} environment need(s)")
 
 
-def record_post_merge_criteria(ctx, run: dict, criteria: list[str]) -> list[str]:
-    """Save criteria that the independent reviewer deferred to a configured post-merge check run."""
-    clean = list(dict.fromkeys(redact(str(item)).strip()[:600] for item in criteria if str(item).strip()))[:20]
+def record_post_merge_criteria(ctx, run: dict, criteria: list[Any]) -> list[dict[str, str]]:
+    """Save criteria the reviewer deferred, each tied to one configured check command."""
     if run.get("step") != "verify":
         return []
+    project = ctx.repo().projects.get(run["project"])
+    settings = project.settings_for_repo(str((run.get("details") or {}).get("repository") or project.repo)) if project else {}
+    configured_checks = set(settings.get("checks") or (project.checks if project else []))
+    clean: list[dict[str, str]] = []
+    for raw in criteria[:20]:
+        if isinstance(raw, dict):
+            criterion_id = str(raw.get("id") or "").strip().upper()[:24]
+            text = str(raw.get("text") or "").strip()
+            check = str(raw.get("check") or "").strip()
+        else:
+            criterion_id, text, check = "", str(raw).strip(), ""
+        if not text:
+            continue
+        text = redact(text)[:600]
+        clean.append({"id": criterion_id, "text": text,
+                      "check": check if check in configured_checks else ""})
+    clean = list({(item["id"], item["text"]): item for item in clean}.values())
     if not clean:
         ctx.db.run("DELETE FROM environment_post_merge_checks WHERE ticket_key=%s AND status='pending'",
                    (run["ticket_key"],))
         return []
+    unmapped = [item for item in clean if not item["check"]]
+    if unmapped:
+        ids = ", ".join(item["id"] or "deferred criterion" for item in unmapped[:8])
+        raise UnmappedPostMergeCriteria(
+            f"{ids} must map to a valid configured post-merge check before verify can pass")
     ctx.db.run("INSERT INTO environment_post_merge_checks (ticket_key, project, criteria, status, result, release_ticket, run_id, checked_at)"
                " VALUES (%s,%s,%s,'pending','{}','',%s,NULL) ON CONFLICT (ticket_key) DO UPDATE SET"
                " project=EXCLUDED.project, criteria=EXCLUDED.criteria, status='pending', result='{}',"
@@ -169,43 +217,52 @@ def record_post_merge_criteria(ctx, run: dict, criteria: list[str]) -> list[str]
 
 
 def pending_post_merge(ctx, project: str, ticket_keys: list[str] | None = None) -> list[dict[str, Any]]:
-    """Pending deferred criteria for the tickets included in a configured project release."""
+    """Deferred criteria for merged tickets, whether or not they belong to a Jira version release."""
     if ticket_keys is not None and not ticket_keys:
         return []
     if ticket_keys is None:
-        rows = ctx.db.all("SELECT ticket_key, criteria FROM environment_post_merge_checks"
-                          " WHERE project=%s AND status='pending' ORDER BY created_at, ticket_key", (project,))
+        rows = ctx.db.all("SELECT c.ticket_key, c.criteria FROM environment_post_merge_checks c"
+                          " JOIN tickets t ON t.key=c.ticket_key WHERE c.project=%s AND c.status='pending'"
+                          " AND t.status='Done' ORDER BY c.created_at, c.ticket_key", (project,))
     else:
-        rows = ctx.db.all("SELECT ticket_key, criteria FROM environment_post_merge_checks"
-                          " WHERE project=%s AND status='pending' AND ticket_key = ANY(%s)"
-                          " ORDER BY created_at, ticket_key", (project, ticket_keys))
+        rows = ctx.db.all("SELECT c.ticket_key, c.criteria FROM environment_post_merge_checks c"
+                          " JOIN tickets t ON t.key=c.ticket_key WHERE c.project=%s AND c.status='pending'"
+                          " AND c.ticket_key = ANY(%s) AND t.status='Done' ORDER BY c.created_at, c.ticket_key",
+                          (project, ticket_keys))
     return [{"ticket": row["ticket_key"], "criteria": row["criteria"] or []} for row in rows]
 
 
-def record_post_merge_results(ctx, run: dict, version: str, report: dict[str, Any],
-                              criteria: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Record the configured release-check result against every ticket whose criterion it checked."""
-    checks = report.get("checks") or []
-    passed = bool(checks) and not report.get("error") and all(bool(item.get("passed")) for item in checks)
-    result = {"version": version, "release_ticket": run["ticket_key"], "run_id": str(run["id"]),
-              "head_sha": str(report.get("head_sha") or ""), "source_sha": str(report.get("source_sha") or ""),
-              "checks": [{"command": str(item.get("command") or ""), "passed": bool(item.get("passed"))}
-                         for item in checks], "error": str(report.get("error") or "")[:1000]}
-    recorded = []
-    for item in criteria:
-        ticket = str(item.get("ticket") or "")
-        if not ticket:
-            continue
-        count = ctx.db.run("UPDATE environment_post_merge_checks SET status=%s, result=%s, release_ticket=%s,"
-                           " run_id=%s, checked_at=now(), updated_at=now() WHERE ticket_key=%s AND project=%s"
-                           " AND status='pending'",
-                           ("passed" if passed else "failed", J(result), run["ticket_key"], str(run["id"]),
-                            ticket, run["project"]))
-        if count:
-            ctx.events.emit("environment.post_merge_result", ticket=ticket, project=run["project"],
-                            step="post_merge", run_id=str(run["id"]), outcome="passed" if passed else "failed",
-                            reason=f"project release checks for {version}", data=result)
-            recorded.append({"ticket": ticket, "status": "passed" if passed else "failed", "criteria": item.get("criteria") or []})
+def record_post_merge_results(ctx, run: dict, report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Record each deferred criterion only from the check command explicitly mapped to it."""
+    checks = {str(item.get("command") or ""): item for item in report.get("checks") or []}
+    recorded: list[dict[str, Any]] = []
+    ticket = str(run.get("ticket_key") or "")
+    row = ctx.db.one("SELECT criteria,project FROM environment_post_merge_checks WHERE ticket_key=%s"
+                     " AND status='pending'", (ticket,))
+    if not row:
+        return recorded
+    results = []
+    for criterion in row["criteria"] or []:
+        command = str(criterion.get("check") or "") if isinstance(criterion, dict) else ""
+        check = checks.get(command) if command else None
+        status = ("passed" if bool(check.get("passed")) else "failed") if check else "failed"
+        result = {"id": criterion.get("id", "") if isinstance(criterion, dict) else "",
+                  "text": criterion.get("text", "") if isinstance(criterion, dict) else str(criterion),
+                  "check": command, "status": status,
+                  "check_result": {"command": command, "passed": bool(check.get("passed")),
+                                   "exit_code": check.get("exit_code")} if check else None}
+        results.append(result)
+    status = "passed" if results and all(item["status"] == "passed" for item in results) else "failed"
+    result = {"run_id": str(run["id"]), "head_sha": str(report.get("head_sha") or ""),
+              "criteria": results, "error": str(report.get("error") or "")[:1000]}
+    count = ctx.db.run("UPDATE environment_post_merge_checks SET status=%s,result=%s,release_ticket=%s,run_id=%s,"
+                       "checked_at=now(),updated_at=now() WHERE ticket_key=%s AND project=%s AND status='pending'",
+                       (status, J(result), ticket, str(run["id"]), ticket, row["project"]))
+    if count:
+        ctx.events.emit("environment.post_merge_result", ticket=ticket, project=row["project"], step="post_merge",
+                        run_id=str(run["id"]), outcome=status, reason="per-criterion post-merge checks",
+                        data=result)
+        recorded.append({"ticket": ticket, "status": status, "criteria": results})
     return recorded
 
 

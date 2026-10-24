@@ -32,11 +32,23 @@ QUEUE_POLL_S = 15
 POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
 
 
-def deferred_criteria(text: str) -> list[str]:
-    """Read the reviewer AI's explicit list of criteria that need the post-merge environment."""
+def deferred_criteria(text: str) -> list[dict[str, str]]:
+    """Read deferred criteria and their explicitly selected configured check command."""
     match = POST_MERGE_CHECKS.search(text or "")
-    return list(dict.fromkeys(re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()[:600]
-                              for line in (match.group(1).splitlines() if match else []) if line.strip()))[:20]
+    out = []
+    for line in (match.group(1).splitlines() if match else []):
+        value = re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()
+        if not value:
+            continue
+        mapped = re.match(r"^(AC\d+)\s*:\s*(.*?)\s*\|\s*check\s*:\s*`?(.+?)`?$", value, re.I)
+        if mapped:
+            out.append({"id": mapped.group(1).upper(), "text": mapped.group(2).strip()[:600],
+                        "check": mapped.group(3).strip()[:500]})
+        else:
+            criterion = re.match(r"^(AC\d+)\s*:\s*(.*)$", value, re.I)
+            out.append({"id": criterion.group(1).upper() if criterion else "",
+                        "text": (criterion.group(2) if criterion else value)[:600], "check": ""})
+    return list({(item["id"], item["text"]): item for item in out}.values())[:20]
 
 
 def findings_of(text: str) -> str:
@@ -140,8 +152,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                 hb.progress = {"phase": "wordpress-site"}
                 start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
-                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
-                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
@@ -175,6 +187,15 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
                                                     f"{(res.error_message or text.strip())[-400:]}")
             return result
+        configured_checks = set(project.get("checks") or [])
+        unmapped = [criterion for criterion in post_merge
+                    if str(criterion.get("check") or "") not in configured_checks]
+        if unmapped:
+            ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
+            findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
+                        "Map each deferred criterion to a configured check, or verify it before merge.")
+            return _rework(c, api, jira, pr_comment, result, findings,
+                           "deferred criterion has no configured check", checks, t0=t0)
         # PASS from the reviewer; CI on the PR head must agree before anything is merged
         ci = wait_for_ci(api, c, pr.get("head_sha") or head, hb)
         failed = [x for x in ci if x["state"] == "failure"]

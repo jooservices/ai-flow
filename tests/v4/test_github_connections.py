@@ -17,9 +17,16 @@ from aiflow.v4.control.api import github_gateway
 from aiflow.v4.control.github import GitHubApp, GitHubError
 from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core import secretbox
 from aiflow.v4.node import probes
 
 TOKEN = "github_pat_" + "p" * 40
+
+
+@pytest.fixture(autouse=True)
+def secret_encryption_key(monkeypatch):
+    """GitHub App connection tests use a test-only external key for private-key storage."""
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
 
 
 class PersonalGitHub(FakeGitHub):
@@ -74,6 +81,8 @@ def test_cached_default_app_is_revoked_after_another_replica_removes_its_files(c
                                                         "installation_id": 7}))
     (secrets_dir / "app.pem").write_text("-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----")
     replica_gateway = GitHubApp(str(secrets_dir), "jooservices")
+    stored_key = (secrets_dir / "app.pem").read_text(encoding="utf-8")
+    assert secretbox.is_encrypted(stored_key) and "test" not in stored_key
     replica_gateway._cache["person/tool|[]"] = ("cached-installation-token", 9_999_999_999)
     ctx.github = replica_gateway
 

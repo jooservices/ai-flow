@@ -14,7 +14,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 COOKIE_NAME = "aiflow4_session"
@@ -117,6 +117,7 @@ ROLE_VIEW_IDS = {
     "licensing": "licensing.manage",
     "backup": "backup.read",
     "notifications": "notifications.manage",
+    "security": "console.read",  # every person manages their own two-factor sign-in; administrators see the rest
 }
 PAGE_VIEWS = {
     "/": "dashboard", "/cc": "dashboard", "/dashboard": "dashboard",
@@ -125,6 +126,7 @@ PAGE_VIEWS = {
     "/stakeholder": "stakeholder", "/knowledge": "knowledge", "/integrations": "integrations",
     "/machines": "machines_ai", "/projects": "projects", "/users": "users",
     "/licensing": "licensing", "/backup": "backup", "/notifications": "notifications",
+    "/security": "security",
     "/support": "support",
     "/logs": "logs",
 }
@@ -180,9 +182,10 @@ def has_permission(role: str | Iterable[str], permission: str) -> bool:
     return role_satisfies(role, {permission})
 
 
-def resolve_session_user(db, claims: "ConsoleUser") -> "ConsoleUser | None":
+def resolve_session_user(db, claims: "ConsoleUser", allow_pending: bool = False) -> "ConsoleUser | None":
     """Refresh mutable account state from PostgreSQL while keeping support for pre-DB signed sessions."""
-    row = db.one("SELECT role, roles, project_keys, disabled FROM console_users WHERE email=%s", (claims.subject,))
+    row = db.one("SELECT role, roles, project_keys, disabled, totp_enabled FROM console_users WHERE email=%s",
+                 (claims.subject,))
     if row is None:
         return claims
     if row["disabled"]:
@@ -193,8 +196,20 @@ def resolve_session_user(db, claims: "ConsoleUser") -> "ConsoleUser | None":
         return None
     view_as = claims.view_as if claims.view_as and "administrator" in assigned else None
     projects = row.get("project_keys")
+    pending = claims.mfa_pending or _needs_two_factor(row, assigned, claims)
+    if pending and not allow_pending:
+        return None
     return ConsoleUser(claims.subject, assigned[0], roles=assigned,
-                       project_keys=tuple(projects) if projects is not None else None, view_as=view_as)
+                       project_keys=tuple(projects) if projects is not None else None, view_as=view_as,
+                       sid=claims.sid, mfa_pending=pending)
+
+
+def _needs_two_factor(row: dict, assigned: tuple[str, ...], claims: "ConsoleUser") -> bool:
+    """A session opened before the person became an administrator is limited to two-factor setup until they enrol.
+
+    Such a session carries no pending flag, so the roles it was issued with are compared with the current ones."""
+    promoted = "administrator" in assigned and "administrator" not in claims.assigned_roles
+    return promoted and not row.get("totp_enabled")
 
 
 def checks_bearer(endpoint):
@@ -210,6 +225,8 @@ class ConsoleUser:
     roles: tuple[str, ...] = ()
     project_keys: tuple[str, ...] | None = None
     view_as: str | None = None
+    sid: str = ""  # names the console_sessions row; empty for a token issued without one
+    mfa_pending: bool = False  # signed in, but must set up two-factor sign-in before anything else
 
     @property
     def assigned_roles(self) -> tuple[str, ...]:
@@ -236,8 +253,23 @@ def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+# Cookies issued before sessions were tracked (JAIF-231) carry no version; they are refused so every administrator
+# signs in again through the two-factor flow, and each later cookie can be ended by a forced sign-out.
+SESSION_VERSION = 2
+
+# signing secret -> callable(sid) that is True when that session was ended (forced sign-out) or is unknown.
+# login.install_login registers it; verify_session asks it for every token that names a session, so every
+# route that reads the cookie, not only the login gate, refuses an ended session.
+SESSION_REVOKED: dict[str, Callable[[str], bool]] = {}
+
+
+def csrf_token(session_cookie: str, secret: str) -> str:
+    """The cross-site request token for one session: an HMAC of its cookie, so it cannot be guessed or reused."""
+    return hmac.new(secret.encode(), b"csrf:" + session_cookie.encode(), hashlib.sha256).hexdigest()[:40]
+
+
 def issue_session(subject: str, role: str | Iterable[str], expires_at: int, secret: str,
-                  view_as: str | None = None) -> str:
+                  view_as: str | None = None, sid: str = "", mfa_pending: bool = False) -> str:
     """Create the token that the console authentication flow sets as its HttpOnly cookie."""
     try:
         roles = normalize_roles(role)
@@ -247,15 +279,23 @@ def issue_session(subject: str, role: str | Iterable[str], expires_at: int, secr
     if not subject.strip() or len(secret.encode()) < 32 or (acting_as and "administrator" not in roles):
         raise ValueError("invalid console session claims or signing secret")
     header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64(json.dumps({"sub": subject.strip(), "role": roles[0], "roles": list(roles), "exp": int(expires_at),
-                               **({"view_as": acting_as} if acting_as else {})}, separators=(",", ":")).encode())
+    claims: dict = {"sub": subject.strip(), "role": roles[0], "roles": list(roles), "exp": int(expires_at),
+                    "v": SESSION_VERSION, **({"view_as": acting_as} if acting_as else {})}
+    if sid:
+        claims["sid"] = sid
+    if mfa_pending:
+        claims["pm"] = 1
+    payload = _b64(json.dumps(claims, separators=(",", ":")).encode())
     message = f"{header}.{payload}"
     signature = hmac.new(secret.encode(), message.encode("ascii"), hashlib.sha256).digest()
     return f"{message}.{_b64(signature)}"
 
 
-def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUser | None:
-    """Return claims only for a valid, unexpired session signed with the configured key."""
+def verify_session(token: str, secret: str, now: int | None = None, allow_pending: bool = False) -> ConsoleUser | None:
+    """Return claims only for a valid, unexpired, not ended session signed with the configured key.
+
+    A session that still has to set up two-factor sign-in is refused unless `allow_pending` (only the two-factor
+    setup routes pass it)."""
     if not token or len(secret.encode()) < 32:
         return None
     try:
@@ -279,10 +319,21 @@ def verify_session(token: str, secret: str, now: int | None = None) -> ConsoleUs
         roles = normalize_roles(roles_claim)
         if not isinstance(expires_at, int) or expires_at <= (int(time.time()) if now is None else now):
             return None
+        if claims.get("v") != SESSION_VERSION:  # a cookie from before the hardening: no two-factor, no forced sign-out
+            return None
+        sid = claims.get("sid", "")
+        if not isinstance(sid, str):
+            return None
+        pending = claims.get("pm") == 1
+        if pending and not allow_pending:
+            return None
+        revoked = SESSION_REVOKED.get(secret)
+        if sid and revoked and revoked(sid):
+            return None
         view_as_value = claims.get("view_as")
         view_as = normalize_role(view_as_value) if isinstance(view_as_value, str) else None
         if view_as and "administrator" not in roles:
             return None
-        return ConsoleUser(subject.strip(), roles[0], roles=roles, view_as=view_as)
+        return ConsoleUser(subject.strip(), roles[0], roles=roles, view_as=view_as, sid=sid, mfa_pending=pending)
     except (ValueError, TypeError, AttributeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
         return None

@@ -26,7 +26,7 @@ HERE = Path(__file__).parent
 CONSOLE_PAGE_PATHS = (
     "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
     "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing",
-    "/notifications", "/lead", "/projects", "/support", "/cc",
+    "/notifications", "/lead", "/projects", "/support", "/cc", "/security",
 )
 
 

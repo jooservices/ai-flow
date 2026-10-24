@@ -21,6 +21,7 @@ from aiflow.v4.control.api import create_app
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.jira import Jira, JiraError
 from aiflow.v4.control.jira_connect import CALLBACK_PATH, SCOPES, JiraAuth, SecretStore
+from aiflow.v4.core import secretbox
 from aiflow.v4.control.loops import jira_sync
 
 SESSION_SECRET = "s" * 40
@@ -151,7 +152,8 @@ def atlassian():
 
 
 @pytest.fixture
-def jira_env(ctx, tmp_path, atlassian):
+def jira_env(ctx, tmp_path, atlassian, monkeypatch):
+    monkeypatch.setenv("AIFLOW4_SECRET_KEY", secretbox.generate_key())
     s = ctx.settings
     s.jira_site, s.public_url, s.console_session_secret = SITE, "https://control.example.test", SESSION_SECRET
     s.jira_oauth_authorize_url, s.jira_oauth_token_url = f"{AUTH}/authorize", f"{AUTH}/oauth/token"
@@ -222,7 +224,9 @@ def test_connect_redirects_to_consent_with_minimal_scopes_and_state(web, jira_en
     assert len(q["state"]) >= 32
     # the client secret is in the secret store only, readable by its owner only
     path = SecretStore(jira_env.settings.jira_secret_dir).dir / "oauth-app.json"
-    assert json.loads(path.read_text())["client_secret"] == CLIENT_SECRET
+    stored = path.read_text()
+    assert secretbox.is_encrypted(stored)
+    assert json.loads(secretbox.decrypt(stored, context="oauth-app.json"))["client_secret"] == CLIENT_SECRET
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     status = web.get("/v1/integrations/jira").json()
@@ -255,6 +259,9 @@ def test_oauth_callback_stores_tokens_and_sync_and_writes_use_bearer_via_cloud_i
     stored = jira_env.jira_auth.store.credential()
     assert stored["access_token"] in atlassian.access and stored["refresh_token"] in atlassian.refresh
     assert stored["cloud_id"] == CLOUD_ID
+    callback_audit = jira_env.db.one("SELECT actor,category FROM audit_log"
+                                     " WHERE action='GET /v1/integrations/jira/oauth/callback' ORDER BY id DESC LIMIT 1")
+    assert callback_audit == {"actor": "owner@example.test", "category": "credentials"}
 
     assert jira_sync(jira_env, full=True) == 1
     assert jira_env.db.one("SELECT summary FROM tickets WHERE key='TESTWP-1'")["summary"] == "Synced over the new credential"

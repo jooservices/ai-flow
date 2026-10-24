@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from conftest import join_node
 from aiflow.v4 import cli
-from aiflow.v4.control import login
+from aiflow.v4.control import login, mfa
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control import console_auth, licensing
 from aiflow.v4.control.console_auth import COOKIE_NAME, has_permission, issue_session, role_satisfies
@@ -27,6 +27,7 @@ EXP = 4_102_444_800
 def make_client(ctx, gate=False, with_ui=False):
     ctx.settings.console_session_secret = SECRET
     ctx.settings.console_login = gate
+    ctx.settings.console_require_mfa = False  # a legacy false setting must not bypass administrator MFA
     app = create_app(ctx)
     if with_ui:
         mount_ui(app, ctx)
@@ -73,6 +74,8 @@ def test_seed_user_is_created_once_and_stores_only_a_hash(ctx):
 def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, seeded):
     client = make_client(ctx, gate=True)
     assert sign_in(client, seeded).status_code == 200
+    secret = client.post("/v1/security/mfa/setup").json()["secret"]  # administrators finish two-factor setup first
+    assert client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)}).status_code == 200
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
     limits["free"]["users"] = 2
     ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
@@ -174,7 +177,7 @@ def test_an_expired_lock_resets_failed_attempts(ctx, seeded):
 
 
 # --- AC3: rate limits and bounded audit ------------------------------------------------------------------------------
-def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, monkeypatch):
+def test_ip_and_email_rate_limit_still_checks_credentials_without_counting_another_failure(ctx, seeded, monkeypatch):
     ctx.settings.trusted_proxies = ["127.0.0.1/32"]
     monkeypatch.setattr(login, "RATE_PER_IP_EMAIL", 3)
     client = make_client(ctx)
@@ -185,7 +188,7 @@ def test_ip_and_email_rate_limit_answers_429_before_the_database(ctx, seeded, mo
     monkeypatch.setattr(ctx.db, "one", lambda sql, *a: lookups.append(sql) or real_one(sql, *a))
     limited = sign_in(client, seeded, ip="203.0.113.7")
     assert limited.status_code == 429 and int(limited.headers["retry-after"]) > 0
-    assert not [s for s in lookups if "console_users" in s]  # refused before any lookup
+    assert len([s for s in lookups if "console_users" in s]) == 1  # checked, but no 2FA means no exception
     assert user_row(ctx)["failed_attempts"] == 3
     assert sign_in(client, seeded, ip="198.51.100.9").status_code == 200  # another address is not affected
 
@@ -316,6 +319,9 @@ def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seede
         assert client.get(open_path).status_code == 200
     assert client.get("/v1/auth/me").status_code == 401
     assert sign_in(client, seeded).status_code == 200
+    secret = client.post("/v1/security/mfa/setup").json()["secret"]
+    enabled = client.post("/v1/security/mfa/enable", json={"code": mfa.totp_code(secret)})
+    assert enabled.status_code == 200
     assert client.get("/v1/state").status_code == 200
     for path in CONSOLE_PAGE_PATHS:
         response = client.get(path)

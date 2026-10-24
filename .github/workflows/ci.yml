@@ -34,6 +34,34 @@ jobs:
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
 
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The blocking level is a repository variable (Settings > Variables), not a constant: LOW, MEDIUM, HIGH or CRITICAL.
+      SECURITY_SEVERITY_THRESHOLD: ${{ vars.SECURITY_SEVERITY_THRESHOLD || 'HIGH' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build control-api image to scan
+        run: docker build -f deploy/v4/control/Dockerfile -t aiflow4-control-api:scan .
+
+      - name: Scan dependencies, repository and image (a finding at or above the level blocks the merge)
+        run: bash deploy/v4/ci/security-scan.sh security-report aiflow4-control-api:scan
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 -m aiflow.v4.core.security_report report --version "pull request" --revision "$GITHUB_SHA" \
+            --threshold "$SECURITY_SEVERITY_THRESHOLD" \
+            --check "Dependencies (uv.lock)=security-report/dependencies.json" \
+            --check "Repository (secrets, misconfiguration)=security-report/repository.json" \
+            --check "Container image=security-report/image.json" >> "$GITHUB_STEP_SUMMARY"
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

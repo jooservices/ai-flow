@@ -157,8 +157,27 @@ def restore(database_url: str, archive: Path, layout: Layout | None = None) -> d
             if missing:
                 raise BackupError("the installed release lacks tables of the backup (" + ", ".join(missing)
                                   + "); install the release named in the backup first: " + manifest["release"])
-            conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in sorted(existing)) + " CASCADE")
+            # Security migration 013 makes the audit log append-only, including at the database level. Restore
+            # replaces mutable registry tables, but must preserve destination audit history and append the archived
+            # history without issuing UPDATE, DELETE or TRUNCATE against that table.
+            mutable = sorted(existing - {"audit_log"})
+            if mutable:
+                conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in mutable) + " CASCADE")
             for t in manifest["tables"]:
+                if t == "audit_log":
+                    conn.execute("CREATE TEMP TABLE _aiflow_restore_audit_log (LIKE public.audit_log) ON COMMIT DROP")
+                    with conn.cursor().copy("COPY _aiflow_restore_audit_log FROM STDIN") as copy:
+                        copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
+                    conn.execute(
+                        "INSERT INTO audit_log (ts, actor, category, action, target, ip, detail) "
+                        "SELECT source.ts, source.actor, source.category, source.action, source.target, source.ip, "
+                        "source.detail FROM _aiflow_restore_audit_log AS source "
+                        "WHERE NOT EXISTS (SELECT 1 FROM audit_log AS current WHERE "
+                        "current.ts=source.ts AND current.actor=source.actor AND current.category=source.category "
+                        "AND current.action=source.action AND current.target=source.target AND current.ip=source.ip "
+                        "AND current.detail=source.detail) ORDER BY source.id"
+                    )
+                    continue
                 with conn.cursor().copy(f'COPY "{t}" FROM STDIN') as copy:
                     copy.write(tar.extractfile(members[f"db/{t}.copy"]).read())
             _reset_owned_sequences(conn, manifest["tables"])

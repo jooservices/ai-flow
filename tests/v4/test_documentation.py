@@ -51,7 +51,10 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
         assert re.search(rf"\b{view}: '", hints), f"no first-use hint for {view}"
-        assert (GUIDE / "screens" / f"{view}.md").is_file()
+        if view == "security":
+            assert (ROOT / "docs/v4/security.md").is_file()
+        else:
+            assert (GUIDE / "screens" / f"{view}.md").is_file()
         assert (site / "screens" / f"{view}.html").is_file()
 
 
@@ -244,6 +247,8 @@ def test_ci_check_fails_without_documentation_and_passes_with_it():
     layout_views = docsite.LAYOUT_SCREEN_VIEWS
     assert gaps(ui, "docs/v4/console-layouts.md", views=layout_views) == []
     assert gaps(ui, "docs/v4/console-layouts.md", views={"cc", "sa"})  # layout doc does not cover SA
+    assert gaps(ui, "docs/v4/security.md", "docs/v4/console-layouts.md",
+                views={"security", "cc"}) == []  # preserve both documentation mappings after a merge
     # every module that registers routes is watched, not only api.py
     login = "aiflow/v4/control/login.py"
     assert gaps(login, "docs/v4/knowledge.md")
@@ -451,7 +456,8 @@ def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(mo
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     views = set(docsite.console_views())
     assert docsite.changed_views("origin/develop") == views
-    assert docsite.documentation_gaps([ui, topic], views=views) == []
+    # the Security screen's page ships from the v4 feature docs
+    assert docsite.documentation_gaps([ui, topic, "docs/v4/security.md"], views=views) == []
 
 
 def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monkeypatch):

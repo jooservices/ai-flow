@@ -548,8 +548,8 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
-             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "support")
+             "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "security",
+             "notifications", "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -744,11 +744,12 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', "
+            "'notifications', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']") in page
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'security', 'notifications', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -865,6 +866,7 @@ def test_super_admin_can_sign_in_and_see_github_and_project_controls_in_a_browse
 
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = "browser-test-session-secret-at-least-32-bytes"
+        ctx.settings.console_require_mfa = False  # this browser test covers the rest of the console login flow
         ctx.repo().projects["TESTWP"].paused = True
         password = login.seed_user(ctx.db, "browser-admin@example.test", "super_admin", "Browser Admin")
         assert password
@@ -1381,8 +1383,8 @@ def test_command_center_menu_order_and_role_visibility():
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
-        ("support", "Support"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("security", "Security"),
+        ("notifications", "Notifications"), ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
     # Each role sees exactly the views its permissions in console_auth.py allow.
@@ -1392,7 +1394,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
-        "support": "console.manage",
+        "security": "console.read", "support": "console.manage",
     }
     visible = json.loads(run_script("""
 var tabs = MENU_ITEMS.map(function (item) { return {view: item.view, hidden: false,

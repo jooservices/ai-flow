@@ -51,7 +51,7 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
         assert re.search(rf"\b{view}: '", hints), f"no first-use hint for {view}"
-        assert (GUIDE / "screens" / f"{view}.md").is_file()
+        assert (GUIDE / "screens" / f"{view}.md").is_file() or view in docsite.SCREEN_TOPIC_DOCS
         assert (site / "screens" / f"{view}.html").is_file()
 
 
@@ -411,6 +411,7 @@ def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatc
 def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     topic = "docs/v4/dashboard-v2.md"
+    settings_topic = "docs/v4/runtime-settings.md"
     source_lines = (ROOT / ui).read_text().splitlines()
     changed_lines = [
         next(i for i, line in enumerate(source_lines, 1) if line.startswith(":root{")),
@@ -431,7 +432,7 @@ def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(mo
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     views = set(docsite.console_views())
     assert docsite.changed_views("origin/develop") == views
-    assert docsite.documentation_gaps([ui, topic], views=views) == []
+    assert docsite.documentation_gaps([ui, topic, settings_topic], views=views) == []
 
 
 def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monkeypatch):

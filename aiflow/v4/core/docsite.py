@@ -41,6 +41,10 @@ SCREEN_PAGE = "screens/{view}.md"
 # screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
 LAYOUT_SCREEN_VIEWS = frozenset({"cc", "review", "machines", "knowledge", "delivery", "users"})
 CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
+# Ticket-specific v4 topics can be the canonical screen guide when the repository instructions require the
+# feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
+# docs/guide/screens.
+SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -101,6 +105,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
+    "renderRuntimeSettings": ("settings",),
     "addProjectRepository": ("projects",),
     "saveProjectRepositories": ("projects",),
     "githubAppTarget": ("integrations",),
@@ -568,6 +573,11 @@ SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
+    if guide.resolve() == GUIDE.resolve():
+        for view, source_path in SCREEN_TOPIC_DOCS.items():
+            source = _read_doc(source_path)
+            if source:
+                pages[f"screens/{view}.md"] = source
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages

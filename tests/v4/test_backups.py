@@ -52,6 +52,28 @@ def configure_paths(ctx, root: Path, repo: Path | None = None) -> dict[str, Path
     return roots
 
 
+def test_stored_secrets_archive_includes_runtime_and_project_env_files(ctx, tmp_path):
+    runtime = tmp_path / "secrets" / "runtime.env"
+    projects = tmp_path / "projects"
+    runtime.parent.mkdir()
+    projects.mkdir()
+    runtime.write_text("EXTERNAL_API_TOKEN=backup-sentinel\n", encoding="utf-8")
+    (projects / "TESTWP.env").write_text("FEATURE_FLAG=enabled\n", encoding="utf-8")
+    ctx.settings.runtime_secret_file = str(runtime)
+    ctx.settings.project_env_dir = str(projects)
+
+    archive = tmp_path / "stored-secrets.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for label, path in backups._secret_roots(ctx.settings):
+            backups._add_tree(tar, path, label)
+    restored_secrets = tmp_path / "restored-secrets"
+    restored_projects = tmp_path / "restored-projects"
+    backups._extract_archive(archive, {"runtime": restored_secrets, "projects": restored_projects})
+    assert (restored_secrets / "runtime.env").read_text(encoding="utf-8") == runtime.read_text(encoding="utf-8")
+    assert (restored_projects / "TESTWP.env").read_text(encoding="utf-8") == (
+        projects / "TESTWP.env").read_text(encoding="utf-8")
+
+
 def test_backup_screen_and_owner_settings_api(client, ctx, tmp_path):
     from aiflow.v4.control.ui import mount_ui
 

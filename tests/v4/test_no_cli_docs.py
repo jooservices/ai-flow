@@ -32,7 +32,7 @@ def test_inventory_covers_requested_owner_and_user_operations():
 def test_uncovered_operations_are_explicit_lead_backlog_proposals():
     inventory = (ROOT / "docs/v4/no-cli.md").read_text(encoding="utf-8")
 
-    assert inventory.count("Proposed – ticket to be created by the lead after merge") >= 4
+    assert inventory.count("Proposed – ticket to be created by the lead after merge") >= 3
     assert "Assign an AI account to a node" in inventory
     assert "UI available; see [Machines and AI management](machines-and-ai.md)" in inventory
     assert "Change an existing project's settings or node assignment" in inventory

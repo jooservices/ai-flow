@@ -22,6 +22,12 @@ REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "redis://127.0.0.1:16399/5"
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "postgresql://aiflow:test@127.0.0.1:15499/aiflow4")
 
 
+@pytest.fixture(autouse=True)
+def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
+    """Keep per-node runtime-setting private keys inside the test's temporary workspace."""
+    monkeypatch.setenv("AIFLOW4_NODE_OPERATION_KEY_FILE", str(tmp_path / "runtime-settings.key"))
+
+
 @pytest.fixture
 def leases():
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -54,9 +60,14 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
+    # Keep the per-session database visible as active to the node agent's idle test-database sweeper. Individual
+    # test DB pools close between tests, and a long docs/browser check must not make this still-running session
+    # look like an abandoned database.
+    anchor = psycopg.connect(own, autocommit=True)
     try:
         yield own
     finally:
+        anchor.close()
         try:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:

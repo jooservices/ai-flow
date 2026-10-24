@@ -252,8 +252,12 @@ async function exerciseReviews(page, mode) {
         throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
           `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${error.message}`);
       });
+    await page.waitForLoadState('networkidle');
+    const refreshedQueue = page.waitForResponse((item) => item.request().method() === 'GET' &&
+      new URL(item.url()).pathname === '/v1/reviews', { timeout: 15000 });
     await actionButton.click();
     assert.equal((await response).status(), 200, `${buttonName} failed for ${key}`);
+    await refreshedQueue;
   }
 }
 

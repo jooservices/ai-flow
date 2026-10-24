@@ -19,12 +19,14 @@ import subprocess
 import threading
 import time
 import select
+from datetime import datetime, timezone
 from urllib.parse import quote
 from pathlib import Path
 
 from .. import VERSION
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
+from ..core.settings import read_env_file
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -160,6 +162,26 @@ def worker_states() -> list[dict]:
                 out.append(s)
             except (OSError, ValueError):
                 pass
+    return out
+
+
+def runtime_settings_inventory(projects_dir: str | Path = "/etc/aiflow/projects") -> dict[str, list[dict]]:
+    """Report project env key names, set state, and file mtime; never include a value in the heartbeat."""
+    out: dict[str, list[dict]] = {}
+    root = Path(projects_dir)
+    if not root.is_dir():
+        return out
+    for path in sorted(root.glob("*.env")):
+        project = path.stem
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            entries = read_env_file(path)
+            changed_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            continue
+        out[project] = [{"name": key, "is_set": bool(value), "changed_at": changed_at}
+                        for key, value in sorted(entries.items()) if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)]
     return out
 
 
@@ -711,7 +733,10 @@ def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str
 
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
+    from ..core.runtime_settings_crypto import node_public_key
+
     api = ControlClient(control_url, token, timeout=15)
+    runtime_settings_public_key = node_public_key()
     stop = stop or threading.Event()
     relay = PolicyRelay(control_url) if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1" else None
     if relay:
@@ -748,7 +773,9 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "services": _services_snapshot(service_state, service_lock),
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+                    "workers": ws, "credential_expiries": credential_expiries(ws),
+                    "runtime_settings": runtime_settings_inventory(),
+                    "runtime_settings_public_key": runtime_settings_public_key}, retries=2)["desired"]
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
                     pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",

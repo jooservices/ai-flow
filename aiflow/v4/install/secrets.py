@@ -89,6 +89,10 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
 def ensure_internal(secret_dir: Path, public_url: str, gatus_url: str) -> list[str]:
     """Create the internal secrets that are missing; returns the names of the files that changed."""
     ensure_dir(secret_dir)
+    # These owner-managed runtime files have their own lifecycle and UI. Keep them separate from the generated
+    # control credentials, Jira OAuth material, and GitHub App keys.
+    update_env(secret_dir.parent / "runtime.env", header="Owner-managed runtime secrets (Command Center)")
+    ensure_dir(secret_dir.parent.parent / "projects")
     pg = read_env(secret_dir / POSTGRES_ENV).get("POSTGRES_PASSWORD") or secrets.token_urlsafe(32)
     o2 = read_env(secret_dir / OPENOBSERVE_ENV).get("ZO_ROOT_USER_PASSWORD") or secrets.token_urlsafe(24)
     changed = []

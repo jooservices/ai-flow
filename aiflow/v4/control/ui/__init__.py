@@ -25,7 +25,7 @@ HERE = Path(__file__).parent
 # Keep the address inventory shared with the login gate and route tests; `/cc` and `/board` are view aliases.
 CONSOLE_PAGE_PATHS = (
     "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
-    "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing",
+    "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing", "/settings",
     "/notifications", "/lead", "/projects", "/support", "/cc",
 )
 
@@ -41,7 +41,7 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     for path in CONSOLE_PAGE_PATHS:
-        if path not in {"/", "/help", "/notifications"}:
+        if path not in {"/", "/help", "/notifications", "/settings"}:
             app.add_api_route(path, console, methods=["GET"], include_in_schema=False)
 
     @app.get("/help", include_in_schema=False)
@@ -71,6 +71,16 @@ def mount_ui(app: FastAPI, ctx) -> None:
         if not user:
             raise HTTPException(401, "authenticated console session required")
         if not role_satisfies(user.effective_roles, {"notifications.manage"}):
+            raise HTTPException(403, "not available for your role")
+        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/settings", include_in_schema=False)
+    def settings_page(request: Request) -> FileResponse:
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if not user:
+            raise HTTPException(401, "authenticated console session required")
+        if not role_satisfies(user.effective_roles, {"console.manage"}):
             raise HTTPException(403, "not available for your role")
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 

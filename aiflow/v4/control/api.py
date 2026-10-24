@@ -46,7 +46,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
-               shared_accounts, support_bundle, tooling, version_release)
+               runtime_settings, shared_accounts, support_bundle, tooling, version_release)
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
@@ -723,6 +723,8 @@ class HeartbeatBody(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
+    runtime_settings: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    runtime_settings_public_key: str = Field(default="", max_length=2000)
 
 
 class ClaimBody(BaseModel):
@@ -3353,13 +3355,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status,accepting_work FROM nodes WHERE name=%s", (node,))
+        inventory = runtime_settings.sanitize_inventory(body.runtime_settings)
         ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
                    " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
+                   " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
+                   " release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
-                    body.release_protocol, body.slots_used, node))
+                    J(inventory), body.runtime_settings_public_key, body.release_protocol, body.slots_used, node))
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         tooling.resolve_available(ctx, node, node_state)
@@ -3986,10 +3990,25 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(404, "unknown node operation") from exc
         status = body.status
-        updated = ctx.db.one(
-            "UPDATE node_operations SET status=%s, result=%s, completed_at=now()"
-            " WHERE id=%s AND node=%s AND status='running' RETURNING id, action",
-            (status, J(body.result), parsed_id, node))
+        with ctx.db.pool.connection() as connection:
+            operation = connection.execute(
+                "SELECT id,action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
+                (parsed_id, node)).fetchone()
+            if not operation:
+                raise HTTPException(404, "unknown or completed node operation")
+            payload = operation["payload"] or {}
+            if operation["action"] == "runtime-setting-project":
+                resume = payload.get("resume_accepting")
+                connection.execute("UPDATE nodes SET accepting_work=%s,status=CASE WHEN %s THEN 'online' ELSE 'draining' END"
+                                   " WHERE name=%s", (bool(resume), bool(resume), node))
+            # Runtime values are delivered only to the node agent and removed from the durable queue record
+            # as soon as it has applied or rolled them back. The remaining metadata contains names only.
+            connection.execute(
+                "UPDATE node_operations SET status=%s,result=%s,completed_at=now(),"
+                " payload=CASE WHEN action LIKE 'runtime-setting%%' THEN payload - 'value_envelope' ELSE payload END"
+                " WHERE id=%s AND node=%s AND status='running'",
+                (status, J(body.result), parsed_id, node))
+        updated = operation
         if not updated:
             raise HTTPException(404, "unknown or completed node operation")
         ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
@@ -7034,6 +7053,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"queued": True}
 
     jira_connect.mount(app, ctx)
+    runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
     return app

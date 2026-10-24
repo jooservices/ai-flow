@@ -55,7 +55,7 @@ class Settings:
     jira_oauth_revoke_url: str = "https://auth.atlassian.com/oauth/revoke"
     jira_oauth_resources_url: str = "https://api.atlassian.com/oauth/token/accessible-resources"
     jira_api_base: str = "https://api.atlassian.com/ex/jira"
-    canary_bug_project: str = "TESTFLOW"
+    canary_bug_project: str = "JAIF"  # the AI Flow project: a canary rollback files its bug there
     maintenance_project: str = "JAIF"  # the AI Flow project: tooling tickets (docs/v4/missing-tools.md)
     github_org: str = "jooservices"
     github_app_dir: str = "/etc/aiflow/secrets/github"

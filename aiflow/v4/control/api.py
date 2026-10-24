@@ -4504,8 +4504,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "post_merge", "probation": probation("release")})
         if "master" in roles:
             triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
+            # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
-                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
+                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
+                                " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
+                                " AND e.resolution = 'open')",
                                 (projects,)):
                 if ticket_needs_missing_container_runtime(t, "triage"):
                     continue
@@ -6581,6 +6584,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             status = ticket["status"]
             if status != "Needs owner":
                 status = reviewer_transition(key, run_id, fence, "Needs owner", "reviewer asked the AI")
+            if not escalations.open_escalation(ctx.db, key):  # triage only decides a raised escalation
+                escalations.record(ctx.db, key, ticket["project"], "review", run_id, escalations.AMBIGUITY, question,
+                                   "reviewer asked the AI")
             record_reviewer_action(ticket, run_id, fence, "ask-ai", question)
             finish_reviewer_run(key, run_id, fence, "question", question)
             return {"status": status, "thread": review_thread(key)}

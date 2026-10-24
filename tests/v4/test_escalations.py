@@ -154,8 +154,8 @@ def test_replay_of_the_22_and_23_october_escalations_sends_none_of_the_five_fami
     assert results[("JAIF-222", 1)]["outcome"] == "auto_answered" and "installed" in results[("JAIF-222", 1)]["answer"]
     assert results[("JAIF-130", 0)]["outcome"] == "auto_answered" and "/v1/github/ci-log" in results[("JAIF-130", 0)]["answer"]
     unreportable = results[("JOOWP-304", 9)]
-    assert unreportable["outcome"] == "failed" and unreportable["missing_tools"] == []
-    assert "cannot report dev-vm" in unreportable["answer"]
+    assert unreportable["outcome"] == "auto_answered" and unreportable["missing_tools"] == []
+    assert "cannot report dev-vm" in unreportable["answer"] and "Continue with the work" in unreportable["answer"]
     assert ctx.db.one("SELECT count(*) AS n FROM tool_waits WHERE ticket_key='JOOWP-304'")["n"] == 0
     # the policy message of JOOWP-308 explains the allowed alternative
     assert "Edit" in results[("JOOWP-308", 3)]["answer"]

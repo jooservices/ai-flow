@@ -598,11 +598,12 @@ def dev_question(ctx, run: dict, question: str) -> dict:
         else:
             requirement = c.environment.replace("_", "-")
         if not tooling.requirement_is_accepted(ctx, project, requirement):
-            text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked. "
-                    f"The run failed with the original report: {question[:1200]}")
+            text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked, "
+                    "and it is not a reason to stop. Continue with the work: use what the machine provides, run the "
+                    "checks that can run, and state in your result exactly which check could not run and why.")
             settle(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason,
                    "unreportable_requirement", None, text)
-            return {**base, "resolved": True, "outcome": "failed", "answer": text}
+            return {**base, "resolved": True, "outcome": "auto_answered", "answer": text}
         if tooling.machine_has(node, requirement):
             version = (node.get("tools") or {}).get(requirement, "")
             text = (f"{requirement} is installed on {run['node']} ({version}); it is available to this run. "

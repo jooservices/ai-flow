@@ -46,6 +46,7 @@ from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.loops import jira_sync
 from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core.system_check import condition
 from aiflow.v4.install import backup
 from aiflow.v4.install import secrets as sec
 from aiflow.v4.install.control import Layout
@@ -54,7 +55,12 @@ ADMIN = "owner@example.test"
 SESSION_SECRET = "acceptance-session-secret-with-32-bytes"
 DOC = ROOT / "docs/v4/clean-install-acceptance.md"
 TOOLS = {"git": "git version 2.43", "uv": "uv 0.8.1", "python3": "Python 3.12.2",
-         "codex": "codex 1.0", "codex-code-mode-host": "present"}
+         "claude": "Claude Code 2.1.305", "codex": "codex 1.0",
+         "codex-code-mode-host": "codex-code-mode-host 1.0", "grok": "grok 1.0",
+         "opencode": "opencode 1.0", "docker": "Docker version 29.1", "node": "node v24.0.0",
+         "gh": "gh version 2.58.0", "php": "PHP 8.3.10", "composer": "Composer 2.8.4",
+         "wp": "WP-CLI 2.12.0", "playwright": "Version 1.56.0",
+         "playwright-browser": "Playwright Chromium 1.56.0"}
 
 
 def issue(key, summary, status, labels, issuetype="Story"):
@@ -111,9 +117,29 @@ class Fresh:
         joined = self.client.post("/v1/nodes/join", json={"name": name, "join_token": token})
         assert joined.status_code == 200, joined.text
         headers = {"Authorization": f"Bearer {joined.json()['node_token']}"}
-        beat = self.client.post(f"/v1/nodes/{name}/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
+        beat = self.heartbeat(name, headers)
         assert beat.status_code == 200, beat.text
         return headers, beat.json()
+
+    def heartbeat(self, name, headers):
+        """Report the ready machine and credential checks a current node agent sends."""
+        accounts = self.ctx.repo().accounts_on(name)
+        body = {
+            "tools": TOOLS,
+            "slots_total": 2,
+            "metrics": {"disk_free": 20 * 1024 ** 3},
+            "system_conditions": [
+                condition("disk-space", "Free disk space", "ready", "20 GiB is available."),
+                condition("workspace-permissions", "Work directory permissions", "ready",
+                          "The node can write its work and state directories."),
+                condition("control-network", "Control API network", "ready",
+                          "The machine reached the control API and sent this heartbeat."),
+                condition("repository-network", "Repository network", "ready",
+                          "The machine can reach GitHub over HTTPS."),
+            ],
+            "credential_checks": {account.id: {"present": True, "valid": True} for account in accounts},
+        }
+        return self.client.post(f"/v1/nodes/{name}/heartbeat", json=body, headers=headers)
 
     def machine_client(self):
         """A client without the console cookie: what a machine's own call looks like."""
@@ -158,6 +184,13 @@ def test_clean_control_machine_asks_for_sign_in_and_first_run_setup_needs_only_t
     assert beat["desired"]["accounts"]
     nodes = {n["name"]: n for n in client.get("/v1/state").json()["nodes"]}
     assert {"cc", "node1"} <= set(nodes)
+    readiness = client.get("/v1/system-check").json()["nodes"]
+    readiness_by_node = {row["name"]: row["readiness"] for row in readiness}
+    assert {"cc", "node1"} <= set(readiness_by_node)
+    assert all(row["machine"] and row["projects"].get("TESTWP") for row in readiness_by_node.values())
+    bundle = client.get("/v1/support-bundle").json()
+    bundled_by_node = {row["name"]: row["readiness"] for row in bundle["system_check"]["nodes"]}
+    assert bundled_by_node == readiness_by_node
 
 
 def test_every_setup_step_the_test_takes_is_in_the_document():
@@ -189,6 +222,8 @@ def test_sample_ticket_passes_intake_development_verification_and_merge_and_a_hu
     ctx.repo = lambda: snap
     ctx.refresh_repo = lambda: None
     fresh.app.state.sync_accounts()
+    heartbeat = fresh.heartbeat("cc", cc)
+    assert heartbeat.status_code == 200, heartbeat.text
 
     # Jira (the fake) is the source of truth: the registry only mirrors what the sync reads from it
     jira_now = {"NEWAPP-1": issue("NEWAPP-1", "Sample ticket", "Intake", []),

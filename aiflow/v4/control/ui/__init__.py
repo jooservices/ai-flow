@@ -1,11 +1,11 @@
 """Console views for Dashboard, Work board, Delivery, SA, Machines and AI, Users and roles,
-Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, Licensing and Backup.
+Team Lead, Business, Human review, Stakeholder, Knowledge, Integrations, Projects, System check, Licensing and Backup.
 
 Dashboard (/dashboard, /cc), Work board (/work, /board), Delivery (/delivery), SA health (/sa),
 Machines and AI (/machines), Users and roles (/users), Team Lead (/lead),
 Business (/business), Human review (/review), Stakeholder (/stakeholder), Knowledge (/knowledge),
-Integrations (/integrations, control/jira_connect.py), Projects (/projects), Licensing (/licensing),
-Backup (/backup), Notifications (/notifications) and Support (/support), fed by /v1/state and relevant view APIs.
+Integrations (/integrations, control/jira_connect.py), Projects (/projects), System check (/system-check),
+Licensing (/licensing), Backup (/backup), Notifications (/notifications) and Support (/support), fed by /v1/state and relevant view APIs.
 All views are fed by the live registry; the Business view adds
 /v1/business/<project>/change-requests (see control/business.py). The console renders the live registry; extra
 read-only endpoints give its drawers ticket details, runs, events, audited writes and time segments.
@@ -26,7 +26,7 @@ HERE = Path(__file__).parent
 CONSOLE_PAGE_PATHS = (
     "/", "/dashboard", "/work", "/board", "/delivery", "/sa", "/business", "/review", "/stakeholder",
     "/machines", "/users", "/knowledge", "/backup", "/integrations", "/help", "/licensing",
-    "/notifications", "/lead", "/projects", "/support", "/cc",
+    "/notifications", "/lead", "/projects", "/system-check", "/support", "/cc",
 )
 
 

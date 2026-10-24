@@ -80,3 +80,12 @@ def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, t
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) >= 1
     assert not exists(admin, old)
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) == 0  # not again within ten minutes
+
+
+def test_sweeper_keeps_the_active_pytest_session_database(test_database_url, admin):
+    name = psycopg.conninfo.conninfo_to_dict(test_database_url)["dbname"]
+
+    dropped = testdb.sweep(DATABASE_URL, now=time.time() + testdb.STALE_AFTER_S + 1, max_databases=0)
+
+    assert name not in dropped
+    assert exists(admin, name)

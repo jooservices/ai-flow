@@ -26,7 +26,18 @@ def join(client, name):
 
 
 def beat(client, node, headers):
-    r = client.post(f"/v1/nodes/{node}/heartbeat", json={"slots_total": 4}, headers=headers)
+    ctx = client.app.state.ctx
+    row = ctx.db.one("SELECT readiness FROM nodes WHERE name=%s", (node,)) or {}
+    readiness = row.get("readiness") or {}
+    credential_checks = dict(readiness.get("credential_statuses") or {})
+    for account in ctx.repo().accounts_on(node):
+        machine = ctx.db.one("SELECT status FROM account_machines WHERE account_id=%s AND node=%s",
+                             (account.id, node))
+        if machine:
+            signed_in = machine.get("status") == "signed_in"
+            credential_checks[account.id] = {"present": signed_in, "valid": signed_in}
+    r = client.post(f"/v1/nodes/{node}/heartbeat",
+                    json={"slots_total": 4, "credential_checks": credential_checks}, headers=headers)
     assert r.status_code == 200
     return r.json()["desired"]
 
@@ -333,6 +344,7 @@ def test_account_from_the_control_repo_can_be_shared_with_another_machine(client
     beat(client, "cc", cc)
     beat(client, "node1", node1)
     assert client.post("/v1/accounts/claude-01/probe", json={"ok": True}, headers=node1).status_code == 200
+    beat(client, "node1", node1)
     add_ticket(ctx.db, "TESTWP-1")
 
     # Removing the accounts.yaml primary detaches just that assignment; the other machine can still take work.

@@ -50,8 +50,8 @@ def test_every_console_screen_has_help_link_hint_and_target_page(site):
     assert 'id="help-link"' in page and "helpUrl(S.view)" in page and "HELP_BASE = '/help/screens/'" in page
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
-        assert re.search(rf"\b{view}: '", hints), f"no first-use hint for {view}"
-        assert (GUIDE / "screens" / f"{view}.md").is_file()
+        assert re.search(rf"\b{view}'?: '", hints), f"no first-use hint for {view}"
+        assert docsite.screen_doc_source(view).is_file()
         assert (site / "screens" / f"{view}.html").is_file()
 
 
@@ -83,6 +83,27 @@ def test_help_route_serves_the_screen_pages(monkeypatch, site):
     assert client.get("/help/").status_code == 200
     assert client.get("/help/../../etc/passwd").status_code == 404
     assert client.get("/help/%2e%2e/%2e%2e/etc/passwd").status_code == 404
+
+
+def test_system_check_feature_document_is_its_console_help_page():
+    source = "docs/v4/system-check.md"
+    ui = "aiflow/v4/control/ui/console.html"
+    assert docsite.screen_doc_source("system-check") == ROOT / source
+    assert docsite.collect_pages(with_api=False)["screens/system-check.md"] == (ROOT / source).read_text()
+    assert docsite.documentation_gaps([ui, source], views={"system-check"}) == []
+    assert docsite.documentation_gaps([ui, "docs/guide/screens/system-check.md"],
+                                      views={"system-check"})
+
+
+def test_system_check_console_state_maps_to_its_screen_documentation():
+    console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    state_line = next(line for line in console.splitlines() if "systemCheck: null" in line)
+    mapped = {view for pattern, view in docsite.SCREEN_LINE_VIEWS if pattern.search(state_line)}
+    assert mapped == {"system-check"}
+
+
+def test_system_check_console_changes_map_only_to_the_system_check_screen():
+    assert docsite.changed_views("origin/develop") == {"projects", "system-check"}
 
 
 def test_every_page_states_what_it_assumes_and_roles_have_a_guide():
@@ -565,7 +586,8 @@ def test_ci_check_maps_shared_help_changes_and_screen_hint_edits(monkeypatch):
     current_lines = shared_lines + [hint_line]
     views = docsite.changed_views("origin/develop")
     assert views == set(docsite.console_views())
-    all_pages = ["aiflow/v4/control/ui/console.html", *(f"docs/guide/screens/{v}.md" for v in views)]
+    all_pages = ["aiflow/v4/control/ui/console.html",
+                 *(docsite.screen_doc_source(v).relative_to(ROOT).as_posix() for v in views)]
     assert docsite.documentation_gaps(all_pages, views=views) == []
     assert docsite.documentation_gaps([ui, "docs/guide/screens/cc.md"], views=views)
 

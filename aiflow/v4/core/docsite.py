@@ -185,6 +185,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewByRole": ("review",),
     "submitReview": ("review",),
     "projectRequestBody": ("projects",),
+    "servicesFromText": ("projects",),
+    "saveProjectServices": ("projects",),
+    "projectServicesCell": ("projects",),
     "loadProjectList": ("projects",),
     "loadEnvironmentOverview": ("projects",),
     "loadProjectEnvironment": ("projects",),
@@ -206,6 +209,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
+    (re.compile(r"service_undeclared: 'Undeclared services'"), "cc"),
+    (re.compile(r"service_undeclared: 'Undeclared services'"), "machines"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
@@ -254,7 +259,7 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"']dashboard-tab[\"']"), ("cc",)),
     (re.compile(r"\bact\s*===\s*[\"']dashboard-card[\"']"), ("cc", "work", "review")),
     (re.compile(r"\bact\s*===\s*[\"']flow-step[\"']"), ("cc", "work")),
-    (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository)|environment-scan)[\w-]*[\"']"),
+    (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository|services)|environment-scan)[\w-]*[\"']"),
      ("projects",)),
     (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
 )

@@ -301,6 +301,7 @@ def watchdog(ctx: Ctx) -> None:
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
+    tooling.declare_undeclared_services(ctx)
     tooling.sweep(ctx)
     tooling.check_stalled_waits(ctx)
     # environment items a run reported missing, and the daily scan of open tickets for server wording

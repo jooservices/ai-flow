@@ -11,6 +11,7 @@ One line per feature document in `docs/v4/`. **Do not add your line here:** add 
 holding that single line (see [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); the full index is generated
 by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topics.
 
+- [Test services of a project](../../docs/v4/test-services.md): one `services` setting (the old `databases` is read as the same), unsupported names are rejected and surfaced in Projects, and the flow doctor declares a service a ticket is parked on
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure

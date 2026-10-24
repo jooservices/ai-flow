@@ -3,6 +3,8 @@ export default {
     defaultIgnores: true,
     // CI sets this only from the trusted pull request author context.
     ignores: [
+        // The pull_request merge ref has a synthetic "Merge remote branch" commit; validate the authored PR commits.
+        (message) => message.split('\n', 1)[0] === 'Merge remote branch',
         (message) =>
             process.env.DEPENDABOT_PR === 'true' &&
             /^(?:chore\((?:deps|deps-dev)\)|ci\(deps\)): (?:[Bb]ump\s+|lockfile maintenance)/u.test(message),

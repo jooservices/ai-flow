@@ -29,16 +29,20 @@ def test_runbooks_match_incident_kinds_raised_in_code():
     # the kinds named by the ticket are really found
     assert {"ticket_stuck", "config_pin", "flow_idle", "jira_auth", "openobserve_delivery",
             "backup_failure", "backup_restore_test"} <= kinds
-    pages = {p.stem for p in (GUIDE / "runbooks").glob("*.md")} - {"index"}
+    guide_pages = {p.stem for p in (GUIDE / "runbooks").glob("*.md")} - {"index"}
+    v4_pages = {p.stem for p in (ROOT / "docs/v4/runbooks").glob("*.md")}
+    pages = guide_pages | v4_pages
     assert pages == kinds, f"missing: {sorted(kinds - pages)}; unknown: {sorted(pages - kinds)}"
     index = (GUIDE / "runbooks" / "index.md").read_text()
-    for kind in kinds:
+    for kind in guide_pages:
         assert f"[{kind}]({kind}.md)" in index
 
 
 def test_every_runbook_has_symptom_cause_and_fix():
     for kind in docsite.incident_kinds():
-        text = (GUIDE / "runbooks" / f"{kind}.md").read_text()
+        guide_page = GUIDE / "runbooks" / f"{kind}.md"
+        page = guide_page if guide_page.is_file() else ROOT / "docs/v4/runbooks" / f"{kind}.md"
+        text = page.read_text()
         for part in ("## Symptom", "## Cause", "## Fix"):
             assert part in text, f"{kind} lacks {part}"
 

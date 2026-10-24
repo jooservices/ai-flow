@@ -691,9 +691,9 @@ var S = {
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
-  projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
+  projectAdmin: { projects: null, invalidProjects: [], catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null, envEditor: null, envMissing: [], envScan: null, envScanBusy: false,
-    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
+    form: { site: '', project: '', repo: '', base: 'develop', stack: '', services: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
@@ -753,7 +753,7 @@ function viewOf(path) {
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 function inColumn(ticket, column) { return ticket.status === column || (column === 'Human review' && ticket.status === 'Ready to merge'); }
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', service_undeclared: 'Undeclared services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
   { view: 'cc', label: 'Dashboard' },
@@ -1124,7 +1124,7 @@ function projectResponseError(response) {
 }
 function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
-    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
+    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.invalidProjects = d.invalid_projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
   loadEnvironmentOverview();
 }
@@ -1549,9 +1549,29 @@ function renderGitHubIntegrations() {
 function projectRequestBody() {
   var f = S.projectAdmin.form;
   return { site: f.site, project: f.project, repo: f.repo, base: f.base || 'develop', stack: f.stack || '',
+    services: servicesFromText(f.services),
     containers: Boolean(f.containers),
     checks: String(f.checks || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean),
     priority: Number(f.priority), parallel_limit: Number(f.parallel_limit), merge_method: f.merge_method };
+}
+function servicesFromText(text) {
+  return String(text || '').split(/[\s,]+/).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+}
+function saveProjectServices(key, button) {
+  var input = document.querySelector('[data-project-services="' + key + '"]');
+  if (!input) return;
+  if (button) button.disabled = true;
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/services', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ services: servicesFromText(input.value) }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast('Test services saved', d.project + ': ' + ((d.services || []).join(', ') || 'none') + '. Every machine of the project prepares them within two minutes.', 'ok'); loadProjectList(); poll(); })
+    .catch(function (e) { toast('Could not save test services', String(e.message || e), 'warn'); if (button) button.disabled = false; });
+}
+function projectServicesCell(p) {
+  var current = (p.services || []).join(', ');
+  if (!consoleCan('projects.manage')) return '<span class="mono">' + esc(current || 'none') + '</span>';
+  return '<div class="project-actions"><input data-project-services="' + esc(p.key) + '" value="' + esc(current) + '" placeholder="postgres, redis" aria-label="Test services of ' + esc(p.key) + '" size="16">' +
+    '<button class="btn sm" data-act="project-services-save" data-key="' + esc(p.key) + '">Save</button></div>';
 }
 function runProjectPreflight() {
   S.projectAdmin.busy = true; S.projectAdmin.error = ''; S.projectAdmin.preflight = null; renderProjects();
@@ -4216,6 +4236,7 @@ function drawerInc(id) {
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
+    service_undeclared: 'Tickets of a project are parked on a test service (PostgreSQL or Redis) that the project does not declare. The flow doctor declares it itself; this alert appears only when it could not. Add the service to Test services of the project on the Projects screen.',
     ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';
@@ -4607,18 +4628,22 @@ function flowDoctorPanel(d) {
 
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
-  var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
+  var state = S.projectAdmin, rows = state.projects || [], invalid = state.invalidProjects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
   h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
   if (consoleCan('projects.manage')) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
   h += '</div>';
   if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (invalid.length) {
+    h += '<div class="stakeholder-error" role="alert"><strong>Project files could not be loaded.</strong> These projects are unavailable to machines until their files are corrected in aiflow-control.';
+    h += '<ul>' + invalid.map(function (item) { return '<li><span class="mono">' + esc(item.file) + '</span>: ' + esc(item.reason) + '</li>'; }).join('') + '</ul></div>';
+  }
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
-  else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
-  else {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Actions</th></tr></thead><tbody>';
+  else if (!rows.length && !invalid.length) h += '<div class="muted">No projects are configured.</div>';
+  else if (rows.length) {
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-environment" data-key="' + esc(p.key) + '">Environment</button>';
@@ -4645,6 +4670,7 @@ function renderProjects() {
       h += '<a class="btn sm" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repository on GitHub</a></div>';
       h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
       h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Test services (postgres, redis)<input data-project-field="services" value="' + esc(form.services) + '" placeholder="postgres, redis"></label>';
       h += '<label>Checks need Docker containers<select data-project-field="containers"><option value="false"' + (!form.containers ? ' selected' : '') + '>No</option><option value="true"' + (form.containers ? ' selected' : '') + '>Yes · require the safe rootless runtime</option></select></label>';
       h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
       h += '<label>Parallel limit<input type="number" min="1" max="100" data-project-field="parallel_limit" value="' + esc(form.parallel_limit) + '"></label>';
@@ -5527,6 +5553,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-add-cancel') { S.projectAdmin.showForm = false; S.projectAdmin.preflight = null; S.projectAdmin.error = ''; renderProjects(); }
   else if (act === 'project-preflight') runProjectPreflight();
   else if (act === 'project-save') saveProject();
+  else if (act === 'project-services-save') saveProjectServices(el.getAttribute('data-key'), el);
   else if (act === 'project-pause') setProjectPaused(el.getAttribute('data-key'), el.getAttribute('data-paused') === 'true');
   else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();

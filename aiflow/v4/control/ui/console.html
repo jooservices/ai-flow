@@ -1662,14 +1662,14 @@ function pollDashboardWaiting() {
   if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) loadDashboardWaiting();
   setTimeout(pollDashboardWaiting, 15000);
 }
-function loadReviews(forceRender) {
+function loadReviews() {
   fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function (d) { S.reviews = d.tickets || []; S.reviewMetrics = d.metrics || null; S.reviewProjects = d.projects || [];
     S.reviewThreads = d.threads || [];
-    S.reviewsError = ''; if (S.view === 'review') renderReviews(forceRender); })
-    .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(forceRender); });
+    S.reviewsError = ''; if (S.view === 'review') renderReviews(); })
+    .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(); });
 }
 function pollReviews() {
   if (S.view === 'review') loadReviews();
@@ -2690,7 +2690,7 @@ function renderDBody() {
 }
 
 /* ---------- Human review ---------- */
-function renderReviews(forceRender) {
+function renderReviews() {
   var root = $('#view-review'); if (!root) return;
   var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
   var active = document.activeElement;
@@ -2700,7 +2700,7 @@ function renderReviews(forceRender) {
     if (activeCard) noteDrafts[activeCard.getAttribute('data-key')] = active.value;
     return;
   }
-  if (!forceRender && activeInsideReview && active.matches && active.matches('button[data-act^="review-"]')) {
+  if (activeInsideReview && active.matches && active.matches('button[data-act^="review-"]')) {
     return;
   }
   if (typeof root.querySelectorAll === 'function') {
@@ -2825,7 +2825,7 @@ function submitReview(key, action, comment) {
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
     var focusedAction = document.activeElement;
     if (focusedAction && focusedAction.matches && focusedAction.matches('button[data-act^="review-"]')) focusedAction.blur();
-    loadReviews(true);
+    loadReviews();
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 

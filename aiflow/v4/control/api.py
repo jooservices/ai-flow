@@ -50,7 +50,7 @@ from . import (business, escalations, jira_connect, knowledge, layouts, licensin
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import review_metrics
+from . import capacity, review_metrics
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -4171,7 +4171,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str) -> list[dict]:
+    def eligible(account_id: str, node: str, *, capacity_routing: bool = True) -> list[dict]:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4346,9 +4346,58 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
-                                               for ticket in eligible(peer["id"], peer_node))
+                                               for ticket in eligible(peer["id"], peer_node,
+                                                                      capacity_routing=False))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
+        if capacity_routing and out:
+            out = route_capacity(account_id, node, out)
         return out
+
+    def route_capacity(account_id: str, node: str, offered: list[dict]) -> list[dict]:
+        """Prefer an eligible account whose quota can cover the ticket's estimated upper bound.
+
+        Candidate polling keeps its legacy behavior when no reliable quota forecast exists. If at least one eligible
+        peer has a quota-safe forecast, only the best safe account sees that development ticket.
+        """
+        development = [ticket for ticket in offered if ticket.get("step") == "dev"]
+        if not development:
+            return offered
+        account_rows = ctx.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
+        accounts_by_id = {str(row["id"]): row for row in account_rows}
+        forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+        samples = capacity.history(ctx.db)
+        eligible_by_key: dict[tuple[str, str], dict[str, dict]] = {}
+        for account in ctx.repo().accounts:
+            if account.id not in accounts_by_id:
+                continue
+            machines = [node] if account.id == account_id else account.machines
+            for machine in dict.fromkeys(machines):
+                if account.id != account_id and machine not in shared_accounts.online_nodes(ctx.db):
+                    continue
+                try:
+                    peer_offers = offered if account.id == account_id and machine == node else eligible(
+                        account.id, machine, capacity_routing=False)
+                except HTTPException:
+                    continue
+                for item in peer_offers:
+                    if item.get("step") == "dev":
+                        eligible_by_key.setdefault((item["key"], item["step"]), {})[account.id] = {
+                            **accounts_by_id[account.id], "tier": account.tier}
+        if not eligible_by_key:
+            return offered
+        selected: dict[tuple[str, str], str] = {}
+        for ticket in development:
+            key = (ticket["key"], ticket["step"])
+            candidates = list(eligible_by_key.get(key, {}).values())
+            if len(candidates) < 2:
+                continue
+            prediction = capacity.estimate(ticket, samples)
+            account, _fits = capacity.choose_account(candidates, ticket, prediction, forecasts)
+            if account:
+                selected[key] = account
+        return [ticket for ticket in offered
+                if ticket.get("step") != "dev" or (ticket["key"], ticket["step"]) not in selected
+                or selected[(ticket["key"], ticket["step"])] == account_id]
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):
@@ -4536,6 +4585,36 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
                         "repository_settings": selected_repo} if selected_repo else {})
+        if body.step == "dev":
+            capacity_samples = capacity.history(ctx.db)
+            ticket_estimate = capacity.estimate(t, capacity_samples)
+            quota_accounts = ctx.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
+            account_forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in quota_accounts}
+            fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
+            expected_tokens = ticket_estimate["tokens"]
+            expected_minutes = ticket_estimate["time_minutes"]
+            if fit["known"] and fit["fits"]:
+                senior_work = ("tier-senior" in (t.get("labels") or [])
+                               or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
+                tier_order = ("senior, then middle, then junior" if senior_work
+                              else "middle, then senior, then junior")
+                strength = f"tier preference for this ticket is {tier_order}"
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}): estimated work is "
+                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
+                          f"{fit['reason']}; {strength}.")
+            elif fit["known"]:
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) because it remains eligible and no "
+                          f"quota-safe eligible account was identified. The estimate is "
+                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; {fit['reason']}.")
+            else:
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) by the existing eligibility rules. "
+                          f"The estimate is {expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
+                          "quota history is not reliable enough to compare eligible accounts.")
+            run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
+                                       "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
         if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
                                                        model, node, c.fence, h(run_token))):
             ctx.leases.release(t["key"], run_id, c.fence)
@@ -6633,6 +6712,18 @@ def create_app(ctx: Ctx) -> FastAPI:
         if tl is None:
             raise HTTPException(404, "unknown ticket")
         return tl
+
+    @app.get("/v1/capacity")
+    def capacity_plan(request: Request) -> dict:
+        """Next-week quota capacity, recorded assignment reasons and completed estimate errors."""
+        user = (console_user(request, "view.machines_ai") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and not has_permission(user.effective_roles, "view.machines_ai"):
+            raise HTTPException(403, "not available for your role")
+        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota FROM accounts ORDER BY id")
+        forecasts = quota_reporting.assessments(ctx.db, accounts)
+        project_keys = user.project_keys if user and user.project_keys is not None else None
+        return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)
 
     @app.get("/v1/role-health")
     def role_health_state() -> dict:

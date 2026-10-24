@@ -98,11 +98,17 @@ class Project:
 
     def __post_init__(self) -> None:
         # `databases` is the old name of `services`: both are read as one setting, so a project file can never name
-        # a database that no machine prepares (docs/v4/test-services.md). Names that are no test service stay behind.
+        # a database that no machine prepares (docs/v4/test-services.md). Reject unsupported legacy names instead of
+        # silently keeping a declaration that nodes cannot prepare.
         legacy = [self.databases] if isinstance(self.databases, str) else list(self.databases or [])
+        unknown_legacy = [str(database).strip() for database in legacy
+                          if str(database).strip() and not normalize_services([database])]
+        if unknown_legacy:
+            raise ValueError("unknown legacy database/test service names: " + ", ".join(unknown_legacy) +
+                             ". Use postgres or redis.")
         self.services = normalize_services([*([self.services] if isinstance(self.services, str) else self.services or []),
                                             *legacy])
-        self.databases = [d for d in legacy if not normalize_services([d])]
+        self.databases = []
 
     @property
     def repo_name(self) -> str:

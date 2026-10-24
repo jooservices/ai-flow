@@ -1,5 +1,6 @@
 """One setting for a project's test services: `databases` is read as `services`, the Projects screen saves it, the
 machines prepare and report it, and the flow doctor declares a service a ticket is parked on (docs/v4/test-services.md)."""
+import pytest
 import yaml
 from conftest import add_ticket, join_node
 from test_projects import owner_sign_in, prepare_project_control, project_body, save_project
@@ -33,10 +34,17 @@ def test_project_file_with_only_databases_migrates_to_services(control_repo):
     assert project.services == ["postgres", "redis"] and project.required_services == ["postgres", "redis"]
     assert project.databases == []
 
-    both = Project(key="X", repo="o/x", services=["redis"], databases=["PostgreSQL", "redis", "mysql"])
+    both = Project(key="X", repo="o/x", services=["redis"], databases=["PostgreSQL", "redis"])
     assert both.required_services == ["redis", "postgres"]
-    assert both.databases == ["mysql"]  # only names that are no test service stay behind
+    assert both.databases == []
     assert Project(key="Y", repo="o/y", databases="pg").required_services == ["postgres"]
+
+
+def test_project_file_rejects_unknown_legacy_database_names(control_repo):
+    write_project(control_repo, "databases: [postgres, postgress]\n")
+
+    with pytest.raises(ValueError, match="unknown legacy database/test service names: postgress"):
+        ControlRepo.load(control_repo)
 
 
 def test_project_with_services_makes_machines_prepare_and_report_them(client, ctx, control_repo):

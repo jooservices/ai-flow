@@ -22,6 +22,7 @@ from .lock import Redis, RedisError
 from .memory import cases as memory_cases
 from .memory.client import Memory
 from .project_database import ProjectDatabase, ticket_database_id
+from .worktree_sweep import cleanup_done_worktree, resolve_merged_pull_request
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
           "Human review": "human", "Ready to merge": "finalize"}
@@ -963,48 +964,8 @@ class Supervisor:
                 for issue in self.jira.search(f"key in ({', '.join(trees)})", 100):
                     path, branch = trees[issue["key"]]
                     if issue["status"] == "Done":
-                        marker = f"sweep-cleanup:{issue['key']}:{branch}"
-                        merged_pr = False
-                        pull_request_error: Exception | None = None
-                        try:
-                            gh = GitHub(repo.github_slug())
-                        except (GitError, GitHubError, JiraError, ValueError, KeyError) as error:
-                            pull_request_error = error
-                            gh = None
-                        pr = None
-                        if gh:
-                            try:
-                                pr = gh.find(branch)
-                            except (GitError, GitHubError, JiraError, ValueError, KeyError) as error:
-                                pull_request_error = error
-                            if pr is None:
-                                try:
-                                    known_pr = self.gate_pr(issue["key"], gh)
-                                    if known_pr and known_pr.get("headRefName") == branch:
-                                        pr = known_pr
-                                except (GitError, GitHubError, JiraError, ValueError, KeyError) as error:
-                                    pull_request_error = error
-                        merged_pr = bool(pr and pr.get("state") == "MERGED")
-
-                        cleanup_state = self.redis.get(marker)
-                        if cleanup_state == "stopped" or (cleanup_state == "awaiting-merge" and not merged_pr):
-                            continue
-                        try:
-                            repo.cleanup(issue["key"], merged_pr=merged_pr)
-                            self.redis.delete(marker)
-                            log(f"{issue['key']}: removed the worktree and branch of a finished ticket")
-                        except (GitError, OSError) as error:
-                            # An ancestry refusal may become safe once GitHub reports the PR merged. Other
-                            # cleanup errors need operator intervention, so neither is retried every sweep.
-                            awaiting_merge = not merged_pr and "not fully merged" in str(error).casefold()
-                            state = "awaiting-merge" if awaiting_merge else "stopped"
-                            self.redis.set(marker, state, 365 * DAY)
-                            reason = f"cleanup failed ({error})"
-                            if pull_request_error:
-                                reason += f"; cannot check pull request before cleanup ({pull_request_error})"
-                            if awaiting_merge:
-                                reason += "; will retry after GitHub confirms the PR is merged"
-                            log(f"{issue['key']}: keeping the worktree and branch; {reason}")
+                        merged_pr, lookup_error = resolve_merged_pull_request(repo, issue["key"], branch, self.gate_pr)
+                        cleanup_done_worktree(self.redis, repo, issue["key"], branch, merged_pr, lookup_error, log)
                     elif issue["status"] == "Declined":
                         repo.remove_worktree(path)
                         self.redis.delete(f"sweep-cleanup:{issue['key']}:{branch}")

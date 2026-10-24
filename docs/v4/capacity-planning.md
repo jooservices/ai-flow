@@ -28,8 +28,10 @@ For each category AI Flow uses the empirical 10th and 90th percentiles of ticket
 estimate first looks for matching type, size and area. It requires three samples to stop at that level; otherwise
 it backs off to type and size, type, and then all ticket types. Any available broader history is used when no level
 has three samples. When runs have identical values, the range is widened by ten percent on each side so it remains
-a range. The rework percentage is the 90% Wilson interval for the observed fraction of tickets that needed
-rework. With no recorded ticket history, the screen uses a size-based starting range (XS 2,000–8,000 tokens and
+a range. If a minimum floor makes both bounds equal, the upper bound is raised by at least one tenth of the lower
+bound (or 0.1 unit) to preserve distinct range bounds. The rework percentage is the 90% Wilson interval for the
+observed fraction of tickets that needed rework. With no recorded ticket history, the screen uses a size-based
+starting range (XS 2,000–8,000 tokens and
 5–30 minutes, S 4,000–16,000 and 15–90 minutes, M 8,000–32,000 and 30–180 minutes, L 16,000–64,000 and
 60–360 minutes, XL 32,000–128,000 and 120–720 minutes) and a 0–60% rework range.
 
@@ -43,13 +45,18 @@ estimates and ranges update from new work.
 ## Quota-aware assignment
 
 The control plane keeps existing eligibility checks for project, account role, machine, worker capacity, tools,
-license and account cooldown. Among eligible accounts that can claim a development ticket, it reads the latest
+license and account cooldown. `POST /v1/work/claim` records the selected account, estimate, quota fit and rationale
+with the development run. Among eligible accounts that can claim a development ticket, it reads the latest
 quota assessment persisted by the 15-second watchdog, so candidate polling does not rebuild weeks of run and probe
 history. An account is quota-safe only if the upper token estimate fits every quota window with a known
-remaining-token balance and the forecast exhaustion time is later than the upper time estimate.
-If at least one quota-safe account is eligible, the ticket is offered to the best safe account: senior tier for
-large/XL or Highest-priority work, middle tier for other work, then greater quota headroom. The assignment reason
-and estimate are retained with that run. The latest quota forecast is retained on the account. If forecasts are missing or every eligible account is predicted to run
+remaining-token balance and every predicted exhaustion time is later than the upper time estimate. A window without
+a balance can still make an account unsafe when it predicts exhaustion during the ticket; missing
+balances without a near-term prediction remain unknown and cannot establish safety. If at least one quota-safe
+account is eligible, large/XL or Highest-priority work prefers senior, then middle, then junior; ordinary work
+prefers middle, then senior, then junior. Quota headroom breaks ties within the tier preference. The assignment
+reason and estimate are retained with that run. The per-ticket drawer loads the latest saved rationale from
+`GET /v1/tickets/{key}`, so it remains available when older assignments are outside the Dashboard's recent list.
+The latest quota forecast is retained on the account. If forecasts are missing or every eligible account is predicted to run
 out, the existing eligible route remains available so a ticket is not starved; the reason records that fallback.
 
 ## Weekly capacity

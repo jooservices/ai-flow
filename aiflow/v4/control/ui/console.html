@@ -3744,6 +3744,18 @@ function drawerTicket(key) {
     b += '<div class="dsec"><h4>Acceptance criteria</h4><ul class="checklist">' + acs.map(function (a) { return '<li><span class="' + (passed ? 'ico-ok' : 'ico-pend') + '">' + (passed ? ICON.ok : ICON.pend) + '</span><span>' + esc(a) + '</span></li>'; }).join('') + '</ul></div>';
   }
   if (det.timeline) b += timeSec(det.timeline);
+  if (det.capacity_decision) {
+    var decision = det.capacity_decision, estimate = decision.estimate || {};
+    var tokens = estimate.tokens || {}, minutes = estimate.time_minutes || {};
+    b += '<div class="dsec"><h4>Why this AI was assigned</h4>';
+    b += '<div class="small">' + esc(decision.account) + ' · ' + esc(PROVIDER[decision.provider] || decision.provider || '') +
+      ' · ' + esc(when(decision.assigned_at)) + '</div><p>' + esc(decision.reason || 'No assignment explanation was saved.') + '</p>';
+    if (tokens.low != null && tokens.high != null && minutes.low != null && minutes.high != null) {
+      b += '<div class="small">Saved estimate: ' + tok(tokens.low) + '–' + tok(tokens.high) + ' tokens · ' +
+        Number(minutes.low).toFixed(1) + '–' + Number(minutes.high).toFixed(1) + ' minutes</div>';
+    }
+    b += '</div>';
+  }
   if (full.description) b += '<div class="dsec"><h4>Description</h4><div class="prose">' + esc(full.description) + '</div></div>';
   b += '<div class="dsec"><h4>Runs</h4>';
   if (!det.runs.length) b += '<div class="empty">No run yet.</div>';

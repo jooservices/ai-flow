@@ -4530,10 +4530,11 @@ def create_app(ctx: Ctx) -> FastAPI:
             expected_tokens = ticket_estimate["tokens"]
             expected_minutes = ticket_estimate["time_minutes"]
             if fit["known"] and fit["fits"]:
-                strength = ("senior tier selected for the ticket's size or priority"
-                            if acc.tier == "senior" and (ticket_estimate["size"] in {"L", "XL"}
-                                                          or t.get("priority") == "Highest")
-                            else f"{acc.tier} tier matches the ticket's expected scope")
+                senior_work = ("tier-senior" in (t.get("labels") or [])
+                               or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
+                tier_order = ("senior, then middle, then junior" if senior_work
+                              else "middle, then senior, then junior")
+                strength = f"tier preference for this ticket is {tier_order}"
                 reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}): estimated work is "
                           f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
                           f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "

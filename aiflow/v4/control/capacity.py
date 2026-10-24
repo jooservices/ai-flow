@@ -113,7 +113,11 @@ def _range(values: list[float], *, floor: float = 0.0) -> dict[str, float]:
     if high - low < max(1.0, abs((low + high) / 2) * .10):
         middle = (low + high) / 2
         low, high = middle * .9, middle * 1.1
-    return {"low": round(max(floor, low), 1), "high": round(max(floor, high), 1)}
+    low, high = max(floor, low), max(floor, high)
+    # A minimum floor can otherwise flatten widened sub-minute or zero-valued history into one number.
+    if round(high, 1) <= round(low, 1):
+        high = low + max(.1, abs(low) * .1)
+    return {"low": round(low, 1), "high": round(high, 1)}
 
 
 def _risk_range(samples: list[dict[str, Any]]) -> dict[str, float]:
@@ -170,22 +174,19 @@ def estimate(ticket: dict[str, Any], samples: list[dict[str, Any]]) -> dict[str,
 
 def account_fit(account_id: str, forecast: dict[str, Any], estimate_value: dict[str, Any],
                 now: datetime | None = None) -> dict[str, Any]:
-    """Check whether the estimate's upper bound fits every known quota window and exhaustion forecast."""
+    """Check the estimate against every quota balance and every window's exhaustion forecast."""
     now = now or datetime.now(timezone.utc)
     windows = forecast.get("windows") or []
     useful = [window for window in windows if window.get("left_tokens") is not None]
     reliable = forecast.get("source") == "reported" or forecast.get("confidence") in {"medium", "high"}
-    if not reliable or not useful:
-        return {"account": account_id, "known": False, "fits": None, "left_tokens": None,
-                "exhaustion_at": None, "reason": "quota history is not reliable enough to forecast this account"}
     upper_tokens = float(estimate_value["tokens"]["high"])
     finishes_at = now + timedelta(minutes=float(estimate_value["time_minutes"]["high"]))
-    left_tokens = min(int(window["left_tokens"]) for window in useful)
+    left_tokens = min((int(window["left_tokens"]) for window in useful), default=None)
     exhaustion = []
     insufficient = []
-    for window in useful:
-        left = int(window["left_tokens"])
-        if left < upper_tokens:
+    for window in windows:
+        left = window.get("left_tokens")
+        if left is not None and int(left) < upper_tokens:
             insufficient.append(str(window.get("label") or window.get("name") or "quota window"))
         prediction = window.get("prediction") or {}
         exhausts = as_utc(prediction.get("exhaustion_at"))
@@ -194,9 +195,26 @@ def account_fit(account_id: str, forecast: dict[str, Any], estimate_value: dict[
             if exhausts <= finishes_at:
                 insufficient.append(f"{window.get('label') or window.get('name') or 'quota window'} forecast to run out during the ticket")
     exhaustion_at = min(exhaustion) if exhaustion else None
+    # A near exhaustion prediction is useful evidence of an unsafe account even when that window has no
+    # remaining-token balance. Otherwise, missing balances cannot establish that an account is safe.
+    imminent_exhaustion = any(item <= finishes_at for item in exhaustion)
+    if not reliable:
+        reason = "quota history is not reliable enough to forecast this account"
+        if imminent_exhaustion:
+            reason += "; a quota window predicts exhaustion during the ticket"
+        return {"account": account_id, "known": False, "fits": None, "left_tokens": None,
+                "exhaustion_at": exhaustion_at.isoformat() if exhaustion_at else None, "reason": reason}
+    if not useful and not imminent_exhaustion:
+        return {"account": account_id, "known": False, "fits": None, "left_tokens": None,
+                "exhaustion_at": exhaustion_at.isoformat() if exhaustion_at else None,
+                "reason": "quota history has no remaining-token balance or near-term exhaustion prediction"}
     fits = not insufficient
-    reason = (f"quota forecast leaves at least {left_tokens:,} tokens and lasts through the estimated work"
-              if fits else f"{', '.join(dict.fromkeys(insufficient))}; only {left_tokens:,} tokens remain")
+    if fits:
+        reason = f"quota forecast leaves at least {left_tokens:,} tokens and lasts through the estimated work"
+    else:
+        reason = ", ".join(dict.fromkeys(insufficient))
+        if left_tokens is not None:
+            reason += f"; only {left_tokens:,} tokens remain"
     return {"account": account_id, "known": True, "fits": fits, "left_tokens": left_tokens,
             "exhaustion_at": exhaustion_at.isoformat() if exhaustion_at else None, "reason": reason}
 
@@ -221,7 +239,10 @@ def choose_account(candidates: list[dict[str, Any]], ticket: dict[str, Any],
     def rank(row: dict[str, Any]) -> tuple[int, int, float, str]:
         account_id = str(row["id"])
         tier = str(row.get("tier") or "middle")
-        strength = int((tier == "senior") == prefer_senior)
+        if prefer_senior:
+            strength = {"junior": 0, "middle": 1, "senior": 2}.get(tier, 1)
+        else:
+            strength = {"junior": 0, "senior": 1, "middle": 2}.get(tier, 2)
         left = float(fits[account_id].get("left_tokens") or 0)
         upper = max(1.0, float(estimate_value["tokens"]["high"]))
         return (1, strength, left / upper, account_id)

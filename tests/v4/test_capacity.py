@@ -7,6 +7,7 @@ import uuid
 from conftest import add_ticket, join_node
 from aiflow.v4.control import capacity, quota as quota_reporting
 from aiflow.v4.control.db import J
+from aiflow.v4.control.ui import mount_ui
 
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
@@ -74,6 +75,19 @@ def test_estimate_uses_ticket_type_size_and_area_history_as_ranges(db):
     assert (estimate["type"], estimate["size"], estimate["area"]) == ("bug", "M", "core")
 
 
+def test_estimate_ranges_stay_distinct_after_floors_for_subminute_and_zero_token_history():
+    ticket = {"type": "Bug", "project": "TESTWP", "labels": ["size-m", "area-core"]}
+    subminute = [{"type": "bug", "size": "M", "area": "core", "tokens": 1_000,
+                  "duration_s": 20.0, "reworked": False} for _ in range(3)]
+    fast = capacity.estimate(ticket, subminute)
+    assert 1.0 <= fast["time_minutes"]["low"] < fast["time_minutes"]["high"]
+
+    zero_tokens = [{"type": "bug", "size": "M", "area": "core", "tokens": 0,
+                    "duration_s": 600.0, "reworked": False} for _ in range(3)]
+    zero = capacity.estimate(ticket, zero_tokens)
+    assert zero["tokens"]["low"] < zero["tokens"]["high"]
+
+
 def test_capacity_routing_avoids_account_that_will_run_out_and_saves_reason(client, ctx):
     cc = online(client, "cc", "claude-01")
     node1 = online(client, "node1", "codex-01")
@@ -98,6 +112,49 @@ def test_capacity_routing_avoids_account_that_will_run_out_and_saves_reason(clie
     assert decision["account"] == "codex-01"
     assert "Assigned to codex-01" in decision["reason"]
     assert decision["estimate"]["tokens"]["high"] > decision["estimate"]["tokens"]["low"]
+    mount_ui(client.app, ctx)
+    detail = client.get("/v1/tickets/TESTWP-CAPACITY-1").json()
+    assert detail["capacity_decision"]["account"] == "codex-01"
+    assert detail["capacity_decision"]["reason"] == decision["reason"]
+
+
+def test_capacity_routing_checks_exhaustion_for_window_without_token_balance(client, ctx):
+    cc = online(client, "cc", "claude-01")
+    node1 = online(client, "node1", "codex-01")
+    now = datetime.now(UTC)
+    claude_forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000, "prediction": {}},
+        {"name": "five_hour", "left_tokens": None,
+         "prediction": {"exhaustion_at": (now + timedelta(minutes=1)).isoformat()}},
+    ]}
+    codex_forecast = {"source": "reported", "confidence": "high", "windows": [
+        {"name": "weekly", "left_tokens": 100_000,
+         "prediction": {"exhaustion_at": (now + timedelta(days=2)).isoformat()}},
+    ]}
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id='claude-01'", (J(claude_forecast),))
+    ctx.db.run("UPDATE accounts SET quota_forecast=%s WHERE id='codex-01'", (J(codex_forecast),))
+    add_ticket(ctx.db, "TESTWP-UNKNOWN-WINDOW")
+
+    claude_candidates = client.get("/v1/work/candidates?account=claude-01", headers=cc).json()["tickets"]
+    codex_candidates = client.get("/v1/work/candidates?account=codex-01", headers=node1).json()["tickets"]
+
+    assert "TESTWP-UNKNOWN-WINDOW" not in {item["key"] for item in claude_candidates}
+    assert "TESTWP-UNKNOWN-WINDOW" in {item["key"] for item in codex_candidates}
+
+
+def test_capacity_routing_prefers_middle_tier_to_junior_for_ordinary_work():
+    candidates = [{"id": "junior-01", "tier": "junior"}, {"id": "middle-01", "tier": "middle"}]
+    forecasts = {
+        "junior-01": {"source": "reported", "windows": [{"left_tokens": 100_000, "prediction": {}}]},
+        "middle-01": {"source": "reported", "windows": [{"left_tokens": 5_000, "prediction": {}}]},
+    }
+    estimate = {"size": "M", "tokens": {"low": 1_000, "high": 2_000},
+                "time_minutes": {"low": 10, "high": 20}}
+
+    account, fits = capacity.choose_account(candidates, {"labels": [], "priority": "Medium"}, estimate, forecasts)
+
+    assert account == "middle-01"
+    assert fits["junior-01"]["fits"] is True and fits["middle-01"]["fits"] is True
 
 
 def test_weekly_plan_counts_finishable_tickets_and_names_the_limiting_ai(client, ctx):
@@ -152,4 +209,5 @@ def test_dashboard_exposes_capacity_plan_assignment_reason_and_estimate_error_ui
     assert "fetch('/v1/capacity'" in page
     assert "function capacityPanel()" in page
     assert "Capacity plan" in page and "Why tickets were assigned" in page and "Estimate error" in page
+    assert "det.capacity_decision" in page and "Why this AI was assigned" in page
     assert "capacity-refresh" in page and "tickets_finishable" in page and "limiting_ai" in page

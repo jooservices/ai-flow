@@ -180,8 +180,8 @@ def test_board_reader_roles_keep_already_done_reason_and_pull_request_in_state(c
         client = role_client(ctx, role, f"{role}@example.test")
         ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-2")
 
+        assert ticket["already_done"]["pr_url"] == url, role
         assert ticket["last_run"]["already_done"] is True, role
-        assert ticket["last_run"]["pr_url"] == url, role
 
 
 def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):

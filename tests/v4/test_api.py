@@ -94,7 +94,26 @@ def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(
     ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-8")
 
     assert ticket["last_run"]["already_done"] is True
-    assert ticket["last_run"]["pr_url"] == url
+    assert ticket["already_done"]["pr_url"] == url
+
+
+def test_already_done_marker_survives_a_later_verifier_run_without_verdict(client, ctx):
+    add_ticket(ctx.db, "TESTWP-10", status="In Verify")
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/44"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,pr_url,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-10','TESTWP','dev','claude-01','claude','cc',1,'finished','done','Already done',%s,%s,now()-interval '5 minute',now()-interval '4 minute')",
+               (str(uuid.uuid4()), J({"already_done": True}), url))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-10','TESTWP','verify','codex-01','codex','cc',2,'finished','quota','no verdict',%s,now()-interval '2 minute',now())",
+               (str(uuid.uuid4()), J({})))
+
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-10")
+
+    assert ticket["last_run"]["step"] == "verify" and ticket["last_run"]["already_done"] is False
+    assert ticket["already_done"]["pr_url"] == url
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-10'")
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-10")
+    assert ticket["already_done"] is None
 
 
 def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_release(client):

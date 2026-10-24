@@ -19,5 +19,5 @@ normal failure path. Pull requests are looked up by the exact repository and bra
 ## Interfaces
 
 - `GET /v1/github/pr` finds the open pull request of a run's branch (repository and head), fenced to the run.
-- `GET /v1/state` and `GET /v1/deploy/state` carry `already_done` on each ticket's last run, which the board uses
+- `GET /v1/state` and `GET /v1/deploy/state` carry `already_done` (`pr_url`, `run_id`) on each ticket in **In Verify** whose latest successful developer run found the work done, so a later verifier run without a verdict does not hide it. The board uses it
   to show "Already done · sent to verification" and the pull request link.

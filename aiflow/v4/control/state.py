@@ -182,7 +182,15 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
     last_by_ticket: dict[str, dict] = {}
     for r in recent:
         last_by_ticket.setdefault(r["ticket"], r)
+    # The marker comes from the ticket's latest successful developer run, so a later verifier run that ends
+    # without a verdict (quota, timeout) does not hide it while the ticket stays in verification.
+    already_done = {}
+    for r in db.all("SELECT DISTINCT ON (ticket_key) id, ticket_key, pr_url, details FROM runs"
+                    " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
+        if (r["details"] or {}).get("already_done"):
+            already_done[r["ticket_key"]] = {"pr_url": r["pr_url"] or "", "run_id": str(r["id"])}
     for t in tickets:
+        t["already_done"] = already_done.get(t["key"]) if t["status"] == "In Verify" else None
         t["run"] = run_by_ticket.get(t["key"])
         t["last_run"] = last_by_ticket.get(t["key"])
         t["done_at"] = _iso(t["done_at"])

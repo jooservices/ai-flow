@@ -1352,7 +1352,7 @@ def test_board_card_shows_already_done_reason_and_clickable_pull_request():
     driver = r"""
 var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
   priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
-  pr_url: 'https://github.com/jooservices/test-aiflow-wp/pull/42', already_done: true}};
+  step: 'verify'}, already_done: {pr_url: 'https://github.com/jooservices/test-aiflow-wp/pull/42', run_id: 'r1'}};
 S.data = {tickets: [ticket], projects: [], nodes: [], accounts: [], active_runs: [], recent_runs: [],
   incidents: [], events: [], totals: {}, versions: {}};
 console.log(card(ticket, {}));

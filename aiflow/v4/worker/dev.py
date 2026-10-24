@@ -445,11 +445,18 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                                                     "repo": repo, "head": branch})
                 existing_pr = found if found and found.get("found") else None
                 if existing_pr or branch_commit_count:
+                    pushed = False
                     if branch_commit_count:
                         # The latest base may have been merged into the existing branch above; publish that
-                        # integration commit before asking GitHub to create or return its pull request.
-                        git.push(wt, branch, token)
-                    sha = (existing_pr or {}).get("head_sha") or git.run("rev-parse", "HEAD", cwd=wt).strip()
+                        # integration commit before asking GitHub to create or return its pull request. The
+                        # relay only accepts pushes with a credential scoped to the branch.
+                        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                                              "repo": repo, "branch": branch})
+                        git.push(wt, branch, credential["token"])
+                        pushed = True
+                    # after a push the head to verify is the pushed commit, not the PR head fetched before it
+                    sha = (git.run("rev-parse", "HEAD", cwd=wt).strip() if pushed or not existing_pr
+                           else existing_pr.get("head_sha") or git.run("rev-parse", "HEAD", cwd=wt).strip())
                     if existing_pr:
                         pr = existing_pr
                     else:

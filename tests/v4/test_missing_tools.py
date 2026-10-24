@@ -216,6 +216,18 @@ def test_clean_no_changes_with_branch_commits_opens_a_pull_request_and_verifies(
     assert [call[2]["to"] for call in api.calls if call[1].endswith("/transition")][-1] == "In Verify"
 
 
+def test_no_changes_push_uses_branch_scoped_credential_and_records_pushed_sha(monkeypatch, tmp_path):
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    result, api = _run_dev(monkeypatch, tmp_path, "DONE", "", final_text="SUMMARY: Nothing to change.",
+                           branch_commits=3, existing_pr={"url": url, "number": 42, "head_sha": "stale-pr-head"})
+
+    assert result["outcome"] == "done" and result["pr_url"] == url
+    scoped = [call for call in api.calls if call[1] == "/v1/github/token" and call[2].get("branch")]
+    assert scoped and scoped[-1][2]["branch"] == "TESTWP-1-s"
+    # the pushed (base-integrated) commit is verified, not the PR head fetched before the push
+    assert result["head_sha"] == "head-sha"
+
+
 def test_fail_verdict_without_file_changes_is_failed_not_no_changes(monkeypatch, tmp_path):
     result, _ = _run_dev(monkeypatch, tmp_path, "FAIL", "tests reported failure",
                          final_text="SUMMARY: Nothing to change.\nRESULT: FAIL: tests reported failure")

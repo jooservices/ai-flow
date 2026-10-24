@@ -3833,7 +3833,7 @@ function card(t, p) {
   if (t.labels.indexOf('aiflow-ready') >= 0 && t.status === 'To Do') flags += '<span class="flag" data-tone="ok">ready</span>';
   if (t.labels.indexOf('require-human') >= 0) flags += '<span class="flag" data-tone="info">require human</span>';
   if (t.labels.indexOf('tier-senior') >= 0) flags += '<span class="flag" data-tone="muted">senior</span>';
-  if (t.status === 'In Verify' && t.last_run && t.last_run.already_done) flags += '<span class="flag" data-tone="ok">Already done · sent to verification</span>';
+  if (t.status === 'In Verify' && t.already_done) flags += '<span class="flag" data-tone="ok">Already done · sent to verification</span>';
   var blocked = (t.blocked_by || []).filter(function (k) { var b = ticketBy(k); return !b || b.status !== 'Done'; });
   if (blocked.length && t.status !== 'Done') flags += '<span class="flag" data-tone="warn">blocked by ' + esc(blocked.join(', ')) + '</span>';
   var h = '<button class="card" data-act="open-ticket" data-key="' + esc(t.key) + '">';
@@ -3851,9 +3851,9 @@ function card(t, p) {
     h += '<span class="c-run">' + pill(runTone(lr.outcome), lr.outcome) + ' <span class="mono">' + esc(lr.account) + '</span> · ' + mmss(lr.duration_s) + (lr.pr_url ? ' · PR #' + esc(lr.pr_url.split('/').pop()) : '') + '</span>';
   }
   h += '</button>';
-  if (t.status === 'In Verify' && t.last_run && t.last_run.already_done && t.last_run.pr_url) {
-    var prMatch = t.last_run.pr_url.match(/\/pull\/(\d+)(?:\/|$)/), prLabel = prMatch ? 'Pull request #' + prMatch[1] : 'Open pull request';
-    return '<div class="card-wrap">' + h + '<a class="card-pr-link" href="' + esc(t.last_run.pr_url) + '" target="_blank" rel="noopener" aria-label="' + esc(prLabel + ' for ' + t.key) + '">' + esc(prLabel) + ' ' + ICON.ext + '</a></div>';
+  if (t.status === 'In Verify' && t.already_done && t.already_done.pr_url) {
+    var prMatch = t.already_done.pr_url.match(/\/pull\/(\d+)(?:\/|$)/), prLabel = prMatch ? 'Pull request #' + prMatch[1] : 'Open pull request';
+    return '<div class="card-wrap">' + h + '<a class="card-pr-link" href="' + esc(t.already_done.pr_url) + '" target="_blank" rel="noopener" aria-label="' + esc(prLabel + ' for ' + t.key) + '">' + esc(prLabel) + ' ' + ICON.ext + '</a></div>';
   }
   return h;
 }

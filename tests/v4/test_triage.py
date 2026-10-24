@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node
 from aiflow.v4.control import escalations as esc
 from aiflow.v4.control.api import notify
 from aiflow.v4.worker import triage
@@ -71,6 +71,7 @@ def join(client, name):
 def test_done_dependents_do_not_make_triage_alert_critical(client, ctx, monkeypatch):
     headers = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-72", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-72")
     add_ticket(ctx.db, "TESTWP-73", status="Done", blocked_by=["TESTWP-72"])
     claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-72", "account": "codex-01", "step": "triage"},
                         headers=headers).json()
@@ -101,6 +102,7 @@ def test_triage_decisions_use_readonly_base_and_record_jira_effects(
         client, ctx, tmp_path, monkeypatch, decision, outcome, raised_class, question):
     headers = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-70", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-70")
     ctx.jira.status_of["TESTWP-70"] = "Needs owner"
     dev_id = str(uuid.uuid4())
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary) "
@@ -169,6 +171,7 @@ def test_triage_answers_reviewer_question_in_jira_and_pr_then_returns_to_review(
     key = "TESTWP-102"
     headers = join(client, "cc")
     add_ticket(ctx.db, key, status="Needs owner", labels=("require-human",))
+    add_open_escalation(ctx.db, key, "Does this PR preserve retry handling?")
     ctx.jira.status_of[key] = "Needs owner"
     dev_id = str(uuid.uuid4())
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,pr_url)"

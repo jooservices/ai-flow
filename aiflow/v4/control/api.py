@@ -1039,6 +1039,7 @@ class ViewAsBody(BaseModel):
 
 class BaChatResultBody(BaseModel):
     account: str = ""
+    claim_token: str = ""
     output: dict[str, Any] = Field(default_factory=dict)
     error_kind: str = ""
 
@@ -4463,7 +4464,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             parsed_id = str(uuid.UUID(job_id))
         except ValueError:
             raise HTTPException(404, "chat turn was not found") from None
-        if not ba_chat.complete_job(ctx, parsed_id, body.account, node, body.output, body.error_kind):
+        if not ba_chat.complete_job(ctx, parsed_id, body.claim_token, body.account, node,
+                                    body.output, body.error_kind):
             raise HTTPException(409, "chat turn is no longer assigned to this worker")
         return {"accepted": True}
 

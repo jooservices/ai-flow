@@ -189,7 +189,8 @@ class Worker:
                 result = {"error_kind": "worker_error", "output": {}}
             try:
                 self.api.call("POST", f"/v1/ba-chat/{chat_job['job_id']}/result",
-                              {"account": self.account, "output": result.get("output") or {},
+                              {"account": self.account, "claim_token": chat_job["claim_token"],
+                               "output": result.get("output") or {},
                                "error_kind": result.get("error_kind") or ""})
             except Exception as e:  # noqa: BLE001
                 log.warning("BA chat result was not recorded account=%s error=%s", self.account, type(e).__name__)

@@ -349,7 +349,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .devcode{font-family:var(--f-mono); font-size:30px; letter-spacing:.14em; text-align:center; padding:14px; border:1px dashed var(--accent); border-radius:12px; color:var(--accent)}
 
 /* toasts */
-.toasts{position:fixed; z-index:50; right:max(16px, env(safe-area-inset-right,0px)); bottom:calc(16px + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:8px; width:min(360px, calc(100vw - 32px))}
+.toasts{position:fixed; z-index:50; right:max(16px, env(safe-area-inset-right,0px)); bottom:calc(16px + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:8px; width:min(360px, calc(100vw - 32px)); pointer-events:none}
 .toast{background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:11px 14px; display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; animation:toastIn .35s cubic-bezier(.2,.7,.2,1) both}
 .toast.out{animation:toastOut .3s ease both}
 .toast .t-title{font-weight:600}
@@ -5058,13 +5058,15 @@ document.addEventListener('keydown', layoutKey);
 
 /* ---------- interactions ---------- */
 document.addEventListener('click', function (e) {
-  if (e.target.closest('[data-stop]')) return;
-  if (S.projectPickerOpen && !e.target.closest('#project-picker')) {
+  var target = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
+  if (!target || !target.closest) return;
+  if (target.closest('[data-stop]')) return;
+  if (S.projectPickerOpen && !target.closest('#project-picker')) {
     S.projectPickerOpen = false;
     renderProjectPickerOptions();
   }
-  var el = e.target.closest('[data-act]');
-  if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
+  var el = target.closest('[data-act]');
+  if (!el) { if (target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
@@ -5187,7 +5189,9 @@ document.addEventListener('click', function (e) {
   else if (act === 'refresh-reviews') loadReviews();
   else if (act.indexOf('review-') === 0) {
     var card = el.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
-    submitReview(el.getAttribute('data-key'), act.slice('review-'.length), note ? note.value : '');
+    var reviewKey = el.getAttribute('data-key'), reviewComment = note ? note.value : (S.reviewNoteDrafts[reviewKey] || '');
+    if (note) S.reviewNoteDrafts[reviewKey] = reviewComment;
+    submitReview(reviewKey, act.slice('review-'.length), reviewComment);
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));

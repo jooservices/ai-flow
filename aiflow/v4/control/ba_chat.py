@@ -249,12 +249,15 @@ def claim_job(ctx, account: str, node: str) -> dict | None:
             ).fetchone()
             if not row:
                 return None
+            claim_token = str(uuid.uuid4())
             connection.execute("UPDATE ba_chat_jobs SET status='claimed',claimed_by=%s,claimed_node=%s,"
-                               "claim_until=now()+interval '5 minutes',updated_at=now() WHERE id=%s",
-                               (account, node, row["id"]))
+                               "claim_token=%s,claim_until=clock_timestamp()+interval '5 minutes',updated_at=now()"
+                               " WHERE id=%s",
+                               (account, node, claim_token, row["id"]))
             return {"job_id": str(row["id"]), "conversation_id": str(row["conversation_id"]),
                     "project_key": row["project_key"], "status": row["status"],
-                    "history": row["history"] or [], "proposal": row["proposal"] or {}}
+                    "history": row["history"] or [], "proposal": row["proposal"] or {},
+                    "claim_token": claim_token}
 
 
 def _clean_line(value: Any, limit: int) -> str:
@@ -393,55 +396,68 @@ def creation_reply(result: dict, site: str = "") -> str:
     return "\n".join(lines)
 
 
-def complete_job(ctx, job_id: str, account: str, node: str, output: dict | None = None,
+def complete_job(ctx, job_id: str, claim_token: str, account: str, node: str, output: dict | None = None,
                  error_kind: str = "") -> bool:
-    """Persist a worker answer, preserving proposal state until the owner explicitly approves it."""
-    job = ctx.db.one("SELECT j.*,c.history,c.status AS conversation_status,c.project_key,c.proposal"
-                     " FROM ba_chat_jobs j JOIN ba_chat_conversations c ON c.id=j.conversation_id WHERE j.id=%s",
-                     (job_id,))
-    if not job or job["status"] != "claimed" or job["claimed_by"] != account or job["claimed_node"] != node:
+    """Persist only the current, unexpired claim and its reply as one transaction."""
+    try:
+        claim_token = str(uuid.UUID(claim_token))
+    except (TypeError, ValueError, AttributeError):
         return False
-    channel = ctx.db.one("SELECT * FROM notification_channels WHERE id=%s", (job["channel_id"],))
-    if not channel:
-        ctx.db.run("UPDATE ba_chat_jobs SET status='failed',last_error='channel removed',updated_at=now() WHERE id=%s",
-                   (job_id,))
-        return False
-    config = channel.get("config") or {}
-    token = str(config.get("bot_token") or "")
-    reply = ""
-    proposal = None
-    mode = str((output or {}).get("mode") or "")
-    if error_kind:
-        reply = "I couldn't complete that turn just now. Please send the request again in a moment."
-        ctx.db.run("UPDATE ba_chat_jobs SET status='failed',last_error=%s,updated_at=now() WHERE id=%s",
-                   (_clean_line(error_kind, 80), job_id))
-    elif mode == "question":
-        reply = _clean_line((output or {}).get("reply"), 3500) or "What would you like the owner to clarify?"
-        ctx.db.run("UPDATE ba_chat_jobs SET status='done',last_error='',updated_at=now() WHERE id=%s", (job_id,))
-    elif mode == "proposal":
-        try:
-            proposal = normalise_proposal((output or {}).get("proposal"), job["project_key"])
-            summary = _clean_line((output or {}).get("summary") or proposal.get("summary"), 2000)
-            proposal["summary"] = summary
-            reply = render_proposal(summary, proposal)
-        except ValueError:
-            reply = "I couldn't prepare a complete proposal yet. Please add more detail or ask me to revise it."
-            ctx.db.run("UPDATE ba_chat_jobs SET status='failed',last_error='invalid proposal',updated_at=now() WHERE id=%s",
-                       (job_id,))
-    else:
-        reply = "I couldn't prepare a valid response. Please rephrase your request."
-        ctx.db.run("UPDATE ba_chat_jobs SET status='failed',last_error='invalid model response',updated_at=now() WHERE id=%s",
-                   (job_id,))
-    reply = _redact(reply, token)
-    if proposal:
-        ctx.db.run("UPDATE ba_chat_conversations SET status='proposal',proposal=%s,history=history || %s,updated_at=now()"
-                   " WHERE id=%s", (J(proposal), J([{"role": "assistant", "content": reply}]), job["conversation_id"]))
-        ctx.db.run("UPDATE ba_chat_jobs SET status='done',last_error='',updated_at=now() WHERE id=%s", (job_id,))
-    else:
-        ctx.db.run("UPDATE ba_chat_conversations SET status=CASE WHEN proposal IS NOT NULL THEN 'proposal' ELSE 'collecting' END,"
-                   "history=history || %s,updated_at=now() WHERE id=%s",
-                   (J([{"role": "assistant", "content": reply}]), job["conversation_id"]))
-    _enqueue(ctx, job["channel_id"], str(job["conversation_id"]), reply, token)
+    with ctx.db.pool.connection() as connection:
+        with connection.transaction():
+            job = connection.execute(
+                "SELECT j.*,c.history,c.project_key,c.proposal FROM ba_chat_jobs j"
+                " JOIN ba_chat_conversations c ON c.id=j.conversation_id"
+                " WHERE j.id=%s AND j.status='claimed' AND j.claim_token=%s AND j.claimed_by=%s"
+                " AND j.claimed_node=%s AND j.claim_until>clock_timestamp() FOR UPDATE OF j",
+                (job_id, claim_token, account, node),
+            ).fetchone()
+            if not job:
+                return False
+            channel = connection.execute("SELECT * FROM notification_channels WHERE id=%s",
+                                         (job["channel_id"],)).fetchone()
+            if not channel:
+                connection.execute("UPDATE ba_chat_jobs SET status='failed',last_error='channel removed',updated_at=now()"
+                                   " WHERE id=%s", (job_id,))
+                return False
+            config = channel.get("config") or {}
+            token = str(config.get("bot_token") or "")
+            reply = ""
+            proposal = None
+            status, last_error = "done", ""
+            mode = str((output or {}).get("mode") or "")
+            if error_kind:
+                reply = "I couldn't complete that turn just now. Please send the request again in a moment."
+                status, last_error = "failed", _clean_line(error_kind, 80)
+            elif mode == "question":
+                reply = _clean_line((output or {}).get("reply"), 3500) or "What would you like the owner to clarify?"
+            elif mode == "proposal":
+                try:
+                    proposal = normalise_proposal((output or {}).get("proposal"), job["project_key"])
+                    summary = _clean_line((output or {}).get("summary") or proposal.get("summary"), 2000)
+                    proposal["summary"] = summary
+                    reply = render_proposal(summary, proposal)
+                except ValueError:
+                    reply = "I couldn't prepare a complete proposal yet. Please add more detail or ask me to revise it."
+                    status, last_error = "failed", "invalid proposal"
+            else:
+                reply = "I couldn't prepare a valid response. Please rephrase your request."
+                status, last_error = "failed", "invalid model response"
+
+            reply = _redact(reply, token)
+            assistant_message = J([{"role": "assistant", "content": reply}])
+            if proposal:
+                connection.execute("UPDATE ba_chat_conversations SET status='proposal',proposal=%s,"
+                                   "history=history || %s,updated_at=now() WHERE id=%s",
+                                   (J(proposal), assistant_message, job["conversation_id"]))
+            else:
+                connection.execute("UPDATE ba_chat_conversations SET status=CASE WHEN proposal IS NOT NULL"
+                                   " THEN 'proposal' ELSE 'collecting' END,history=history || %s,updated_at=now()"
+                                   " WHERE id=%s", (assistant_message, job["conversation_id"]))
+            connection.execute("UPDATE ba_chat_jobs SET status=%s,last_error=%s,updated_at=now() WHERE id=%s",
+                               (status, last_error, job_id))
+            connection.execute("INSERT INTO ba_chat_outbox (channel_id,conversation_id,body) VALUES (%s,%s,%s)",
+                               (job["channel_id"], job["conversation_id"], reply[:80_000]))
     return True
 
 

@@ -62,8 +62,32 @@ def proposal(*, epic="Planning", story="Capture scope", tasks=None):
 def run_job(ctx, expected_account="claude-01", node="cc", output=None, error_kind=""):
     job = ba_chat.claim_job(ctx, expected_account, node)
     assert job is not None
-    assert ba_chat.complete_job(ctx, job["job_id"], expected_account, node, output or {}, error_kind)
+    assert ba_chat.complete_job(ctx, job["job_id"], job["claim_token"], expected_account, node,
+                               output or {}, error_kind)
     return job
+
+
+def test_reclaimed_chat_job_rejects_the_previous_claim_result_even_for_the_same_worker(ctx):
+    channel(ctx)
+    assert ba_chat.accept_update(ctx, ctx.db.one("SELECT * FROM notification_channels WHERE kind='telegram'"),
+                                 message(5, "Plan a billing improvement"))
+    old_claim = ba_chat.claim_job(ctx, "claude-01", "cc")
+    assert old_claim is not None
+    ctx.db.run("UPDATE ba_chat_jobs SET claim_until=clock_timestamp()-interval '1 second' WHERE id=%s",
+               (old_claim["job_id"],))
+
+    new_claim = ba_chat.claim_job(ctx, "claude-01", "cc")
+    assert new_claim is not None and new_claim["job_id"] == old_claim["job_id"]
+    assert new_claim["claim_token"] != old_claim["claim_token"]
+    stale_proposal = {"mode": "proposal", "proposal": proposal()}
+    assert not ba_chat.complete_job(ctx, old_claim["job_id"], old_claim["claim_token"],
+                                    "claude-01", "cc", stale_proposal)
+    assert ctx.db.one("SELECT status FROM ba_chat_conversations")["status"] == "collecting"
+    assert ctx.db.one("SELECT count(*) AS n FROM ba_chat_outbox")["n"] == 0
+
+    assert ba_chat.complete_job(ctx, new_claim["job_id"], new_claim["claim_token"],
+                                "claude-01", "cc", stale_proposal)
+    assert ctx.db.one("SELECT status FROM ba_chat_conversations")["status"] == "proposal"
 
 
 def test_private_chat_asks_then_proposes_and_only_approval_creates_template_tickets(ctx):

@@ -13,9 +13,7 @@ Machines and AI (`/machines`) lists the machines that run AI work and the AI acc
 ## Common tasks
 
 - Add a machine by entering its name, role and project, then create its one-time join command. Add an AI account
-  from the machine's account section by choosing a provider, an optional name, sessions and jobs, and creating
-  its sign-in link and code. Machines, accounts and worker counts are stored in the database and are part of every
-  backup; see `docs/v4/inventory-in-database.md`.
+  from the machine's account section by choosing a provider and creating its sign-in link and code.
 - Find a node that stopped sending heartbeats: see the [node_down runbook](../runbooks/node_down.md).
 - Check which accounts are signed out before work stalls: see the [node_no_ai runbook](../runbooks/node_no_ai.md).
   For capacity advice open [SA health](sa.md).

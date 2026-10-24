@@ -13,9 +13,10 @@ or a restart, and the control repository (`aiflow-control`) is never written.
 | Total session limit and extra machines of a shared account | `shared_accounts`, `account_machines` |
 | Rules, profiles, tool versions, project definitions | control repository (versioned policy) |
 
-`accounts.yaml` and the `nodes/*.yaml` files are no longer read for accounts, roles, worker counts or project
-assignment once the import below ran. A node file may still carry hardware hints (`packages`, `services`, `tools`);
-they are setup details, not scheduling facts.
+`accounts.yaml`, `nodes/*.yaml` and project-level `nodes` assignments are no longer read for accounts, roles,
+worker counts or project assignment once the import below ran. Node project assignments and project-level machine
+assignments are copied to the database together. A node file may still carry hardware hints (`packages`, `services`,
+`tools`); they are setup details, not scheduling facts.
 
 ## Join, add, change
 

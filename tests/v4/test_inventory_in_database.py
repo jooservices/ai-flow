@@ -17,7 +17,7 @@ from test_machines import owner_session
 from aiflow.v4.control import inventory
 from aiflow.v4.control.db import DB
 from aiflow.v4.core import backups
-from aiflow.v4.core.controlrepo import ControlRepo
+from aiflow.v4.core.controlrepo import ControlRepo, Project
 
 INVENTORY_TABLES = ("nodes", "managed_ai_accounts", "shared_accounts", "account_machines", "control_imports")
 
@@ -124,6 +124,25 @@ def test_joined_machine_serves_its_project_after_the_import_without_the_node_fil
     joined = join_node(client, "node1")
     assert joined.status_code == 200, joined.text
     assert heartbeat(client, "node1", joined.json()["node_token"])["projects"] == ["TESTWP"]
+
+
+def test_project_node_assignments_are_imported_and_then_read_from_database(client, ctx):
+    owner_session(client, ctx)
+    configured = ctx.repo()
+    configured.projects["TESTFLOW"] = Project(key="TESTFLOW", repo="jooservices/testflow", nodes=["node1"])
+    assert "TESTFLOW" not in configured.nodes["node1"].projects
+
+    result = client.app.state.import_inventory()
+    assert result["imported"] is True
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"] == ["TESTWP", "TESTFLOW"]
+
+    # The repo can change after import. Its old assignment cannot add or remove runtime access.
+    configured.projects["TESTFLOW"].nodes = ["cc"]
+    runtime = ctx.repo()
+    node1 = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name='node1'")
+    cc = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name='cc'")
+    assert runtime.projects_for_node("node1", node1["projects"], node1["dynamic"]) == ["TESTWP", "TESTFLOW"]
+    assert runtime.projects_for_node("cc", cc["projects"], cc["dynamic"]) == ["TESTWP"]
 
 
 def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(

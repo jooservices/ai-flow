@@ -54,13 +54,30 @@ def import_control_repo(db, repo: ControlRepo) -> dict:
             if not first:
                 return {"imported": False, "accounts": 0, "machines": 0}
             machines = accounts = 0
-            for node in repo.nodes.values():
+            project_assignments: dict[str, list[str]] = {}
+            for key, project in repo.projects.items():
+                for name in project.nodes or []:
+                    project_assignments.setdefault(name, []).append(key)
+            for name in sorted(set(repo.nodes) | set(project_assignments)):
+                node = repo.nodes.get(name)
+                projects = list(dict.fromkeys([*(node.projects if node else []), *project_assignments.get(name, [])]))
                 # Rows already synced from the repo keep their live state; only the assignment moves to the database.
-                conn.execute(
-                    "INSERT INTO nodes (name, ip, role, slots_total, projects, dynamic) VALUES (%s,%s,%s,%s,%s,true)"
-                    " ON CONFLICT (name) DO UPDATE SET dynamic=true,"
-                    " projects=CASE WHEN cardinality(nodes.projects)=0 THEN EXCLUDED.projects ELSE nodes.projects END",
-                    (node.name, node.ip, node.role, node.slots, list(node.projects)))
+                if node:
+                    conn.execute(
+                        "INSERT INTO nodes (name, ip, role, slots_total, projects, dynamic) VALUES (%s,%s,%s,%s,%s,true)"
+                        " ON CONFLICT (name) DO UPDATE SET dynamic=true, projects=nodes.projects || ARRAY("
+                        " SELECT imported.project FROM unnest(EXCLUDED.projects) AS imported(project)"
+                        " WHERE NOT (imported.project = ANY(nodes.projects)))",
+                        (node.name, node.ip, node.role, node.slots, projects))
+                else:
+                    # A project can assign a machine without a nodes/*.yaml hardware profile. Keep that assignment
+                    # in the registry so project files stop being a live source after this one-time import.
+                    conn.execute(
+                        "INSERT INTO nodes (name, projects, dynamic, status) VALUES (%s,%s,true,'offline')"
+                        " ON CONFLICT (name) DO UPDATE SET dynamic=true, projects=nodes.projects || ARRAY("
+                        " SELECT imported.project FROM unnest(EXCLUDED.projects) AS imported(project)"
+                        " WHERE NOT (imported.project = ANY(nodes.projects)))",
+                        (name, projects))
                 machines += 1
             for account in repo.accounts:
                 # An account the owner already removed or changed on screen has a row: it is never overwritten.

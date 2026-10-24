@@ -90,7 +90,6 @@ def resolve_available(ctx, node: str, node_row: dict) -> int:
     node_config = ctx.db.one("SELECT projects,dynamic FROM nodes WHERE name=%s", (node,)) or {}
     projects = set(repo.projects_for_node(node, node_config.get("projects") or [], node_config.get("dynamic", False)))
     projects.update(node_config.get("projects") or [])
-    projects.update(key for key, project in repo.projects.items() if node in project.nodes)
     resolved = 0
     for wait in ctx.db.all("SELECT ticket_key,project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
         if (not requirement_is_accepted(ctx, wait["project"], wait["requirement"])

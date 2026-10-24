@@ -209,7 +209,7 @@ class ControlRepo:
     policy_archived: bool = False
     ref: str = ""
     # True once machines and accounts were imported into the control database (docs/v4/inventory-in-database.md):
-    # `accounts` then comes from the database and nodes are assigned to projects by their join, not by `nodes/*.yaml`.
+    # accounts and project assignments then come from the database, including assignments migrated from project YAML.
     inventory_in_db: bool = False
 
     @classmethod
@@ -284,12 +284,14 @@ class ControlRepo:
         dynamic = dynamic or self.inventory_in_db
         if configured:
             assigned = list(configured.projects)
-            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            if not self.inventory_in_db:
+                assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
             return [key for key in dict.fromkeys(assigned)
                     if key in self.projects and not self.projects[key].paused]
         if dynamic:
             assigned = list(bound_projects)
-            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            if not self.inventory_in_db:
+                assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
             return [key for key in dict.fromkeys(assigned)
                     if key in self.projects and not self.projects[key].paused]
         return []

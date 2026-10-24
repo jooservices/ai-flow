@@ -22,6 +22,7 @@ from .db import J
 from .login import SESSION_TTL_S, hash_password, normalize_email
 
 PAGE = Path(__file__).with_name("ui") / "setup.html"
+PROGRESS_SCRIPT = Path(__file__).with_name("ui") / "setup-progress.js"
 COOKIE_PATH = "/"
 NON_SKIPPABLE = {"public_address", "administrator"}
 STEP_IDS = ("public_address", "administrator", "jira", "github", "machine", "ai_accounts", "project",
@@ -150,10 +151,6 @@ def status(ctx) -> dict:
             sample_ready = sample_status == "Intake"
         except Exception:  # noqa: BLE001 - explain the observable state without exposing provider details
             sample_status = "unavailable"
-    if sample_ready and not row.get("completed_at"):
-        ctx.db.run("UPDATE setup_wizard_state SET completed_at=now(),updated_at=now() WHERE id=true"
-                   " AND completed_at IS NULL")
-        row["completed_at"] = True
     steps = {
         "public_address": _step(bool(stored_url or (admin_exists and ctx.settings.public_url)),
                                 "Choose the address people use to open AI Flow."),
@@ -168,8 +165,15 @@ def status(ctx) -> dict:
     }
     for step_id in STEP_IDS:
         steps[step_id]["skipped"] = step_id in skipped
-    return {"admin_exists": admin_exists, "public_url": url, "completed": bool(row.get("completed_at")),
-            "locked": bool(row.get("completed_at")), "sample_ticket": sample_key, "sample_status": sample_status,
+    # Setup is finished only when every step is ready; a skipped step keeps the Dashboard panel and stays resumable.
+    all_ready = all(item["ready"] for item in steps.values())
+    if all_ready and not row.get("completed_at"):
+        ctx.db.run("UPDATE setup_wizard_state SET completed_at=now(),updated_at=now() WHERE id=true"
+                   " AND completed_at IS NULL")
+    elif not all_ready and row.get("completed_at"):
+        ctx.db.run("UPDATE setup_wizard_state SET completed_at=NULL,updated_at=now() WHERE id=true")
+    return {"admin_exists": admin_exists, "public_url": url, "completed": all_ready,
+            "locked": admin_exists, "sample_ticket": sample_key, "sample_status": sample_status,
             "projects": projects,
             "steps": [{"id": step_id, "title": STEP_LABELS[step_id], **steps[step_id],
                        "action": STEP_ACTIONS.get(step_id)} for step_id in STEP_IDS]}
@@ -198,10 +202,15 @@ def install(app: FastAPI, ctx) -> None:
     """Mount bootstrap and progress routes. Bootstrap is the only route available before the first user exists."""
     @app.get("/setup", include_in_schema=False)
     def setup_page():
-        if setup_complete(ctx):
+        # The wizard screen only creates the first Administrator; later steps live on the Dashboard panel.
+        if user_count(ctx):
             return RedirectResponse("/dashboard", status_code=303)
         return FileResponse(PAGE, media_type="text/html", headers={"Cache-Control": "no-store",
                                                                      "Referrer-Policy": "no-referrer"})
+
+    @app.get("/ui/setup-progress.js", include_in_schema=False)
+    def setup_progress_script():
+        return FileResponse(PROGRESS_SCRIPT, media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
     @app.get("/v1/setup/status")
     def setup_status(request: Request):
@@ -272,7 +281,7 @@ def install(app: FastAPI, ctx) -> None:
             ctx.settings.join_control_url = public_url
         token = issue_session(email, ["administrator"], int(time.time()) + SESSION_TTL_S,
                               ctx.settings.console_session_secret)
-        response = JSONResponse({"created": True, "email": email, "next": "/setup"},
+        response = JSONResponse({"created": True, "email": email, "next": "/dashboard"},
                                 headers={"Cache-Control": "no-store"})
         response.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL_S, httponly=True,
                             secure=public_url.lower().startswith("https://"), samesite="strict", path=COOKIE_PATH)
@@ -285,8 +294,6 @@ def install(app: FastAPI, ctx) -> None:
         user = _administrator(request, ctx)
         if step_id not in STEP_IDS or step_id in NON_SKIPPABLE:
             raise HTTPException(404, "that setup step cannot be skipped")
-        if setup_complete(ctx):
-            raise HTTPException(409, "Setup is complete. Use Integrations, Machines and AI, and Projects to make changes.")
         if body.skipped:
             ctx.db.run("UPDATE setup_wizard_state SET skipped_steps=array_append(array_remove(skipped_steps,%s),%s),"
                        "updated_at=now() WHERE id=true", (step_id, step_id))
@@ -336,13 +343,15 @@ def install(app: FastAPI, ctx) -> None:
                    " ON CONFLICT (key) DO UPDATE SET status='Intake',synced_at=now()",
                    (key, project, ["aiflow-setup-sample"],
                     "Sample ticket created by the AI Flow first-run setup wizard."))
-        ctx.db.run("UPDATE setup_wizard_state SET completed_at=coalesce(completed_at,now()),updated_at=now() WHERE id=true")
+        completed = status(ctx)["completed"]
         _audit(ctx, "sample_ticket", user.subject, True, "sample ticket confirmed in Intake",
                {"project": project, "ticket": key, "status": "Intake"})
         ctx.events.emit("setup.sample_ticket", ticket=key, project=project, outcome="Intake",
                         account=user.subject, reason="first-run setup sample confirmed")
-        return {"ok": True, "ticket": key, "status": "Intake", "completed": True,
-                "message": f"Sample ticket {key} was created in Intake. Setup is complete; follow its progress on the ticket and Dashboard screens."}
+        tail = ("Setup is complete; follow its progress on the ticket and Dashboard screens." if completed
+                else "Skipped or unfinished steps stay on the Dashboard until you finish them.")
+        return {"ok": True, "ticket": key, "status": "Intake", "completed": completed,
+                "message": f"Sample ticket {key} was created in Intake. {tail}"}
 
     public_url_cache = {"read_at": 0.0}
 

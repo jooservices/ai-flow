@@ -681,7 +681,6 @@ var S = {
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
   dashboardDisagreements: { rows: null, error: '', loading: false, loadedAt: 0 },
-  setupWizard: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
@@ -1022,8 +1021,7 @@ function pollConsoleSession() {
     if (S.consoleUser && !consoleCan(VIEW_PERMISSION[S.view] || 'view.dashboard')) {
       location.replace(S.consoleUser.landing_page || '/cc'); return;
     }
-    render();
-    if (S.consoleUser && consoleCan('integrations.manage')) loadSetupWizardStatus();
+    render(); if (window.AIFlowSetup) AIFlowSetup.poll(); else if (!S.setupScript) { S.setupScript = document.head.appendChild(Object.assign(document.createElement('script'), { src: '/ui/setup-progress.js' })); }
     if (S.view === 'cc' || S.view === 'work' || S.view === 'delivery') loadDashboardWaiting(true);
     if (consoleReader() && (!S.licensing.status || Date.now() - S.licensing.statusAt > 60000) && !S.licensing.statusBusy) loadLicenseStatus();
     if (consoleCan('licensing.manage') && (!S.licensing.data || Date.now() - S.licensing.loadedAt > 60000) && !S.licensing.busy) loadLicensing();
@@ -1041,16 +1039,6 @@ function pollConsoleSession() {
     S.consoleUser = null; S.consoleSessionLoaded = true; loadConsoleThemePreference();
     document.documentElement.classList.remove('role-loading'); applyRoleNavigation(); render(); pollServices(); })
     .then(function () { setTimeout(pollConsoleSession, 15000); });
-}
-function loadSetupWizardStatus() {
-  var setup = S.setupWizard;
-  if (!S.consoleUser || setup.loading || Date.now() - setup.loadedAt < 10000) return;
-  setup.loading = true;
-  fetch('/v1/setup/status', { cache: 'no-store' }).then(function (r) {
-    return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || 'Setup status is unavailable'); return d; });
-  }).then(function (d) { setup.data = d; setup.error = ''; setup.loadedAt = Date.now(); })
-    .catch(function (e) { setup.error = String(e.message || e); setup.loadedAt = Date.now(); })
-    .then(function () { setup.loading = false; if (S.view === 'cc' && S.data) renderDashboard(); });
 }
 function themeStorageKey(user) { return 'aiflow4-theme:' + encodeURIComponent(user || 'anonymous').toLowerCase(); }
 function applyTheme(theme) {
@@ -2129,13 +2117,6 @@ function openDashboardCard(card) {
   if (card === 'waiting' && consoleCan('view.human_review')) { S.reviewProject = ''; setView('review'); return; }
   openDashboardWorkFilter(card === 'done' ? 'done' : card === 'in-flight' ? 'in-flight' : 'waiting');
 }
-function setupDashboardPanel() {
-  var data = S.setupWizard.data;
-  if (!data || data.completed || !S.consoleUser || !consoleCan('integrations.manage')) return '';
-  var pending = (data.steps || []).slice(2).filter(function (step) { return !step.ready && !step.skipped; })[0];
-  var text = pending ? (pending.title + ': ' + pending.missing) : 'Some steps are skipped or still need checking.';
-  return '<section class="panel" data-block="first-run-setup"><div class="panel-h"><h2>Finish setting up AI Flow</h2><span class="hint">You can continue now or resume later from this Dashboard.</span><span class="spacer"></span><a class="btn primary sm" href="/setup">Continue setup</a></div><div class="muted">' + esc(text) + '</div></section>';
-}
 function renderDashboard() {
   var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
@@ -2187,7 +2168,7 @@ function renderDashboard() {
   h += '<button type="button" role="tab" class="dashboard-tab" id="dashboard-tab-ai" aria-controls="dashboard-panel" aria-selected="' + (S.dashboardTab === 'ai') + '" data-act="dashboard-tab" data-tab="ai">AI and machines</button></div>';
   h += '<div id="dashboard-panel" role="tabpanel" aria-labelledby="dashboard-tab-' + (S.dashboardTab === 'ai' ? 'ai' : 'work') + '">';
   h += '<section class="dash-section" data-dashboard-panel="work"' + (S.dashboardTab === 'ai' ? ' hidden' : '') + '><h2 class="dash-section-title" id="dashboard-work-title">Work</h2>';
-  h += setupDashboardPanel();
+  h += '<div data-block="first-run-setup">' + (window.AIFlowSetup ? AIFlowSetup.panel() : '') + '</div>';
   h += '<div class="dash-kpis" data-block="kpis" aria-label="Work summary">';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="done"><span class="label">Done</span><span class="kpi-main"><span class="value">' + done.length + '</span>' + dashboardSpark(doneTrend, 'var(--good)') + '</span><span class="kpi-delta">+' + doneThisWeek + ' this week</span><span class="detail">of ' + total + ' tickets · ' + donePct + '% complete</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="in-flight"><span class="label">In flight</span><span class="kpi-main"><span class="value">' + inFlight + '</span>' + dashboardSpark(inFlightTrend, 'var(--provider-codex)') + '</span><span class="kpi-delta">' + Number(d.active_runs.length || 0) + ' live runs</span><span class="detail">In progress, verify or human review</span></button>';

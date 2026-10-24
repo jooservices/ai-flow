@@ -48,8 +48,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling,
-               version_release)
+               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -7601,9 +7600,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("backup", "run_now", "", "", None, user.subject, True, "backup queued")
         return {"queued": True}
 
-    jira_connect.mount(app, ctx)
+    jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)
     runtime_settings.install(app, ctx, console_user, audit)
-    setup_wizard.install(app, ctx)
     from .login import install_login
     install_login(app, ctx)
     return app

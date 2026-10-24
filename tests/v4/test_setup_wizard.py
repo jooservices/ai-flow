@@ -96,7 +96,7 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
 
     challenge, created = bootstrap(client)
     assert challenge["bootstrap_token"] and created.status_code == 200, created.text
-    assert created.json() == {"created": True, "email": "first.owner@example.test", "next": "/setup"}
+    assert created.json() == {"created": True, "email": "first.owner@example.test", "next": "/dashboard"}
     assert COOKIE_NAME in created.headers["set-cookie"]
     user = ctx.db.one("SELECT email,role,roles,password_hash FROM console_users")
     assert user["email"] == "first.owner@example.test" and user["role"] == "administrator"
@@ -107,7 +107,10 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
     audit = ctx.db.one("SELECT payload::text AS payload FROM write_audit WHERE target='setup' AND action='bootstrap'")
     assert PASSWORD not in audit["payload"]
     assert client.get("/v1/auth/me").status_code == 200  # bootstrap signs the owner in immediately
-    assert client.get("/setup").status_code == 200
+    # AC5: the wizard screen is locked as soon as the first Administrator exists, before any step is done.
+    locked = client.get("/setup")
+    assert locked.status_code == 303 and locked.headers["location"] == "/dashboard"
+    assert status(client)["locked"] is True and status(client)["completed"] is False
 
 
 def test_each_external_step_reports_missing_action_and_skip_can_be_resumed(ctx):
@@ -166,21 +169,38 @@ def test_sample_ticket_completes_only_after_jira_confirms_intake_and_then_locks_
     sample = client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"})
     assert sample.status_code == 200, sample.text
     assert sample.json()["ticket"] == "TESTWP-99" and sample.json()["status"] == "Intake"
-    assert sample.json()["completed"] is True
+    # Jira, GitHub, machine and AI accounts are still missing, so setup is not complete yet (AC3).
+    assert sample.json()["completed"] is False
     assert jira.created[0][0] == "TESTWP" and "aiflow-setup-sample" in jira.created[0][4]
     assert jira.transitions == [("TESTWP-99", "Intake")]
     current = status(client)
-    assert current["completed"] is True and current["locked"] is True
+    assert current["completed"] is False and current["locked"] is True
     assert by_id(current, "sample_ticket")["ready"] is True
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-99'")["status"] == "Intake"
     assert client.get("/setup").status_code == 303 and client.get("/setup").headers["location"] == "/dashboard"
-    assert client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"}).status_code == 409
-    assert client.post("/v1/setup/steps/jira", json={"skipped": True}).status_code == 409
 
-    console = (Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui/console.html").read_text()
-    assert "setupDashboardPanel" in console and "Continue setup" in console
+    # Skipped steps stay resumable from the Dashboard after the sample ticket was sent.
+    skipped = client.post("/v1/setup/steps/jira", json={"skipped": True})
+    assert skipped.status_code == 200 and by_id(skipped.json(), "jira")["skipped"] is True
+    resumed = client.post("/v1/setup/steps/jira", json={"skipped": False})
+    assert resumed.status_code == 200 and by_id(resumed.json(), "jira")["skipped"] is False
+
+    # Once every step is ready the Dashboard panel goes away.
+    ctx.jira_auth = SetupJiraAuth(True)
+    ctx.github = FakeGitHub()
+    ctx.db.run("INSERT INTO nodes (name,role,status) VALUES ('done-node','worker','joined')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,status) VALUES ('codex-done','codex','done-node','idle')")
+    assert status(client)["completed"] is True
+
+    ui = Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui"
+    console = (ui / "console.html").read_text()
+    assert "/ui/setup-progress.js" in console and "AIFlowSetup.panel()" in console
+    assert "<script src" not in console  # the console keeps one inline script; the panel script is added at run time
     assert "data-view=\"integrations\"" in console and "data-view=\"machines\"" in console
     assert "data-view=\"projects\"" in console
+    script = client.get("/ui/setup-progress.js")
+    assert script.status_code == 200 and "Skip for now" in script.text and "Resume this step" in script.text
+    assert 'data-block="first-run-setup"' in console
 
 
 def test_sample_ticket_failure_says_it_was_not_confirmed_and_keeps_setup_open(ctx):

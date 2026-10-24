@@ -22,21 +22,24 @@ the wizard presents the machine step first. Every check reports what is ready or
 words. Jira, GitHub, machine, account and project actions remain available in Integrations, Machines and AI, and
 Projects after setup.
 
-Any post-administrator step can be skipped. The wizard records the skip and leaves a setup panel on the Dashboard;
-the owner can resume there later. The sample ticket step creates a Jira issue, moves it to Intake and confirms that
-status. If Jira cannot create or confirm the issue, the screen says what failed and how to retry. A successfully
-confirmed sample ticket completes and locks the wizard. The ticket's later pipeline progress is followed on the
-normal ticket and Dashboard screens; setup does not wait for Done.
+The setup screen (`/setup`, or `/login` before any user exists) only takes the public address and creates the
+Administrator. It is locked from that moment: `/setup` redirects to the Dashboard. Every later step is shown in the
+"Finish setting up AI Flow" panel on the Dashboard (`ui/setup-progress.js`), with its check, its missing action, a link
+to Integrations, Machines and AI, or Projects, and a Skip or Resume button. The sample ticket step creates a Jira
+issue, moves it to Intake and confirms that status. If Jira cannot create or confirm the issue, the panel says what
+failed and how to retry. Sending the sample does not close setup while other steps are skipped or unfinished: the panel
+stays, and those steps stay resumable, until every step is ready. The ticket's later pipeline progress is followed on
+the normal ticket and Dashboard screens; setup does not wait for Done.
 
 ## Bootstrap and access
 
 - `GET /login` serves the wizard while there is no console user, then serves the regular sign-in form.
-- `GET /setup` resumes setup until a sample ticket is confirmed, then redirects to Dashboard.
+- `GET /setup` serves the bootstrap screen only while there is no Administrator, then redirects to the Dashboard.
 - `GET /v1/setup/status` checks each step and returns its plain-language missing action.
 - `POST /v1/setup/bootstrap` accepts the public address, Administrator email and password once. A short-lived
   same-site setup nonce protects this first-use request.
 - `POST /v1/setup/steps/{step}` records a skip or resume for an optional step.
-- `POST /v1/setup/sample-ticket` creates the sample and only completes setup after Jira confirms Intake.
+- `POST /v1/setup/sample-ticket` creates the sample and confirms Intake in Jira; `completed` is true only when all steps are ready.
 
 An optional legacy installer `--admin-email` can still seed an Administrator for controlled CI or migration
 workflows. A fresh install needs only `aiflow4-control-install --version vX.Y.Z --domain D`, then browser setup.

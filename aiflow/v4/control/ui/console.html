@@ -689,7 +689,7 @@ var S = {
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
-  projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
+  projectAdmin: { projects: null, invalidProjects: [], catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null, envEditor: null, envMissing: [], envScan: null, envScanBusy: false,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', services: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
@@ -1118,7 +1118,7 @@ function projectResponseError(response) {
 }
 function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
-    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
+    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.invalidProjects = d.invalid_projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
   loadEnvironmentOverview();
 }
@@ -4412,14 +4412,18 @@ function toolWaitsPanel(d) {
 
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
-  var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
+  var state = S.projectAdmin, rows = state.projects || [], invalid = state.invalidProjects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
   h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
   if (consoleCan('projects.manage')) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
   h += '</div>';
   if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (invalid.length) {
+    h += '<div class="stakeholder-error" role="alert"><strong>Project files could not be loaded.</strong> These projects are unavailable to machines until their files are corrected in aiflow-control.';
+    h += '<ul>' + invalid.map(function (item) { return '<li><span class="mono">' + esc(item.file) + '</span>: ' + esc(item.reason) + '</li>'; }).join('') + '</ul></div>';
+  }
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
-  else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
-  else {
+  else if (!rows.length && !invalid.length) h += '<div class="muted">No projects are configured.</div>';
+  else if (rows.length) {
     h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';

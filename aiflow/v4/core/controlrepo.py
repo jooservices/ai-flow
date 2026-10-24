@@ -107,8 +107,13 @@ class Project:
         if unknown_legacy:
             raise ValueError("unknown legacy database/test service names: " + ", ".join(unknown_legacy) +
                              ". Use postgres or redis.")
-        self.services = normalize_services([*([self.services] if isinstance(self.services, str) else self.services or []),
-                                            *legacy])
+        declared = [self.services] if isinstance(self.services, str) else list(self.services or [])
+        unknown_services = [str(service).strip() for service in declared
+                            if str(service).strip() and not normalize_services([service])]
+        if unknown_services:
+            raise ValueError("unknown test service names: " + ", ".join(dict.fromkeys(unknown_services)) +
+                             ". Use postgres or redis.")
+        self.services = normalize_services([*declared, *legacy])
         self.databases = []
 
     @property

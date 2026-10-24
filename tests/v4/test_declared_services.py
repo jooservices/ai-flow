@@ -47,6 +47,20 @@ def test_project_file_rejects_unknown_legacy_database_names(control_repo):
         Project(key="TESTWP", repo="o/x", databases=["postgres", "postgress"])
 
 
+def test_project_file_rejects_unknown_service_names_during_load(control_repo):
+    write_project(control_repo, "services: [postgress]\n")
+    (control_repo / "projects" / "GOOD.yaml").write_text("key: GOOD\nrepo: o/good\nservices: [redis]\n",
+                                                         encoding="utf-8")
+
+    repo = ControlRepo.load(control_repo)
+
+    assert repo.projects["GOOD"].required_services == ["redis"]
+    assert "TESTWP" not in repo.projects
+    assert repo.invalid_projects["TESTWP"] == "unknown test service names: postgress. Use postgres or redis."
+    with pytest.raises(ValueError, match="unknown test service names: postgress"):
+        Project(key="TESTWP", repo="o/x", services=["postgress"])
+
+
 def test_bad_project_file_does_not_stop_other_projects_loading(control_repo):
     write_project(control_repo, "databases: [postgres, postgress]\n")
     (control_repo / "projects" / "GOOD.yaml").write_text("key: GOOD\nrepo: o/good\ndatabases: [redis]\n",
@@ -100,6 +114,21 @@ def test_project_creation_rejects_unknown_test_service_names(client, ctx, contro
     assert "unknown test services: postgress" in rejected.json()["detail"]
     assert not ctx.github.commits
     assert "TYPO" not in ctx.repo().projects
+
+
+def test_projects_api_surfaces_invalid_project_files_with_the_reason(client, ctx, control_repo):
+    write_project(control_repo, "services: [postgress]\n")
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+
+    response = client.get("/v1/projects")
+
+    assert response.status_code == 200
+    assert response.json()["projects"] == []
+    assert response.json()["invalid_projects"] == [{
+        "file": "TESTWP.yaml",
+        "reason": "unknown test service names: postgress. Use postgres or redis.",
+    }]
 
 
 def test_park_on_an_undeclared_service_is_declared_by_the_flow_doctor(client, ctx, control_repo):

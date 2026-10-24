@@ -2972,7 +2972,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                     for project in sorted(repo.projects.values(), key=lambda item: item.key)]
         if user and user.project_keys is not None:
             projects = [project for project in projects if project["key"] in user.project_keys]
-        return {"projects": projects}
+        invalid_projects = [{"file": f"{name}.yaml", "reason": reason}
+                            for name, reason in sorted(repo.invalid_projects.items())
+                            if not user or user.project_keys is None or name in user.project_keys]
+        return {"projects": projects, "invalid_projects": invalid_projects}
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:

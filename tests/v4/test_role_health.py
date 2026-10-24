@@ -112,8 +112,8 @@ def ready_enabled_count(ctx, role):
         "tool_missing_evidence": "explicit_marker"}}, "tool_missing", 1.0),
     ({"step": "dev", "outcome": "tool_missing", "details": {
         "missing_tools": ["php"], "tool_missing_evidence": "command_not_found"}}, "excluded", None),
-    ({"step": "dev", "outcome": "timeout"}, "stopped", 1.0),
-    ({"step": "dev", "outcome": "lost"}, "stopped", 1.0),
+    ({"step": "dev", "outcome": "timeout"}, "stopped", 0.25),
+    ({"step": "dev", "outcome": "lost"}, "stopped", 0.25),
     ({"step": "intake", "outcome": "refined"}, "finished", 0.0),
     ({"step": "triage", "outcome": "answered"}, "finished", 0.0),
     ({"step": "verify", "outcome": "rework"}, "finished", 0.0),
@@ -584,3 +584,22 @@ def test_only_an_owner_can_edit_thresholds(client, ctx):
     sign_in(client, ctx, "lead", "lead@example.test")
     assert client.put("/v1/role-health/settings", json=body).status_code == 403
     assert client.get("/v1/role-health").json()["settings"]["window_runs"] == 10
+
+
+def test_runs_stopped_by_the_time_limit_alone_never_switch_a_role_off():
+    history = [({"started_at": datetime(2026, 10, 25, tzinfo=timezone.utc)}, role_health.classify(
+        {"step": "dev", "outcome": "timeout", "error_kind": "", "summary": "timeout: the suite is at 40 percent"}))
+        for _ in range(10)]
+    score, used = role_health.failure_score(history, window=10)
+
+    assert used == 10 and score == 0.25 and score < role_health.DEFAULT_FAILURE_PERCENT / 100
+
+
+def test_two_failures_and_seven_timeouts_stay_under_the_threshold():
+    runs = [{"step": "dev", "outcome": "failed", "error_kind": "", "summary": "worker error"}] * 2
+    runs += [{"step": "dev", "outcome": "timeout", "error_kind": "", "summary": "timeout"}] * 7
+    runs += [{"step": "dev", "outcome": "merged", "error_kind": "", "summary": "merged"}]
+    history = [({"started_at": datetime(2026, 10, 25, tzinfo=timezone.utc)}, role_health.classify(r)) for r in runs]
+    score, _ = role_health.failure_score(history, window=10)
+
+    assert score < role_health.DEFAULT_FAILURE_PERCENT / 100

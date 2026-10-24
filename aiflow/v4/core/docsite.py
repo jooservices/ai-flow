@@ -41,6 +41,10 @@ SCREEN_PAGE = "screens/{view}.md"
 # screen documentation gate for the complete set they explicitly cover; unrelated screens still need their page.
 LAYOUT_SCREEN_VIEWS = frozenset({"cc", "review", "machines", "knowledge", "delivery", "users"})
 CROSS_SCREEN_DOCS = {"docs/v4/console-layouts.md": LAYOUT_SCREEN_VIEWS}
+# Ticket-specific v4 topics can be the canonical screen guide when the repository instructions require the
+# feature documentation to live under docs/v4. Keep the generated Help URL available without duplicating it in
+# docs/guide/screens.
+SCREEN_TOPIC_DOCS = {"settings": "docs/v4/runtime-settings.md"}
 
 # JavaScript renderers and view-routing helpers run outside the static <section> ranges. Keep this map beside the
 # check so a function edit requires the page for the screen it renders or routes. `None` means shared by all views,
@@ -105,6 +109,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
+    "renderRuntimeSettings": ("settings",),
+    "loadRuntimeSettings": ("settings",),
+    "pollRuntimeSettingChange": ("settings",),
+    "saveRuntimeSetting": ("settings",),
     "addProjectRepository": ("projects",),
     "saveProjectRepositories": ("projects",),
     "githubAppTarget": ("integrations",),
@@ -176,6 +184,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewByRole": ("review",),
     "submitReview": ("review",),
     "projectRequestBody": ("projects",),
+    "servicesFromText": ("projects",),
+    "saveProjectServices": ("projects",),
+    "projectServicesCell": ("projects",),
     "loadProjectList": ("projects",),
     "loadEnvironmentOverview": ("projects",),
     "loadProjectEnvironment": ("projects",),
@@ -189,11 +200,14 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
+    (re.compile(r"service_undeclared: 'Undeclared services'"), "cc"),
+    (re.compile(r"service_undeclared: 'Undeclared services'"), "machines"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
@@ -242,7 +256,7 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"']dashboard-tab[\"']"), ("cc",)),
     (re.compile(r"\bact\s*===\s*[\"']dashboard-card[\"']"), ("cc", "work", "review")),
     (re.compile(r"\bact\s*===\s*[\"']flow-step[\"']"), ("cc", "work")),
-    (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository)|environment-scan)[\w-]*[\"']"),
+    (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository|services)|environment-scan)[\w-]*[\"']"),
      ("projects",)),
     (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
 )
@@ -602,6 +616,11 @@ SECTIONS = [("", "Start"), ("user", "User guides"), ("screens", "Console screens
 def collect_pages(guide: Path = GUIDE, with_api: bool = True, version: str = "") -> dict[str, str]:
     """Relative page path (`screens/cc.md`) -> Markdown source."""
     pages = {p.relative_to(guide).as_posix(): p.read_text(encoding="utf-8") for p in sorted(guide.rglob("*.md"))}
+    if guide.resolve() == GUIDE.resolve():
+        for view, source_path in SCREEN_TOPIC_DOCS.items():
+            source = _read_doc(source_path)
+            if source:
+                pages[f"screens/{view}.md"] = source
     if with_api:
         pages[API_PAGE] = api_reference_markdown(version)
     return pages

@@ -5,6 +5,9 @@ ticket asks for, completely, in this worktree. The ticket is the source of truth
 technical notes, acceptance criteria (AC1, AC2...), test cases and definition of done.
 
 Read AGENTS.md and docs/SPEC.md first when they exist; they define the layout, rules and definition of done.
+Before changing code on every developer run, read `docs/v4/architecture.md` and use it to place the feature and
+check layer dependencies, registration points, function size and complexity. Include the architecture document in
+the run notes, together with any architecture checks that found a mismatch.
 {rework}
 Rules:
 - Do not run git commit, git push or anything that changes branches or history. AI Flow commits and pushes your

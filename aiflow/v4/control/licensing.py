@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,11 +19,14 @@ import jwt
 
 from .db import J
 
+log = logging.getLogger("aiflow4.licensing")
+
 GRACE_PERIOD = timedelta(days=14)
+LIMIT_INCIDENT_KIND = "licence_limit"
 # Shared by resource admission and limit updates so they observe one another atomically.
 RESOURCE_ADMISSION_LOCK = (1095320132, 233)
 PLAN_DEFAULTS: dict[str, dict[str, int]] = {
-    "free": {"machines": 1, "ai_accounts": 2, "projects": 3, "users": 3},
+    "free": {"machines": 3, "ai_accounts": 6, "projects": 3, "users": 3},
     "team": {"machines": 5, "ai_accounts": 12, "projects": 25, "users": 25},
     "business": {"machines": 50, "ai_accounts": 100, "projects": 250, "users": 250},
 }
@@ -186,6 +190,9 @@ def snapshot(db, public_key: str, now: datetime | None = None, *, connection=Non
                         "SELECT invalid_since FROM licensing_state WHERE id=1").fetchone())["invalid_since"]
             plan = plan if plan in PLAN_DEFAULTS else "free"
 
+    # No issuer key and no stored licence: nothing can ever be licensed, so nothing is restricted (self-hosted,
+    # development, lab). A stored licence whose key went missing is still an invalid licence with its grace.
+    unlicensed = not token and not str(public_key or "").strip()
     deadline = None
     if reason == "invalid":
         deadline = _now(invalid_since) + GRACE_PERIOD
@@ -200,6 +207,8 @@ def snapshot(db, public_key: str, now: datetime | None = None, *, connection=Non
         "plan": plan, "expires_at": _iso(expiry), "grace_until": _iso(deadline),
         "read_only": status == "read_only", "limits": limits_by_plan[plan], "plans": limits_by_plan,
         "source": row.get("license_source") or ("free" if not token else ""),
+        "licence_required": not unlicensed, "limits_enforced": not unlicensed,
+        "over_limit_since": _iso(row.get("over_limit_since")),
     }
 
 
@@ -260,10 +269,14 @@ def require_capacity(ctx, resource: str, count: int | None = None, *, public_key
 
 
 def require_count_capacity(db, resource: str, current: int, *, public_key: str, connection=None) -> dict[str, Any]:
-    """Check a known count, for resources whose creator has only a DB handle (console users)."""
+    """Check a known count, for resources whose creator has only a DB handle (console users).
+
+    Creating a new resource is refused at the limit even inside the over-limit grace period."""
     state = require_writable(db, public_key, connection=connection)
     if resource not in LIMIT_LABELS:
         raise LicenseError("Unknown licence limit.")
+    if not state.get("limits_enforced", True):
+        return state
     limit = state["limits"][resource]
     if current >= limit:
         label = LIMIT_LABELS[resource]
@@ -274,42 +287,110 @@ def require_count_capacity(db, resource: str, current: int, *, public_key: str, 
     return state
 
 
+def over_limit_grace(ctx, state: dict[str, Any], now: datetime | None = None) -> bool:
+    """True while usage above a newly applied or lowered limit is inside the grace period.
+
+    The clock starts the first time usage is found above a limit and is cleared when usage is back within every
+    limit. Machines, accounts and projects already over the limit keep working during it; only creating new
+    ones is refused. The answer is cached on `state`. Limit incidents are closed here once nothing is stopped."""
+    if "over_limit_grace" in state:
+        return state["over_limit_grace"]
+    now = _now(now)
+    if not state.get("limits_enforced", True):
+        state["over_limit_grace"] = False
+        return False
+    usage = resource_counts(ctx)
+    over = sorted(key for key, limit in state["limits"].items() if usage.get(key, 0) > limit)
+    since = state.get("over_limit_since")
+    if over and not since:
+        row = ctx.db.one("UPDATE licensing_state SET over_limit_since=%s, updated_at=now()"
+                         " WHERE id=1 AND over_limit_since IS NULL RETURNING over_limit_since", (now,))
+        since = _iso((row or ctx.db.one("SELECT over_limit_since FROM licensing_state WHERE id=1"))["over_limit_since"])
+    elif not over and since:
+        ctx.db.run("UPDATE licensing_state SET over_limit_since=NULL, updated_at=now() WHERE id=1")
+        since = None
+    deadline = _now(datetime.fromisoformat(since)) + GRACE_PERIOD if over and since else None
+    in_grace = bool(deadline and now < deadline)
+    state.update(over_limit_since=since, over_limit_until=_iso(deadline), over_limit_grace=in_grace)
+    # Work flows again for every resource that is within its limit or still inside the grace period.
+    for key in LIMIT_LABELS:
+        if in_grace or key not in over:
+            _close_limit_incident(ctx, key)
+    return in_grace
+
+
+def _close_limit_incident(ctx, resource: str) -> None:
+    try:
+        from .incidents import close_incident
+        close_incident(ctx, LIMIT_INCIDENT_KIND, resource,
+                       "Work resumed: usage is within the limit, the limit was raised or the grace period applies.")
+    except Exception as exc:  # noqa: BLE001 - closing an alert must never block work
+        log.warning("licence limit incident could not be closed: %s", type(exc).__name__)
+
+
+def _stop_work(ctx, resource: str, message: str, limit: int, usage: int) -> None:
+    """A limit stops new work: open a critical incident naming it, then refuse with the same message."""
+    label = LIMIT_LABELS[resource].lower()
+    try:
+        from .incidents import open_incident
+        open_incident(ctx, LIMIT_INCIDENT_KIND, resource, "critical",
+                      f"Licence limit stops new work: {label}s {usage}/{limit}",
+                      f"{message} The grace period for usage above the limit has ended; new work is refused for "
+                      f"{label}s beyond the first {limit}.")
+    except Exception as exc:  # noqa: BLE001 - the refusal itself must still reach the worker
+        log.warning("licence limit incident could not be opened: %s", type(exc).__name__)
+    raise LicenseError(message)
+
+
 def enforce_account_entitlement(ctx, account_id: str, *, public_key: str,
                                 state: dict[str, Any] | None = None) -> None:
     """Keep excess configured accounts from starting new runs while leaving their running work alone."""
     state = state or require_writable(ctx.db, public_key)
+    if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
+        return
     limit = state["limits"]["ai_accounts"]
     # A configured account can be intentionally absent from the database when startup sync skipped it at
     # capacity. Count the union so that this resource still cannot claim work through the node API.
     account_ids = sorted({str(row["id"]) for row in ctx.db.all(_ACTIVE_ACCOUNTS + " ORDER BY id")}
                          | {str(account.id) for account in ctx.repo().accounts})
     if account_id in account_ids and account_ids.index(account_id) >= limit:
-        raise LicenseError(f"AI accounts limit of {limit} reached ({len(account_ids)}/{limit}). Disable or remove extra AI accounts or raise the limit in the Licence screen.")
+        _stop_work(ctx, "ai_accounts",
+                   f"AI accounts limit of {limit} reached ({len(account_ids)}/{limit}). Disable or remove extra AI accounts or raise the limit in the Licence screen.",
+                   limit, len(account_ids))
 
 
 def enforce_machine_entitlement(ctx, node: str, *, public_key: str,
                                 state: dict[str, Any] | None = None) -> None:
     """Keep machines beyond the current plan from starting new work; active runs remain unaffected."""
     state = state or require_writable(ctx.db, public_key)
+    if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
+        return
     node_names = [str(row["name"]) for row in ctx.db.all("SELECT name FROM nodes WHERE removed_at IS NULL ORDER BY name")]
     limit = state["limits"]["machines"]
     if node in node_names and node_names.index(node) >= limit:
-        raise LicenseError(f"Machines limit of {limit} reached ({len(node_names)}/{limit}). Disable or remove extra machines or raise the limit in the Licence screen.")
+        _stop_work(ctx, "machines",
+                   f"Machines limit of {limit} reached ({len(node_names)}/{limit}). Disable or remove extra machines or raise the limit in the Licence screen.",
+                   limit, len(node_names))
 
 
 def enforce_project_entitlement(ctx, project: str, *, public_key: str,
                                 state: dict[str, Any] | None = None) -> None:
     """Keep projects beyond the current plan from receiving new work."""
     state = state or require_writable(ctx.db, public_key)
+    if not state.get("limits_enforced", True) or over_limit_grace(ctx, state):
+        return
     project_keys = sorted(ctx.repo().projects)
     limit = state["limits"]["projects"]
     if project in project_keys and project_keys.index(project) >= limit:
-        raise LicenseError(f"Projects limit of {limit} reached ({len(project_keys)}/{limit}). Disable or remove extra projects or raise the limit in the Licence screen.")
+        _stop_work(ctx, "projects",
+                   f"Projects limit of {limit} reached ({len(project_keys)}/{limit}). Disable or remove extra projects or raise the limit in the Licence screen.",
+                   limit, len(project_keys))
 
 
 def enforce_work_entitlement(ctx, account_id: str, node: str, *, public_key: str) -> dict[str, Any]:
     """Return the active plan state after checking the machine and account that would start new work."""
     state = require_writable(ctx.db, public_key)
+    over_limit_grace(ctx, state)
     enforce_account_entitlement(ctx, account_id, public_key=public_key, state=state)
     enforce_machine_entitlement(ctx, node, public_key=public_key, state=state)
     return state

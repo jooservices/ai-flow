@@ -124,3 +124,10 @@ master snapshot is available through `GET /v1/master/autonomy`.
 Other worker Jira writes stay fenced to the claimed ticket: `POST /v1/jira/{key}/comment` posts a comment, and
 `POST /v1/jira/{key}/fields` updates its fields or labels. Both require the run ID and fence; an impact run may
 comment but cannot change fields.
+
+## When triage runs, and what an unaccepted tool report does
+
+- Triage is offered (`POST /v1/work/claim` with step `triage`) only for a ticket in Needs owner that has an open escalation. A ticket in Needs owner without one has nothing to decide; it is not offered and cannot refuse itself again and again.
+- A reviewer question sent with `POST /v1/reviews/{key}/ask-ai` raises that escalation (class ambiguity in the repository), so triage answers it.
+- `POST /v1/escalations/raise` with a report of something that is not a catalogue tool or service does not fail the run: the answer tells the AI that this is no reason to stop and to continue with the work, naming in its result which check could not run and why.
+

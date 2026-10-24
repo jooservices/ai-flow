@@ -43,12 +43,12 @@ from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
 from ..core import backups as control_backups, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from ..core.services import service_gaps
+from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
+               role_health, rollout, runtime_settings, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -563,6 +563,28 @@ def github_control_gateway(ctx: Ctx) -> GitHubApp:
     return gateway
 
 
+def declare_project_services(ctx: Ctx, key: str, services: list[str], message: str) -> tuple[list[str], str]:
+    """Write the project's test services (`services`, the only setting; `databases` is dropped) to its project file in
+    aiflow-control and reload it. Returns the saved services and the commit. Used by the Projects screen and by the
+    flow doctor (docs/v4/test-services.md)."""
+    names = normalize_services(services)
+    project_file = ctx.repo().root / "projects" / f"{key}.yaml"
+    config = yaml.safe_load(project_file.read_text(encoding="utf-8")) or {}
+    config.pop("databases", None)
+    if names:
+        config["services"] = names
+    else:
+        config.pop("services", None)
+    control_name = Path(ctx.settings.control_repo).name
+    github = github_control_gateway(ctx)
+    branch = github.default_branch(control_name)
+    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml",
+                                yaml.safe_dump(config, sort_keys=False, allow_unicode=True), message)
+    if ctx.refresh_repo:
+        ctx.refresh_repo()
+    return names, commit or ""
+
+
 def github_context_for_repository(ctx: Ctx, repo: str) -> tuple[GitHubApp, str]:
     gateway = github_gateway(ctx, repo)
     if gateway is None:
@@ -731,6 +753,8 @@ class HeartbeatBody(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
+    runtime_settings: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    runtime_settings_public_key: str = Field(default="", max_length=2000)
     environment_items: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -773,7 +797,12 @@ class ProjectPreflightBody(BaseModel):
     containers: bool = False
 
 
+class ProjectServicesBody(BaseModel):
+    services: list[str] = Field(default_factory=list, max_length=10)
+
+
 class ProjectCreateBody(ProjectPreflightBody):
+    services: list[str] = Field(default_factory=list, max_length=10)
     checks: list[str] = Field(default_factory=list, max_length=50)
     priority: int = Field(default=5, ge=0, le=100)
     parallel_limit: int = Field(default=2, ge=1, le=100)
@@ -1142,6 +1171,11 @@ class LogReadBody(BaseModel):
 class NodeOperationResultBody(BaseModel):
     status: Literal["completed", "failed"]
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeOperationCheckpointBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    rollback_envelope: dict[str, str]
 
 
 class JoinCommandBody(BaseModel):
@@ -2313,7 +2347,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     def licensing_status(request: Request) -> dict:
         console_user(request, "console.read")
         state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
-        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only")}
+        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only",
+                                            "licence_required")}
 
     @app.post("/v1/licensing/activate")
     def activate_license(body: LicenseKeyBody, request: Request) -> dict:
@@ -2976,11 +3011,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack,
+                              "services": project.required_services,
                               "checks": probes.get(project.key, {})}
                     for project in sorted(repo.projects.values(), key=lambda item: item.key)]
         if user and user.project_keys is not None:
             projects = [project for project in projects if project["key"] in user.project_keys]
-        return {"projects": projects}
+        invalid_projects = [{"file": f"{name}.yaml", "reason": reason}
+                            for name, reason in sorted(repo.invalid_projects.items())
+                            if not user or user.project_keys is None or name in user.project_keys]
+        return {"projects": projects, "invalid_projects": invalid_projects}
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:
@@ -3271,6 +3310,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
+        unknown = [service for service in body.services if service.strip() and not normalize_services(service)]
+        if unknown:
+            raise HTTPException(422, "unknown test services: " + ", ".join(unknown) + ". Use postgres or redis.")
         with ctx.db.pool.connection() as connection:
             with connection.transaction():
                 # Keep the shared admission lock through preflight, the external commit, and repo refresh. A
@@ -3308,7 +3350,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
                 checks = [check.strip() for check in body.checks if check.strip()]
                 config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                          "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
+                          "services": normalize_services(body.services), "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
                           "limits": {"parallel": body.parallel_limit,
                                      "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
                           "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
@@ -3331,6 +3373,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
         return {"saved": True, "project": key, "commit": commit, "preflight": result}
+
+    @app.post("/v1/projects/{key}/services")
+    def save_project_services(key: str, body: ProjectServicesBody, request: Request) -> dict:
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_services", node=key)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
+            project_audit("project_services", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        unknown = [s for s in body.services if s.strip() and not normalize_services(s)]
+        if unknown:
+            raise HTTPException(422, "unknown test services: " + ", ".join(unknown) + ". Use postgres or redis.")
+        try:
+            names, commit = declare_project_services(ctx, key, body.services, f"projects: test services of {key} via AI Flow console")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("project services update failed (%s)", type(exc).__name__)
+            project_audit("project_services", key, user.subject, False, "control repo commit failed", {"services": body.services})
+            raise HTTPException(502, "could not update the project in aiflow-control") from exc
+        project_audit("project_services", key, user.subject, True, commit or "bot commit created", {"services": names})
+        ctx.events.emit("project.services_saved", project=key, account=user.subject, outcome="saved",
+                        reason=", ".join(names) or "none")
+        return {"saved": True, "project": key, "services": names, "commit": commit}
 
     @app.post("/v1/projects/{key}/pause")
     def pause_project(key: str, body: ProjectPauseBody, request: Request) -> dict:
@@ -3515,13 +3579,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status,accepting_work FROM nodes WHERE name=%s", (node,))
+        inventory = runtime_settings.sanitize_inventory(body.runtime_settings)
         ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
                    " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
+                   " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
+                   " release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
-                    body.release_protocol, body.slots_used, node))
+                    J(inventory), body.runtime_settings_public_key, body.release_protocol, body.slots_used, node))
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         environment_reports.confirm_node_environment(ctx, node, body.environment_items)
@@ -3607,6 +3673,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
+        runtime_settings_bootstrap = runtime_settings.bootstrap_settings_for_node(
+            ctx, node, node_projects, inventory, body.runtime_settings_public_key, body.workers)
         return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
                             "sign_ins": [{"account": row["id"], "provider": row["provider"],
                                           "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
@@ -3619,6 +3687,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                     for key in node_projects if key in repo.projects},
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
+                            "runtime_settings_bootstrap": runtime_settings_bootstrap,
                             "tool_repairs": tool_repairs,
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
@@ -4195,6 +4264,39 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"operation": None}
         return {"operation": {"id": str(row["id"]), "action": row["action"], "payload": row["payload"]}}
 
+    @app.post("/v1/nodes/{name}/operations/{operation_id}/checkpoint")
+    def checkpoint_node_operation(name: str, operation_id: str, body: NodeOperationCheckpointBody,
+                                  node: str = Depends(node_auth)) -> dict:
+        """Persist the node's encrypted pre-change snapshot before a runtime setting can be written."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        try:
+            parsed_id = str(uuid.UUID(operation_id))
+        except ValueError as exc:
+            raise HTTPException(404, "unknown node operation") from exc
+        envelope = body.rollback_envelope
+        if (set(envelope) != {"key", "nonce", "ciphertext"}
+                or any(not value or len(value) > 2_000_000 for value in envelope.values())):
+            raise HTTPException(422, "runtime setting snapshot is invalid")
+        with ctx.db.pool.connection() as connection:
+            operation = connection.execute(
+                "SELECT action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
+                (parsed_id, node)).fetchone()
+            if (not operation or operation["action"] not in {"runtime-setting-control", "runtime-setting-project"}
+                    or (operation["payload"] or {}).get("phase", "apply") != "apply"):
+                raise HTTPException(404, "unknown or completed runtime setting operation")
+            payload = operation["payload"] or {}
+            saved = payload.get("rollback_envelope")
+            if saved is None:
+                updated = connection.execute(
+                    "UPDATE node_operations SET payload=payload || %s WHERE id=%s AND node=%s AND status='running'"
+                    " RETURNING payload->'rollback_envelope' AS rollback_envelope",
+                    (J({"rollback_envelope": envelope}), parsed_id, node)).fetchone()
+                saved = updated["rollback_envelope"] if updated else None
+        if not isinstance(saved, dict):
+            raise HTTPException(409, "runtime setting snapshot could not be saved")
+        return {"rollback_envelope": saved}
+
     @app.post("/v1/nodes/{name}/operations/{operation_id}/result")
     def finish_node_operation(name: str, operation_id: str, body: NodeOperationResultBody,
                               node: str = Depends(node_auth)) -> dict:
@@ -4205,16 +4307,39 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(404, "unknown node operation") from exc
         status = body.status
-        current = ctx.db.one("SELECT action FROM node_operations WHERE id=%s AND node=%s AND status='running'",
-                             (parsed_id, node))
-        if not current:
-            raise HTTPException(404, "unknown or completed node operation")
-        result = (log_viewer.safe_node_result(body.result, status) if current["action"] == "read_logs"
-                  else body.result)
-        updated = ctx.db.one(
-            "UPDATE node_operations SET status=%s, result=%s, completed_at=now()"
-            " WHERE id=%s AND node=%s AND status='running' RETURNING id, action",
-            (status, J(result), parsed_id, node))
+        with ctx.db.pool.connection() as connection:
+            candidate = connection.execute(
+                "SELECT action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running'",
+                (parsed_id, node)).fetchone()
+            if not candidate:
+                raise HTTPException(404, "unknown or completed node operation")
+            candidate_payload = candidate["payload"] or {}
+            if candidate["action"].startswith("runtime-setting") and candidate_payload.get("change_id"):
+                # Serialize every node result for a change before locking operation rows. This prevents two
+                # completing nodes from each holding one row and deadlocking while the fleet coordinator locks
+                # the whole change set.
+                connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                                   (str(candidate_payload["change_id"]),))
+            operation = connection.execute(
+                "SELECT id,action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
+                (parsed_id, node)).fetchone()
+            if not operation:
+                raise HTTPException(404, "unknown or completed node operation")
+            payload = operation["payload"] or {}
+            result = (log_viewer.safe_node_result(body.result, status) if operation["action"] == "read_logs"
+                      else body.result)
+            # Runtime values are delivered only to the node agent and removed from the durable queue record
+            # as soon as it has applied or rolled them back. A successful project operation remains drained until
+            # every serving node has applied the change, or the coordinator has rolled successful peers back.
+            connection.execute(
+                "UPDATE node_operations SET status=%s,result=%s,completed_at=now(),"
+                " payload=CASE WHEN action LIKE 'runtime-setting%%'"
+                " THEN payload - 'value_envelope' - 'rollback_envelope' ELSE payload END"
+                " WHERE id=%s AND node=%s AND status='running'",
+                (status, J(result), parsed_id, node))
+            if operation["action"].startswith("runtime-setting") and payload.get("change_id"):
+                runtime_settings.reconcile_node_change(connection, str(payload["change_id"]))
+        updated = operation
         if not updated:
             raise HTTPException(404, "unknown or completed node operation")
         ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
@@ -4436,8 +4561,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 out.append({**t, "step": "post_merge", "probation": probation("release")})
         if "master" in roles:
             triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
+            # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
-                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))",
+                                " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
+                                " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
+                                " AND e.resolution = 'open')",
                                 (projects,)):
                 if ticket_needs_missing_container_runtime(t, "triage"):
                     continue
@@ -6513,6 +6641,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             status = ticket["status"]
             if status != "Needs owner":
                 status = reviewer_transition(key, run_id, fence, "Needs owner", "reviewer asked the AI")
+            escalations.raise_reviewer_question(ctx.db, key, ticket["project"], run_id, question)
             record_reviewer_action(ticket, run_id, fence, "ask-ai", question)
             finish_reviewer_run(key, run_id, fence, "question", question)
             return {"status": status, "thread": review_thread(key)}
@@ -7472,6 +7601,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"queued": True}
 
     jira_connect.mount(app, ctx)
+    runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
     return app

@@ -170,6 +170,14 @@ def decrypt_file(source: Path, destination: Path, key: bytes) -> None:
 
 def _add_tree(tar: tarfile.TarFile, source: Path, prefix: str, excluded: set[Path] | None = None) -> None:
     excluded = excluded or set()
+    if source.is_file() and not source.is_symlink() and source not in excluded:
+        info = tar.gettarinfo(str(source), arcname=(PurePosixPath(prefix) / source.name).as_posix())
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        info.mode &= 0o700
+        with source.open("rb") as stream:
+            tar.addfile(info, stream)
+        return
     if not source.is_dir():
         return
     for item in sorted(source.rglob("*")):
@@ -195,7 +203,8 @@ def _add_tree(tar: tarfile.TarFile, source: Path, prefix: str, excluded: set[Pat
 
 def _secret_roots(settings) -> list[tuple[str, Path]]:
     roots = [("control", Path(settings.control_secrets_dir)), ("console", Path(settings.console_secrets_dir)),
-             ("jira", Path(settings.jira_secret_dir)), ("github", Path(settings.github_app_dir))]
+             ("jira", Path(settings.jira_secret_dir)), ("github", Path(settings.github_app_dir)),
+             ("runtime", Path(settings.runtime_secret_file)), ("projects", Path(settings.project_env_dir))]
     return roots
 
 
@@ -693,7 +702,9 @@ def restore_archive(source: str, key: bytes, database_url: str, settings, *, s3_
             try:
                 roots = restore_roots or {name: Path(path) for name, path in {
                     "control": settings.control_secrets_dir, "console": settings.console_secrets_dir,
-                    "jira": settings.jira_secret_dir, "github": settings.github_app_dir}.items()}
+                    "jira": settings.jira_secret_dir, "github": settings.github_app_dir,
+                    "runtime": str(Path(settings.runtime_secret_file).parent),
+                    "projects": settings.project_env_dir}.items()}
                 if outcomes.get("database", {}).get("status") == "restored" and not scratch_mode:
                     _restore_database_password(database_url, files["stored_secrets"])
                 _extract_archive(files["stored_secrets"], roots)

@@ -21,7 +21,8 @@ def test_dashboard_json_defines_the_expected_panels():
     files = sorted(DASHBOARDS.glob("*.json"))
     assert files
     dashboards = [json.loads(path.read_text(encoding="utf-8")) for path in files]
-    panels = [panel for dashboard in dashboards for tab in dashboard["tabs"] for panel in tab["panels"]]
+    dashboard = next(item for item in dashboards if item["title"] == "AI Flow events and runs")
+    panels = [panel for tab in dashboard["tabs"] for panel in tab["panels"]]
     by_title = {panel["title"]: panel for panel in panels}
 
     assert set(by_title) == set(EXPECTED_PANELS)
@@ -78,10 +79,10 @@ def test_provision_creates_then_updates_dashboards_idempotently():
     created = provision_module.provision("http://openobserve/o2", "encoded-auth", client)
     updated = provision_module.provision("http://openobserve/o2", "encoded-auth", client)
 
-    assert created == ["Created: AI Flow events and runs"]
-    assert updated == ["Updated: AI Flow events and runs"]
-    assert len(client.created) == 1
-    assert len(client.updated) == 1
+    assert created == ["Created: AI Flow events and runs", "Created: AI Flow production health and SLO"]
+    assert updated == ["Updated: AI Flow events and runs", "Updated: AI Flow production health and SLO"]
+    assert len(client.created) == 2
+    assert len(client.updated) == 2
     url, params, payload = client.created[0]
     assert url == "http://openobserve/o2/api/default/dashboards"
     assert params == {"folder": "default"}
@@ -107,4 +108,4 @@ def test_main_reads_openobserve_url_and_basic_auth_from_environment(monkeypatch)
     provision_module.main()
 
     assert client_args["headers"] == {"Authorization": "Basic encoded-auth"}
-    assert client.created[0][0] == "http://openobserve/o2/api/default/dashboards"
+    assert [created[0] for created in client.created] == ["http://openobserve/o2/api/default/dashboards"] * 2

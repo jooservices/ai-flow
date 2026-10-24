@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, runner, usage
+from . import agents, deploy, events, github, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -889,7 +889,7 @@ class Supervisor:
         """The owner moved a blocked ticket back to To Do himself: forget why it was blocked (the answer is in the comments)."""
         if self.redis.get(f"blocked:{key}") is None:
             return
-        self.redis.delete(f"blocked:{key}")
+        rework_rounds.forget_block(self.redis, key)
         events.emit("ticket.unblocked", ticket=key)
         self.clear_blocked_reason(key)
 
@@ -1040,7 +1040,8 @@ class Supervisor:
         parsed = sections(description)
         wanted = " ".join([str(view.get("summary", "")), (parsed.get("ac") or parsed.get("acceptance criteria") or "")[:600], parsed.get("scopes", "")[:300]])
         items = self.memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
-        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items))
+        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items),
+                    case_ids=",".join(str(i["id"])[:8] for i in items if i.get("kind") == "case"))
         if items:
             self.redis.set(f"recalled:{key}", json.dumps([i["id"] for i in items]), 30 * DAY)
         return memory_cases.prompt_block(items)
@@ -1444,11 +1445,11 @@ class Supervisor:
             seen.update(i["id"] for i in items if i["kind"] != "thread")
             self.redis.set(f"seen:{key}", json.dumps(sorted(seen)), 30 * DAY)
         text = "\n".join(lines)
-        self.redis.set(f"rework:{key}", text[:12000], 30 * DAY)
+        over_limit = rework_rounds.record_round(self.redis, key, cycles, text, (headline, details, items), self.cfg.loop_limit_for(key), 30 * DAY)
         self.redis.delete(f"qa:{key}")
         self.jira.comment(key, f"AI Flow: {text[:6000]}")
-        if cycles > self.cfg.max_cycles:
-            self.block(key, f"{cycles - 1} rework rounds without success; needs the owner.", kind="Rework")
+        if over_limit:
+            self.block(key, over_limit, kind="Rework")
             return
         self.jira.add_label(key, "rework")
         self.jira.transition(key, "To Do")
@@ -1847,7 +1848,7 @@ class Supervisor:
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
-        for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
+        for name in ("dev", "reviewer", "home", "cycles", "rework-history", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
                      "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel", "recalled"):
             self.redis.delete(f"{name}:{key}")
 

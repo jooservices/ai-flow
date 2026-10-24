@@ -2,7 +2,8 @@
 
 Open **Projects** in the AI Flow console to see configured project keys, repositories, active or paused state,
 priority and mirrored ticket count. An authenticated owner can add, pause, resume or remove a project from this
-screen.
+screen. Project files that could not be loaded appear in an alert with the filename and reason; correct the named
+file in aiflow-control so the project can be assigned to machines again.
 
 ## Add a project
 

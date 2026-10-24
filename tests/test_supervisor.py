@@ -932,6 +932,75 @@ class MergedPullRequestGateTests(unittest.TestCase):
 
         self.assertEqual(repo.cleaned, ("JAIF-9", True))
 
+    def test_done_ticket_sweep_uses_the_known_pr_when_branch_lookup_misses(self):
+        sup = make()
+
+        class SweepRepo:
+            name = "ai-flow"
+
+            def exists(self):
+                return True
+
+            def worktrees(self):
+                return [(Path("/worktrees/JAIF-9"), "JAIF-9-fix")]
+
+            def github_slug(self):
+                return "o/r"
+
+            def cleanup(self, key, merged_pr=False):
+                self.cleaned = (key, merged_pr)
+
+        repo = SweepRepo()
+        sup.jira.search = lambda *args, **kwargs: [{"key": "JAIF-9", "status": "Done"}]
+        sup.jira.comments = lambda key, last=6: [{
+            "body": "AI Flow: pull request opened by the supervisor: https://github.com/o/r/pull/71."
+        }]
+        pr = {"number": 71, "state": "MERGED", "headRefName": "JAIF-9-fix"}
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo), \
+                mock.patch.object(github.GitHub, "find", return_value=None) as find, \
+                mock.patch.object(github.GitHub, "view", return_value=pr) as view:
+            sup.sweep_worktrees()
+
+        find.assert_called_once_with("JAIF-9-fix")
+        view.assert_called_once_with(71)
+        self.assertEqual(repo.cleaned, ("JAIF-9", True))
+
+    def test_done_sweep_reports_an_ancestry_refusal_once_and_waits_for_merge(self):
+        sup = make()
+
+        class SweepRepo:
+            name = "ai-flow"
+
+            def __init__(self):
+                self.cleanup_calls = []
+
+            def exists(self):
+                return True
+
+            def worktrees(self):
+                return [(Path("/worktrees/JAIF-9"), "JAIF-9-fix")]
+
+            def github_slug(self):
+                return "o/r"
+
+            def cleanup(self, key, merged_pr=False):
+                self.cleanup_calls.append((key, merged_pr))
+                raise GitError("ERROR: Branch JAIF-9-fix is not fully merged into develop; refusing cleanup")
+
+        repo = SweepRepo()
+        sup.jira.search = lambda *args, **kwargs: [{"key": "JAIF-9", "status": "Done"}]
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo), \
+                mock.patch.object(github.GitHub, "find", return_value=None), \
+                mock.patch("aiflow.supervisor.log") as log:
+            sup.sweep_worktrees()
+            sup.redis.delete("sweep:test")  # the next call represents the next supervisor sweep
+            sup.sweep_worktrees()
+
+        self.assertEqual(repo.cleanup_calls, [("JAIF-9", False)])
+        messages = [call.args[0] for call in log.call_args_list]
+        self.assertEqual(len([message for message in messages if "keeping the worktree and branch" in message]), 1)
+        self.assertIn("not fully merged into develop; refusing cleanup", messages[0])
+
 
 class PullRequestBodyTests(unittest.TestCase):
     values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",

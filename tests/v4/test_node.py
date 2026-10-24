@@ -103,6 +103,95 @@ def test_node_tool_versions_probe_each_playwright_browser_and_name_missing_engin
                           require_pins=True) == ["firefox"]
 
 
+def test_collect_heartbeat_gathers_metrics_tools_workers_and_settings(monkeypatch):
+    import time
+
+    workers = [{"account": "codex-01", "state": "working", "alive": True,
+                "probe": {"credential_expires_at": "2026-10-25T10:00:00+00:00"}},
+               {"account": "claude-01", "state": "idle", "alive": True}]
+    node_metrics = {"cpu_pct": 23.5, "mem_used": 200, "disk_free": 300, "load1": 0.5}
+    state = agent._AgentLoopState(tools={"codex": "Codex 1.0"}, tools_at=time.time(),
+                                 project_environment={"DEMO": ["API_KEY", "EMPTY"]},
+                                 service_state={"redis": {"healthy": True}})
+
+    class Relay:
+        def health(self):
+            return {"enabled": True, "healthy": True}
+
+    monkeypatch.setattr(agent, "metrics", lambda previous: (node_metrics, (100, 20)))
+    monkeypatch.setattr(agent, "worker_states", lambda: workers)
+    monkeypatch.setattr(agent, "read_env_file", lambda _path: {"API_KEY": "set", "EMPTY": ""})
+    monkeypatch.setattr(agent, "runtime_settings_inventory", lambda: {"DEMO": [{"name": "API_KEY"}]})
+    monkeypatch.setattr(agent, "installed_release", lambda: "v4.2.0")
+    monkeypatch.setattr(agent.socket, "gethostname", lambda: "node-test")
+    monkeypatch.setattr(agent, "tool_versions", lambda: (_ for _ in ()).throw(AssertionError("refresh too early")))
+
+    heartbeat = agent.collect_heartbeat(state, "node-test", 4, Relay(), "public-key")
+
+    assert heartbeat == {
+        "slots_total": 4, "slots_used": 1, "release_version": "v4.2.0", "release_protocol": 1,
+        "tools": {"codex": "Codex 1.0"}, "services": {"redis": {"healthy": True}},
+        "metrics": {**node_metrics, "hostname": "node-test",
+                    "policy_relay": {"enabled": True, "healthy": True}},
+        "workers": workers,
+        "credential_expiries": {"codex-01": "2026-10-25T10:00:00+00:00"},
+        "runtime_settings": {"DEMO": [{"name": "API_KEY"}]},
+        "runtime_settings_public_key": "public-key", "environment_items": {"DEMO": ["API_KEY"]},
+    }
+    assert state.previous_metrics == (100, 20)
+
+
+def test_send_heartbeat_posts_collected_body_and_returns_desired():
+    heartbeat = {"slots_total": 2, "workers": []}
+    desired = {"workers": ["codex-01"]}
+
+    class FakeApi:
+        def call(self, method, path, body, **kwargs):
+            assert (method, path, body, kwargs) == (
+                "POST", "/v1/nodes/node-test/heartbeat", heartbeat, {"retries": 2})
+            return {"desired": desired}
+
+    assert agent.send_heartbeat(FakeApi(), "node-test", heartbeat) is desired
+
+
+def test_apply_heartbeat_reconciles_desired_worker_units_and_signins(monkeypatch):
+    state = agent._AgentLoopState(tools={}, tools_at=0)
+    desired = {"workers": ["codex-new"], "accounts": ["ignored"],
+               "project_environment": {"DEMO": ["API_KEY"]},
+               "sign_ins": [{"request_id": "one"}], "signin": [{"request_id": "two"}]}
+    calls = []
+    sync_requests = []
+
+    def systemctl(*args):
+        calls.append(args)
+        return 3 if args[:2] == ("is-active", "--quiet") else 0
+
+    monkeypatch.setattr(agent, "_apply_toolchains", lambda *_args: None)
+    monkeypatch.setattr(agent, "_apply_services", lambda *_args: None)
+    monkeypatch.setattr(agent, "_apply_probes", lambda *_args: None)
+    monkeypatch.setattr(agent, "_apply_queued_work", lambda *_args: None)
+    monkeypatch.setattr(agent, "sync_provider_sign_ins",
+                        lambda _api, _node, requests, _processes: sync_requests.extend(requests))
+    monkeypatch.setattr(agent, "systemctl", systemctl)
+    monkeypatch.setattr(agent, "ensure_account_home", lambda _account: True)
+    monkeypatch.setattr(agent.subprocess, "run", lambda *args, **_kwargs:
+                        SimpleNamespace(stdout="aiflow4-worker@codex-old.service loaded active running\n"))
+    monkeypatch.setattr(agent, "clean_scratch", lambda: None)
+    monkeypatch.setattr(agent, "clean_worktrees", lambda *_args: None)
+    monkeypatch.setattr(agent, "sweep_test_databases", lambda: None)
+    monkeypatch.setenv("AIFLOW4_SELF_UPDATE", "0")
+
+    assert agent.apply_heartbeat(object(), "node-test", desired, state, True, threading.Event(), 15)
+
+    assert state.project_environment == {"DEMO": ["API_KEY"]}
+    assert sync_requests == [{"request_id": "one"}, {"request_id": "two"}]
+    assert calls == [
+        ("is-active", "--quiet", "aiflow4-worker@codex-new"),
+        ("enable", "--now", "aiflow4-worker@codex-new"),
+        ("disable", "--now", "aiflow4-worker@codex-old.service"),
+    ]
+
+
 def test_heartbeat_carries_the_version_or_missing_for_each_project_tool(monkeypatch):
     heartbeats = []
     stop = threading.Event()

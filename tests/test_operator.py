@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from aiflow.config import ConfigError
 from aiflow.incidents import find_incidents
 from aiflow.operator import Operator, parse_output
 from aiflow.operator_policy import Policy, load as load_policy
+from aiflow.supervisor import main
 from tests.test_supervisor import FakeJira, FakeRedis, make
 
 NOW = 1_000_000.0
@@ -250,6 +252,43 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(len(audit), 1)
         self.assertIn("RESOLVED: answered and unblocked", audit[0])
 
+    def test_answerable_blocked_ticket_drill_posts_resolution_evidence(self):
+        answer = "The runbook is in docs/RUNBOOK.md, under Operate."
+        out = (f'ACTION: comment {{"key": "JAIF-1", "text": "{answer}"}}\n'
+               'ACTION: transition {"key": "JAIF-1", "status": "To Do"}\n'
+               "RESULT: RESOLVED: answered from the repository runbook")
+        op, sup, _ = self.build(out)
+        incident = self.incident()
+        incident.facts.update({"status": "Blocked", "question": "Where are the operator instructions?"})
+
+        self.assertTrue(op.run_incident(incident, "20260101"))
+
+        self.assertIn(("JAIF-1", "To Do"), sup.jira.moves)
+        self.assertTrue(any(key == "JAIF-1" and answer in body for key, body in sup.jira.comments))
+        audit = next(body for key, body in sup.jira.comments if body.startswith("AI Flow operator (Claude)"))
+        self.assertIn("Outcome: RESOLVED:", audit)
+        self.assertIn("Did:", audit)
+
+    def test_credential_question_drill_escalates_without_actions(self):
+        out = ('ACTION: transition {"key": "JAIF-1", "status": "To Do"}\n'
+               "OPTIONS: share a token; keep it private\nRECOMMEND: keep it private\n"
+               "RESULT: ESCALATE: May the operator use the requested credential?")
+        op, sup, _ = self.build(out)
+        incident = self.incident()
+        incident.facts.update({"status": "Blocked", "question": "Can you use my access token to deploy?"})
+
+        self.assertTrue(op.run_incident(incident, "20260101"))
+
+        self.assertEqual(sup.jira.moves, [])
+        self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        question = next(body for key, body in sup.jira.comments if body.startswith("Question for the owner"))
+        self.assertIn("May the operator use the requested credential?", question)
+        self.assertIn("Options: share a token; keep it private", question)
+        audit = next(body for key, body in sup.jira.comments if body.startswith("AI Flow operator (Claude)"))
+        self.assertIn("Outcome: ESCALATE:", audit)
+        self.assertIn('Refused: transition {"key": "JAIF-1", "status": "To Do"}', audit)
+        self.assertIn("credentials, tokens or secrets", op.prompt(incident))
+
     def test_unknown_or_unsafe_actions_are_refused(self):
         out = ('ACTION: shell {"cmd": "rm -rf /"}\nACTION: transition {"key": "JAIF-1", "status": "Done"}\nACTION: label {"key": "JAIF-1", "label": "x"}\n'
                'ACTION: comment {"key": "OTHER-1", "text": "x"}\nACTION: comment {"key": "JAIF-1; rm", "text": "x"}\nRESULT: RESOLVED: tried')
@@ -405,13 +444,34 @@ class OperatorTests(unittest.TestCase):
         self.assertTrue(op.handle(self.incident()))
         self.assertEqual(self.calls, [])
         self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        audit = next(body for key, body in sup.jira.comments if body.startswith("AI Flow operator (system)"))
+        self.assertIn("per-ticket run limit was reached", audit)
 
-    def test_hourly_limit_stops_runs(self):
+    def test_hourly_limit_escalates_queued_incidents_instead_of_running_more_ai(self):
         op, sup, redis = self.build(policy=Policy(enabled=True, max_runs_per_hour=1))
         op.sync_queue([self.incident("blocked:JAIF-1", "JAIF-1"), self.incident("blocked:JAIF-2", "JAIF-2")])
         self.assertTrue(op.run_next())
+        self.assertTrue(op.run_next())
         self.assertFalse(op.run_next())
         self.assertEqual(len(self.calls), 1)
+        self.assertIn(("JAIF-2", "needs-owner"), sup.jira.added)
+        audit = next(body for key, body in sup.jira.comments if body.startswith("AI Flow operator (system)"))
+        self.assertIn("global hourly limit", audit)
+
+    def test_daily_limit_escalates_without_running_ai_and_does_not_repeat(self):
+        op, sup, redis = self.build(policy=Policy(enabled=True, max_runs_per_day=1))
+        day = time.strftime("%Y%m%d", time.gmtime())
+        redis.set(f"operator:runs:d:{day}", "1", 10)
+        op.sync_queue([self.incident()])
+
+        self.assertTrue(op.run_next())
+        self.assertFalse(op.run_next())
+
+        self.assertEqual(self.calls, [])
+        self.assertIn(("JAIF-1", "needs-owner"), sup.jira.added)
+        audits = [body for key, body in sup.jira.comments if body.startswith("AI Flow operator (system)")]
+        self.assertEqual(len(audits), 1)
+        self.assertIn("global daily limit", audits[0])
 
     def test_switches_stop_the_operator(self):
         op, sup, redis = self.build()
@@ -425,6 +485,27 @@ class OperatorTests(unittest.TestCase):
         op.policy = Policy(enabled=False)
         self.assertFalse(op.active())
         self.assertFalse(op.cycle())
+
+    def test_cli_pause_stops_the_operator_and_check_shows_the_separate_switch(self):
+        op, sup, redis = self.build()
+        redis.close = lambda: None
+        with mock.patch("aiflow.config.load", return_value=op.cfg), mock.patch("aiflow.supervisor.Redis", return_value=redis), \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(main(["pause"]), 0)
+        self.assertIsNotNone(redis.get("paused"))
+        self.assertFalse(op.active())
+
+        redis.delete("paused")
+        with mock.patch("aiflow.config.load", return_value=op.cfg), mock.patch("aiflow.supervisor.Redis", return_value=redis), \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(main(["operator", "off"]), 0)
+        self.assertIsNotNone(redis.get("operator:off"))
+        self.assertFalse(op.active())
+
+        with mock.patch("aiflow.config.load", return_value=op.cfg), mock.patch("aiflow.supervisor.Redis", return_value=redis), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(main(["check"]), 0)
+        self.assertIn("runtime switch OFF", output.getvalue())
 
     def test_resolved_incidents_leave_the_queue_and_new_ones_enter_once(self):
         op, sup, redis = self.build()

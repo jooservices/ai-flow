@@ -33,6 +33,12 @@ CONSOLE_PAGE_PATHS = (
 def mount_ui(app: FastAPI, ctx) -> None:
     page = HERE / "console.html"
     logs_page = HERE / "logs.html"
+    licensing_notice_script = HERE / "licensing_notice.js"
+
+    @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
+    def licensing_notice() -> FileResponse:
+        return FileResponse(licensing_notice_script, media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:

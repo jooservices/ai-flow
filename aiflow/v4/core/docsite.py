@@ -80,6 +80,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjectPickerOptions": ("work", "delivery"),
     "renderDBody": ("work", "delivery"),
     "renderReviews": ("review",),
+    "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
@@ -99,6 +100,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
+    "notificationConfigFromForm": ("notifications",),
+    "notificationFormSubmit": ("notifications",),
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
@@ -186,6 +189,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 SCREEN_LINE_VIEWS = (
     # The changed pointer behavior lets Dashboard actions remain clickable beneath the toast area.
     (re.compile(r"^\s*\.toasts\{"), "cc"),
+    (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
@@ -194,6 +198,9 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
     (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
+    # The click handler resolves the clicked element from a text node first; the phone review buttons need it.
+    (re.compile(r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"
+                r"\btarget\.closest\(|\btarget\.id === 'overlay'|submitReview\(reviewKey"), "review"),
     (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )
 

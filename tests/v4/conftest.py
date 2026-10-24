@@ -54,15 +54,14 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
-    # The node agent sweeps old `aiflow4_t_*` databases between tests.  Keep one
-    # connection open for the whole pytest session so that the sweeper sees this
-    # database as in use even while individual test DB pools are closed.
-    guard = psycopg.connect(own, application_name="aiflow4-pytest-session")
+    # Keep this session database visible to the node-agent sweeper between tests, even while
+    # individual test DB pools are closed.
+    keepalive = psycopg.connect(own, autocommit=True, application_name="aiflow4-pytest-session")
     try:
         yield own
     finally:
         try:
-            guard.close()
+            keepalive.close()
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:
             pass

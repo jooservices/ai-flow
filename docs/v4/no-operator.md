@@ -27,8 +27,10 @@ Safe repairs use the existing routing and fencing rules:
   account, a machine, tool or network failure excludes the machine; table `flow_doctor_route_exclusions`). The claim
   path honours the exclusion, so the failed route cannot pick the ticket up again. "Ready" uses the routing rules:
   an online machine with a fresh heartbeat, a signed-in account assignment, and free account and machine capacity.
-  Managed account sign-in is restarted through its normal node-agent sign-in link; after provider authorization the
-  first successful credential probe completes recovery and clears the pending sign-in without a console confirmation.
+  Managed account sign-in is restarted through its normal node-agent sign-in link; the first successful credential
+  probe completes recovery without a console confirmation. If the provider returns a device authorization URL,
+  the doctor retires that interactive handoff and records why. Work routes through configured ready accounts; if no
+  replacement is available, the Dashboard shows the coverage gap and the next step.
 - A healthy but switched-off role can receive another probation slot immediately. Each required role reports the
   number of ready accounts and provider diversity. Where safe recovery cannot create a second provider, Dashboard
   states the reason and the next practical step.

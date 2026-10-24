@@ -255,6 +255,33 @@ def test_doctor_retries_a_failed_managed_account_signin(ctx):
         {"action": "retry_account_sign_in", "outcome": "queued"}
 
 
+def test_doctor_replaces_interactive_signin_with_ready_accounts_without_a_person(ctx):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    ctx.repo().account("opencode-01").explicit_only = False
+    account_state(ctx, "claude-01", "signed_out")
+    account_state(ctx, "codex-01", "idle")
+    account_state(ctx, "opencode-01", "idle")
+    request_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO managed_ai_accounts (id,provider,node,roles,sign_in_request_id,sign_in_status,"
+               "sign_in_url,sign_in_code,sign_in_started_at)"
+               " VALUES ('claude-01','claude','cc',%s,%s,'waiting','https://auth.example.test/device','ABCD-1234',now())",
+               (["dev"], request_id))
+
+    flow_doctor._retry_signins(ctx)
+    flow_doctor._retry_signins(ctx)  # don't reopen the same interactive request on the next doctor pass
+
+    sign_in = ctx.db.one("SELECT sign_in_status,sign_in_url,sign_in_code,sign_in_error"
+                         " FROM managed_ai_accounts WHERE id='claude-01'")
+    assert sign_in["sign_in_status"] == "failed" and not sign_in["sign_in_url"] and not sign_in["sign_in_code"]
+    assert "interactive" in sign_in["sign_in_error"]
+    action = ctx.db.one("SELECT action,outcome,detail FROM flow_doctor_actions WHERE account_id='claude-01'")
+    assert action["action"] == "replace_interactive_signin" and action["outcome"] == "replaced"
+    assert "codex-01" in action["detail"] or "opencode-01" in action["detail"]
+    coverage = next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "dev")
+    assert coverage["healthy"] and coverage["provider_count"] == 2
+
+
 def test_successful_managed_signin_probe_completes_recovery_without_console_confirmation(client, ctx):
     request_id = str(uuid.uuid4())
     ctx.db.run("INSERT INTO managed_ai_accounts (id,provider,node,roles,sign_in_request_id,sign_in_status,"

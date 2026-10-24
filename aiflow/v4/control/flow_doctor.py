@@ -345,10 +345,50 @@ def _route_around_failed_assignment(ctx) -> None:
 
 def _retry_signins(ctx) -> None:
     now = datetime.now(timezone.utc)
-    for row in ctx.db.all("SELECT m.id,m.provider,m.node,m.roles,m.sign_in_status,m.sign_in_started_at,a.status"
+    for row in ctx.db.all("SELECT m.id,m.provider,m.node,m.roles,m.sign_in_status,m.sign_in_started_at,"
+                          "m.sign_in_request_id,m.sign_in_url,m.sign_in_error,a.status"
                           " FROM managed_ai_accounts m JOIN accounts a ON a.id=m.id"
                           " WHERE m.removed_at IS NULL AND a.status IN ('signed_out','error')"):
         if ctx.db.one("SELECT 1 AS active FROM runs WHERE account_id=%s AND status='running' LIMIT 1", (row["id"],)):
+            continue
+        if (row["sign_in_status"] == "failed"
+                and str(row.get("sign_in_error") or "").startswith("Flow doctor: provider authorization is interactive")):
+            continue  # don't keep reopening a provider handoff that cannot finish without a person
+        if row["sign_in_status"] == "waiting" and row.get("sign_in_url"):
+            # Device authorization requires a person to open the link. Retire that handoff and keep the
+            # affected role moving through an already-ready account whenever one is configured.
+            repo = ctx.repo()
+            online = shared_accounts.online_nodes(ctx.db)
+            coverage = {item["role"]: item for item in role_coverage(ctx, persist=False)}
+            replacements = []
+            roles = sorted(set(row.get("roles") or []) & set(coverage))
+            for role in roles:
+                replacement = next((repo.account(account_id)
+                                    for account_id in coverage[role]["ready_accounts"]
+                                    if account_id != row["id"] and repo.account(account_id)), None)
+                if replacement:
+                    node = next(iter(routable_machines(ctx, replacement, online)), "")
+                    if node:
+                        replacements.append((role, replacement, node))
+            replacement_detail = "; ".join(
+                f"{role}: {account.id} on {node}" for role, account, node in replacements)
+            if replacements:
+                detail = ("provider device authorization was waiting for a person; normal routing uses ready "
+                          f"replacement account(s): {replacement_detail}")
+                outcome = "replaced"
+                next_step = "Work continues through the listed ready accounts. Add another provider account only if the Dashboard shows a role coverage gap."
+            else:
+                detail = "provider device authorization was waiting for a person; no ready replacement account is configured"
+                outcome = "needs_replacement"
+                next_step = "Add or enable a ready account from another provider on an online machine; the role coverage panel shows the affected role."
+            ctx.db.run("UPDATE managed_ai_accounts SET sign_in_status='failed',sign_in_url='',sign_in_code='',"
+                       "sign_in_error=%s,sign_in_expires_at=NULL,updated_at=now() WHERE id=%s"
+                       " AND sign_in_status='waiting'", ("Flow doctor: provider authorization is interactive; "
+                                                          + detail, row["id"]))
+            record_action(ctx, f"signin-replacement:{row['id']}:{row.get('sign_in_request_id') or 'unknown'}",
+                          "replace_interactive_signin", node=row["node"], account=row["id"], outcome=outcome,
+                          detail=detail)
+            _finding(ctx, f"account:{row['id']}", "account_error", detail, next_step)
             continue
         if row["sign_in_status"] not in ("idle", "failed") and row["sign_in_started_at"] \
                 and (now - row["sign_in_started_at"]).total_seconds() < 900:

@@ -94,7 +94,7 @@ class Settings:
     ci_wait_minutes: int
     feedback_settle_minutes: int
     gate_poll_seconds: int
-    max_cycles: int
+    loop_limit: int
     merge_method: str
     ignored_authors: tuple[str, ...]
     workspace_field: str
@@ -133,6 +133,11 @@ class Settings:
     def project(self, issue_key: str = ""):
         """The registry entry of the Jira project an issue belongs to (the first project when no issue is given)."""
         return self.registry.of_issue(issue_key) if issue_key else next(iter(self.registry.projects.values()))
+
+    def loop_limit_for(self, issue_key: str) -> int:
+        """The project's rework limit, or the global limit when the project does not override it."""
+        override = self.project(issue_key).loop_limit
+        return self.loop_limit if override is None else override
 
 
 def parse_worker_id(worker_id: str) -> int:
@@ -203,6 +208,9 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
             raise ConfigError(f"Project {home} runs {project.workers} worker(s) in its TOML file; worker {worker_id} is outside that number.")
     elif worker_id is not None and workers and slot > workers:
         raise ConfigError(f"Machine {machine} runs {workers} shared worker(s) in aiflow.toml; worker {slot} is outside that number.")
+    loop_limit = _int(merged, "AIFLOW_MAX_CYCLES", 3)
+    if loop_limit < 0:
+        raise ConfigError("`max_cycles` / `loop_limit` must be a whole number of 0 or more.")
     return Settings(
         root=WORKSPACES_ROOT,
         projects=tuple(registry.projects),
@@ -240,7 +248,7 @@ def load(env: dict[str, str] | None = None, worker_id: str | None = None, config
         ci_wait_minutes=_int(merged, "AIFLOW_CI_WAIT_MINUTES", 90),
         feedback_settle_minutes=_int(merged, "AIFLOW_FEEDBACK_SETTLE_MINUTES", 5),
         gate_poll_seconds=_int(merged, "AIFLOW_GATE_POLL_SECONDS", 60),
-        max_cycles=_int(merged, "AIFLOW_MAX_CYCLES", 6),
+        loop_limit=loop_limit,
         merge_method=merged.get("AIFLOW_MERGE_METHOD", "merge"),
         ignored_authors=tuple(a.lower() for a in _list(merged, "AIFLOW_IGNORED_AUTHORS",
                               "codecov-commenter,github-actions,sonarqubecloud,sonarcloud,dependabot,codeql,github-advanced-security")),

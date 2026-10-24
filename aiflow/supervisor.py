@@ -811,6 +811,8 @@ class Supervisor:
         rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
         for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
             self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
+        if kind != "Rework":
+            self.redis.delete(f"rework-history:{key}")
         try:
             status = str(self.jira.view(key).get("status", ""))
             blocked = {"status": status, "kind": kind}
@@ -890,6 +892,8 @@ class Supervisor:
         if self.redis.get(f"blocked:{key}") is None:
             return
         self.redis.delete(f"blocked:{key}")
+        self.redis.delete(f"cycles:{key}")
+        self.redis.delete(f"rework-history:{key}")
         events.emit("ticket.unblocked", ticket=key)
         self.clear_blocked_reason(key)
 
@@ -1446,10 +1450,22 @@ class Supervisor:
             self.redis.set(f"seen:{key}", json.dumps(sorted(seen)), 30 * DAY)
         text = "\n".join(lines)
         self.redis.set(f"rework:{key}", text[:12000], 30 * DAY)
+        try:
+            history = json.loads(self.redis.get(f"rework-history:{key}") or "[]")
+        except (TypeError, ValueError):
+            history = []
+        if not isinstance(history, list):
+            history = []
+        failing_reason = (headline + (f"\n{details.strip()}" if details.strip() else ""))[:1000]
+        history.append({"round": cycles, "reason": failing_reason})
+        self.redis.set(f"rework-history:{key}", json.dumps(history), 30 * DAY)
         self.redis.delete(f"qa:{key}")
         self.jira.comment(key, f"AI Flow: {text[:6000]}")
-        if cycles > self.cfg.max_cycles:
-            self.block(key, f"{cycles - 1} rework rounds without success; needs the owner.", kind="Rework")
+        loop_limit = self.cfg.loop_limit_for(key)
+        if cycles > loop_limit:
+            reasons = "\n".join(f"- Round {entry['round']}: {entry['reason']}" for entry in history if isinstance(entry, dict))
+            self.block(key, f"Rework loop limit of {loop_limit} exceeded at round {cycles}.\n"
+                            f"Failing reason for each counted round:\n{reasons}", kind="Rework")
             return
         self.jira.add_label(key, "rework")
         self.jira.transition(key, "To Do")
@@ -1848,7 +1864,7 @@ class Supervisor:
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)
         self.jira.remove_label(key, "rework")
-        for name in ("dev", "reviewer", "home", "cycles", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
+        for name in ("dev", "reviewer", "home", "cycles", "rework-history", "qa", "rework", "feedback", "seen", "pr", "prtitle", "pushed", "gateentry", "ishotfix",
                      "gatenote", "mergefail", "gatepoll", "repo", "humanreview", "humanok", "blocked", "devmodel", "recalled"):
             self.redis.delete(f"{name}:{key}")
 

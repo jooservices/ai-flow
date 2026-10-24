@@ -38,6 +38,31 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual((ai.human_on_deployment, crawler.human_on_deployment), (True, False))
         self.assertEqual((ai.database, crawler.database), ("ai-flow", ""))
 
+    def test_project_loop_limit_overrides_global_and_accepts_the_legacy_name(self):
+        write(self.dir / "aiflow.toml", '[runtime]\nmax_cycles = 5\n[defaults]\n')
+        write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nloop_limit = 2\n')
+        cfg = self.load()
+        self.assertEqual((cfg.loop_limit, cfg.loop_limit_for("JAIF-1"), cfg.loop_limit_for("JOOCX-1")), (5, 5, 2))
+
+        write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmax_cycles = 1\n')
+        self.assertEqual(self.load().loop_limit_for("JOOCX-1"), 1)
+
+    def test_max_cycles_and_loop_limit_are_rejected_together(self):
+        configurations = (
+            ('[runtime]\nmax_cycles = 3\nloop_limit = 4\n', self.dir / "aiflow" / "ai.toml"),
+            ('[defaults]\nmax_cycles = 3\nloop_limit = 4\n', self.dir / "aiflow" / "ai.toml"),
+            ('[defaults]\n', self.dir / "aiflow" / "ai.toml"),
+        )
+        for general, project_path in configurations:
+            with self.subTest(general=general, project_path=project_path):
+                write(self.dir / "aiflow.toml", general)
+                project = '[project]\njira_key = "JAIF"\nrepo = "ai-flow"\n'
+                if general == '[defaults]\n':
+                    project += 'max_cycles = 3\nloop_limit = 4\n'
+                write(project_path, project)
+                with self.assertRaises(ConfigError):
+                    self.load()
+
     def test_deploy_settings_default_and_project_override(self):
         write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\n'
               'deploy_command = "./deploy.sh"\ndeploy_timeout_minutes = 12\ndeploy_on = "all"\n')
@@ -148,6 +173,11 @@ class RuntimeSectionTest(unittest.TestCase):
         cfg = self.load('[runtime]\npoll_seconds = 10\nagent_order = ["Codex", "Claude"]\nhealth_ticket = "JAIF-12"',
                         AIFLOW_POLL_SECONDS="99", AIFLOW_AGENT_ORDER="Grok", AIFLOW_HEALTH_TICKET="X-1")
         self.assertEqual((cfg.poll_seconds, cfg.agent_order, cfg.health_ticket), (10, ("Codex", "Claude"), "JAIF-12"))
+
+    def test_loop_limit_defaults_to_three_and_can_use_either_global_name(self):
+        self.assertEqual(self.load("").loop_limit, 3)
+        self.assertEqual(self.load("[runtime]\nloop_limit = 4").loop_limit, 4)
+        self.assertEqual(self.load("[runtime]\nmax_cycles = 5").loop_limit, 5)
 
     def test_without_the_section_env_applies(self):
         cfg = self.load("", AIFLOW_POLL_SECONDS="99", AIFLOW_AGENT_ORDER="Grok,Codex")

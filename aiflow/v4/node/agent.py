@@ -24,9 +24,9 @@ from urllib.parse import quote
 from pathlib import Path
 
 from .. import VERSION
+from ..core.settings import read_env_file
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
-from ..core.settings import read_env_file
 from ..install.secrets import read_env_timestamps, update_env
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
@@ -818,6 +818,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
+    project_environment: dict[str, list[str]] = {}
     pending_network_events: list[dict] = []
     operation_thread: threading.Thread | None = None
     toolchain_thread: threading.Thread | None = None
@@ -842,6 +843,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     tools, tools_at = tool_versions(), time.time()
                 ws = worker_states()
                 used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
+                environment_items = {}
+                for project, names in project_environment.items():
+                    local = read_env_file(f"/etc/aiflow/projects/{project}.env")
+                    present = [name for name in names if local.get(name)]
+                    if present:
+                        environment_items[project] = present
                 desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
                     "release_protocol": 1,
@@ -851,7 +858,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
                     "workers": ws, "credential_expiries": credential_expiries(ws),
                     "runtime_settings": runtime_settings_inventory(),
-                    "runtime_settings_public_key": runtime_settings_public_key}, retries=2)["desired"]
+                    "runtime_settings_public_key": runtime_settings_public_key,
+                    "environment_items": environment_items}, retries=2)["desired"]
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
                     pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
@@ -870,6 +878,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
                     stop.wait(every_s)
                     continue
+            project_environment = desired.get("project_environment", {})
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),

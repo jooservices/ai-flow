@@ -16,12 +16,12 @@ product, client and versions, never a machine.
 
 ## The check that marks a ticket ready (AC2)
 
-`aiflow/v4/core/environment.py` finds wording that names a host (internal host names, `ssh://`), an **IP address**, a
-**machine** ("the Dev VM", "shared Docker", "lab machines", "WSL"), a **network** (VPN, subnet, bastion, port
-forwarding), an **access instruction** ("ssh into", "log in to the server", `password: …`) or a **Jira action**.
-`intake.parse` rejects a rewrite that contains any of it; the author is told to *describe the requirement instead*,
-and the rejection names the kinds and the quoted words. The ticket stays in Intake. The same requirement without the
-host is accepted. `intake.readiness_problems` returns the same verdict for any description.
+`aiflow/v4/core/environment.py` finds wording that names a host (including public host names and URLs), an **IP
+address** (IPv4 or IPv6), a **machine** (including generic server and host references), a **network**, an **access
+instruction** or a **Jira action**. `intake.parse` rejects a rewrite that still contains any of it; a Jira note asks
+the author to *describe the requirement instead* without repeating the server wording. The ticket stays in Intake.
+The same requirement without the location or access detail is accepted. `intake.readiness_problems` returns the same
+verdict for any description, and the open-ticket scan uses the same detector.
 
 ## Removing the wording and recording it (AC3, AC4)
 
@@ -36,12 +36,14 @@ ENVIRONMENT NEEDS:
 ```
 
 * The Jira comment that keeps the original has every server wording replaced by `[server detail removed]`, then says
-  what was removed (kinds and counts, the AI's own lines) and which environment ticket holds the need.
+  what was removed (kinds and counts, the AI's own lines) and which environment ticket holds the need. A rejected
+  rewrite gets a separate safe note telling the author how to fix the requirement; the ticket remains in Intake.
 * `POST /v1/environment/removals` stores the full record (`environment_removals`) in the control database, never in
   Jira. The record also holds the wording found by the rule itself, not only the AI's list.
 * A **real need** ("tests need a seeded site") is not left in the story: the control plane opens one Task labelled
   `environment` in the AI Flow project (`AIFLOW4_MAINTENANCE_PROJECT`, default `JAIF`) and links it to the story
-  (*Relates*). The same need of the same project joins the existing ticket (`environment_needs`).
+  (*Relates*). The same need of the same project joins the existing ticket (`environment_needs`). If Jira creation
+  fails, the need remains durable and the environment sweep retries it.
 
 ## The environment section of a project (AC5)
 
@@ -49,7 +51,7 @@ ENVIRONMENT NEEDS:
 
 ```yaml
 environment:
-  - {name: WP_BASE_URL, kind: base_url, value: "http://site.example.test:8080", runs: [dev, verify]}
+  - {name: WP_BASE_URL, kind: base_url, value: "<configured-base-url>", runs: [dev, verify]}
   - {name: WP_DB_NAME, kind: database, value: wp_test, runs: [dev]}
   - {name: BROWSERS, kind: browser, value: "chromium,firefox", runs: [verify]}
   - {name: WP_ADMIN_PASSWORD, kind: secret, runs: [dev, verify]}
@@ -74,10 +76,12 @@ notifications do not block the Projects screen controls while they are visible.
 ## What the run receives (AC6)
 
 The work claim carries the items of the project (a secret without a value). The worker (`worker/notes.py: project_env`)
-builds the run environment: `PLAYWRIGHT_BROWSERS_PATH`, unconfigured legacy node-local variables, then only the
-configured values and secrets permitted for that run's step. The variables reach the AI process (`RunSpec.extra_env`).
-Run notes list the **names**, their kind and whether each is set; never a value. A configured secret for `dev` is
-removed from a `verify` or `post_merge` process. Nothing about a server is in a ticket, a source repository or the notes.
+builds the run environment from only the configured values and secrets permitted for that run's step, plus the
+explicit safe built-in `PLAYWRIGHT_BROWSERS_PATH` and explicit per-run values. Unlisted node-local variables are
+never ambient run variables. The variables reach the AI process (`RunSpec.extra_env`). Run notes list the **names**,
+their kind and whether each is set; never a value. A configured secret for `dev` is absent from a `verify` or
+`post_merge` process. Jira notes and Workspace fields use environment item names and status; they do not expose a
+node name or a temporary test-site URL.
 
 ## A missing environment item (AC8, AC9)
 
@@ -90,31 +94,35 @@ RESULT: BLOCKED: MISSING-ENV: WP_DB_NAME - the test database is not there
 using a **name from the configuration**; free text is not an item and the run fails normally. The outcome is
 `environment_missing`; the ticket goes back to To Do with a comment and **no question to the owner**. The control
 plane records one open row per ticket and item (`environment_reports`) and does not offer the ticket again until the
-item is provided. A question about servers, hosts, networks or access is classified `missing_tool_or_environment`
-and answered by the flow (it points at the variables and `MISSING-ENV`); only production or irreversible actions
-still reach a person.
+item is provided. A question about servers, hosts, addresses, networks, access or where to run/test is classified
+`missing_tool_or_environment` and answered by the flow (it points at configured item names and `MISSING-ENV`); it is
+never posted to the owner. Intake also routes server questions to the environment flow instead of Jira's Needs owner
+path. Only production or irreversible actions still reach a person.
 
-The flow doctor (JAIF-260) provides the item by calling `environment.provide(ctx, project, item, how)`, which offers
-the waiting tickets again. If the item is still missing after one hour, the watchdog raises **one** environment
-ticket per project and item (label `environment`). A change of the item in the configuration, a removed item or a
-Done ticket also ends the wait. The **Projects** screen lists the missing items (*Missing environment items*).
+The node agent returns the names of configured secrets it can read in its authenticated heartbeat; the control plane
+confirms each item only for the assigned project, reporting node and current item fingerprint. This fenced,
+names-only confirmation resolves matching waits and offers their tickets again; no secret value leaves the node.
+Configuration changes, a removed item or a Done ticket also end a wait. If an item stays missing for an hour, the
+environment sweep raises **one** environment ticket per project and item (label `environment`) and retries durable
+environment needs whose Jira ticket could not yet be created. The **Projects** screen lists the missing items
+(*Missing environment items*).
 
 ## Criteria that need the post-merge environment (AC10)
 
-The reviewer lists criteria that need a configured post-merge environment under `POST-MERGE CHECKS:`. On a configured
-Jira version release, the release claim (`POST /v1/version-releases/claim`) carries those criteria and the project's environment items whose `runs`
-include `post_merge`. The version-release worker runs the configured full-project release checks with those items in
-its environment. Control records each check result, checked commit, version and release run against every ticket
-with deferred criteria. *Projects → Environment* shows pending, passed or failed criteria, the release checks and
-when they ran. The `post_merge` permission is opt-in for each item; it is not implied by `dev` or `verify`.
-
-The verify prompt directs criteria that cannot be proven in the development run to this path; the verify result
-stores them by ticket. The regular release run, after those tickets have merged, provides the post-merge check and
-keeps its result on the original ticket record.
+The reviewer marks a criterion that needs a post-merge environment and maps it to one exact command from the
+project's configured checks. After a successful merge (including a human-review outcome), control queues the
+criteria on that ticket, whether or not it belongs to a Jira version. A fenced `post_merge` claim gives the worker
+only the project's environment items whose `runs` include `post_merge`, and the checks mapped to that ticket's
+criteria. The worker runs each mapped command against the merged project checkout and reports each result through
+`POST /v1/environment/post-merge/complete`. Control records a criterion as passed only when its own mapped command
+passes; missing or failed commands are recorded failed. A deferred criterion without an exact configured check is
+sent back for rework, and the control API refuses to accept a verify PASS carrying an unmapped criterion. *Projects →
+Environment* shows pending, passed or failed criteria and when they ran. The `post_merge` permission is opt-in for each
+item; it is not implied by `dev` or `verify`.
 
 ## Scan of the open tickets (AC11)
 
-`environment.scan` checks every open ticket of every project (summary and description) with the same rule and keeps
+`environment.scan` checks every open ticket of every project and issue type, including Epics (summary and description), with the same rule and keeps
 the report (`environment_scans`; kinds and counts, never the wording). Tickets nobody works on (Created, Backlog,
 To Do, Needs owner) lose `aiflow-ready`, get a note that names the kinds and go back to **Intake**, where the intake AI
 removes the wording and records it; tickets in flight are listed and left alone; tickets already in Intake are listed.
@@ -127,10 +135,13 @@ The watchdog runs it once a day; *Projects → Tickets that name servers* shows 
 - `GET /v1/environment/missing` returns missing items for the Projects screen.
 - `GET /v1/environment/scan` reads the latest open-ticket scan; `POST /v1/environment/scan` runs and stores one.
 - `POST /v1/work/claim` returns only the environment items permitted for that work step.
-- `POST /v1/runs/{run_id}/result` records a missing item report or queues deferred criteria after a successful merge.
-- `POST /v1/version-releases/{version_id}/complete` records the project release-check result against the deferred
-  criteria on each included ticket. The version-release claim passes the permitted `post_merge` items and deferred
-  criteria to the release worker; results are stored in `environment_post_merge_checks` against each original ticket.
+- `POST /v1/runs/{run_id}/result` records a missing item report or queues deferred criteria after a merge or successful human-review outcome.
+- Authenticated node heartbeats confirm configured secret names by assigned project, node and item fingerprint; a confirmation resolves matching waits and reoffers tickets.
+- `POST /v1/work/claim` offers pending post-merge criteria as fenced `post_merge` work with only permitted environment items and per-ticket mapped checks.
+- `POST /v1/environment/post-merge/complete` records each criterion only from its mapped command; results are stored in `environment_post_merge_checks` against the original ticket.
+- `POST /v1/github/token` returns the repository credential used to fetch the project checkout for dev, verify and post-merge work.
+- `POST /v1/nodes/{name}/heartbeat` carries the authenticated node's names-only confirmation of configured environment secrets.
+- `POST /v1/version-releases/claim` and `POST /v1/version-releases/{version_id}/complete` claim and complete configured version release work.
 - `GET /v1/capacity` reports quota capacity for the Machines and AI dashboard; it is separate from project run
   environment configuration, which uses `GET /v1/projects/{key}/environment` and the work claim.
 

@@ -193,6 +193,20 @@ def test_joined_machine_serves_its_project_after_the_import_without_the_node_fil
     assert heartbeat(client, "node1", joined.json()["node_token"])["projects"] == ["TESTWP"]
 
 
+def test_rejoining_imported_machine_preserves_all_database_project_assignments(client, ctx):
+    owner_session(client, ctx)
+    configured = ctx.repo()
+    configured.projects["TESTFLOW"] = Project(key="TESTFLOW", repo="jooservices/testflow", nodes=["node1"])
+    assert client.app.state.import_inventory()["imported"] is True
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"] == ["TESTWP", "TESTFLOW"]
+
+    joined = join_node(client, "node1")  # its token names only TESTWP
+
+    assert joined.status_code == 200, joined.text
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"] == ["TESTWP", "TESTFLOW"]
+    assert heartbeat(client, "node1", joined.json()["node_token"])["projects"] == ["TESTWP", "TESTFLOW"]
+
+
 def test_project_node_assignments_are_imported_and_then_read_from_database(client, ctx):
     owner_session(client, ctx)
     configured = ctx.repo()

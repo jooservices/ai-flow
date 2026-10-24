@@ -24,7 +24,8 @@ old file, runtime scheduling ignores it and backups filter it out.
 ## Join, add, change
 
 - A machine that joins with its one-use token appears on the screen on its own and serves the project it joined
-  for. Project assignments are held in `nodes.projects`; project files do not list machines.
+  for. Rejoining preserves its stored project assignments and adds the token's project if needed. Project
+  assignments are held in `nodes.projects`; project files do not list machines.
 - **Add AI account** takes provider, an optional name, jobs (roles) and sessions (workers). The account id stays
   generated (`<provider>-<machine>-NN`). Sign-in is a provider link and code shown on the screen.
 - Sessions and jobs are changed on the same screen. The node reads them on its next heartbeat, so a change is applied

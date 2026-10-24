@@ -5321,7 +5321,6 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();
   else if (act.indexOf('review-') === 0 && !e.aiflowReviewHandled) {
-    // Bubble-phase fallback for targets that the capture listener cannot resolve.
     var card = el.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
     var reviewKey = el.getAttribute('data-key'), reviewComment = note ? note.value : (S.reviewNoteDrafts[reviewKey] || '');
     if (note) S.reviewNoteDrafts[reviewKey] = reviewComment;

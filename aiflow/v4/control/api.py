@@ -3466,7 +3466,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " INSERT INTO nodes (name,ip,role,token_hash,status,projects,dynamic)"
                 " SELECT node_name,%s,role,%s,'joined',ARRAY[project],dynamic FROM grant_row"
                 " ON CONFLICT (name) DO UPDATE SET token_hash=EXCLUDED.token_hash,"
-                " ip=coalesce(nullif(EXCLUDED.ip,''),nodes.ip), role=EXCLUDED.role,projects=EXCLUDED.projects,"
+                " ip=coalesce(nullif(EXCLUDED.ip,''),nodes.ip), role=EXCLUDED.role,"
+                " projects=CASE WHEN nodes.removed_at IS NULL THEN"
+                " CASE WHEN EXCLUDED.projects[1]=ANY(nodes.projects) THEN nodes.projects"
+                " ELSE array_append(nodes.projects,EXCLUDED.projects[1]) END ELSE EXCLUDED.projects END,"
                 " dynamic=EXCLUDED.dynamic,status='joined',accepting_work=true,removed_at=NULL"
                 " RETURNING name,role,projects,dynamic",
                 (h(body.join_token), body.name, body.name, body.ip, h(token))).fetchone()

@@ -336,9 +336,6 @@ def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_crit
         def remote_branch_exists(self, *_args):
             return True
 
-        def behind(self, *_args, **_kwargs):
-            return 0
-
         def detached(self, _mirror, _path, ref):
             return ref
 
@@ -346,7 +343,7 @@ def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_crit
             return []
 
         def behind(self, *_args, **_kwargs):
-            return False
+            return 0
 
         def scrub(self, _path):
             pass

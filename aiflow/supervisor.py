@@ -1449,6 +1449,7 @@ class Supervisor:
             seen.update(i["id"] for i in items if i["kind"] != "thread")
             self.redis.set(f"seen:{key}", json.dumps(sorted(seen)), 30 * DAY)
         text = "\n".join(lines)
+        previous_text = str(self.redis.get(f"rework:{key}") or "")
         self.redis.set(f"rework:{key}", text[:12000], 30 * DAY)
         try:
             history = json.loads(self.redis.get(f"rework-history:{key}") or "[]")
@@ -1475,6 +1476,16 @@ class Supervisor:
             if summaries:
                 reason_parts.append("Feedback item summaries:\n" + "\n".join(f"- {summary}" for summary in summaries))
         failing_reason = "\n".join(reason_parts)[:8000]
+        # Rounds counted in cycles:<KEY> before round history existed have no recorded reason: backfill them so
+        # the Blocked comment lists every counted round. Only the newest earlier round has its text stored.
+        history = [entry for entry in history if isinstance(entry, dict)]
+        recorded = {entry.get("round") for entry in history}
+        for missing in range(1, cycles):
+            if missing not in recorded:
+                reason = (previous_text[:8000] if missing == cycles - 1 and previous_text
+                          else "not recorded (round counted before round history was kept)")
+                history.append({"round": missing, "reason": reason})
+        history.sort(key=lambda entry: entry.get("round", 0))
         history.append({"round": cycles, "reason": failing_reason})
         self.redis.set(f"rework-history:{key}", json.dumps(history), 30 * DAY)
         self.redis.delete(f"qa:{key}")

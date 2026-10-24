@@ -1154,6 +1154,18 @@ class SendBackTests(unittest.TestCase):
         })
         self.assertEqual([incident.id for incident in incidents], ["rework:JAIF-9"])
 
+    def test_rounds_counted_before_history_existed_are_backfilled_in_the_blocked_comment(self):
+        sup = make()
+        sup.redis.data.update({"cycles:JAIF-9": "3", "rework:JAIF-9": "Rework needed (round 3): old third failure"})
+        sup.send_back("JAIF-9", FakeRepo(), "failed check 4", "reason 4", [])
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+        block_comment = sup.jira.comments[-1][1]
+        for round_number in (1, 2, 3, 4):
+            self.assertIn(f"Round {round_number}:", block_comment)
+        self.assertIn("old third failure", block_comment)
+        self.assertIn("not recorded", block_comment)
+        self.assertIn("failed check 4", block_comment)
+
     def test_feedback_item_summaries_are_in_round_history_and_final_blocked_comment(self):
         sup = make()
         for round_number in range(1, 5):

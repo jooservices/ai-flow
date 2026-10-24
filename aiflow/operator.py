@@ -64,6 +64,7 @@ class Operator:
         self.notifier = notifier if notifier is not None else notify.from_env(sup.cfg.notify)
         self.run_ai = run_ai or self._run_ai
         self.redis, self.jira, self.cfg = sup.redis, sup.jira, sup.cfg
+        self._run_id = ""
 
     # ---- switches --------------------------------------------------------------------------------------------
     def active(self) -> bool:
@@ -273,13 +274,15 @@ class Operator:
         workdir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         log_file, result_file = self.cfg.root / ".tmp" / "aiflow" / "logs" / f"operator-{tag}-{stamp}.log", self.cfg.root / ".tmp" / "aiflow" / "logs" / f"operator-{tag}-{stamp}.result"
+        self._run_id = log_file.stem
         argv, stdin_text = agents.build_command(agent, workdir, result_file, prompt, self.cfg.root, read_only=True)
 
         def beat() -> bool:
             return self.redis.renew("operator:run", self.cfg.owner, self.policy.run_minutes * 60 + 120) and self.active()
         code, why = runner.run(argv, stdin_text, workdir, log_file, agents.run_env(agent, workdir, self.cfg.root), idle_seconds=self.cfg.idle_minutes * 60,
                                max_seconds=self.policy.run_minutes * 60, heartbeat_seconds=self.cfg.heartbeat_seconds, heartbeat=beat)
-        usage.report(agent, log_file, ticket=tag.split("-", 2)[-1] if False else "", role="operator", incident=tag, why=why, code=code)
+        usage.report(agent, log_file, ticket=tag.split("-", 2)[-1] if False else "", role="operator", incident=tag,
+                     run_id=self._run_id, why=why, code=code)
         text = agents.final_text(agent, log_file, result_file)
         quota = (code != 0 or not RESULT.search(text)) and agents.looks_like_quota(log_file, text, code)
         return why, text, quota
@@ -295,10 +298,12 @@ class Operator:
             self.redis.incr(f"operator:ticket:{incident.ticket}:{day}", 2 * DAY)
         self.redis.set(f"operator:cool:{incident.id}", "1", 3600)
         began = time.monotonic()
+        self._run_id = ""
         why, text, quota = self.run_ai(agent, self.prompt(incident), incident.id.replace(":", "-"))
         self.sup.log_usage(incident.ticket or "operator", "operator", agent, (time.monotonic() - began) / 60, why, 0 if why == "ok" else None)
         result, actions, options, recommend = parse_output(text)
-        events.emit("operator.run", incident=incident.id, agent=agent, why=why, minutes=round((time.monotonic() - began) / 60, 2),
+        events.emit("operator.run", incident=incident.id, run_id=self._run_id or None, agent=agent, why=why,
+                    minutes=round((time.monotonic() - began) / 60, 2),
                     result=result[0] if result else "NONE", actions=len(actions))
         if quota:
             self.redis.set(f"cooldown:{agent}", "1", self.cfg.quota_cooldown_minutes * 60)

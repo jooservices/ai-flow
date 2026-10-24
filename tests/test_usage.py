@@ -30,12 +30,23 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((got["total"], got["cost_usd_list"], got["turns"], got["model"], got["usage_known"]), (28 + 4747 + 480673 + 25157, 0.19622, 21, "claude-sonnet-5-5", True))
 
     def test_codex_json_turns_are_added_and_cached_is_split_out(self):
-        got = usage.parse("Codex", CODEX_JSON)
+        got = usage.parse("Codex", CODEX_JSON, model="gpt-6-luna")
         self.assertEqual((got["input"], got["cache_read"], got["output"], got["reasoning"], got["total"]), (16809 + 200 - 1100, 1100, 20, 10, 17009 + 20))
+        self.assertEqual((got["cost_usd_list"], got["cost_known"], got["cost_model"]), (0.001612, True, "gpt-6-luna"))
+
+    def test_codex_cost_estimate_separates_cache_writes_and_unknown_models_stay_unknown(self):
+        text = json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 100, "cached_input_tokens": 20, "cache_write_input_tokens": 10,
+            "output_tokens": 5, "reasoning_output_tokens": 2}})
+        got = usage.parse("Codex", text, model="gpt-6-luna")
+        self.assertEqual((got["input"], got["cache_read"], got["cache_write"], got["output"], got["total"]), (70, 20, 10, 5, 105))
+        self.assertEqual((got["cost_usd_list"], got["cost_known"]), (0.000011, True))
+        unknown = usage.parse("Codex", text, model="unlisted-model")
+        self.assertEqual((unknown["cost_usd_list"], unknown["cost_known"]), (None, False))
 
     def test_codex_plain_log_gives_the_total_only(self):
         got = usage.parse("Codex", "work\ntokens used\n64,945\n")
-        self.assertEqual((got["total"], got["input"], got["usage_known"]), (64945, 0, True))
+        self.assertEqual((got["total"], got["input"], got["usage_known"], got["cost_known"]), (64945, 0, True, False))
 
     def test_opencode_steps_are_added(self):
         got = usage.parse("OpenCode", OPENCODE)
@@ -60,6 +71,7 @@ class ParseTests(unittest.TestCase):
             events._sink = None
         row = sink.sender.calls[0][1][0]
         self.assertEqual((row["event"], row["ticket"], row["agent"], row["role"], row["output"], row["usage_known"]), ("ai.usage", "JAIF-5", "Claude", "developer", 4747, True))
+        self.assertEqual(row["run_id"], "run")
         self.assertEqual(got["total"], row["total"])
 
 
@@ -166,19 +178,30 @@ class StatusTests(unittest.TestCase):
 
 
 class SpoolAndSummaryTests(unittest.TestCase):
-    def test_rows_that_could_not_be_sent_survive_the_process(self):
+    def test_delivery_failure_spools_rows_before_shutdown_and_a_new_process_replays_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             spool = Path(tmp) / "events.jsonl"
             down = Events("http://obs", "default", "s", "u", "p", {}, Sender(fail=99), thread=False, spool=spool)
             down.emit("a")
             down.emit("b")
-            down.close()
+            self.assertFalse(down.flush())
             self.assertEqual(len(spool.read_text().splitlines()), 2)
+            down.close()
             up = Sender()
             fresh = Events("http://obs", "default", "s", "u", "p", {}, up, thread=False, spool=spool)
             fresh.flush()
             self.assertEqual([r["event"] for r in up.rows()], ["a", "b"])
             self.assertFalse(spool.exists())
+
+    def test_closing_persists_unsent_rows_without_waiting_for_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = Path(tmp) / "events.jsonl"
+            sender = Sender(fail=99)
+            sink = Events("http://obs", "default", "s", "u", "p", {}, sender, thread=False, spool=spool)
+            sink.emit("pending")
+            sink.close()
+            self.assertEqual([json.loads(line)["event"] for line in spool.read_text().splitlines()], ["pending"])
+            self.assertEqual(sender.calls, [])
 
     def test_the_daily_summary_shows_tokens_and_list_price(self):
         redis = FakeRedis()

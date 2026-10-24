@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import api, environment as environment_reports, version_release
+from aiflow.v4.control import api, environment as environment_reports, system_check_api, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.github_connections import GitHubConnections
@@ -163,7 +163,7 @@ def test_release_candidates_and_claims_obey_project_and_account_readiness_gate(
         client, ctx, monkeypatch, blocked_condition, expected_name):
     configure(ctx)
     evidence(ctx, "TESTWP-22")
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     headers = node_headers(client)
     readiness = {"checked_at": datetime.now(timezone.utc).isoformat(), "machine": [],
                  "projects": {"TESTWP": [blocked_condition]}}

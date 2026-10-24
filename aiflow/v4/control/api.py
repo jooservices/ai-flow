@@ -18,7 +18,6 @@ import os
 import secrets
 import shlex
 import socket
-import threading
 import time
 import uuid
 import html
@@ -49,8 +48,8 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, runtime_settings, shared_accounts, support_bundle as support_bundle_service,
-               system_check, tooling, version_release)
+               role_health, rollout, runtime_settings, shared_accounts, support_bundle,
+               system_check, system_check_api, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -62,7 +61,7 @@ from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
 from .events import Events
-from .github import GITHUB_APP_REQUIRED_PERMISSIONS, GitHubApp, GitHubError
+from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
 from .jira import Jira
@@ -71,54 +70,6 @@ from .report import ReportNotFound, build_report, render_csv, render_html, rende
 from . import notify
 
 log = logging.getLogger("aiflow4.api")
-
-_READINESS_REFRESH_LOCK = threading.Lock()
-_PENDING_READINESS_REFRESHES: set[str] = set()
-
-
-def _refresh_join_readiness(ctx, node: str) -> None:
-    """Run provider-backed readiness probes away from the one-use node join request."""
-    try:
-        system_check.refresh_node(ctx, node, "machine_joined")
-    except Exception as exc:  # noqa: BLE001 - a readiness outage must not affect a completed join
-        log.warning("machine-join system check failed for node %s (%s)", node, type(exc).__name__)
-
-
-def _schedule_join_readiness(ctx, node: str) -> None:
-    threading.Thread(target=_refresh_join_readiness, args=(ctx, node),
-                     name=f"aiflow4-join-readiness-{node}", daemon=True).start()
-
-
-def _refresh_heartbeat_readiness(ctx, node: str, trigger: str) -> None:
-    try:
-        system_check.refresh_node(ctx, node, trigger)
-    except Exception as exc:  # noqa: BLE001 - readiness outages must not delay the node heartbeat
-        log.warning("heartbeat system check failed for node %s (%s)", node, type(exc).__name__)
-    finally:
-        with _READINESS_REFRESH_LOCK:
-            _PENDING_READINESS_REFRESHES.discard(node)
-
-
-def _schedule_heartbeat_readiness(ctx, node: str, trigger: str) -> None:
-    """Run provider-backed heartbeat checks away from the node's desired-state response."""
-    with _READINESS_REFRESH_LOCK:
-        if node in _PENDING_READINESS_REFRESHES:
-            return
-        _PENDING_READINESS_REFRESHES.add(node)
-    threading.Thread(target=_refresh_heartbeat_readiness, args=(ctx, node, trigger),
-                     name=f"aiflow4-heartbeat-readiness-{node}", daemon=True).start()
-
-
-def _system_check_block_reason(readiness: dict | None, project: str, account: str,
-                               assigned_accounts: list[str]) -> str:
-    reasons = system_check.blocking_reasons(readiness, project, account, assigned_accounts)
-    if not reasons:
-        return ""
-    first = reasons[0]
-    name = str(first.get("name") or "System check")
-    guidance = str(first.get("action") or first.get("detail") or "Review this condition on the System check screen.")
-    return f"System check: {name}. {guidance}"
-
 
 PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
@@ -745,14 +696,6 @@ def _github_git_upstream(repository: str, suffix: str, method: str, params: list
                               headers=headers, content=body, auth=("x-access-token", token))
 
 
-def validate_github_app_permissions(details: dict[str, Any]) -> None:
-    permissions = details.get("permissions") or {}
-    missing = [name for name, level in GITHUB_APP_REQUIRED_PERMISSIONS.items()
-               if permissions.get(name) != level]
-    if missing:
-        raise ValueError("GitHub App does not have the permissions AI Flow requires")
-
-
 def notify_human_review(ctx: Ctx, key: str, ticket: dict | None = None) -> list[str]:
     """Notify the Jira assignee, or the configured owner, when a required human review starts."""
     ticket = ticket or ctx.db.one("SELECT key, project, labels, summary, fields FROM tickets WHERE key=%s", (key,))
@@ -793,23 +736,7 @@ class JoinInspectBody(BaseModel):
     join_token: str = Field(min_length=1, max_length=200)
 
 
-class HeartbeatBody(BaseModel):
-    slots_total: int = 1
-    slots_used: int = 0
-    release_version: str = ""
-    release_protocol: int = 0
-    tools: dict[str, Any] = Field(default_factory=dict)
-    services: dict[str, Any] = Field(default_factory=dict)  # test services: state per name (docs/v4/test-services.md)
-    metrics: dict[str, Any] = Field(default_factory=dict)
-    workers: list[dict[str, Any]] = Field(default_factory=list)
-    credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
-    system_conditions: list[dict[str, Any]] = Field(default_factory=list)
-    credential_checks: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    auto_fixed_tools: list[str] = Field(default_factory=list)
-    auto_fixed_conditions: list[str] = Field(default_factory=list)
-    runtime_settings: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
-    runtime_settings_public_key: str = Field(default="", max_length=2000)
-    environment_items: dict[str, list[str]] = Field(default_factory=dict)
+HeartbeatBody = system_check_api.HeartbeatBody
 
 
 class ClaimBody(BaseModel):
@@ -1335,7 +1262,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         base_repo = ctx.repo
         ctx.repo = lambda: shared_accounts.overlay(base_repo(), ctx.db)
         ctx._shared_accounts = True
-    support_bundle_service.control_log_buffer(
+    support_bundle.control_log_buffer(
         *(v if isinstance(v, str) else "" for v in (ctx.settings.support_log_dir, ctx.settings.o2_source))
     )
     app.state.license_sync_warnings = []
@@ -2238,7 +2165,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         creator = console_user(request, {"console.manage"}, target="support_bundle", action="create")
         ticket_key = body.ticket_key.strip().upper() or None
         try:
-            archive, inventory = support_bundle_service.build_support_bundle(ctx, ticket_key)
+            archive, inventory = support_bundle.build_support_bundle(ctx, ticket_key)
         except KeyError as exc:
             raise HTTPException(404, "unknown ticket") from exc
         except ValueError as exc:
@@ -2496,7 +2423,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not private_key or record.get("phase") not in {"manifest_setup", "import"}:
             raise ValueError("GitHub App setup is incomplete")
         gateway = pending_gateway(store, pending_id, meta)
-        validate_github_app_permissions(gateway.app_details())
+        system_check_api.validate_github_app_permissions(gateway.app_details())
         installation = gateway.installation_details(installation_id)
         if int(installation.get("id") or 0) != installation_id:
             raise ValueError("GitHub installation could not be verified")
@@ -2813,7 +2740,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             details = gateway.app_details()
             if int(details.get("id") or 0) != app_id:
                 raise ValueError("GitHub App id did not match")
-            validate_github_app_permissions(details)
+            system_check_api.validate_github_app_permissions(details)
             if not details.get("slug"):
                 raise ValueError("GitHub App slug is missing")
             record["app"] = app_metadata(details)
@@ -3059,19 +2986,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo = ctx.repo()
         counts = {row["project"]: int(row["count"]) for row in
                   ctx.db.all("SELECT project,count(*) AS count FROM tickets GROUP BY project")}
-        nodes = ctx.db.all("SELECT name,readiness,projects,dynamic FROM nodes ORDER BY name")
         probes = tooling.probe_report(ctx)
         projects = [{"key": project.key, "repo": project.repo,
                               "repositories": project.configured_repositories,
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack,
-                              "node_readiness": [{"name": node["name"],
-                                  **system_check.project_node_readiness(
-                                      node.get("readiness"), project.key,
-                                      [account.id for account in repo.accounts_on(node["name"])])}
-                                  for node in nodes if project.key in repo.projects_for_node(
-                                      node["name"], node.get("projects") or [], node.get("dynamic", False))],
+                              "node_readiness": system_check_api.project_readiness(ctx, project, repo),
                               "services": project.required_services,
                               "checks": probes.get(project.key, {})}
                     for project in sorted(repo.projects.values(), key=lambda item: item.key)]
@@ -3624,7 +3545,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(403, "invalid, expired, or used join token")
         ctx.events.emit("node.joined", node=row["name"], reason=f"{row['role']} · {row['projects'][0]}")
         repo = ctx.repo()
-        _schedule_join_readiness(ctx, row["name"])
+        system_check_api.schedule_join_readiness(ctx, row["name"])
         project = repo.projects[row["projects"][0]]
         sign_in_requests = ctx.db.all(
             "SELECT id FROM managed_ai_accounts"
@@ -3743,16 +3664,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
-        trigger = "upgrade" if prev and prev.get("release_version") and prev["release_version"] != reported_release \
-            else "heartbeat"
-        system_check.refresh_node(
-            ctx, node, trigger,
-            body.system_conditions if "system_conditions" in body.model_fields_set else None,
-            body.auto_fixed_tools if "auto_fixed_tools" in body.model_fields_set else None,
-            body.credential_checks if "credential_checks" in body.model_fields_set else None,
-            body.auto_fixed_conditions if "auto_fixed_conditions" in body.model_fields_set else None,
-            provider_checks=False)
-        _schedule_heartbeat_readiness(ctx, node, trigger)
+        system_check_api.refresh_heartbeat(ctx, node, body, prev, reported_release)
         runtime_settings_bootstrap = runtime_settings.bootstrap_settings_for_node(
             ctx, node, node_projects, inventory, body.runtime_settings_public_key, body.workers)
         return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
@@ -4593,8 +4505,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         reported_services = (node_row.get("metrics") or {}).get("services")
         projects = [p for p in projects
                     if not service_gaps(reported_services, repo.projects[p].required_services)]
-        projects = [p for p in projects
-                    if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
+        projects = [p for p in projects if not system_check.blocking_reasons(node_row.get("readiness"), p, account_id)]
         roles = set(acc.roles or ["dev", "verify"])
         # a role switched off for this account (docs/v4/role-health.md) takes one unresolved probation ticket
         modes = role_health.modes(ctx.db, acc.id, sorted(roles))
@@ -5176,19 +5087,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         if ctx.leases.cooling(account):
             return {"versions": [], "reason": "account quota is cooling or predicted to run out before reset"}
         versions = version_release.candidates(ctx, account, node)
-        assigned_accounts = [item.id for item in repo.accounts_on(node)]
-        readiness_blocked: list[str] = []
-        readiness_allowed: list[dict] = []
-        for candidate in versions:
-            reason = _system_check_block_reason(node_row.get("readiness"), candidate["project"],
-                                                account, assigned_accounts)
-            if reason:
-                readiness_blocked.append(reason)
-            else:
-                readiness_allowed.append(candidate)
-        if versions and not readiness_allowed:
-            return {"versions": [], "reason": readiness_blocked[0]}
-        versions = readiness_allowed
+        refusal = system_check_api.release_candidate_refusal(
+            node_row.get("readiness"), account, [item.id for item in repo.accounts_on(node)], versions)
+        if refusal:
+            return refusal
         versions = [item for item in versions
                     if not (item.get("project") in repo.projects
                             and repo.projects[item["project"]].settings_for_repo(item.get("repository", "")).get("containers")
@@ -5243,17 +5145,13 @@ def create_app(ctx: Ctx) -> FastAPI:
         can_take, reason = shared_accounts.may_take(ctx.db, acc, node)
         if not can_take:
             raise HTTPException(409, reason)
-        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work,readiness FROM nodes WHERE name=%s",
-                              (node,)) or {}
+        node_row = ctx.db.one("SELECT projects,dynamic,status,accepting_work,readiness FROM nodes WHERE name=%s", (node,)) or {}
         if not node_row.get("accepting_work", False):
             raise HTTPException(409, "machine is not accepting new work")
         if project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False)):
             raise HTTPException(403, "project is not assigned to this node")
-        readiness_reason = _system_check_block_reason(
-            node_row.get("readiness"), project.key, body.account,
-            [item.id for item in repo.accounts_on(node)])
-        if readiness_reason:
-            raise HTTPException(409, readiness_reason)
+        system_check_api.require_project_ready(node_row.get("readiness"), project.key, body.account,
+                                               [item.id for item in repo.accounts_on(node)])
         version = next((v for v in version_release.project_versions(ctx, project) if v["id"] == body.version_id), None)
         if not version:
             raise HTTPException(404, "configured unreleased Jira version not found")
@@ -5474,7 +5372,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:
             try:
-                support_bundle_service.store_run_log(ctx, run_id, run_log)
+                support_bundle.store_run_log(ctx, run_id, run_log)
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         outcome = body.outcome
@@ -7284,27 +7182,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                                            "duration_s", "pr_url", "already_done", "ended_age_s")}
         return data
 
-    @app.get("/v1/system-check")
-    def system_check_report(request: Request) -> dict:
-        user = (console_user(request, "node.operations.read") if ctx.settings.console_login
-                else optional_console_user(request))
-        scope = user.project_keys if user else None
-        return {"nodes": system_check.report_nodes(ctx, scope)}
-
-    @app.post("/v1/system-check/run")
-    def system_check_run(request: Request) -> dict:
-        console_user(request, "nodes.manage", target="system-check", action="run")
-        return {"nodes": system_check.refresh_all(ctx, "manual")}
-
-    @app.get("/v1/support-bundle")
-    def support_bundle(request: Request) -> JSONResponse:
-        user = (console_user(request, "node.operations.read") if ctx.settings.console_login
-                else optional_console_user(request))
-        scope = user.project_keys if user else None
-        return JSONResponse(system_check.support_bundle(ctx, scope), headers={
-            "Content-Disposition": 'attachment; filename="aiflow4-support.json"',
-            "Cache-Control": "no-store",
-        })
     @app.get("/v1/deploy/state")
     def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:
         """The registry state for aiflow4-autodeploy; works with console sign-in on because it checks the token."""
@@ -7726,4 +7603,5 @@ def create_app(ctx: Ctx) -> FastAPI:
     runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
+    system_check_api.register_routes(app, ctx, console_user, optional_console_user)
     return app

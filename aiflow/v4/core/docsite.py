@@ -212,7 +212,8 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
-    (re.compile(r"^\s*systemCheck(?:Error|Busy)?:"), "system-check"),
+    (re.compile(r"^\s*(?:S\.)?systemCheck(?:Error|Busy)?\s*(?::|=)|system-check(?:-run)?|"
+                r"S\.view === 'system-check'"), "system-check"),
     (re.compile(r"service_undeclared: 'Undeclared services'"), "cc"),
     (re.compile(r"service_undeclared: 'Undeclared services'"), "machines"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
@@ -330,7 +331,11 @@ def incident_kinds(source_root: Path = ROOT / "aiflow" / "v4") -> set[str]:
 
 def console_views(page: Path = UI) -> list[str]:
     """Screens of the console: the `view-*` sections of console.html."""
-    return re.findall(r'<section class="view" id="view-([a-z-]+)"', page.read_text(encoding="utf-8"))
+    views = re.findall(r'<section class="view" id="view-([a-z-]+)"', page.read_text(encoding="utf-8"))
+    extension = page.with_name("system-check.js")
+    if extension.is_file() and "system-check" not in views:
+        views.append("system-check")
+    return views
 
 
 def role_names() -> list[str]:

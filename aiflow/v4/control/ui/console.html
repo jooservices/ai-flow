@@ -543,7 +543,6 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-backup" aria-controls="view-backup" aria-selected="false" data-act="view" data-menu-view data-view="backup">Backup &amp; Restore</button>
       <button class="tab" role="tab" id="tab-integrations" aria-controls="view-integrations" aria-selected="false" data-act="view" data-menu-view data-view="integrations">Integrations</button>
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
-      <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
       <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" data-act="view" data-menu-view data-view="settings">Settings</button>
@@ -592,7 +591,6 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
-  <section class="view" id="view-system-check" role="tabpanel" aria-labelledby="tab-system-check" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
   <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
@@ -679,7 +677,6 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '', conflicts: null, conflictsError: '',
-  systemCheck: null, systemCheckError: '', systemCheckBusy: false,
   dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
@@ -725,15 +722,14 @@ var S = {
 S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
   lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
-  machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage', 'system-check': 'node.operations.read',
+  machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage',
   backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', settings: 'console.manage', support: 'console.manage' };
 var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
   review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
-  projects: '/projects', 'system-check': '/system-check', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', settings: '/settings', support: '/support' };
+  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', settings: '/settings', support: '/support' };
 var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
-  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']];
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];
 function viewOf(path) {
-  if (path.indexOf('/system-check') === 0) return 'system-check';
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
   if (path.indexOf('/settings') === 0) return 'settings';
@@ -774,7 +770,6 @@ var MENU_ITEMS = [
   { view: 'backup', label: 'Backup & Restore' },
   { view: 'integrations', label: 'Integrations' },
   { view: 'projects', label: 'Projects' },
-  { view: 'system-check', label: 'System check' },
   { view: 'licensing', label: 'Licence' },
   { view: 'notifications', label: 'Notifications' },
   { view: 'settings', label: 'Settings', permission: 'console.manage' }
@@ -1246,54 +1241,6 @@ function projectEnvironmentPanels(state) {
   }
   h += '</section>';
   return h;
-}
-function loadSystemCheck() {
-  fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
-    .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; if (S.view === 'system-check') renderSystemCheck(); })
-    .catch(function (e) { S.systemCheckError = String(e.message || e); if (S.view === 'system-check') renderSystemCheck(); });
-}
-function runSystemCheck() {
-  S.systemCheckBusy = true; renderSystemCheck();
-  fetch('/v1/system-check/run', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
-    .then(function () { return fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); }); })
-    .then(function (d) { S.systemCheck = d; S.systemCheckError = ''; })
-    .catch(function (err) { S.systemCheckError = String(err.message || err); })
-    .then(function () { S.systemCheckBusy = false; renderSystemCheck(); });
-}
-function renderSystemCheck() {
-  var root = $('#view-system-check'); if (!root) return;
-  var data = S.systemCheck, h = '<section class="panel"><div class="panel-h"><h2>System check</h2>';
-  h += '<span class="hint">Conditions needed before work can start, by machine and project</span><span class="spacer"></span>';
-  h += '<a class="btn sm" href="/v1/support-bundle">Download support bundle</a>';
-  if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="system-check-run"' + (S.systemCheckBusy ? ' disabled' : '') + '>Run now</button>';
-  h += '</div>';
-  if (S.systemCheckError) h += '<div class="stakeholder-error">' + esc(S.systemCheckError) + '</div>';
-  if (!data) h += '<div class="muted">Loading readiness results…</div>';
-  else if (!(data.nodes || []).length) h += '<div class="muted">No machine has joined yet. Results will appear after the first machine heartbeat.</div>';
-  else (data.nodes || []).forEach(function (node) {
-    var readiness = node.readiness || {};
-    h += '<section class="project-checks"><div class="panel-h"><strong class="mono">' + esc(node.name) + '</strong>';
-    h += '<span class="pill" data-tone="' + (node.status === 'online' ? 'ok' : 'warn') + '">' + esc(node.status) + '</span>';
-    h += '<span class="muted">Checked ' + esc(readiness.checked_at ? when(readiness.checked_at) : 'not yet') + ' · trigger ' + esc(readiness.trigger || 'pending') + '</span></div>';
-    function conditionRows(scope, conditions) {
-      h += '<h3>' + esc(scope) + '</h3>';
-      if (!conditions || !conditions.length) { h += '<div class="muted">No conditions reported yet.</div>'; return; }
-      h += '<div class="project-table"><table><thead><tr><th>Condition</th><th>Result</th><th>Details and action</th></tr></thead><tbody>';
-      conditions.forEach(function (item) {
-        var labels = { ready: 'Ready', fixed_automatically: 'Fixed automatically', needs_action: 'Needs an action', not_possible_on_this_machine: 'Not possible on this machine' };
-        var tone = item.result === 'ready' || item.result === 'fixed_automatically' ? 'ok' : 'warn';
-        var text = item.detail || '';
-        if (item.action) text += (text ? ' ' : '') + item.action;
-        h += '<tr><td>' + esc(item.name || item.id) + '</td><td><span class="pill" data-tone="' + tone + '">' + esc(labels[item.result] || item.result) + '</span></td><td>' + esc(text || '—') + '</td></tr>';
-      });
-      h += '</tbody></table></div>';
-    }
-    conditionRows('Machine', readiness.machine || []);
-    Object.keys(readiness.projects || {}).sort().forEach(function (project) { conditionRows('Project · ' + project, readiness.projects[project]); });
-    h += '</section>';
-  });
-  h += '</section>';
-  root.innerHTML = h;
 }
 function adminRequest(url, options) {
   return fetch(url, Object.assign({ cache: 'no-store' }, options || {})).then(function (r) {
@@ -4646,17 +4593,10 @@ function renderProjects() {
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
   else if (!rows.length && !invalid.length) h += '<div class="muted">No projects are configured.</div>';
   else if (rows.length) {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Machine readiness</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
-      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>';
-      var readiness = p.node_readiness || [], blocked = readiness.filter(function (n) { return n.blocked; });
-      if (blocked.length) blocked.forEach(function (n) {
-        var reasons = (n.conditions || []).map(function (c) { return esc(c.name || c.id) + ' — ' + esc(c.action || c.detail); }).join('; ');
-        h += '<div class="bad"><span class="mono">' + esc(n.name) + '</span>: ' + reasons + '</div>';
-      });
-      else h += '<span class="good">' + (readiness.length ? 'Ready on ' + readiness.length + ' machine' + (readiness.length === 1 ? '' : 's') : 'No assigned machine') + '</span>';
-      h += '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
+      h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-environment" data-key="' + esc(p.key) + '">Environment</button>';
@@ -5085,7 +5025,6 @@ function render() {
   else if (S.view === 'backup') renderBackup();
   else if (S.view === 'integrations') renderIntegrations();
   else if (S.view === 'projects') renderProjects();
-  else if (S.view === 'system-check') renderSystemCheck();
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
   else if (S.view === 'settings') renderRuntimeSettings();
@@ -5127,7 +5066,6 @@ var HINTS = {
   stakeholder: 'Open the test environment of a project, try the change, then record acceptance or feedback.',
   knowledge: 'Study cases, skills, guides and policies the AI workers read. Every save creates a new version.',
   backup: 'Review backup and weekly restore status, set a schedule and destination, and save the encryption key separately.',
-  'system-check': 'See every condition the flow needs per machine and project, run the check now, and follow the action for any that is not ready.',
   integrations: 'Connect Jira and GitHub first. Secrets are stored on the control machine and never shown.',
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
@@ -5148,7 +5086,7 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
@@ -5173,7 +5111,6 @@ function setView(v) {
   if (v === 'backup') loadBackups(true);
   if (v === 'integrations') loadIntegrations();
   if (v === 'projects') loadProjectList();
-  if (v === 'system-check') loadSystemCheck();
   if (v === 'licensing') loadLicensing();
   if (v === 'users') loadUsers();
   if (v === 'machines') pollServices();
@@ -5448,7 +5385,6 @@ document.addEventListener('click', function (e) {
   if (!el) { if (target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
-  else if (act === 'system-check-run') runSystemCheck();
   else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
   else if (act === 'capacity-refresh') { S.capacity.loadedAt = 0; loadCapacity(true); }
   else if (act === 'dashboard-card') openDashboardCard(el.getAttribute('data-card'));
@@ -5948,7 +5884,6 @@ render();
 if (S.view === 'knowledge') loadKnowledge(true);
 if (S.view === 'backup') loadBackups(true);
 if (S.view === 'projects') loadProjectList();
-if (S.view === 'system-check') loadSystemCheck();
 if (S.view === 'integrations') {
   var githubResult = new URLSearchParams(location.search).get('github');
   if (githubResult === 'connected') S.integrations.notice = 'GitHub is connected.';

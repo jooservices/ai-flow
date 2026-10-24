@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import redis
 
-from aiflow.v4.control import api
+from aiflow.v4.control import api, system_check_api
 from aiflow.v4.control.api import Ctx, create_app
 from aiflow.v4.control.db import DB, J
 from aiflow.v4.control.events import Events
@@ -452,7 +452,7 @@ def client(ctx):
     for thread in list(threading.enumerate()):
         if thread.name.startswith(("aiflow4-join-readiness-", "aiflow4-heartbeat-readiness-")):
             thread.join(timeout=15)
-    api._PENDING_READINESS_REFRESHES.clear()
+    system_check_api._PENDING_REFRESHES.clear()
 
 
 def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), priority: str = "Medium", blocked_by=()):

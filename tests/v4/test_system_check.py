@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shutil
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from aiflow.v4.control import api, loops, system_check
+from aiflow.v4.control import loops, system_check, system_check_api
 from aiflow.v4.control import notify
+from aiflow.v4.control.ui import build_console_page
 from aiflow.v4.core.system_check import condition
 from aiflow.v4.node import agent
 from conftest import add_ticket, join_node
@@ -75,7 +78,7 @@ def test_node_join_returns_token_while_provider_readiness_probe_is_slow(client, 
 def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(client, monkeypatch):
     provider_started = threading.Event()
     provider_release = threading.Event()
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     build_provider_conditions = system_check._github_project_conditions
 
     def slow_provider(*args, **kwargs):
@@ -118,8 +121,8 @@ def test_heartbeat_returns_desired_state_while_provider_readiness_probe_is_slow(
 
 
 def test_legacy_heartbeat_marks_unreported_machine_conditions_uncheckable(client, monkeypatch):
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
-    monkeypatch.setattr(api, "_schedule_heartbeat_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_heartbeat_readiness", lambda *_args: None)
     headers = _direct_join(client)
 
     response = client.post("/v1/nodes/cc/heartbeat", headers=headers, json={})
@@ -353,7 +356,7 @@ def test_hourly_system_check_revalidates_repository_branch_and_jira_access(clien
 
 
 def test_jira_browse_access_without_issue_write_permissions_needs_action(client, ctx, monkeypatch):
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": False, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": False, "ADD_COMMENTS": True,
@@ -374,7 +377,7 @@ def test_jira_browse_access_without_issue_write_permissions_needs_action(client,
 
 
 def test_jira_edit_and_transition_without_comment_permission_needs_action(client, ctx, monkeypatch):
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": False,
@@ -397,7 +400,7 @@ def test_jira_edit_and_transition_without_comment_permission_needs_action(client
 ])
 def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, missing_permission, label,
                                                                monkeypatch):
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     ctx.jira.project_permissions["TESTWP"] = {
         "BROWSE_PROJECTS": True, "CREATE_ISSUES": True, "EDIT_ISSUES": True, "LINK_ISSUES": True,
         "TRANSITION_ISSUES": True, "ADD_COMMENTS": True,
@@ -418,7 +421,7 @@ def test_jira_issue_creation_and_link_permissions_are_required(client, ctx, miss
 def test_jira_403_reports_missing_browse_permission_without_invalidating_credential(client, ctx, monkeypatch):
     from aiflow.v4.control.jira import JiraError
 
-    monkeypatch.setattr(api, "_schedule_join_readiness", lambda *_args: None)
+    monkeypatch.setattr(system_check_api, "schedule_join_readiness", lambda *_args: None)
     ctx.jira.projects = lambda: (_ for _ in ()).throw(
         JiraError("GET /rest/api/3/project/search -> 403: restricted project"))
     ctx.jira.project_permissions["TESTWP"] = {
@@ -498,19 +501,61 @@ def test_support_bundle_omits_untrusted_heartbeat_maps(client):
 
 def test_system_check_screen_and_clean_install_acceptance_include_results():
     root = Path(__file__).resolve().parents[2]
-    page = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    page = build_console_page()
     assert 'data-view="system-check">System check</button>' in page
     assert 'id="view-system-check"' in page and "fetch('/v1/system-check'" in page
     assert "Ready" in page and "Fixed automatically" in page and "Needs an action" in page
     assert "Not possible on this machine" in page and "/v1/support-bundle" in page
-    assert "esc(c.name || c.id) + ' — ' + esc(c.action || c.detail)" in page
-    assert "else if (act === 'system-check-run') runSystemCheck();" in page
+    assert "viewOf = function (path)" in page
+    assert "if (path.indexOf('/system-check') === 0) return 'system-check';" in page
+    assert "cannot start this project because" in page
+    assert "esc(item.name || item.id) + ' — ' + esc(item.action || item.detail)" in page
+    assert "event.target.closest('[data-act=\"system-check-run\"]')" in page
     run_handler = page.split("function runSystemCheck() {", 1)[1].split("\n}\n", 1)[0]
     assert "fetch('/v1/system-check/run'" in run_handler
     assert "fetch('/v1/system-check', { cache: 'no-store' })" in run_handler
     assert "S.systemCheck = d" in run_handler
     smoke = (root / "deploy/v4/ci/install-smoke.sh").read_text(encoding="utf-8")
     assert "/v1/system-check" in smoke and "/v1/support-bundle" in smoke
+
+
+def test_projects_readiness_escapes_node_condition_names_and_actions():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed to render the Projects readiness panel")
+    root = Path(__file__).resolve().parents[2]
+    page = (root / "aiflow/v4/control/ui/console.html").read_text(encoding="utf-8")
+    script = page.split("<script>\n", 1)[1].split("</script>", 1)[0].split("/* ---------- boot ---------- */", 1)[0]
+    extension = (root / "aiflow/v4/control/ui/system-check.js").read_text(encoding="utf-8")
+    prelude = """
+var projectsView = {innerHTML: '', insertAdjacentHTML: function (_position, html) { this.innerHTML += html; }};
+var inert = {hidden: true, parentNode: {insertBefore: function () {}}};
+var document = {addEventListener: function () {}, documentElement: {setAttribute: function () {},
+  classList: {add: function () {}, remove: function () {}}},
+getElementById: function () { return null; }, querySelector: function (selector) {
+  if (selector === '#view-projects') return projectsView;
+  if (selector === '#tab-system-check' || selector === '#view-system-check' || selector === '#tab-licensing'
+      || selector === '#view-licensing') return inert;
+  return null;
+}, querySelectorAll: function () { return []; }};
+var window = {matchMedia: function () { return {matches: false}; }, addEventListener: function () {}};
+var location = {pathname: '/cc'};
+var localStorage = {getItem: function () { return null; }, setItem: function () {}};
+var fetch = function () { return Promise.resolve({}); };
+var setInterval = function () {};
+"""
+    payload = json.dumps([{
+        "key": "NEWAPP", "node_readiness": [{"name": "node1", "blocked": True, "conditions": [{
+            "name": '<img src=x onerror="alert(1)">', "action": '<svg onload="alert(2)">', "detail": "unsafe",
+        }]}],
+    }])
+    driver = f"S.projectAdmin.projects = {payload}; renderProjectReadiness(); console.log(projectsView.innerHTML);"
+    result = subprocess.run([node, "-"], input=prelude + script + extension + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "<img" not in result.stdout and "<svg" not in result.stdout
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in result.stdout
+    assert "&lt;svg onload=&quot;alert(2)&quot;&gt;" in result.stdout
 
 
 def test_node_agent_sends_scrubbed_credential_and_machine_results(monkeypatch, tmp_path):

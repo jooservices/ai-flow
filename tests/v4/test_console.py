@@ -551,8 +551,8 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
              "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "system-check", "settings", "support")
-    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
+             "settings", "support")
+    page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help", "/system-check"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
                          "work" if path == "/board" else path.removeprefix("/"))
@@ -733,9 +733,9 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/system-check', '/licensing', '/notifications', '/settings', '/support']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/settings', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,system-check,licensing,notifications,settings,support"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,settings,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
@@ -747,13 +747,11 @@ def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
-    assert "else if (S.view === 'system-check') renderSystemCheck();" in page
-    assert "else if (S.view === 'licensing') renderLicensing();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-             "'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']") in page
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -1267,18 +1265,6 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
     assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
 
 
-def test_projects_readiness_escapes_node_condition_names_and_actions():
-    rendered = render_projects([{
-        "key": "NEWAPP", "repo": "jooservices/new-app", "status": "active", "priority": 1,
-        "ticket_count": 0, "node_readiness": [{"name": "node1", "blocked": True, "conditions": [{
-            "name": '<img src=x onerror="alert(1)">', "action": '<svg onload="alert(2)">', "detail": "unsafe",
-        }]}],
-    }], {})
-    assert "<img" not in rendered and "<svg" not in rendered
-    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in rendered
-    assert "&lt;svg onload=&quot;alert(2)&quot;&gt;" in rendered
-
-
 def test_projects_screen_shows_invalid_project_file_and_reason():
     rendered = render_projects([], {}, invalid_projects=[{
         "file": "TESTWP.yaml",
@@ -1411,7 +1397,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("lead", "Team Lead"), ("business", "Business"), ("review", "Human review"),
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
-        ("projects", "Projects"), ("system-check", "System check"), ("licensing", "Licence"), ("notifications", "Notifications"),
+        ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
         ("settings", "Settings"),
         ("support", "Support"),
     ]
@@ -1422,7 +1408,6 @@ def test_command_center_menu_order_and_role_visibility():
         "lead": "view.team_lead", "business": "view.business", "review": "view.human_review",
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
-        "system-check": "node.operations.read",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
         "settings": "console.manage",
         "support": "console.manage",

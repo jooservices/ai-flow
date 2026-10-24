@@ -48,15 +48,19 @@ def test_every_runbook_has_symptom_cause_and_fix():
 
 
 def test_every_console_screen_has_help_link_hint_and_target_page(site):
-    page = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
+    from aiflow.v4.control.ui import build_console_page
+
+    page = build_console_page()
     views = docsite.console_views()
     assert len(views) >= 10
     assert 'id="help-link"' in page and "helpUrl(S.view)" in page and "HELP_BASE = '/help/screens/'" in page
     hints = re.search(r"var HINTS = \{(.*?)\n\};", page, re.S).group(1)
     for view in views:
-        assert re.search(rf"\b{view}'?: '", hints), f"no first-use hint for {view}"
+        if view != "system-check":
+            assert re.search(rf"\b{view}'?: '", hints), f"no first-use hint for {view}"
         assert docsite.screen_doc_source(view).is_file()
         assert (site / "screens" / f"{view}.html").is_file()
+    assert "HINTS['system-check'] =" in page
 
 
 def test_users_and_sa_screen_guides_match_permissions_and_rendered_controls():
@@ -91,7 +95,7 @@ def test_help_route_serves_the_screen_pages(monkeypatch, site):
 
 def test_system_check_feature_document_is_its_console_help_page():
     source = "docs/v4/system-check.md"
-    ui = "aiflow/v4/control/ui/console.html"
+    ui = "aiflow/v4/control/ui/system-check.js"
     assert docsite.screen_doc_source("system-check") == ROOT / source
     assert docsite.collect_pages(with_api=False)["screens/system-check.md"] == (ROOT / source).read_text()
     assert docsite.documentation_gaps([ui, source], views={"system-check"}) == []
@@ -100,8 +104,8 @@ def test_system_check_feature_document_is_its_console_help_page():
 
 
 def test_system_check_console_state_maps_to_its_screen_documentation():
-    console = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
-    state_line = next(line for line in console.splitlines() if "systemCheck: null" in line)
+    console = (ROOT / "aiflow/v4/control/ui/system-check.js").read_text()
+    state_line = next(line for line in console.splitlines() if "S.systemCheck = null" in line)
     mapped = {view for pattern, view in docsite.SCREEN_LINE_VIEWS if pattern.search(state_line)}
     assert mapped == {"system-check"}
 

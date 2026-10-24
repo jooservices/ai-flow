@@ -215,6 +215,11 @@ class ControlRepo:
     policy_projects: dict[str, dict[str, Any]] = field(default_factory=dict)
     policy_archived: bool = False
     ref: str = ""
+    # True once machines and accounts were imported into the control database (docs/v4/inventory-in-database.md):
+    # accounts and project assignments then come from the database, including assignments migrated from project YAML.
+    inventory_in_db: bool = False
+    # Console-created project access retained separately until the one-time import makes nodes.projects authoritative.
+    managed_project_assignments: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, root: str | Path) -> "ControlRepo":
@@ -283,16 +288,20 @@ class ControlRepo:
         return out
 
     def projects_for_node(self, node: str, bound_projects: list[str], dynamic: bool = False) -> list[str]:
-        """Return the projects this node serves, using YAML as authority for configured nodes."""
-        configured = self.nodes.get(node)
+        """Return the projects this node serves: the database once inventory was imported, else YAML for configured nodes."""
+        configured = None if self.inventory_in_db else self.nodes.get(node)
+        dynamic = dynamic or self.inventory_in_db
         if configured:
-            assigned = list(configured.projects)
-            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            assigned = list(bound_projects) if self.inventory_in_db else list(configured.projects)
+            if not self.inventory_in_db:
+                assigned.extend(self.managed_project_assignments.get(node, []))
+                assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
             return [key for key in dict.fromkeys(assigned)
                     if key in self.projects and not self.projects[key].paused]
         if dynamic:
             assigned = list(bound_projects)
-            assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
+            if not self.inventory_in_db:
+                assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
             return [key for key in dict.fromkeys(assigned)
                     if key in self.projects and not self.projects[key].paused]
         return []

@@ -27,11 +27,13 @@ def owner_sign_in(client, ctx, role="owner"):
 
 def prepare_project_control(ctx, control_repo: Path):
     """Make repository refresh read the latest fake bot commit, as RepoCache does after git pull."""
+    from aiflow.v4.control import inventory
+
     (control_repo / "versions.lock").write_text(
         "schema: 1\ntools:\n  claude_code: 2.1.305\n  python3: '3.12'\n  uv: '0.8'\n",
         encoding="utf-8")
     ctx.settings.control_repo = str(control_repo)
-    ctx.repo = lambda: ControlRepo.load(control_repo)
+    ctx.repo = lambda: inventory.apply(ControlRepo.load(control_repo), ctx.db)
 
     def pull_fake_commit():
         if not ctx.github.commits:
@@ -100,7 +102,10 @@ def test_owner_adds_project_from_jira_and_github_catalog_and_worker_claims_ready
     assert config["repo"] == "jooservices/new-app" and config["base"] == "develop"
     assert config["stack"] == "python-3.12" and config["checks"] == ["vendor/bin/phpunit"]
     assert config["priority"] == 3 and config["limits"]["parallel"] == 2
-    assert config["merge"]["method"] == "squash" and config["nodes"] == ["cc", "node1"]
+    assert config["merge"]["method"] == "squash" and "nodes" not in config
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"] == ["TESTWP", "NEWAPP"]
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='cc'")["projects"] == ["TESTWP", "NEWAPP"]
+    assert ctx.db.one("SELECT managed_projects FROM nodes WHERE name='node1'")["managed_projects"] == ["NEWAPP"]
     assert saved.json()["commit"].startswith("commit")
 
     jql: list[str] = []

@@ -208,9 +208,16 @@ async function exerciseReviews(page, mode) {
   const reviewerToken = page.getByLabel('Reviewer access token', { exact: true });
   if (await reviewerToken.count()) await reviewerToken.fill(config.reviewerToken);
   const reviewTraffic = [];
+  const reviewResponses = [];
   page.on('request', (item) => {
     const url = new URL(item.url());
     if (url.pathname.startsWith('/v1/reviews/')) reviewTraffic.push(`${item.method()} ${url.pathname}`);
+  });
+  page.on('response', (item) => {
+    const url = new URL(item.url());
+    if (url.pathname.startsWith('/v1/reviews/')) reviewResponses.push({
+      path: url.pathname, status: item.status(), body: item.request().postData()
+    });
   });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`${error.name}: ${error.message}`));

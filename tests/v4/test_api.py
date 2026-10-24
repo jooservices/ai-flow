@@ -240,12 +240,13 @@ def test_sync_accounts_restores_projects_for_configured_node_rows_without_join_t
     assert ctx.repo().projects_for_node("node1", after["projects"], dynamic=False) == ["TESTFLOW"]
 
 
-def test_command_center_shows_copyable_join_command_and_device_code_sign_in_guide(client):
+def test_command_center_shows_copyable_join_command_and_screen_sign_in_guide(client):
     page = Path("aiflow/v4/control/ui/console.html").read_text()
     docs = Path("docs/v4/node-join.md").read_text()
     assert "Join a node" in page and "join-tokens" in page and "--token ' + d.token" in page
-    assert "AIFLOW4_JOIN_TOKEN" in page and "codex login --device-auth" in docs
-    assert "AI provider credential" in docs and "never sent to the control plane" in docs
+    assert "AIFLOW4_JOIN_TOKEN" in page and "Machines and AI" in docs
+    assert "provider link and code" in docs and "not sent to the control plane" in docs
+    assert "Map an account to the node name" not in docs and "codex login --device-auth" not in docs
 
 
 def test_joined_project_node_is_online_preflight_green_and_can_claim_project_ticket(client, ctx):
@@ -936,6 +937,7 @@ def test_node_without_ai_accounts_is_flagged(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title, detail FROM incidents WHERE kind='node_no_ai' AND subject='node3' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and "no AI account" in inc["title"] and "not described" in inc["detail"]
+    assert "Machines and AI screen" in inc["detail"] and "accounts.yaml" not in inc["detail"]
     s = client.get("/v1/state").json()
     n = next(x for x in s["nodes"] if x["name"] == "node3")
     assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False

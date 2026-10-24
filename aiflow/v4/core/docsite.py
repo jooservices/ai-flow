@@ -84,6 +84,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
+    "addMachineAccount": ("machines",),
+    "saveAccountSettings": ("machines",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),
@@ -175,6 +177,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "roleChecks": ("users",),
     "reviewByRole": ("review",),
     "submitReview": ("review",),
+    "bindReviewActions": ("review",),
+    "drawerNode": ("machines",),
     "projectRequestBody": ("projects",),
     "loadProjectList": ("projects",),
     "loadEnvironmentOverview": ("projects",),
@@ -197,9 +201,9 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
-    (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
     # The click handler resolves the clicked element from a text node first; the phone review buttons need it.
-    (re.compile(r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"
+    (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for|act\.indexOf\('review-'\)|bindReviewActions|"
+                r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"
                 r"\btarget\.closest\(|\btarget\.id === 'overlay'|submitReview\(reviewKey"), "review"),
     (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )

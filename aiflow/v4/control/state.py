@@ -46,7 +46,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         projects = repo.projects_for_node(n["name"], n["projects"], n["dynamic"])
         required = repo.tools_for_node(n["name"], projects)
         configured = repo.nodes.get(n["name"])
-        stack_gaps = {tool for project in (configured.projects if configured else [])
+        stack_gaps = {tool for project in (projects if repo.inventory_in_db else configured.projects if configured else [])
                       if project in repo.projects for tool in toolchain_gaps(
                           n["tools"], repo.projects[project].tools, repo.versions, repo.projects[project].stacks,
                           require_pins=bool(repo.projects[project].stacks))}
@@ -76,7 +76,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                            for s in desired_services],
                       "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
                       "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "accounts_assigned": assigned.get(n["name"], 0),
+                      "in_control_repo": (not bool(n["dynamic"]) if repo.inventory_in_db
+                                          else n["name"] in repo.nodes),
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "idle_since": _iso(n["idle_since"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",
@@ -100,6 +102,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "GROUP BY account_id")}
     sign_in_states = {row["id"]: row["sign_in_status"] for row in db.all(
         "SELECT id,sign_in_status FROM managed_ai_accounts WHERE removed_at IS NULL AND sign_in_status<>'idle'")}
+    account_names = {row["id"]: row["name"] for row in db.all(
+        "SELECT id,name FROM managed_ai_accounts WHERE removed_at IS NULL AND name<>''")}
     shared_managed = {row["id"] for row in db.all("SELECT id FROM shared_accounts WHERE managed")}
     for a in account_rows:
         cool = ctx.leases.cooling(a["id"])
@@ -121,7 +125,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         resets = [window.get("resets_at") for window in used_windows if window.get("resets_at")]
         usage = today_by_account.get(a["id"], {})
         accounts.append({
-            "id": a["id"], "provider": a["provider"], "node": (acc.machines[0] if acc.machines else ""),
+            "id": a["id"], "name": account_names.get(a["id"], ""), "provider": a["provider"],
+            "node": (acc.machines[0] if acc.machines else ""),
             "tier": a["tier"], "roles": acc.roles,
             "machines": machines_view(db, acc, node_status, include_signin=include_signin),
             "session_limit": acc.sessions, "shared": len(acc.machines) > 1,

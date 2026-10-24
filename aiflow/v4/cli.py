@@ -99,8 +99,9 @@ def build_ctx(s: Settings):
     ctx = Ctx(settings=s, db=db, leases=Leases.from_url(s.redis_url, s.redis_prefix),
               events=events, repo=repo_cache, jira=jira, github=github,
               refresh_repo=repo_cache.refresh, jira_auth=jira_auth)
-    from .control import shared_accounts
-    ctx.repo = lambda: shared_accounts.overlay(repo_cache(), db)  # accounts managed in Command Center
+    from .control import inventory, shared_accounts
+    # Accounts and machines come from the database (docs/v4/inventory-in-database.md); the repo only adds policy.
+    ctx.repo = lambda: shared_accounts.overlay(inventory.apply(repo_cache(), db), db)
     ctx._shared_accounts = True
     events.bind_incident_context(ctx)
     jira_auth.bind(ctx)
@@ -220,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--otel-collector", action="store_true")
     pi.add_argument("--health-timeout", type=int, default=300)
     pi.add_argument("--admin-email", default="", help="the first Super Administrator of Command Center (first install)")
+    sub.add_parser("import-inventory", help="one-time import of machines and AI accounts from the control repo into "
+                                            "the database (docs/v4/inventory-in-database.md); developers and CI only")
     ps = sub.add_parser("secret")
     ps.add_argument("action", choices=["set", "list"])
     ps.add_argument("name", nargs="?")
@@ -289,6 +292,30 @@ def main(argv: list[str] | None = None) -> int:
         from .control.db import DB
         db = DB(s.database_url)
         print("applied:", db.migrate() or "nothing")
+        return 0
+    if a.cmd == "import-inventory":
+        from .control import inventory
+        from .control.github import GitHubApp
+        from .core.controlrepo import ControlRepo
+        from .control.db import DB
+        db = DB(s.database_url)
+        try:
+            db.migrate()
+            result = inventory.import_control_repo(db, ControlRepo.load(s.control_repo))
+        finally:
+            db.close()
+        app_dir = Path(s.github_app_dir)
+        if (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file():
+            try:
+                gateway = GitHubApp(s.github_app_dir, s.github_org)
+                cleaned = inventory.remove_legacy_repository_inventory(gateway, Path(s.control_repo).name)
+                if cleaned:
+                    print(f"removed {len(cleaned)} legacy inventory files or assignments from the control repo")
+            except Exception as exc:  # noqa: BLE001 - the API startup retries cleanup with its configured connection
+                logging.getLogger("aiflow4").warning("control-repository inventory cleanup deferred (%s)",
+                                                     type(exc).__name__)
+        print("imported" if result["imported"] else "already imported; nothing changed",
+              f"({result['machines']} machines, {result['accounts']} AI accounts)")
         return 0
     if a.cmd == "control-api":
         import uvicorn

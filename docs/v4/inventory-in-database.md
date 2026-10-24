@@ -35,6 +35,11 @@ old file, runtime scheduling ignores it and backups filter it out.
   command shown on the screen.
 - `POST /v1/machines/{name}/accounts` adds an account (provider, optional name, sessions, jobs) and returns its
   sign-in link and code.
+- `POST /v1/projects` creates a project: the machines allowed to serve it are saved in the database and the project
+  file carries no `nodes` list.
+- `PATCH /v1/accounts/{id}` changes sessions, roles (jobs) or pause. An account that runs on several machines
+  (for example one imported with legacy extra machines) keeps one total session limit; the Machines and AI
+  screen offers its **Jobs** editor, which saves the roles to the database.
 - `GET /v1/state` and `GET /v1/deploy/state` read machines and accounts from the database, not from files.
 
 ## One-time import

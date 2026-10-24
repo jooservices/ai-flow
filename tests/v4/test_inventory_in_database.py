@@ -143,6 +143,25 @@ def test_repo_inventory_is_imported_once_and_never_overwrites_screen_changes(cli
     assert "ghost-01" not in desired["accounts"]
 
 
+def test_roles_of_an_imported_multi_machine_account_change_on_screen(client, ctx):
+    owner_session(client, ctx)
+    join_node(client, "node2")
+    configured = ctx.repo()
+    configured.account("codex-01").extra_machines = ["node2"]
+    client.app.state.import_inventory()
+    assert ctx.db.one("SELECT node FROM account_machines WHERE account_id='codex-01'") == {"node": "node2"}
+    shown = next(a for a in client.get("/v1/state").json()["accounts"] if a["id"] == "codex-01")
+    assert shown["shared"] is True and len(shown["machines"]) == 2
+
+    # Roles only: a shared account keeps its one total session limit, so the screen sends no worker count.
+    changed = client.patch("/v1/accounts/codex-01", json={"jobs": ["verify"]})
+    assert changed.status_code == 200, changed.text
+    assert ctx.db.one("SELECT roles,parallel FROM managed_ai_accounts WHERE id='codex-01'") == {
+        "roles": ["verify"], "parallel": 1}
+    assert ctx.repo().account("codex-01").roles == ["verify"]
+    assert ctx.repo().account("codex-01").extra_machines == ["node2"]
+
+
 def test_joined_machine_serves_its_project_after_the_import_without_the_node_file(client, ctx, control_repo):
     owner_session(client, ctx)
     client.app.state.import_inventory()

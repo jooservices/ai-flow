@@ -2950,17 +2950,20 @@ function submitReview(key, action, comment) {
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 
-// Review actions use a capture listener so another page handler or a redraw cannot swallow the click before it is
-// dispatched. The note is read from the clicked card at dispatch time.
-document.addEventListener('click', function (e) {
-  var button = e.target && e.target.closest ? e.target.closest('[data-act^="review-"]') : null;
-  if (!button) return;
-  var card = button.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
-  if (!card) return;
-  e.preventDefault();
-  submitReview(button.getAttribute('data-key'), button.getAttribute('data-act').slice('review-'.length),
-    note ? note.value : '');
-}, true);
+function bindReviewActions() {
+  // Review actions use a capture listener so another page handler or a redraw cannot swallow the click before it
+  // is dispatched. The note is read from the clicked card at dispatch time.
+  document.addEventListener('click', function (e) {
+    var button = e.target && e.target.closest ? e.target.closest('[data-act^="review-"]') : null;
+    if (!button) return;
+    var card = button.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
+    if (!card) return;
+    e.preventDefault();
+    submitReview(button.getAttribute('data-key'), button.getAttribute('data-act').slice('review-'.length),
+      note ? note.value : '');
+  }, true);
+}
+bindReviewActions();
 
 /* ---------- Knowledge: versioned resources in aiflow-control ---------- */
 var KNOWLEDGE_TYPES = { study_case: 'Study case', knowledge: 'Knowledge', skill: 'Skill', agent: 'Agent', guide: 'Guide', policy: 'Policy' };
@@ -4205,9 +4208,10 @@ function loadAccountSignIn(id) {
 function saveAccountSettings(id) {
   var form = $('#account-edit-' + CSS.escape(id)); if (!form) return;
   var jobs = $$('[data-edit-job]:checked', form).map(function (item) { return item.value; });
-  var sessions = Number($('[name="sessions"]', form).value || 0);
+  var sessionsField = $('[name="sessions"]', form), payload = {jobs: jobs};
+  if (sessionsField) payload.sessions = Number(sessionsField.value || 0);  /* shared accounts keep one total limit */
   machineRequest('/v1/accounts/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessions: sessions, jobs: jobs})})
+    body: JSON.stringify(payload)})
     .then(function () { S.machines.accountEditor = null; S.machines.error = ''; poll(); renderMachines(); })
     .catch(function (e) { S.machines.error = String(e.message || e); renderMachines(); });
 }
@@ -4321,14 +4325,14 @@ function renderMachines() {
           : ' · ' + esc(a.parallel) + ' session' + (a.parallel === 1 ? '' : 's') +
             ' · ' + esc((a.jobs || []).join(', ') || 'no jobs')) + '</span><span class="spacer"></span>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-pause" data-id="' + esc(a.id) + '" data-paused="' + String(!a.paused) + '">' + (a.paused ? 'Resume' : 'Pause') + '</button>';
-      if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">Sessions and jobs</button>';
+      if (consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-edit" data-id="' + esc(a.id) + '">' + (sharedAssignment ? 'Jobs' : 'Sessions and jobs') + '</button>';
       if (!sharedAssignment && consoleCan('nodes.manage')) h += '<button class="btn sm" data-act="account-signin" data-id="' + esc(a.id) + '">' + (a.status === 'signed_out' ? 'Sign in' : 'Sign in again') + '</button>';
       if (consoleCan('nodes.manage') && removableAssignment) h += '<button class="btn sm danger" data-act="acc-remove-machine" data-account="' + esc(a.id) + '" data-node="' + esc(n.name) + '" data-last="' + ((a.machines || []).length === 1 ? '1' : '') + '">Remove</button>';
       else if (consoleCan('nodes.manage') && !sharedAssignment) h += '<button class="btn sm danger" data-act="account-remove" data-id="' + esc(a.id) + '">Remove</button>';
       h += '</div><div class="machine-facts"><span>Tokens today <strong>' + esc(tok(machineUsage.tokens_today || 0)) + '</strong></span>';
       h += '<span>Cost today <strong>' + esc(usd(machineUsage.cost_today || 0)) + '</strong></span><span>State <strong>' + esc(accLabel(a)) + '</strong></span></div>';
-      if (!sharedAssignment && state.accountEditor === a.id) {
-        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false"><label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label><div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
+      if (state.accountEditor === a.id && consoleCan('nodes.manage')) {
+        h += '<form class="project-form machine-form" id="account-edit-' + esc(a.id) + '" onsubmit="return false">' + (sharedAssignment ? '' : '<label>Sessions at once<input name="sessions" type="number" min="1" max="8" value="' + esc(a.parallel || 1) + '"></label>') + '<div class="wide job-options">' + jobChecks(a.jobs || [], 'data-edit-job') + '</div>';
         h += '<div class="project-actions wide"><button class="btn primary" data-act="account-edit-save" data-id="' + esc(a.id) + '">Save changes</button><button class="btn" data-act="account-edit-cancel">Cancel</button></div></form>';
       }
       h += '</section>';
@@ -5292,6 +5296,7 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-pause') setProjectPaused(el.getAttribute('data-key'), el.getAttribute('data-paused') === 'true');
   else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();
+  else if (act.indexOf('review-') === 0) { /* no-op */ }  // sent by the capture listener in bindReviewActions
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
   else if (act === 'integ-refresh') loadJiraIntegrations();

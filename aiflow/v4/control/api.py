@@ -3815,6 +3815,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             paused = body.action == "pause" if body.action else account.paused
             save_managed_account(account, roles, sessions, paused, connection=connection)
             connection.execute("UPDATE accounts SET roles=%s,updated_at=now() WHERE id=%s", (roles, account_id))
+            connection.execute("UPDATE shared_accounts SET roles=%s WHERE id=%s", (roles, account_id))
             action = body.action or "update"
             payload = {"sessions": sessions, "jobs": account_jobs(roles), "paused": paused}
             audit_in(connection, "ai-account", action, account_id, "", None, user.subject, True, "updated", payload)

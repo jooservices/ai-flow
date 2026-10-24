@@ -170,6 +170,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "roleChecks": ("users",),
     "reviewByRole": ("review",),
     "submitReview": ("review",),
+    "bindReviewActions": ("review",),
+    "drawerNode": ("machines",),
     "projectRequestBody": ("projects",),
     "loadProjectList": ("projects",),
     "loadEnvironmentOverview": ("projects",),
@@ -191,7 +193,7 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
-    (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
+    (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for|act\.indexOf\('review-'\)|bindReviewActions"), "review"),
     (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )
 

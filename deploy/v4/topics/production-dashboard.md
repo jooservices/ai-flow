@@ -1,0 +1,1 @@
+- [Production health dashboard and SLO](../../../docs/OBSERVABILITY.md): OpenObserve dashboard for blocked signatures, status time, autonomous completion, rework, master rescues, repeated study-case signatures, AI minutes and tokens

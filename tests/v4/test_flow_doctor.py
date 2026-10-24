@@ -414,7 +414,7 @@ def test_human_console_configuration_mutation_is_an_intervention_and_creates_a_b
     row = ctx.db.one("SELECT source,actor,action,target,reason FROM operator_interventions")
     assert row["source"] == "control-api" and row["actor"] == email
     assert row["action"] == "ai-account.update" and row["target"] == "claude-01"
-    assert "Authenticated console mutation" in row["reason"] and "updated" in row["reason"]
+    assert "Authenticated principal owner@example.test" in row["reason"] and "updated" in row["reason"]
     assert flow_doctor.create_intervention_bugs(ctx) == 1
     bug = ctx.db.one("SELECT bug_ticket_key FROM operator_interventions")
     assert bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"

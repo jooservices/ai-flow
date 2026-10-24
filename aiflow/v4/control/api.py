@@ -72,6 +72,7 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
+OWNER_TOKEN_PRINCIPAL = "owner-token"
 RELEASES = Path("/srv/aiflow/control/releases")
 _NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
@@ -1401,7 +1402,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
             writable()
-            return ""
+            return OWNER_TOKEN_PRINCIPAL
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         user = resolve_session_user(ctx.db, claims) if claims else None
         if user and has_permission(user.effective_roles, "knowledge.approve"):
@@ -1427,12 +1428,12 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "deploy"
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
-              result: str, payload: dict | None = None) -> None:
+              result: str, payload: dict | None = None, *, human: bool = False) -> None:
         with ctx.db.pool.connection() as connection:
-            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
+            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload, human=human)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
-                  accepted: bool, result: str, payload: dict | None = None) -> None:
+                 accepted: bool, result: str, payload: dict | None = None, *, human: bool = False) -> None:
         entry = connection.execute(
             "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
@@ -1440,14 +1441,15 @@ def create_app(ctx: Ctx) -> FastAPI:
              J(with_connection(target, payload)))).fetchone()
         # A signed console principal is a human, even when the mutation goes through a product API route. Keep the
         # intervention and write-audit entry in one transaction; the doctor creates its Bug on the next pass.
-        if accepted and entry and connection.execute(
-                "SELECT 1 AS person FROM console_users WHERE email=%s AND disabled=false", (actor,)).fetchone():
+        known_console_user = bool(actor and connection.execute(
+            "SELECT 1 AS person FROM console_users WHERE email=%s AND disabled=false", (actor,)).fetchone())
+        if accepted and entry and (human or known_console_user):
             connection.execute(
                 "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
                 " VALUES (%s,'control-api',%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
                 (f"control-api:{entry['id']}", actor, f"{target}.{action}"[:120],
-                 (ticket or target)[:300],
-                 f"Authenticated console mutation: {action} on {target} completed as {result[:200]}.",
+                 (ticket or target)[:300], f"Authenticated principal {actor} completed {action} on {target}: "
+                 f"{result[:200]}.",
                  J({"write_audit_id": entry["id"], "write_target": target, "write_action": action,
                     "ticket": ticket, "result": result[:200]})))
 
@@ -2325,28 +2327,37 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/licensing/activate")
     def activate_license(body: LicenseKeyBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
-                                             ctx.settings.license_public_key)
+            state = licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                              ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated online",
+              {"source": "online", "plan": state["plan"]}, human=True)
+        return state
 
     @app.post("/v1/licensing/offline")
     def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+            state = licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated offline",
+              {"source": "offline", "plan": state["plan"]}, human=True)
+        return state
 
     @app.put("/v1/licensing/limits")
     def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_limits")
         try:
-            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+            state = licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_limits", "", "", None, user.subject, True, "limits updated",
+              {"plan": body.plan, "limits": body.limits}, human=True)
+        return state
 
     @app.get("/v1/licensing/usage")
     def licensing_usage(request: Request) -> dict:
@@ -7167,9 +7178,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
         try:
             item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
-                                       title=body.title, content=body.content, actor=body.actor or user.subject)
+                                       title=body.title, content=body.content, actor=user.subject)
         except knowledge.Invalid as exc:
             raise HTTPException(422, str(exc)) from exc
+        audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
+              {"kind": body.kind, "project": body.project, "scope": body.scope}, human=True)
         return knowledge._pack_item(item)
 
     @app.post("/v1/knowledge/items/{item_id}/{action}")
@@ -7177,12 +7190,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
                             node=str(item_id))
         try:
-            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=body.actor or user.subject,
+            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=user.subject,
                                            content=body.content, title=body.title,
                                            duplicate_id=body.duplicate_id, project=body.project,
                                            scope=body.scope or None, epic=body.epic)
         except knowledge.Invalid as exc:
             raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
+        audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
+              {"item_id": item_id}, human=True)
         return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
@@ -7221,7 +7236,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                             current["version"] if current else 0, actor, action, branch, int(pr["number"]),
                             str(pr.get("html_url") or "")))
                 audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
-                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
+                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha},
+                      human=True)
                 ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
                                 account=actor, outcome="pending", reason=f"PR #{pr['number']}",
                                 data={"type": kind, "id": resource_id})
@@ -7238,7 +7254,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
                                      archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
         audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
-              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
+              {"type": kind, "id": resource_id, "version": row["version"], "path": path}, human=True)
         ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
                         data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
         return row
@@ -7261,24 +7277,24 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/knowledge/resources")
     def knowledge_save(body: KnowledgeBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
         if not body.id.strip():
             raise HTTPException(400, "resource id is required")
         action = "archive" if body.archived else "save"
-        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, body.actor, action,
+        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, user.subject, action,
                                       body.version)
 
     @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
     def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
-                     node=resource_id)
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
+                            node=resource_id)
         load_managed_resources()
         version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
                              " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
         if not version:
             raise HTTPException(404, "resource version not found")
         return submit_resource_change(kind, resource_id, version["title"], version["content"], version["archived"],
-                                      body.actor, "restore")
+                                      user.subject, "restore")
 
     @app.post("/v1/knowledge/proposals/{proposal_id}/approve")
     def knowledge_approve(proposal_id: int, body: KnowledgeApprovalBody,
@@ -7290,7 +7306,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "policy proposal is no longer pending")
         github = github_control_gateway(ctx)
         repo_name = Path(ctx.settings.control_repo).name
-        owner = _owner or body.approved_by.strip() or "owner"
+        owner = _owner
         try:
             merged = github.merge_pr(repo_name, int(proposal["pr_number"]),
                                          f"Policy: {proposal['title']}", "squash")
@@ -7307,7 +7323,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
                    (owner, proposal_id))
         audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
-              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
+              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]},
+              human=True)
         ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
                         account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
                         data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})

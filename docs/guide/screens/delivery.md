@@ -7,7 +7,7 @@ Delivery (`/delivery`) shows one project at a time.
 ## What you see
 
 - Pick the project at the top; the summary tiles show its tickets by state.
-- **Board**: mirrors Jira every 20 seconds. Cards move as workers claim, finish and verify.
+- **Board**: mirrors Jira every 20 seconds. Cards move as workers claim, finish and verify. A ticket that is **Ready to merge** stays in the Human review column until the flow merges it (see `docs/v4/merged-means-done.md`).
 - **Needs attention**: tickets waiting on a person, older than 30 minutes, or whose last run did not finish.
 - **Recent runs** of the project.
 - Epic progress above the board; open an epic to see its tickets.

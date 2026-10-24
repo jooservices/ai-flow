@@ -85,7 +85,7 @@ def run_prepared_bootstrap(tmp_path, php_version):
     log = tmp_path / "curl.log"
     grant = {"name": "aiflow-node-01", "role": "worker", "project": "TESTWP", "stack": "php-8.3",
              "release": "v4.1.0"}
-    env = {"PATH": str(bin_dir), "CURL_LOG": str(log), "GRANT": json.dumps(grant),
+    env = {"PATH": str(bin_dir), "TMPDIR": str(tmp_path), "CURL_LOG": str(log), "GRANT": json.dumps(grant),
            "PHP_STUB_VERSION": php_version or "", "AIFLOW4_SERVER_INSTALLER_PREPARED": "1"}
     result = subprocess.run(["/bin/sh", str(BOOTSTRAP), "--token", "tok"], capture_output=True, text=True,
                             env=env, timeout=60)

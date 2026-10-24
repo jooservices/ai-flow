@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 import select
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import quote
 from pathlib import Path
@@ -967,6 +968,248 @@ def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str
         return {k: dict(v) for k, v in state.items()}
 
 
+@dataclass
+class _AgentLoopState:
+    tools: dict[str, str]
+    tools_at: float
+    previous_metrics: tuple[int, int] | None = None
+    project_environment: dict[str, list[str]] = field(default_factory=dict)
+    pending_network_events: list[dict] = field(default_factory=list)
+    operation_thread: threading.Thread | None = None
+    toolchain_thread: threading.Thread | None = None
+    toolchain_signature: str = ""
+    toolchain_result: dict[str, object] = field(default_factory=dict)
+    toolchain_lock: threading.Lock = field(default_factory=threading.Lock)
+    service_thread: threading.Thread | None = None
+    service_state: dict[str, dict] = field(default_factory=dict)
+    service_names: list[str] = field(default_factory=list)
+    service_at: float = 0.0
+    service_lock: threading.Lock = field(default_factory=threading.Lock)
+    container_cleanup_thread: threading.Thread | None = None
+    container_cleanup_at: float = 0.0
+    sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = field(default_factory=dict)
+    probe_thread: threading.Thread | None = None
+    probe_tried: dict[tuple[str, str], float] = field(default_factory=dict)
+    auto_fixed_tools: set[str] = field(default_factory=set)
+    auto_fixed_conditions: set[str] = field(default_factory=set)
+
+
+def collect_heartbeat(state: _AgentLoopState, name: str, slots: int, relay: PolicyRelay | None,
+                       runtime_settings_public_key: str) -> dict:
+    """Collect the node metrics, tools, workers and settings reported in each heartbeat."""
+    node_metrics, state.previous_metrics = metrics(state.previous_metrics)
+    if time.time() - state.tools_at > 600:
+        state.tools, state.tools_at = tool_versions(), time.time()
+    workers = worker_states()
+    used = sum(1 for worker in workers if worker.get("state") == "working" and worker.get("alive"))
+    environment_items = {}
+    for project, names in state.project_environment.items():
+        local = read_env_file(f"/etc/aiflow/projects/{project}.env")
+        present = [name for name in names if local.get(name)]
+        if present:
+            environment_items[project] = present
+    return {
+        "slots_total": slots,
+        "slots_used": used,
+        "release_version": installed_release() or VERSION,
+        "release_protocol": 1,
+        "tools": state.tools,
+        "services": _services_snapshot(state.service_state, state.service_lock),
+        "metrics": {**node_metrics, "hostname": socket.gethostname(),
+                    "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
+        "workers": workers,
+        "credential_expiries": credential_expiries(workers),
+        "system_conditions": _system_machine_conditions(node_metrics, state.auto_fixed_conditions),
+        "credential_checks": _credential_conditions(workers),
+        "auto_fixed_tools": sorted(state.auto_fixed_tools),
+        "auto_fixed_conditions": sorted(state.auto_fixed_conditions),
+        "runtime_settings": runtime_settings_inventory(),
+        "runtime_settings_public_key": runtime_settings_public_key,
+        "environment_items": environment_items,
+    }
+
+
+def send_heartbeat(api: ControlClient, name: str, heartbeat: dict, state: _AgentLoopState | None = None) -> dict:
+    """Send one collected heartbeat and return the desired node state from control."""
+    desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", heartbeat, retries=2)["desired"]
+    if state is not None:  # fixes are reported once, after control has received them
+        state.auto_fixed_tools.clear()
+        state.auto_fixed_conditions.clear()
+    return desired
+
+
+def _record_heartbeat_failure(state: _AgentLoopState, error: Exception) -> None:
+    if "control API unreachable" in str(error) or type(error).__module__.startswith("httpx"):
+        state.pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
+                                             "retry": True, "attempts": 2,
+                                             "reason": "node-agent could not reach the control API",
+                                             "occurred_at": time.time()})
+        state.pending_network_events = state.pending_network_events[-100:]
+    log.warning("heartbeat failed: %s", error)
+
+
+def _apply_runtime_settings_bootstrap(name: str, desired: dict, stop: threading.Event, every_s: int) -> bool:
+    bootstrap = desired.get("runtime_settings_bootstrap") or []
+    if not bootstrap:
+        return True
+    try:
+        apply_runtime_settings_bootstrap(name, bootstrap)
+    except Exception as exc:  # noqa: BLE001 - do not start workers without backed-up settings applied
+        log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
+        stop.wait(every_s)
+        return False
+    return True
+
+
+def _apply_toolchains(desired: dict, state: _AgentLoopState, name: str) -> None:
+    stack_request = {"release": desired.get("release", ""),
+                     "project_stacks": desired.get("project_stacks", {}),
+                     "versions": desired.get("versions", {}),
+                     "required_tools": desired.get("tools", []),
+                     "requested_tools": desired.get("tool_repairs", [])}
+    signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
+    if signature != state.toolchain_signature and (state.toolchain_thread is None or
+                                                    not state.toolchain_thread.is_alive()):
+        from .operations import prepare_project_toolchains
+
+        with state.toolchain_lock:
+            state.toolchain_result.clear()
+
+        def prepare(request=stack_request):
+            try:
+                required_tools = request["required_tools"]
+                requested_tools = request["requested_tools"]
+                if requested_tools:
+                    result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                        required_tools, requested_tools=requested_tools)
+                elif required_tools:
+                    result = prepare_project_toolchains(request["project_stacks"], request["versions"],
+                                                        required_tools)
+                else:
+                    result = prepare_project_toolchains(request["project_stacks"], request["versions"])
+                with state.toolchain_lock:
+                    state.toolchain_result.clear()
+                    state.toolchain_result.update(result)
+            except Exception as exc:  # noqa: BLE001 - failed preflight is reported as a project warning
+                log.warning("project toolchain preparation failed: %s", type(exc).__name__)
+
+        state.toolchain_signature = signature
+        state.toolchain_thread = threading.Thread(target=prepare, name=f"aiflow4-toolchain-{name}", daemon=True)
+        state.toolchain_thread.start()
+    if state.toolchain_thread is None or state.toolchain_thread.is_alive():
+        return
+    # The post-install probe is reported once; later heartbeats use the normal tool_versions() refresh.
+    with state.toolchain_lock:
+        prepared_tools = state.toolchain_result.pop("tools", None)
+        installed_tools = state.toolchain_result.pop("installed", [])
+        request_gaps = state.toolchain_result.pop("request_gaps", [])
+    if isinstance(prepared_tools, dict) and prepared_tools:
+        state.tools.update({str(key): str(value) for key, value in prepared_tools.items()})
+        state.tools_at = time.time()
+    if isinstance(installed_tools, list):
+        state.auto_fixed_tools.update(str(tool) for tool in installed_tools)
+    if request_gaps:
+        state.toolchain_signature = ""
+
+
+def _apply_services(desired: dict, state: _AgentLoopState, name: str) -> None:
+    wanted = sorted({str(service) for services in (desired.get("project_services") or {}).values()
+                     for service in services})
+    if wanted != state.service_names:
+        state.service_names = wanted
+        state.service_at = 0.0
+        with state.service_lock:  # services no project declares any more are no longer reported
+            for stale in set(state.service_state) - set(wanted):
+                state.service_state.pop(stale, None)
+    if not wanted or time.time() - state.service_at < SERVICE_CHECK_S or (
+            state.service_thread is not None and state.service_thread.is_alive()):
+        return
+    from .services import prepare_services
+
+    def check_services(names=list(wanted)):
+        result = prepare_services(names)
+        with state.service_lock:
+            state.service_state.update(result)
+
+    state.service_at = time.time()
+    state.service_thread = threading.Thread(target=check_services, name=f"aiflow4-services-{name}", daemon=True)
+    state.service_thread.start()
+
+
+def _apply_probes(api: ControlClient, name: str, desired: dict, state: _AgentLoopState,
+                  manage_workers: bool) -> None:
+    asked = [probe for probe in desired.get("check_probes") or []
+             if time.time() - state.probe_tried.get((probe["project"], probe["signature"]), 0.0) > PROBE_RETRY_S]
+    if not asked or not manage_workers or (state.probe_thread is not None and state.probe_thread.is_alive()):
+        return
+    from .probes import run_check_probes
+    from ..worker.loop import RUN_AS
+
+    for probe in asked:
+        state.probe_tried[(probe["project"], probe["signature"])] = time.time()
+
+    def probe_checks(items=asked):
+        try:
+            run_check_probes(api, name, items, "/srv/aiflow", RUN_AS if _has_worker_user() else [])
+        except Exception as exc:  # noqa: BLE001 - control asks again after PROBE_RETRY_S
+            log.warning("project check probe failed: %s", type(exc).__name__)
+
+    state.probe_thread = threading.Thread(target=probe_checks, name=f"aiflow4-check-probe-{name}", daemon=True)
+    state.probe_thread.start()
+
+
+def _apply_queued_work(api: ControlClient, name: str, state: _AgentLoopState) -> None:
+    if state.pending_network_events:
+        try:
+            api.call("POST", "/v1/events", {"events": list(state.pending_network_events)})
+            state.pending_network_events = []
+        except Exception as exc:  # noqa: BLE001 - retry the event delivery on the next heartbeat
+            log.warning("heartbeat error report not recorded: %s", type(exc).__name__)
+    if state.operation_thread is None or not state.operation_thread.is_alive():
+        state.operation_thread = threading.Thread(
+            target=_process_node_operation_logged, args=(api, name), name=f"aiflow4-node-operation-{name}")
+        state.operation_thread.start()
+
+
+def _apply_worker_state(api: ControlClient, name: str, desired: dict, state: _AgentLoopState,
+                        manage_workers: bool) -> None:
+    if manage_workers:
+        reconcile(desired.get("workers") or desired.get("accounts", []))
+        _run_disk_cleanup(clean_scratch, state.auto_fixed_conditions)
+        _run_disk_cleanup(lambda: clean_worktrees(api, name), state.auto_fixed_conditions)
+        sweep_test_databases()
+        if (state.tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
+                and time.time() - state.container_cleanup_at >= 24 * 60 * 60
+                and (state.container_cleanup_thread is None or not state.container_cleanup_thread.is_alive())):
+            from ..worker.containers import prune_image_cache
+
+            state.container_cleanup_at = time.time()
+            state.container_cleanup_thread = threading.Thread(
+                target=prune_image_cache, name=f"aiflow4-container-prune-{name}", daemon=True)
+            state.container_cleanup_thread.start()
+    if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
+        self_update(api, desired.get("release", ""), name)
+
+
+def apply_heartbeat(api: ControlClient, name: str, desired: dict, state: _AgentLoopState,
+                    manage_workers: bool, stop: threading.Event, every_s: int) -> bool:
+    """Apply control's settings, sign-ins, repairs, checks, worker assignments and release instruction."""
+    if not _apply_runtime_settings_bootstrap(name, desired, stop, every_s):
+        return False
+    state.project_environment = desired.get("project_environment", {})
+    requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
+    sync_provider_sign_ins(api, name, requests, state.sign_in_processes)
+    _apply_toolchains(desired, state, name)
+    _apply_services(desired, state, name)
+    _apply_probes(api, name, desired, state, manage_workers)
+    _apply_queued_work(api, name, state)
+    try:
+        _apply_worker_state(api, name, desired, state, manage_workers)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("heartbeat failed: %s", exc)
+    return True
+
+
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
     from ..core.runtime_settings_crypto import node_public_key
@@ -977,196 +1220,21 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     relay = PolicyRelay(control_url) if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1" else None
     if relay:
         relay.start()
-    tools, tools_at, prev = tool_versions(), time.time(), None
-    auto_fixed_tools: set[str] = set()
-    auto_fixed_conditions: set[str] = set()
-    project_environment: dict[str, list[str]] = {}
-    pending_network_events: list[dict] = []
-    operation_thread: threading.Thread | None = None
-    toolchain_thread: threading.Thread | None = None
-    toolchain_signature = ""
-    toolchain_result: dict[str, object] = {}
-    toolchain_lock = threading.Lock()
-    service_thread: threading.Thread | None = None
-    service_state: dict[str, dict] = {}
-    service_names: list[str] = []
-    service_at = 0.0
-    service_lock = threading.Lock()
-    container_cleanup_thread: threading.Thread | None = None
-    container_cleanup_at = 0.0
-    sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
-    probe_thread: threading.Thread | None = None
-    probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
+    state = _AgentLoopState(tools=tool_versions(), tools_at=time.time())
     try:
         while not stop.is_set():
             try:
-                m, prev = metrics(prev)
-                if time.time() - tools_at > 600:
-                    tools, tools_at = tool_versions(), time.time()
-                ws = worker_states()
-                used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
-                environment_items = {}
-                for project, names in project_environment.items():
-                    local = read_env_file(f"/etc/aiflow/projects/{project}.env")
-                    present = [name for name in names if local.get(name)]
-                    if present:
-                        environment_items[project] = present
-                heartbeat = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
-                    "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
-                    "release_protocol": 1,
-                    "tools": tools,
-                    "services": _services_snapshot(service_state, service_lock),
-                    "metrics": {**m, "hostname": socket.gethostname(),
-                                "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws, "credential_expiries": credential_expiries(ws),
-                    "system_conditions": _system_machine_conditions(m, auto_fixed_conditions),
-                    "credential_checks": _credential_conditions(ws),
-                    "auto_fixed_tools": sorted(auto_fixed_tools),
-                    "auto_fixed_conditions": sorted(auto_fixed_conditions),
-                    "runtime_settings": runtime_settings_inventory(),
-                    "runtime_settings_public_key": runtime_settings_public_key,
-                    "environment_items": environment_items}, retries=2)
-                auto_fixed_tools.clear()
-                auto_fixed_conditions.clear()
-                desired = heartbeat["desired"]
-            except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
-                if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
-                    pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
-                                                   "retry": True, "attempts": 2,
-                                                   "reason": "node-agent could not reach the control API",
-                                                   "occurred_at": time.time()})
-                    pending_network_events = pending_network_events[-100:]
-                log.warning("heartbeat failed: %s", e)
+                heartbeat = collect_heartbeat(state, name, slots, relay, runtime_settings_public_key)
+                desired = send_heartbeat(api, name, heartbeat, state)
+            except Exception as exc:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
+                _record_heartbeat_failure(state, exc)
                 stop.wait(every_s)
                 continue
-            bootstrap = desired.get("runtime_settings_bootstrap") or []
-            if bootstrap:
-                try:
-                    apply_runtime_settings_bootstrap(name, bootstrap)
-                except Exception as exc:  # noqa: BLE001 - do not start workers without backed-up settings applied
-                    log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
-                    stop.wait(every_s)
-                    continue
-            project_environment = desired.get("project_environment", {})
-            sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
-            sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
-            stack_request = {"release": desired.get("release", ""),
-                             "project_stacks": desired.get("project_stacks", {}),
-                             "versions": desired.get("versions", {}),
-                             "required_tools": desired.get("tools", []),
-                             "requested_tools": desired.get("tool_repairs", [])}
-            signature = json.dumps(stack_request, sort_keys=True, separators=(",", ":"))
-            if signature != toolchain_signature and (toolchain_thread is None or not toolchain_thread.is_alive()):
-                from .operations import prepare_project_toolchains
-                with toolchain_lock:
-                    toolchain_result.clear()
-
-                def prepare(request=stack_request):
-                    try:
-                        required_tools = request["required_tools"]
-                        requested_tools = request["requested_tools"]
-                        if requested_tools:
-                            result = prepare_project_toolchains(request["project_stacks"], request["versions"],
-                                                                required_tools, requested_tools=requested_tools)
-                        elif required_tools:
-                            result = prepare_project_toolchains(request["project_stacks"], request["versions"],
-                                                                required_tools)
-                        else:
-                            result = prepare_project_toolchains(request["project_stacks"], request["versions"])
-                        with toolchain_lock:
-                            toolchain_result.clear()
-                            toolchain_result.update(result)
-                    except Exception as exc:  # noqa: BLE001 - failed preflight is reported as a project warning
-                        log.warning("project toolchain preparation failed: %s", type(exc).__name__)
-
-                toolchain_signature = signature
-                toolchain_thread = threading.Thread(target=prepare, name=f"aiflow4-toolchain-{name}", daemon=True)
-                toolchain_thread.start()
-            if toolchain_thread is not None and not toolchain_thread.is_alive():
-                # Apply the post-install probe once; later heartbeats rely on the regular tool_versions() refresh
-                # so tools fixed by hand or by repair are reported again.
-                with toolchain_lock:
-                    prepared_tools = toolchain_result.pop("tools", None)
-                    installed_tools = toolchain_result.pop("installed", [])
-                    request_gaps = toolchain_result.pop("request_gaps", [])
-                if isinstance(prepared_tools, dict) and prepared_tools:
-                    tools.update({str(k): str(v) for k, v in prepared_tools.items()})
-                    tools_at = time.time()
-                if isinstance(installed_tools, list):
-                    auto_fixed_tools.update(str(tool) for tool in installed_tools)
-                if request_gaps:
-                    # A failed install is retried at the next heartbeat while the control plane still requests it.
-                    toolchain_signature = ""
-            wanted = sorted({str(s) for services in (desired.get("project_services") or {}).values()
-                             for s in services})
-            if wanted != service_names:
-                service_names = wanted
-                service_at = 0.0
-                with service_lock:  # a service no project declares any more is no longer reported
-                    for stale in set(service_state) - set(wanted):
-                        service_state.pop(stale, None)
-            if wanted and time.time() - service_at >= SERVICE_CHECK_S and (
-                    service_thread is None or not service_thread.is_alive()):
-                from .services import prepare_services
-
-                def check_services(names=list(wanted)):
-                    result = prepare_services(names)
-                    with service_lock:
-                        service_state.update(result)
-
-                service_at = time.time()
-                service_thread = threading.Thread(target=check_services, name=f"aiflow4-services-{name}", daemon=True)
-                service_thread.start()
-            # check commands of the projects on a clean checkout: once per project and set of commands (control asks)
-            asked = [p for p in desired.get("check_probes") or []
-                     if time.time() - probe_tried.get((p["project"], p["signature"]), 0.0) > PROBE_RETRY_S]
-            if asked and manage_workers and (probe_thread is None or not probe_thread.is_alive()):
-                from .probes import run_check_probes
-                from ..worker.loop import RUN_AS
-                for p in asked:
-                    probe_tried[(p["project"], p["signature"])] = time.time()
-
-                def probe_checks(items=asked):
-                    try:
-                        run_check_probes(api, name, items, "/srv/aiflow", RUN_AS if _has_worker_user() else [])
-                    except Exception as exc:  # noqa: BLE001 - control asks again after PROBE_RETRY_S
-                        log.warning("project check probe failed: %s", type(exc).__name__)
-
-                probe_thread = threading.Thread(target=probe_checks, name=f"aiflow4-check-probe-{name}", daemon=True)
-                probe_thread.start()
-            if pending_network_events:
-                try:
-                    api.call("POST", "/v1/events", {"events": list(pending_network_events)})
-                    pending_network_events = []
-                except Exception as e:  # noqa: BLE001 - retry the event delivery on the next heartbeat
-                    log.warning("heartbeat error report not recorded: %s", type(e).__name__)
-            if operation_thread is None or not operation_thread.is_alive():
-                operation_thread = threading.Thread(
-                    target=_process_node_operation_logged, args=(api, name),
-                    name=f"aiflow4-node-operation-{name}")
-                operation_thread.start()
-            try:
-                if manage_workers:
-                    reconcile(desired.get("workers") or desired.get("accounts", []))
-                    _run_disk_cleanup(clean_scratch, auto_fixed_conditions)
-                    _run_disk_cleanup(lambda: clean_worktrees(api, name), auto_fixed_conditions)
-                    sweep_test_databases()
-                    if (tools.get(CONTAINER_RUNTIME_TOOL, "missing") != "missing"
-                            and time.time() - container_cleanup_at >= 24 * 60 * 60
-                            and (container_cleanup_thread is None or not container_cleanup_thread.is_alive())):
-                        from ..worker.containers import prune_image_cache
-
-                        container_cleanup_at = time.time()
-                        container_cleanup_thread = threading.Thread(
-                            target=prune_image_cache, name=f"aiflow4-container-prune-{name}", daemon=True)
-                        container_cleanup_thread.start()
-                if os.environ.get("AIFLOW4_SELF_UPDATE", "1") == "1":
-                    self_update(api, desired.get("release", ""), name)
-            except Exception as e:  # noqa: BLE001
-                log.warning("heartbeat failed: %s", e)
+            if not apply_heartbeat(api, name, desired, state, manage_workers, stop, every_s):
+                continue
             stop.wait(every_s)
     finally:
-        for _request_id, cancel, _thread in sign_in_processes.values():
+        for _request_id, cancel, _thread in state.sign_in_processes.values():
             cancel.set()
         if relay:
             relay.stop()

@@ -64,6 +64,30 @@ def test_keyword_area_points_to_the_console_page(db):
     assert footprint["hot"] == [CONSOLE]
 
 
+def test_hot_scheduling_covers_develop_giants_node_agent_and_shared_tests():
+    develop_baseline_giants = (
+        "aiflow/v4/control/api.py",
+        "aiflow/v4/control/ui/console.html",
+        "aiflow/supervisor.py",
+        "tests/v4/test_console.py",
+        "aiflow/v4/worker/containers.py",
+        "tests/test_supervisor.py",
+    )
+    shared_test_paths = (
+        "tests/v4/conftest.py",
+        "tests/v4/fixtures/grok-streaming-json.jsonl",
+        "tests/v4/test_api.py",
+        "tests/v4/console_browser_suite.cjs",
+        "tests/v4/log_viewer_browser_suite.cjs",
+    )
+
+    for path in (*develop_baseline_giants, "aiflow/v4/node/agent.py", *shared_test_paths):
+        assert hotfiles.is_hot(path), f"{path} is missing from JAIF-253 hot-file scheduling"
+    assert hotfiles.paths_in("Update tests/v4/fixtures/grok-streaming-json.jsonl") == [
+        "tests/v4/fixtures/grok-streaming-json.jsonl"
+    ]
+
+
 def test_blocking_needs_a_shared_hot_file():
     mine = {"hot": ["a.py", "b.py"]}
     assert hotfiles.blocking_ticket(mine, {"X-1": ["c.py"], "X-2": ["b.py", "z"]}) == ("X-2", ["b.py"])

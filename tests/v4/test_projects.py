@@ -138,6 +138,7 @@ def test_concurrent_project_creates_serialize_the_final_licence_slot(ctx, contro
     prepare_project_control(ctx, control_repo)
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
     limits["free"]["projects"] = 2
+    ctx.settings.license_public_key = "test-issuer-public-key"
     ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
     assert licensing.snapshot(ctx.db, "")["limits"]["projects"] == 2
     assert len(ctx.repo().projects) == 1

@@ -246,7 +246,7 @@ class ProjectSettingsTests(unittest.TestCase):
         (base / "aiflow").mkdir()
         (base / "aiflow.toml").write_text("[defaults]\n")
         (base / "aiflow" / "a.toml").write_text('[project]\njira_key = "JAIF"\nrepo = "ai-flow"\nmax_parallel = 1\nrequire_human = true\n')
-        (base / "aiflow" / "b.toml").write_text('[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmerge_method = "squash"\nhuman_on_deployment = false\n')
+        (base / "aiflow" / "b.toml").write_text('[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmerge_method = "squash"\nhuman_on_deployment = false\nloop_limit = 1\n')
         self.cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test"}, config_dir=base)
 
     def tearDown(self):
@@ -311,6 +311,14 @@ class ProjectSettingsTests(unittest.TestCase):
     def test_each_project_has_its_repo_and_merge_method(self):
         self.assertEqual((self.cfg.project("JAIF-9").repo, self.cfg.project("JOOCX-9").repo), ("ai-flow", "crawlerx"))
         self.assertEqual((self.cfg.project("JAIF-9").merge_method, self.cfg.project("JOOCX-9").merge_method), ("merge", "squash"))
+
+    def test_loop_limit_can_be_overridden_per_project(self):
+        self.assertEqual((self.cfg.loop_limit_for("JAIF-9"), self.cfg.loop_limit_for("JOOCX-9")), (3, 1))
+        sup = self.sup()
+        for round_number in range(1, 3):
+            sup.send_back("JOOCX-9", FakeRepo(), f"project failure {round_number}", "details", [])
+        self.assertEqual(sup.jira.moves[-1], ("JOOCX-9", "Blocked"))
+        self.assertEqual(json.loads(sup.redis.get("blocked:JOOCX-9"))["rework_rounds"], 2)
 
 
 class GateEligibilityTests(unittest.TestCase):
@@ -1119,6 +1127,33 @@ class SendBackTests(unittest.TestCase):
         self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
         self.assertEqual(json.loads(sup.redis.get("blocked:JAIF-9"))["rework_rounds"], 3)
 
+    def test_third_rework_is_allowed_and_fourth_blocks_with_reasons_for_rescue(self):
+        sup = make()
+        self.assertEqual(sup.cfg.loop_limit, 3)
+        for round_number in range(1, 4):
+            sup.send_back("JAIF-9", FakeRepo(), f"failed check {round_number}", f"reason {round_number}", [])
+        self.assertEqual(sup.jira.moves, [("JAIF-9", "To Do")] * 3)
+        self.assertEqual(sup.redis.get("cycles:JAIF-9"), "3")
+
+        sup.send_back("JAIF-9", FakeRepo(), "failed check 4", "reason 4", [])
+
+        blocked = json.loads(sup.redis.get("blocked:JAIF-9"))
+        self.assertEqual((blocked["kind"], blocked["rework_rounds"]), ("Rework", 4))
+        self.assertEqual(sup.jira.moves[-1], ("JAIF-9", "Blocked"))
+        block_comment = sup.jira.comments[-1][1]
+        for round_number in range(1, 5):
+            self.assertIn(f"failed check {round_number}", block_comment)
+            self.assertIn(f"reason {round_number}", block_comment)
+
+        incidents = find_incidents({
+            "now": 1000,
+            "thresholds": {"blocked_minutes": 30, "stuck_minutes": 120, "ci_wait_minutes": 120, "rework_limit": 3},
+            "tickets": [{"key": "JAIF-9", "status": "Blocked", "status_since": 0, "labels": [], "blocked_kind": blocked["kind"],
+                         "rework_rounds": blocked["rework_rounds"], "loop_limit": 3}],
+            "heartbeats": {}, "stale_seconds": 300, "role_pools": {},
+        })
+        self.assertEqual([incident.id for incident in incidents], ["rework:JAIF-9"])
+
     def test_blocking_resets_the_counters_so_an_unblock_starts_fresh(self):
         sup = make()
         sup.redis.data.update({"attempts:K-1:developer": "3", "attempts:K-1:qa": "2", "cycles:K-1": "7", "dev:K-1": "Codex"})
@@ -1126,6 +1161,20 @@ class SendBackTests(unittest.TestCase):
         for name in ("attempts:K-1:developer", "attempts:K-1:qa", "cycles:K-1"):
             self.assertNotIn(name, sup.redis.data)
         self.assertIn("dev:K-1", sup.redis.data)  # who developed it is still known
+
+    def test_owner_unblock_resets_rework_rounds_and_history(self):
+        sup = make()
+        sup.redis.data.update({"cycles:K-1": "4", "rework-history:K-1": '[{"round": 4, "reason": "old failure"}]'})
+        sup.block("K-1", "loop limit exceeded", kind="Rework")
+        self.assertIsNone(sup.redis.get("cycles:K-1"))
+        self.assertIsNotNone(sup.redis.get("rework-history:K-1"))  # retained while rescue can inspect the reasons
+
+        sup.clear_block("K-1")
+        sup.send_back("K-1", FakeRepo(), "new failure", "new reason", [])
+
+        self.assertEqual(sup.redis.get("cycles:K-1"), "1")
+        self.assertEqual(json.loads(sup.redis.get("rework-history:K-1")), [{"round": 1, "reason": "new failure\nnew reason"}])
+        self.assertNotIn(("K-1", "Blocked"), sup.jira.moves[1:])
 
     def test_review_items_are_remembered_as_sent(self):
         sup = make()

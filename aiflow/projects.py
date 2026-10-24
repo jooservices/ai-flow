@@ -18,6 +18,7 @@ from .config import ConfigError
 
 SETTINGS = {"base": str, "hotfix_base": str, "developer": str, "reviewer": str, "qa": str, "require_human": bool,
             "human_on_deployment": bool, "auto_merge": bool, "ci_required": bool, "merge_method": str, "max_parallel": int,
+            "loop_limit": int,
             "highest_developer": str, "release_check": str, "tag_prefix": str, "deploy_command": str,
             "deploy_timeout_minutes": int, "deploy_on": str, "workers": int}
 IDENTITY = {"name": str, "jira_key": str, "repo": str, "company": str, "database": str}
@@ -34,6 +35,7 @@ RUNTIME = {
     "wait_note_minutes": (int, "AIFLOW_WAIT_NOTE_MINUTES"), "heartbeat_stale_seconds": (int, "AIFLOW_HEARTBEAT_STALE_SECONDS"),
     "ci_wait_minutes": (int, "AIFLOW_CI_WAIT_MINUTES"), "feedback_settle_minutes": (int, "AIFLOW_FEEDBACK_SETTLE_MINUTES"),
     "gate_poll_seconds": (int, "AIFLOW_GATE_POLL_SECONDS"), "max_cycles": (int, "AIFLOW_MAX_CYCLES"),
+    "loop_limit": (int, "AIFLOW_MAX_CYCLES"),
     "agent_order": (list, "AIFLOW_AGENT_ORDER"), "agent_models": (list, "AIFLOW_AGENT_MODELS"), "explicit_only_ais": (list, "AIFLOW_EXPLICIT_ONLY_AIS"),
     "ignored_authors": (list, "AIFLOW_IGNORED_AUTHORS"), "opencode_model": (str, "AIFLOW_OPENCODE_MODEL"),
     "health_ticket": (str, "AIFLOW_HEALTH_TICKET"), "workspace_name": (str, "AIFLOW_WORKSPACE_NAME"),
@@ -71,6 +73,7 @@ class Project:
     deploy_timeout_minutes: int = 30
     deploy_on: str = "base"  # "all" also runs after hotfix and release merges
     workers: int = 0  # workers of this project (aiflow-work@<KEY>-<n>); worker 1 serves only this project, the others may take other projects' tickets
+    loop_limit: int | None = None  # None uses the global supervisor loop limit
 
     def role(self, role: str) -> str:
         return {"developer": self.developer, "reviewer": self.reviewer, "qa": self.qa}.get(role, "")
@@ -116,6 +119,8 @@ def _read(path: Path) -> dict:
 
 def _runtime(table: dict, where: str) -> dict[str, str]:
     """The `[runtime]` table as AIFLOW_* values; a list becomes a comma separated string."""
+    if "max_cycles" in table and "loop_limit" in table:
+        raise ConfigError(f"{where}: set `max_cycles` or `loop_limit`, not both.")
     unknown = sorted(set(table) - set(RUNTIME))
     if unknown:
         raise ConfigError(f"{where}: unknown setting {', '.join(unknown)} (known: {', '.join(sorted(RUNTIME))}).")
@@ -130,6 +135,16 @@ def _runtime(table: dict, where: str) -> dict[str, str]:
             raise ConfigError(f"{where}: `{key}` must be a list of text values.")
         values[name] = ",".join(value) if kind is list else str(value)
     return values
+
+
+def _project_settings(table: dict, where: str) -> dict:
+    """Accept the legacy setting name as an alias, while refusing two names for one value in a table."""
+    table = dict(table)
+    if "max_cycles" in table and "loop_limit" in table:
+        raise ConfigError(f"{where}: set `max_cycles` or `loop_limit`, not both.")
+    if "max_cycles" in table:
+        table["loop_limit"] = table.pop("max_cycles")
+    return table
 
 
 def desired_ids(registry: Registry, machine: str) -> list[str]:
@@ -155,7 +170,10 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
     for section in general:
         if section not in ("defaults", "machines", "runtime"):
             raise ConfigError(f"{general_file}: unknown section `{section}` (known: defaults, machines, runtime).")
-    defaults = replace(fallback, **_typed(general.get("defaults", {}), SETTINGS, f"{general_file} [defaults]"))
+    defaults = replace(fallback, **_typed(_project_settings(general.get("defaults", {}), f"{general_file} [defaults]"),
+                                           SETTINGS, f"{general_file} [defaults]"))
+    if defaults.loop_limit is not None and defaults.loop_limit < 0:
+        raise ConfigError(f"{general_file} [defaults]: `loop_limit` must be a whole number of 0 or more.")
     workers: dict[str, int] = {}
     ai_limits: dict[str, dict[str, int]] = {}
     max_workers: dict[str, int] = {}
@@ -185,11 +203,13 @@ def load(config_dir: Path, fallback: Project) -> Registry | None:
         data = _read(path)
         if set(data) != {"project"} or not isinstance(data["project"], dict):
             raise ConfigError(f"{path}: needs one [project] table and nothing else.")
-        table = _typed(data["project"], {**IDENTITY, **SETTINGS}, f"{path} [project]")
+        table = _typed(_project_settings(data["project"], f"{path} [project]"), {**IDENTITY, **SETTINGS}, f"{path} [project]")
         for needed in ("jira_key", "repo"):
             if not table.get(needed):
                 raise ConfigError(f"{path} [project]: `{needed}` is required.")
         project = replace(defaults, **table)
+        if project.loop_limit is not None and project.loop_limit < 0:
+            raise ConfigError(f"{path} [project]: `loop_limit` must be a whole number of 0 or more.")
         if project.database and not DATABASE_NAME.fullmatch(project.database):
             raise ConfigError(f"{path}: database must be 2-24 lowercase letters, digits, '-' or '_', starting with a letter.")
         if project.merge_method not in MERGE_METHODS:

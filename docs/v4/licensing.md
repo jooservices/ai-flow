@@ -72,7 +72,9 @@ alert names the licence limit as the cause when ready tickets get no worker beca
 The control API reads the licence state on these routes:
 
 - `GET /v1/licensing` returns the plan, limits, usage, grace state and the "no licence required" flag.
-- `GET /v1/licensing/status` returns the short state used by the console banner.
+- `GET /v1/licensing/status` returns the short state used by the console banner: `status`, `reason`, `plan`,
+  `expires_at`, `grace_until`, `read_only` and `licence_required`. The notice on the Licence screen is rendered by
+  `aiflow/v4/control/ui/licensing_notice.js`, served at `/console-assets/licensing-notice.js`.
 - `GET /v1/work/candidates` and `POST /v1/work/claim` offer and claim tickets; a limit that stops new work is named
   in the `reason` and opens the `licence_limit` incident.
 - `GET /v1/ba-chat/candidate`, `GET /v1/master/candidate`, `GET /v1/version-releases/candidates` and

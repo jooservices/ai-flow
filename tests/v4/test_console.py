@@ -124,7 +124,8 @@ console.log(knowledgeView.innerHTML);
 
 
 def render_projects(projects: list[dict], catalog: dict, preflight: dict | None = None,
-                    user: dict | None = None, repository_editor: dict | None = None) -> str:
+                    user: dict | None = None, repository_editor: dict | None = None,
+                    invalid_projects: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
@@ -134,6 +135,7 @@ def render_projects(projects: list[dict], catalog: dict, preflight: dict | None 
 var projectsView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
 S.projectAdmin.projects = {json.dumps(projects)};
+S.projectAdmin.invalidProjects = {json.dumps(invalid_projects or [])};
 S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
@@ -1261,6 +1263,19 @@ def test_projects_screen_lists_lifecycle_fields_and_preflight_controls():
                  "Needs owner", "node1: missing python3", "Run preflight", "Save project"):
         assert text in rendered
     assert 'data-act="project-pause"' in rendered and 'data-act="project-remove"' in rendered
+
+
+def test_projects_screen_shows_invalid_project_file_and_reason():
+    rendered = render_projects([], {}, invalid_projects=[{
+        "file": "TESTWP.yaml",
+        "reason": "unknown test service names: postgress. Use postgres or redis.",
+    }])
+
+    assert 'role="alert"' in rendered
+    assert "Project files could not be loaded." in rendered
+    assert "TESTWP.yaml" in rendered
+    assert "unknown test service names: postgress" in rendered
+    assert "unavailable to machines until their files are corrected in aiflow-control" in rendered
 
 
 def test_projects_editor_renders_live_epics_and_repository_specific_settings():

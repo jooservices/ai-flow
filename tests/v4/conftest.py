@@ -63,11 +63,11 @@ def test_database_url():
     # Keep the per-session database visible as active to the node agent's idle test-database sweeper. Individual
     # test DB pools close between tests, and a long docs/browser check must not make this still-running session
     # look like an abandoned database.
-    anchor = psycopg.connect(own, autocommit=True)
+    keepalive = psycopg.connect(own, autocommit=True)
     try:
         yield own
     finally:
-        anchor.close()
+        keepalive.close()
         try:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:

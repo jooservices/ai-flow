@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+from . import environment as environment_reports
 from . import escalations, flow_doctor, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
@@ -301,6 +302,9 @@ def watchdog(ctx: Ctx) -> None:
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
     tooling.sweep(ctx)
     tooling.check_stalled_waits(ctx)
+    # environment items a run reported missing, and the daily scan of open tickets for server wording
+    environment_reports.sweep(ctx)
+    environment_reports.scan_if_due(ctx)
     # nodes that joined but have no AI account: they add slots, never work
     with_accounts = {m for a in repo.accounts for m in a.machines}
     for n in ctx.db.all("SELECT name, status FROM nodes"):

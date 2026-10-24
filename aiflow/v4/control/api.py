@@ -18,6 +18,7 @@ import os
 import secrets
 import shlex
 import socket
+import time
 import uuid
 import html
 import json
@@ -52,7 +53,7 @@ from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import capacity, review_metrics
+from . import capacity, conflict_loss, hotfiles, merge_queue, review_metrics
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
@@ -72,6 +73,8 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
+HUMAN_QUEUE_WAIT_S = 90  # an approve click waits this long for its turn in the merge queue
+HUMAN_QUEUE_POLL_S = 2
 RELEASES = Path("/srv/aiflow/control/releases")
 _NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
@@ -1697,6 +1700,30 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("github.merge", ticket=run["ticket_key"], run_id=str(run["id"]), fence=run["fence"],
                         account=run["account_id"], node=node or run["node"],
                         outcome="merged" if ok else "refused", reason=res.get("message", "")[:200])
+        return res
+
+    def queued_merge(run: dict, number: int, title: str, method: str, node: str) -> dict:
+        """Merge a human-approved pull request through the merge queue, like a verify run does.
+
+        The click waits (up to HUMAN_QUEUE_WAIT_S) for its turn behind pull requests that are ready earlier; a
+        branch that had to be brought up to date is not merged on this click (its checks must run on the new head)
+        and the reviewer approves again."""
+        project = ctx.repo().projects.get(run["project"])
+        if not project:
+            raise HTTPException(404, "project is not configured")
+        repository = repository_for_run(run, project)
+        deadline = time.monotonic() + HUMAN_QUEUE_WAIT_S
+        while True:
+            res = merge_queue.merge_next(ctx.db, github_gateway(ctx, repository), repository, number,
+                                         run["ticket_key"], str(run["id"]),
+                                         lambda: merge_command(run, number, title, method, node))
+            if not res.get("queued") or time.monotonic() >= deadline:
+                break
+            time.sleep(HUMAN_QUEUE_POLL_S)
+        if res.get("queued"):
+            merge_queue.leave(ctx.db, repository, number)
+        if not res.get("merged") and not res.get("message"):
+            res["message"] = "the merge was refused"
         return res
 
     def master_budget_state() -> dict[str, Any]:
@@ -4439,6 +4466,14 @@ def create_app(ctx: Ctx) -> FastAPI:
             dev_rows = []
             parked = tooling.parked_tickets(ctx, node_row)  # waiting for a tool this machine lacks
             parked |= environment_reports.parked_tickets(ctx)  # waiting for an environment item
+            footprints: dict[str, dict] = {}
+
+            def footprint(row: dict) -> dict:
+                if row["key"] not in footprints:
+                    footprints[row["key"]] = hotfiles.predict(ctx.db, row, ticket_epic(row))
+                return footprints[row["key"]]
+
+            flying: dict[str, list[str]] | None = None
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "dev"):
@@ -4453,6 +4488,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                     continue
                 if not allowed("dev", t):
                     continue
+                # never start two tickets expected to touch the same hot file (docs/v4/merge-conflicts.md)
+                if flying is None:
+                    flying = hotfiles.in_flight_hot_files(ctx.db, footprint)
+                if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]}):
+                    # A hot-file holder keeps its reservation through development and review; waiting never permits overlap.
+                    hotfiles.mark_blocked(ctx.db, t["key"])
+                    continue
+                else:
+                    hotfiles.clear_blocked(ctx.db, t["key"])
                 dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
@@ -4714,6 +4758,16 @@ def create_app(ctx: Ctx) -> FastAPI:
             if probation_id is not None:
                 role_health.drop_probation(ctx.db, probation_id)
             return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
+        if body.step == "dev":
+            # The eligibility check above is a snapshot: reserve the hot files now, atomically with the claim, so
+            # two simultaneous claims of different tickets cannot both start on the same hot file.
+            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"])
+            if taken:
+                ctx.leases.release(t["key"], run_id, c.fence)
+                if probation_id is not None:
+                    role_health.drop_probation(ctx.db, probation_id)
+                return JSONResponse({"claimed": False, "reason": f"hot file {', '.join(taken[1])} is reserved by "
+                                     f"{taken[0]}"}, status_code=409)
         model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
         run_token = secrets.token_urlsafe(32)
         p = repo.projects.get(t["project"])
@@ -4763,6 +4817,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
                                                        model, node, c.fence, h(run_token))):
             ctx.leases.release(t["key"], run_id, c.fence)
+            hotfiles.unreserve(ctx.db, run_id)
             return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
                                  " concurrent sessions"}, status_code=409)
         if run_details:
@@ -5983,7 +6038,18 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "github", "merge", {"number": body.number})
         if run["step"] != "verify":
             raise HTTPException(403, "only a verify run can merge")
-        res = merge_command(run, body.number, body.title, body.method, node)
+        # ready pull requests merge one after another, each brought up to date first (docs/v4/merge-conflicts.md)
+        project = ctx.repo().projects.get(run["project"])
+        if not project:
+            raise HTTPException(404, "project is not configured")
+        repository = repository_for_run(run, project)
+        res = merge_queue.merge_next(ctx.db, github_gateway(ctx, repository), repository, body.number,
+                                     run["ticket_key"], str(run["id"]),
+                                     lambda: merge_command(run, body.number, body.title, body.method, node))
+        if res.get("updated") or res.get("conflict"):
+            ctx.events.emit("github.merge_queue", ticket=run["ticket_key"], run_id=str(run["id"]), fence=run["fence"],
+                            account=run["account_id"], node=node,
+                            outcome="updated" if res.get("updated") else "conflict", reason=res.get("message", "")[:200])
         if res.get("merged"):  # the verify step's merge: the commit and the time are kept on the ticket
             merge_flow.record_merge(ctx, run["ticket_key"], merge_flow.latest_pr(ctx.db, run["ticket_key"]),
                                     str(res.get("sha") or ""), "flow", settled=False)
@@ -6298,7 +6364,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             run = fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
             ctx.db.run("UPDATE tickets SET approved_at=coalesce(approved_at, now()) WHERE key=%s", (key,))
-            result = merge_command(run, number, f"{key}: {ticket['summary']}",
+            result = queued_merge(run, number, f"{key}: {ticket['summary']}",
                                    (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
                 # approved: the merge step of the flow takes over, so nobody has to press merge later
@@ -6464,7 +6530,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, "ticket has no pull request to skip the gate for")
             run = fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
-            result = merge_command(run, number, f"{key}: {ticket['summary']}",
+            result = queued_merge(run, number, f"{key}: {ticket['summary']}",
                                    (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
                 note = f"Human review gate could not be skipped because PR #{number} did not merge: "
@@ -7022,6 +7088,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             rows = daily(ctx.db, days, project)
         return {"days": days, "project": project, "rows": rows}
+
+    @app.get("/v1/analytics/conflicts")
+    def analytics_conflicts(request: Request, days: int = Query(14, ge=1, le=90),
+                            bucket: Literal["day", "week"] = "day", project: str = "") -> dict:
+        """Share of verifications lost to merge conflicts, the time spent on them and the trend."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        project_keys = user.project_keys if user and user.project_keys is not None else None
+        if project and project_keys is not None and project not in project_keys:
+            raise HTTPException(403, "not available for your role")
+        return {"project": project, **conflict_loss.summary(ctx.db, days, bucket, project_keys, project)}
 
     @app.get("/v1/analytics/usage/daily")
     def analytics_usage_daily(request: Request, days: int = Query(14, ge=1, le=90)) -> dict:

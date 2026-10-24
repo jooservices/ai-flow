@@ -101,7 +101,7 @@ Done ticket also ends the wait. The **Projects** screen lists the missing items 
 ## Criteria that need the post-merge environment (AC10)
 
 The reviewer lists criteria that need a configured post-merge environment under `POST-MERGE CHECKS:`. On a configured
-Jira version release, the release claim carries those criteria and the project's environment items whose `runs`
+Jira version release, the release claim (`POST /v1/version-releases/claim`) carries those criteria and the project's environment items whose `runs`
 include `post_merge`. The version-release worker runs the configured full-project release checks with those items in
 its environment. Control records each check result, checked commit, version and release run against every ticket
 with deferred criteria. *Projects → Environment* shows pending, passed or failed criteria, the release checks and

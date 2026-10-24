@@ -1400,7 +1400,12 @@ class _BrokerHandler(socketserver.StreamRequestHandler):
             else:
                 if not secrets.compare_digest(str(request.get("token", "")), server.token):
                     raise ContainerPolicyError("container broker token is invalid")
-                if not _is_child_of(peer_pid, server.allowed_root_pid):
+                supervised = request.get("action") == "supervise"
+                if supervised:
+                    # The worker supervisor starts run services (the WordPress site) before the AI process exists.
+                    if peer_uid != 0:
+                        raise ContainerPolicyError("only the worker supervisor can start run services")
+                elif not _is_child_of(peer_pid, server.allowed_root_pid):
                     raise ContainerPolicyError("container command is not from this run")
                 if not server.worktree_pin.is_current():
                     server.worktree_replaced.set()
@@ -1523,10 +1528,11 @@ def _watch_run(server: _BrokerServer) -> None:
     while not server.bound_event.wait(0.25):
         if server.stop_requested.is_set():
             return
-    pid, start_time = server.allowed_root_pid, server.run_start_time
-    if pid is None or start_time is None:
+    if server.allowed_root_pid is None or server.run_start_time is None:
         return
     while not server.stop_requested.wait(0.5):
+        # The worker supervisor binds first (site start); the AI process rebinds when it starts.
+        pid, start_time = server.allowed_root_pid, server.run_start_time
         if _proc_identity(pid) != start_time:
             break
         worktree_pin = getattr(server, "worktree_pin", None)
@@ -1653,6 +1659,7 @@ class ContainerRuntime(AbstractContextManager):
         self.acl_fd = -1
         self.quota_id: int | None = None
         self.runtime_quota_id: int | None = None
+        self.supervisor_bound = False
 
     def _setfacl(self, *args: str) -> subprocess.CompletedProcess:
         """Run setfacl on the pinned worktree directory only: through its descriptor, never the mutable path.
@@ -1761,6 +1768,21 @@ class ContainerRuntime(AbstractContextManager):
                                     "PODMAN_COMPOSE_PROVIDER": env["PODMAN_COMPOSE_PROVIDER"]})
         self.spec.container_start_hook = self.bind_process
         return self
+
+    def run_supervised(self, argv: list[str], cwd: str | Path) -> tuple[int, str, str]:
+        """Run one container command for the worker supervisor, before or beside the AI process.
+
+        It goes through the same broker policy, quotas and cleanup as any run command. The first call binds the
+        supervisor, so the broker also cleans up if the worker dies before the AI process starts.
+        """
+        if not self.supervisor_bound:
+            self.bind_process(os.getpid())
+            self.supervisor_bound = True
+        response = _send(str(self.socket_path), {"action": "supervise", "token": self.token,
+                                                 "argv": list(argv), "cwd": str(cwd)})
+        if not response.get("ok"):
+            raise RuntimeError(str(response.get("error") or "container command denied"))
+        return int(response.get("code", 125)), str(response.get("stdout") or ""), str(response.get("stderr") or "")
 
     def bind_process(self, pid: int) -> None:
         response = _send(str(self.socket_path), {"action": "bind", "pid": int(pid)})

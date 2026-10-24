@@ -57,6 +57,37 @@ def test_install_smoke_authenticates_system_check_and_support_bundle_requests():
     assert "authenticated_control_get /v1/support-bundle" in system_check
 
 
+def test_console_browser_suite_runs_in_pr_and_release_smokes_with_failure_traces():
+    ci = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+    v4 = ci["jobs"]["v4"]
+    install = next(step for step in v4["steps"] if step.get("name") == "Install")
+    assert "npm install --global playwright@1.64.1" in install["run"]
+    assert "playwright install chromium --with-deps" in install["run"]
+    assert "tests/v4" in next(step for step in v4["steps"] if step.get("name") == "Tests (real Redis and PostgreSQL)")["run"]
+    upload = next(step for step in v4["steps"] if step.get("name") == "Upload sanitized Playwright traces")
+    assert upload["if"] == "failure()"
+    assert "aiflow-playwright-traces" in upload["with"]["path"]
+
+    release_workflow = yaml.load((ROOT / ".github/workflows/release-v4.yml").read_text(), Loader=yaml.BaseLoader)
+    release_tests = release_workflow["jobs"]["v4-tests"]
+    release_install = next(step for step in release_tests["steps"] if step.get("name") == "Install")
+    assert "playwright install chromium --with-deps" in release_install["run"]
+    release_job = release_workflow["jobs"]["release"]
+    smoke = next(step for step in release_job["steps"]
+                 if step.get("name") == "Fleet rollout and rollback smoke using signed candidate artifacts")
+    assert smoke["env"]["AIFLOW4_TEST_REDIS_URL"]
+    assert smoke["env"]["AIFLOW4_TEST_DATABASE_URL"]
+    assert "aiflow-playwright-traces" in smoke["env"]["AIFLOW4_PLAYWRIGHT_TRACE_DIR"]
+    trace_upload = next(step for step in release_job["steps"]
+                        if step.get("name") == "Upload sanitized release install smoke Playwright traces")
+    assert trace_upload["if"] == "failure()"
+    assert "aiflow-playwright-traces" in trace_upload["with"]["path"]
+
+    smoke_script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
+    assert "tests/v4/test_console_browser.py" in smoke_script
+    assert '"${AIFLOW4_TEST_DATABASE_URL:?AIFLOW4_TEST_DATABASE_URL must point' in smoke_script
+
+
 def test_install_smoke_checks_upgrade_and_failed_candidate_rollback_then_finishes_install():
     script = (ROOT / "deploy/v4/ci/install-smoke.sh").read_text()
     assert "AIFLOW4_SELF_UPDATE=1" in script

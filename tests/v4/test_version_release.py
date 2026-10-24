@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aiflow.v4.control import api, version_release
+from aiflow.v4.control import api, environment as environment_reports, version_release
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.github_connections import GitHubConnections
@@ -181,6 +181,27 @@ def test_release_candidates_and_claims_obey_project_and_account_readiness_gate(
     assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
 
 
+def test_release_claim_receives_only_permitted_post_merge_environment_and_deferred_ticket_criteria(client, ctx):
+    configure(ctx)
+    evidence(ctx, "TESTWP-24")
+    project = ctx.repo().projects["TESTWP"]
+    project.environment = [
+        {"name": "POST_MERGE_URL", "kind": "base_url", "value": "https://site.example.test",
+         "runs": ["post_merge"]},
+        {"name": "DEV_ONLY_SECRET", "kind": "secret", "runs": ["dev"]},
+    ]
+    environment_reports.record_post_merge_criteria(
+        ctx, {"id": "verify-24", "step": "verify", "ticket_key": "TESTWP-24", "project": "TESTWP"},
+        ["AC4: verify the site after merge"])
+    response = claim_release(client, node_headers(client))
+
+    assert response.status_code == 200
+    project_data = response.json()["project"]
+    assert [item["name"] for item in project_data["environment"]] == ["POST_MERGE_URL"]
+    assert project_data["post_merge_criteria"] == [{
+        "key": "TESTWP-24", "post_merge_criteria": ["AC4: verify the site after merge"]}]
+
+
 def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-231")
@@ -340,12 +361,22 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
             raise AssertionError(path)
 
     monkeypatch.setattr(release_worker, "Git", FakeGit)
-    monkeypatch.setattr(release_worker, "project_env", lambda _project: {})
+    env_calls = []
+
+    def project_environment(project, items=None, step="dev"):
+        env_calls.append((project, items, step))
+        return {"POST_MERGE_URL": "https://site.example.test"}
+
+    monkeypatch.setattr(release_worker, "project_env", project_environment)
     api = FakeApi()
     claimed = Claimed(run_id="run-1", fence=1, run_token="", account="claude-01", provider="claude",
                       model="", effort="", ticket={"key": "release:TESTWP:1"},
                       project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "checks": ["true"],
-                               "source_branch": "develop", "work_minutes": {"hard": 1}},
+                               "source_branch": "develop", "work_minutes": {"hard": 1},
+                               "environment": [{"name": "POST_MERGE_URL", "kind": "base_url",
+                                                "value": "https://site.example.test", "runs": ["post_merge"]}],
+                               "post_merge_criteria": [{"key": "TESTWP-25",
+                                                        "post_merge_criteria": ["AC4: verify the site after merge"]}]},
                       identity=("bot", "bot@example.test"), step="version_release")
     claimed.project.update({"release_branch": "release/core-a", "source_sha": "a" * 40})
 
@@ -353,11 +384,16 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
                                                 str(tmp_path), 1, [])
 
     assert result["outcome"] == "done"
+    assert env_calls == [("TESTWP", claimed.project["environment"], "post_merge")]
     assert git_refs == ["origin/release/core-a"]
     complete = next(call for call in api.calls if call[1].endswith("/complete"))
     assert complete[2]["head_sha"] == "a" * 40
     assert complete[2]["source_sha"] == "a" * 40
     assert complete[2]["checks"] == [{"command": "true", "passed": True, "exit_code": 0, "output": ""}]
+    assert complete[2]["post_merge_results"] == [{"ticket": "TESTWP-25",
+                                                   "criteria": ["AC4: verify the site after merge"],
+                                                   "status": "passed", "head_sha": "a" * 40,
+                                                   "checks": [{"command": "true", "passed": True}]}]
 
 
 def test_failed_release_checks_create_one_bug_per_failed_command_linked_as_blocker(ctx):

@@ -349,7 +349,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .devcode{font-family:var(--f-mono); font-size:30px; letter-spacing:.14em; text-align:center; padding:14px; border:1px dashed var(--accent); border-radius:12px; color:var(--accent)}
 
 /* toasts */
-.toasts{position:fixed; z-index:50; right:max(16px, env(safe-area-inset-right,0px)); bottom:calc(16px + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:8px; width:min(360px, calc(100vw - 32px))}
+.toasts{position:fixed; z-index:50; right:max(16px, env(safe-area-inset-right,0px)); bottom:calc(16px + env(safe-area-inset-bottom,0px)); display:flex; flex-direction:column; gap:8px; width:min(360px, calc(100vw - 32px)); pointer-events:none}
 .toast{background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); padding:11px 14px; display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; animation:toastIn .35s cubic-bezier(.2,.7,.2,1) both}
 .toast.out{animation:toastOut .3s ease both}
 .toast .t-title{font-weight:600}
@@ -674,19 +674,22 @@ var ICON = {
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   systemCheck: null, systemCheckError: '', systemCheckBusy: false,
-  dashboardUsage: [], dashboardUsageError: '', dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
+  dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
+  dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
+  dashboardDisagreements: { rows: null, error: '', loading: false, loadedAt: 0 },
   dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
   consoleUser: null, consoleSessionLoaded: false,
   userAdmin: { users: null, projects: [], roleOptions: [], audit: [],
-    loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '' },
+    loading: false, loadedAt: 0, error: '', editing: '', temporaryPassword: '',
+    addForm: { email: '', name: '', roles: [], projects: [], all: true } },
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
   projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
-    repositoryEditor: null,
+    repositoryEditor: null, envEditor: null, envMissing: [], envScan: null, envScanBusy: false,
     form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
@@ -701,7 +704,7 @@ var S = {
   projectQuery: '', projectPickerOpen: false,
   seenInc: null, seenRuns: null, drawer: null, ticket: {}, first: true,
   leadEpic: null, leadReport: null,
-  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '',
+  biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '', reviewNoteDrafts: {},
   rh: { window: null, percent: null, busy: false, error: '', sig: '' },
   reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
@@ -745,6 +748,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
+function inColumn(ticket, column) { return ticket.status === column || (column === 'Human review' && ticket.status === 'Ready to merge'); }
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
@@ -970,7 +974,7 @@ function doing(a) {
   return 'waiting for a ready ticket';
 }
 function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', answered: 'ok', escalated: 'crit', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
-function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
+function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Ready to merge': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
 
 /* ---------- fetch ---------- */
 function poll() {
@@ -1116,6 +1120,110 @@ function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
     .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
+  loadEnvironmentOverview();
+}
+function loadEnvironmentOverview() {
+  if (!consoleCan('projects.manage')) return;
+  fetch('/v1/environment/missing', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { S.projectAdmin.envMissing = d.missing || []; if (S.view === 'projects') renderProjects(); }).catch(function () {});
+  fetch('/v1/environment/scan', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { S.projectAdmin.envScan = d.scan || null; if (S.view === 'projects') renderProjects(); }).catch(function () {});
+}
+function loadProjectEnvironment(key) {
+  S.projectAdmin.envEditor = { key: key, busy: true, saving: false, error: '', data: null };
+  renderProjects();
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/environment', { cache: 'no-store' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (data) { var ed = S.projectAdmin.envEditor; if (ed && ed.key === key) { ed.data = data; ed.error = ''; } })
+    .catch(function (e) { var ed = S.projectAdmin.envEditor; if (ed && ed.key === key) ed.error = String(e.message || e); })
+    .then(function () { var ed = S.projectAdmin.envEditor; if (ed && ed.key === key) { ed.busy = false; renderProjects(); } });
+}
+function saveProjectEnvironment() {
+  var ed = S.projectAdmin.envEditor; if (!ed || !ed.data || ed.saving) return;
+  ed.saving = true; ed.error = ''; renderProjects();
+  var items = ed.data.items.map(function (i) { return { name: i.name, kind: i.kind, value: i.kind === 'secret' ? '' : i.value, runs: i.runs, description: i.description || '' }; });
+  fetch('/v1/projects/' + encodeURIComponent(ed.key) + '/environment', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: items }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast('Environment saved', d.commit || 'Control repository updated', 'ok');
+      S.projectAdmin.envEditor = null; loadProjectList(); })
+    .catch(function (e) { ed.error = String(e.message || e); ed.saving = false; renderProjects(); });
+}
+function runEnvironmentScan() {
+  var state = S.projectAdmin; if (state.envScanBusy) return;
+  state.envScanBusy = true; renderProjects();
+  fetch('/v1/environment/scan', { method: 'POST' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) { state.envScan = d.scan; toast('Scan finished', d.scan.offenders.length + ' of ' + d.scan.scanned + ' open tickets name server wording', 'ok'); })
+    .catch(function (e) { toast('Scan failed', String(e.message || e), 'crit'); })
+    .then(function () { state.envScanBusy = false; renderProjects(); });
+}
+function projectEnvironmentPanels(state) {
+  var h = '', editor = state.envEditor;
+  if (editor) {
+    h += '<section class="panel" data-panel="project-environment"><div class="panel-h"><h2>Environment · ' + esc(editor.key) + '</h2><span class="hint">Test services, base URLs, databases, browsers and secrets by name. Runs get them as environment variables.</span><span class="spacer"></span><button class="btn sm" data-act="project-environment-close">Close</button></div>';
+    if (editor.error) h += '<div class="stakeholder-error">' + esc(editor.error) + '</div>';
+    if (editor.busy || !editor.data) h += '<div class="muted">Loading the environment…</div>';
+    else {
+      var data = editor.data, items = data.items || [];
+      (data.problems || []).forEach(function (p) { h += '<div class="bad">' + esc(p) + '</div>'; });
+      h += '<p class="muted">Stored in <span class="mono">projects/' + esc(editor.key) + '.yaml</span> of the control repository. A secret is listed by name only: its value is set on the machine and is never shown or stored here.</p>';
+      h += '<div class="project-table"><table><thead><tr><th>Variable</th><th>Kind</th><th>Value</th><th>Runs that may use it</th><th></th></tr></thead><tbody>';
+      items.forEach(function (it, index) {
+        var secret = it.kind === 'secret';
+        h += '<tr><td><input data-env-field="name" data-index="' + index + '" value="' + esc(it.name) + '" placeholder="WP_BASE_URL" aria-label="Variable name"></td>';
+        h += '<td><select data-env-field="kind" data-index="' + index + '" aria-label="Kind">' + (data.kinds || []).map(function (k) { return '<option value="' + esc(k) + '"' + (it.kind === k ? ' selected' : '') + '>' + esc(k.replace('_', ' ')) + '</option>'; }).join('') + '</select></td>';
+        h += '<td><input data-env-field="value" data-index="' + index + '" value="' + esc(secret ? '' : it.value) + '"' + (secret ? ' disabled placeholder="set on the machine"' : '') + ' aria-label="Value"></td>';
+        h += '<td>' + (data.runs || []).map(function (r) { return '<label class="chip2" style="cursor:pointer"><input type="checkbox" data-env-run="' + esc(r) + '" data-index="' + index + '"' + ((it.runs || []).indexOf(r) >= 0 ? ' checked' : '') + '> ' + esc(r) + '</label>'; }).join(' ') + '</td>';
+        h += '<td><button class="btn sm danger" data-act="project-environment-remove" data-index="' + index + '">Remove</button></td></tr>';
+      });
+      if (!items.length) h += '<tr><td colspan="5" class="muted">No environment items. Runs of this project get none.</td></tr>';
+      h += '</tbody></table></div>';
+      h += '<div class="project-actions"><button class="btn sm" data-act="project-environment-add">Add item</button><span class="spacer"></span><button class="btn primary" data-act="project-environment-save"' + (editor.saving ? ' disabled' : '') + '>Save environment</button></div>';
+    }
+    h += '</section>';
+  }
+  if (editor && editor.data) {
+    var postMerge = editor.data.post_merge || [];
+    h += '<section class="panel" data-panel="post-merge-environment"><div class="panel-h"><h2>Post-merge environment checks</h2><span class="hint">Deferred criteria are checked by the configured project release checks using items allowed for post_merge.</span></div>';
+    if (!postMerge.length) h += '<div class="muted">No deferred criteria are waiting for or have completed a post-merge check.</div>';
+    else {
+      h += '<div class="project-table"><table><thead><tr><th>Ticket</th><th>Deferred criteria</th><th>Result</th><th>Release checks</th><th>Checked</th></tr></thead><tbody>';
+      postMerge.forEach(function (item) {
+        var result = item.result || {}, checks = (result.checks || []).map(function (c) { return c.command + ': ' + (c.passed ? 'passed' : 'failed'); });
+        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + (item.criteria || []).map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('') + '</td>';
+        h += '<td><span class="pill" data-tone="' + (item.status === 'passed' ? 'ok' : item.status === 'failed' ? 'crit' : 'warn') + '">' + esc(item.status) + '</span></td>';
+        h += '<td>' + esc(checks.join(', ') || result.error || '—') + (item.release_ticket ? ' · ' + esc(item.release_ticket) : '') + '</td><td>' + esc(item.checked_at ? when(item.checked_at) : 'waiting') + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += '</section>';
+  }
+  var missing = state.envMissing || [];
+  h += '<section class="panel" data-panel="environment-missing"><div class="panel-h"><h2>Missing environment items</h2><span class="hint">Reported by a developer run by name; AI Flow provides the item or raises one environment ticket. The owner is never asked.</span></div>';
+  if (!missing.length) h += '<div class="muted">No run is waiting for an environment item.</div>';
+  else {
+    h += '<div class="project-table"><table><thead><tr><th>Item</th><th>Project</th><th>Ticket</th><th>State</th><th>Environment ticket</th><th>Since</th></tr></thead><tbody>';
+    missing.forEach(function (m) {
+      h += '<tr><td class="mono">' + esc(m.item) + '</td><td class="mono">' + esc(m.project) + '</td><td><span class="mono">' + esc(m.ticket) + '</span> ' + esc(m.summary) + '</td><td><span class="pill" data-tone="' + (m.state === 'waiting' ? 'warn' : 'ok') + '">' + esc(m.state) + '</span>' + (m.resolution ? ' <span class="hint">' + esc(m.resolution) + '</span>' : '') + '</td><td class="mono">' + esc(m.environment_ticket || '—') + '</td><td>' + esc(when(m.since)) + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '</section>';
+  var scan = state.envScan;
+  h += '<section class="panel" data-panel="environment-scan"><div class="panel-h"><h2>Tickets that name servers</h2><span class="hint">Open tickets of every project that name a host, an address, a machine, a network or an access instruction. Tickets nobody works on go back to intake, where the wording is removed and the requirement kept.</span><span class="spacer"></span><button class="btn sm" data-act="environment-scan"' + (state.envScanBusy ? ' disabled' : '') + '>' + (state.envScanBusy ? 'Scanning…' : 'Scan now') + '</button></div>';
+  if (!scan) h += '<div class="muted">No scan has run yet. The scan runs once a day.</div>';
+  else {
+    h += '<p class="hint">Scanned ' + esc(when(scan.created_at)) + ' · ' + esc(scan.scanned) + ' open tickets · ' + esc((scan.offenders || []).length) + ' break the rule</p>';
+    if ((scan.offenders || []).length) {
+      h += '<div class="project-table"><table><thead><tr><th>Ticket</th><th>Project</th><th>Status</th><th>Names</th><th>Action</th></tr></thead><tbody>';
+      scan.offenders.forEach(function (o) {
+        h += '<tr><td class="mono">' + esc(o.ticket) + '</td><td class="mono">' + esc(o.project) + '</td><td>' + esc(o.status) + '</td><td>' + esc((o.kinds || []).join(', ')) + '</td><td>' + esc(o.action) + '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+  }
+  h += '</section>';
+  return h;
 }
 function loadSystemCheck() {
   fetch('/v1/system-check', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
@@ -1223,10 +1331,11 @@ function renderUsers() {
     if (!(u.users || []).length) h += '<tr><td colspan="6" class="muted">No people have been added.</td></tr>';
     h += '</tbody></table></div>';
   }
+  var addForm = u.addForm;
   h += '</section><div class="users-layout-secondary" data-block="access"><section class="panel"><div class="panel-h"><h2>Add a person</h2><span class="hint">AI Flow creates a one-time password for the new person.</span></div>' +
-    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required></label>' +
-    '<label>Name<input class="in" data-user-name autocomplete="off"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', []) +
-    '</div></div><div>' + projectChoices([], true) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
+    '<div class="project-form"><label>Email<input class="in" type="email" data-user-email autocomplete="off" required value="' + esc(addForm.email) + '"></label>' +
+    '<label>Name<input class="in" data-user-name autocomplete="off" value="' + esc(addForm.name) + '"></label><div><strong>Roles</strong><div>' + roleChecks(root, 'new-role', addForm.roles || []) +
+    '</div></div><div>' + projectChoices(addForm.projects || [], addForm.all !== false) + '</div><div class="project-actions"><button class="btn primary" data-user-add>Add person</button></div></div></section>';
   h += '<section class="panel"><div class="panel-h"><h2>Views by role</h2><span class="hint">A person with multiple roles sees the union of their views.</span></div>' +
     '<div class="project-table"><table><thead><tr><th>View</th>' + u.roleOptions.map(function (r) { return '<th>' + esc(r.label) + '</th>'; }).join('') +
     '</tr></thead><tbody>' + Object.keys(ROLE_VIEW_LABELS).map(function (permission) {
@@ -1266,7 +1375,10 @@ function renderUsers() {
     var projects = all ? null : $$('[data-user-projects] option:checked', form).map(function (x) { return x.value; });
     adminRequest('/v1/console/users', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email, display_name: name, roles: roles, project_keys: projects })
-    }).then(function (d) { u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true); })
+    }).then(function (d) {
+      u.addForm = { email: '', name: '', roles: [], projects: [], all: true };
+      u.temporaryPassword = { email: d.email, value: d.temporary_password }; loadUsers(true);
+    })
       .catch(function (e) { toast('Person could not be added', String(e.message || e), 'crit'); });
   }; });
 }
@@ -1647,6 +1759,23 @@ function pollDashboardUsage() {
   }).catch(function (e) { S.dashboardUsageError = String(e.message || e); })
     .then(function () { setTimeout(pollDashboardUsage, ANALYTICS_MS); });
 }
+function loadCapacity(force) {
+  var capacity = S.capacity;
+  if (capacity.loading || (S.consoleUser && !consoleCan('view.machines_ai')) ||
+      (!force && capacity.data && Date.now() - capacity.loadedAt < ANALYTICS_MS)) return;
+  capacity.loading = true;
+  fetch('/v1/capacity', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    capacity.data = data; capacity.error = ''; capacity.loadedAt = Date.now();
+  }).catch(function (e) {
+    capacity.error = String(e.message || e); capacity.loadedAt = Date.now();
+  }).then(function () {
+    capacity.loading = false;
+    if (S.view === 'cc' && S.data) renderDashboard();
+  });
+}
 function loadDashboardWaiting(force) {
   var waiting = S.dashboardWaiting;
   if (waiting.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
@@ -1666,6 +1795,33 @@ function loadDashboardWaiting(force) {
     if (S.view === 'cc' && S.data) renderDashboard();
     else if ((S.view === 'work' || S.view === 'delivery') && S.data) renderDBody();
   });
+}
+function loadDashboardDisagreements() {
+  var state = S.dashboardDisagreements;
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (state.rows !== null && Date.now() - state.loadedAt < 30000) return;
+  state.loading = true;
+  fetch('/v1/dashboard/disagreements', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) { state.rows = d.tickets || []; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); if (state.rows === null) state.rows = []; })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
+}
+function disagreementsPanel() {
+  var state = S.dashboardDisagreements, rows = state.rows || [];
+  var h = '<section class="panel" data-block="disagreements" id="p-disagreements"><div class="panel-h"><h2>Jira and GitHub disagree</h2><span class="hint">More than five minutes apart · the flow keeps fixing them</span></div>';
+  if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (state.rows === null) return h + '<div class="muted">Loading…</div></section>';
+  if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>';
+  h += '<div class="tablebox"><table><thead><tr><th>Ticket</th><th>Jira</th><th>Pull request</th><th>The flow will set</th><th>For</th><th>Why it is not fixed yet</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>';
 }
 function loadDashboardQuota(force) {
   if (!S.consoleUser || !consoleCan('view.dashboard') || consoleCan('view.machines_ai')) return;
@@ -1879,6 +2035,51 @@ function dashboardUsageShare(rows) {
   providers.forEach(function (key) { h += '<span><i class="provider-' + esc(key) + '" style="background:var(--provider-' + esc(key) + ')"></i>' + esc(PROVIDER[key] || key) + ' · ' + Math.round(100 * totals.byProvider[key] / grand) + '% · ' + tok(totals.byProvider[key]) + ' tokens</span>'; });
   return h + '</div></div>';
 }
+function capacityPanel() {
+  var state = S.capacity, data = state.data;
+  var h = '<section class="panel" id="d-capacity" aria-labelledby="h-capacity"><div class="panel-h"><h2 id="h-capacity">Capacity plan</h2><span class="hint">Next seven days · quota and completed ticket history</span><span class="spacer"></span><button class="btn sm" data-act="capacity-refresh">' + (data ? 'Refresh' : 'Load plan') + '</button></div>';
+  if (state.error) h += '<div class="dashboard-empty">Capacity plan unavailable: ' + esc(state.error) + '</div>';
+  if (!data) return h + '<div class="dashboard-empty">' + (state.loading ? 'Loading estimates and quota…' : 'Capacity data is not available yet.') + '</div></section>';
+  var limit = data.limiting_ai;
+  h += '<div class="facts"><div class="fact"><span class="fl">Ready tickets</span><span class="fv mono">' + Number(data.ready_tickets || 0) + '</span></div>';
+  h += '<div class="fact"><span class="fl">Finishable with current quota</span><span class="fv mono">' + Number(data.tickets_finishable || 0) + '</span></div>';
+  h += '<div class="fact"><span class="fl">Quota capacity</span><span class="fv mono">' + Number(data.quota_capacity_tickets || 0) + ' tickets</span></div>';
+  h += '<div class="fact"><span class="fl">Limiting AI</span><span class="fv mono">' + (limit ? esc(limit.account) + ' · ' + Number(limit.tickets) + ' tickets' : 'No quota forecast') + '</span></div></div>';
+  if (data.accounts && data.accounts.length) {
+    h += '<div class="tablebox"><table style="min-width:560px"><thead><tr><th>AI account</th><th>Tokens for seven days</th><th>Estimated tickets</th><th>Limit</th><th>Forecast</th></tr></thead><tbody>';
+    data.accounts.forEach(function (account) {
+      h += '<tr style="cursor:default"><td class="mono">' + esc(account.account) + ' <span class="small">' + esc(PROVIDER[account.provider] || account.provider) + '</span></td>';
+      h += '<td class="mono">' + tok(account.tokens_available) + '</td><td class="mono">' + Number(account.tickets || 0) + '</td>';
+      h += '<td>' + esc(account.limiting_window || '—') + '</td><td>' + esc(account.quota_source) + ' · ' + esc(account.confidence) + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '<div class="dsec"><h4>Why tickets were assigned</h4>';
+  if (!data.decisions || !data.decisions.length) h += '<div class="empty">Assignment explanations will appear after a development run starts.</div>';
+  else {
+    h += '<ul class="feed">';
+    data.decisions.slice(0, 8).forEach(function (decision) {
+      h += '<li><span class="f-time">' + esc(when(decision.assigned_at)) + '</span><span class="f-type">' + esc(decision.account) + '</span>';
+      h += '<span class="f-text"><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(decision.ticket) + '">' + esc(decision.ticket) + '</button> ' + esc(decision.reason) + '</span></li>';
+    });
+    h += '</ul>';
+  }
+  h += '</div><div class="dsec"><h4>Estimate error</h4>';
+  if (!data.errors || !data.errors.length) h += '<div class="empty">Completed ticket estimates will be compared with recorded tokens, time and rework here.</div>';
+  else {
+    h += '<div class="tablebox"><table style="min-width:600px"><thead><tr><th>Ticket</th><th>Tokens</th><th>AI time</th><th>Rework</th></tr></thead><tbody>';
+    data.errors.slice(0, 8).forEach(function (row) {
+      var tokens = row.actual.tokens, minutes = row.actual.time_minutes, risk = row.actual.rework;
+      h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(row.ticket) + '">' + esc(row.ticket) + '</button></td>';
+      h += '<td class="mono">' + tok(tokens.actual) + ' · ' + (tokens.within_range ? 'in range' : signedPct(tokens.error_pct)) + '</td>';
+      h += '<td class="mono">' + mmss(minutes.actual * 60) + ' · ' + (minutes.within_range ? 'in range' : signedPct(minutes.error_pct)) + '</td>';
+      h += '<td>' + (risk.actual ? 'rework' : 'no rework') + ' · predicted ' + Number(risk.predicted_pct.low).toFixed(0) + '–' + Number(risk.predicted_pct.high).toFixed(0) + '%</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  return h + '</div></section>';
+}
+function signedPct(value) { return (Number(value) > 0 ? '+' : '') + Number(value || 0).toFixed(0) + '%'; }
 function dashboardWaitingTickets(tickets, queueKeys) {
   var allTickets = tickets || [], byKey = {};
   if (Array.isArray(queueKeys)) {
@@ -1920,10 +2121,11 @@ function renderDashboard() {
   var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
   if (!canSeeMachines) loadDashboardQuota(false);
+  loadDashboardDisagreements();
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
-  var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
+  var inFlightStatuses = ['In Progress', 'In Verify', 'Human review', 'Ready to merge'];
   var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
   var waiting = dashboardVisibleWaitingTickets(d.tickets, S.dashboardWaiting.keys);
   var waitingCount = waiting.length;
@@ -1951,7 +2153,7 @@ function renderDashboard() {
     return (left - right) * S.dashboardSortDir;
   });
   var recentRuns = d.active_runs.slice().sort(function (a, b) { return (a.elapsed_s || 0) - (b.elapsed_s || 0); }).slice(0, 8);
-  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return t.status === c[0]; }).length; });
+  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return inColumn(t, c[0]); }).length; });
   var flowMax = Math.max.apply(null, flowCounts.concat([1]));
   var flow = STATUS_COLS.map(function (c, index) {
     var count = flowCounts[index], color = c[0] === 'Done' ? 'var(--good)' :
@@ -2000,7 +2202,7 @@ function renderDashboard() {
   h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section>' + escalationsPanel() + '</section>';
+  h += '</div></section>' + disagreementsPanel() + escalationsPanel() + '</section>';
   var tokenTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.tokens || 0); }, 0);
   var costTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
   var providers = Object.keys(PROVIDER).filter(function (key) { return (S.dashboardUsage || []).some(function (row) { return row.key === key; }) || d.accounts.some(function (a) { return a.provider === key; }); });
@@ -2011,6 +2213,7 @@ function renderDashboard() {
   h += providerUsageChart(S.dashboardUsage);
   h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + esc(key) + '"></i><span class="provider-name">' + esc(PROVIDER[key] || key) + '</span></span>'; }).join('') + '</div>' + dashboardUsageShare(S.dashboardUsage) + '</section>';
   h += '<section class="panel" data-block="tokens"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Recorded run usage · UTC</span></div><div class="facts"><div class="fact"><span class="fl">Tokens today</span><span class="fv mono">' + tok(usage.tokensToday) + '</span></div><div class="fact"><span class="fl">Approximate cost today</span><span class="fv mono">$' + usage.costToday.toFixed(4) + '</span></div><div class="fact"><span class="fl">Tokens · last 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · last 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section>';
+  h += capacityPanel();
   h += '<section class="panel" data-block="quota"><div class="panel-h"><h2>Quota by AI</h2><span class="hint">Per account · current quota and next reset time</span></div>';
   if (!canSeeMachines && S.dashboardQuota.error) h += '<div class="dashboard-empty">Quota summary unavailable: ' + esc(S.dashboardQuota.error) + '</div>';
   else if (!canSeeMachines && S.dashboardQuota.rows === null) h += '<div class="dashboard-empty">' + (S.dashboardQuota.loading ? 'Loading project-scoped quota…' : 'Project-scoped quota is unavailable.') + '</div>';
@@ -2272,7 +2475,7 @@ function roleHealthPanel(rh) {
   h += '<div class="tablebox"><table style="min-width:900px"><thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">State</th><th scope="col">Success rate</th><th scope="col">Cost per finished ticket</th><th scope="col">Rework rounds</th><th scope="col">Note</th></tr></thead><tbody>';
   rows.forEach(function (r) {
     var tone = r.mode === 'on' ? 'ok' : r.mode === 'probation' ? 'warn' : 'crit';
-    var label = r.mode === 'on' ? 'On' : r.mode === 'probation' ? 'Off · probation ticket available' : 'Off · probation done today';
+    var label = r.mode === 'on' ? 'On' : r.mode === 'probation' ? 'Off · probation ticket available' : 'Off · probation running';
     var note = r.note || '';
     if (r.probation) note += (note ? ' ' : '') + 'Probation: ' + r.probation.streak + ' of ' + r.probation.needed + ' in a row succeeded' + (r.probation.open_ticket ? ' · working on ' + r.probation.open_ticket : '') + '.';
     h += '<tr><td class="mono">' + esc(r.account) + '</td><td>' + esc(RH_ROLE[r.role] || r.role) + '</td><td>' + pill(tone, label) + '</td>';
@@ -2495,7 +2698,7 @@ function projTickets() { return D().tickets.filter(function (t) { return S.proje
 function dashboardWorkStatusMatches(ticket, filter) {
   if (!filter || filter === 'all') return true;
   if (filter === 'done') return ticket.status === 'Done';
-  if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review'].indexOf(ticket.status) >= 0;
+  if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review', 'Ready to merge'].indexOf(ticket.status) >= 0;
   if (filter === 'waiting') return dashboardVisibleWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
   return ticket.status === filter;
 }
@@ -2639,7 +2842,7 @@ function renderDBody() {
 
   h += '<section class="panel" data-block="board"' + (boardOnly ? '' : ' id="d-board"') + ' aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
   STATUS_COLS.forEach(function (c) {
-    var items = list.filter(function (t) { return t.status === c[0]; });
+    var items = list.filter(function (t) { return inColumn(t, c[0]); });
     if (c[0] === 'Done') items.sort(function (a, b) { return (a.updated_age_s || 0) - (b.updated_age_s || 0); });
     h += '<div class="col"><div class="col-h"><span>' + c[1] + '</span><span class="count">' + items.length + '</span></div>';
     if (!items.length) h += '<div class="col-empty">Nothing here</div>';
@@ -2675,6 +2878,15 @@ function renderDBody() {
 /* ---------- Human review ---------- */
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
+  var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
+  if (typeof root.querySelectorAll === 'function') {
+    root.querySelectorAll('[data-review-note]').forEach(function (field) {
+      var card = field.closest('[data-review-card]');
+      if (card && noteDrafts[card.getAttribute('data-key')] == null) {
+        noteDrafts[card.getAttribute('data-key')] = field.value;
+      }
+    });
+  }
   var rows = S.reviews || [], metrics = S.reviewMetrics || {}, h = '<section class="panel" data-block="queue"><div class="panel-h"><h2>Human review queue</h2><span class="hint">Waiting items and the reasons people are needed · refreshed every 15 seconds</span><span class="spacer"></span><button class="btn sm" data-act="refresh-reviews">Refresh</button></div>';
   h += '<div class="review-filters"><label>Project <select data-review-project aria-label="Filter human review by project"><option value="">All projects</option>';
   (S.reviewProjects || []).forEach(function (p) { h += '<option value="' + esc(p) + '"' + (S.reviewProject === p ? ' selected' : '') + '>' + esc(p) + '</option>'; });
@@ -2707,7 +2919,7 @@ function renderReviews() {
         h += '</div>';
       }
       if (actionList.length) {
-        h += '<div class="review-actions"><textarea data-review-note aria-label="Reviewer note for ' + esc(t.key) + '" placeholder="Required for reject, rework, answer, or an AI question"></textarea>';
+        h += '<div class="review-actions"><textarea data-review-note aria-label="Reviewer note for ' + esc(t.key) + '" placeholder="Required for reject, rework, answer, or an AI question">' + esc(noteDrafts[t.key] || '') + '</textarea>';
         actionList.forEach(function (action) {
           var names = { approve: 'Approve and merge', reject: 'Reject', rework: 'Send for rework', 'ask-ai': 'Ask AI a question', answer: 'Answer', 'skip-gate': 'Skip gate and merge' };
           h += '<button class="btn' + (action === 'reject' || action === 'rework' ? ' danger' : '') + '" data-act="review-' + esc(action) + '" data-key="' + esc(t.key) + '">' + esc(names[action] || action) + '</button>';
@@ -2765,6 +2977,7 @@ function reviewByRole() { return !!S.consoleUser && consoleCan('review.actions')
 function submitReview(key, action, comment) {
   var tokenField = $('[data-reviewer-token]'), byRole = reviewByRole();
   S.reviewerToken = tokenField ? tokenField.value : S.reviewerToken;
+  if (!String(comment || '').trim() && S.reviewNoteDrafts[key]) comment = S.reviewNoteDrafts[key];
   if (!byRole && !S.reviewerToken) { toast('Reviewer access required', 'Enter the reviewer access token before taking action.', 'warn'); return; }
   if (['rework', 'reject', 'ask-ai', 'answer'].indexOf(action) >= 0 && !String(comment || '').trim()) {
     toast('A note is required', 'Enter the required reason, comment, answer, or question before taking this action.', 'warn'); return;
@@ -2778,6 +2991,12 @@ function submitReview(key, action, comment) {
   }).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
   }).then(function (d) {
+    var card = Array.from(document.querySelectorAll('[data-review-card]')).find(function (item) {
+      return item.getAttribute('data-key') === key;
+    });
+    var noteField = card && $('[data-review-note]', card);
+    delete S.reviewNoteDrafts[key];
+    if (noteField) noteField.value = '';
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
     loadReviews();
@@ -3692,6 +3911,21 @@ function timeSec(tl) {
   h += '</div><div class="legend">' + Object.keys(TL_KIND).filter(function (k) { return (tt.seconds_by_kind || {})[k] != null; }).map(function (k) { return '<span><i class="tl-' + k + '"></i>' + TL_KIND[k] + '</span>'; }).join('') + '</div></div>';
   return h;
 }
+function mergeSec(det) {
+  var m = det.merge || {}, moves = det.moves || [];
+  var link = m.pr_url ? '<a href="' + esc(m.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
+  var h = '<div class="dsec" data-merge-facts><h4>Pull request and merge</h4><div class="facts">' + fact('Pull request', link) + fact('State on GitHub', esc(m.pr_state || '—')) +
+    fact('Approved', m.approved_at ? when(m.approved_at) : '—') + fact('Merged', m.merged_at ? when(m.merged_at) + (m.merged_by ? ' · ' + esc(m.merged_by) : '') : '—') +
+    fact('Merge commit', m.merge_sha ? '<span class="mono">' + esc(String(m.merge_sha).slice(0, 10)) + '</span>' : '—') +
+    fact('Approval to merge', m.approval_to_merge_s != null ? mmss(m.approval_to_merge_s) : '—') + '</div>';
+  if (m.note) h += '<div class="small">' + esc(m.note) + '</div>';
+  if (moves.length) {
+    h += '<h4>Moves and their cause</h4><ul class="checklist">';
+    moves.forEach(function (v) { h += '<li><span class="mono small">' + when(v.ts) + '</span> ' + esc((v.from_status || '—') + ' → ' + v.to_status) + ' · <b>' + esc(v.cause) + '</b>' + (v.detail ? ' · ' + esc(v.detail) : '') + '</li>'; });
+    h += '</ul>';
+  }
+  return h + '</div>';
+}
 function drawerTicket(key) {
   var t = ticketBy(key) || { key: key, summary: key, status: '?', type: '', labels: [], blocked_by: [] };
   var det = S.ticket[key];
@@ -3711,7 +3945,20 @@ function drawerTicket(key) {
     var passed = t.status === 'Done';
     b += '<div class="dsec"><h4>Acceptance criteria</h4><ul class="checklist">' + acs.map(function (a) { return '<li><span class="' + (passed ? 'ico-ok' : 'ico-pend') + '">' + (passed ? ICON.ok : ICON.pend) + '</span><span>' + esc(a) + '</span></li>'; }).join('') + '</ul></div>';
   }
+  if (det.merge) b += mergeSec(det);
   if (det.timeline) b += timeSec(det.timeline);
+  if (det.capacity_decision) {
+    var decision = det.capacity_decision, estimate = decision.estimate || {};
+    var tokens = estimate.tokens || {}, minutes = estimate.time_minutes || {};
+    b += '<div class="dsec"><h4>Why this AI was assigned</h4>';
+    b += '<div class="small">' + esc(decision.account) + ' · ' + esc(PROVIDER[decision.provider] || decision.provider || '') +
+      ' · ' + esc(when(decision.assigned_at)) + '</div><p>' + esc(decision.reason || 'No assignment explanation was saved.') + '</p>';
+    if (tokens.low != null && tokens.high != null && minutes.low != null && minutes.high != null) {
+      b += '<div class="small">Saved estimate: ' + tok(tokens.low) + '–' + tok(tokens.high) + ' tokens · ' +
+        Number(minutes.low).toFixed(1) + '–' + Number(minutes.high).toFixed(1) + ' minutes</div>';
+    }
+    b += '</div>';
+  }
   if (full.description) b += '<div class="dsec"><h4>Description</h4><div class="prose">' + esc(full.description) + '</div></div>';
   b += '<div class="dsec"><h4>Runs</h4>';
   if (!det.runs.length) b += '<div class="empty">No run yet.</div>';
@@ -3817,7 +4064,7 @@ function drawerAcc(id) {
 }
 function drawerInc(id) {
   var i = incBy(id); if (!i) return drawerShell('incident', '#' + esc(id), '', '<div class="empty">Closed and no longer listed.</div>');
-  var b = '<div style="font-size:13.5px">' + esc(i.detail) + '</div><div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
+  var b = '<div style="font-size:13.5px;white-space:pre-wrap">' + esc(i.detail) + '</div><div class="facts">' + fact('Kind', esc(KIND[i.kind] || i.kind)) + fact('Subject', '<span class="mono">' + esc(i.subject) + '</span>') + fact('Opened', when(i.opened_at)) + fact('Closed', i.closed_at ? when(i.closed_at) : 'open') + '</div>';
   b += '<div class="dsec"><h4>What happens</h4><div style="font-size:13px">' + ({
     node_down: 'Runs on the node keep their lease for 90 s; then the watchdog marks them lost and moves their tickets back to To Do with a comment. The incident closes on the next heartbeat.',
     account_quota: 'The account takes no ticket until it passes its next check; its tickets go to the other accounts.',
@@ -3825,7 +4072,7 @@ function drawerInc(id) {
     quota_prediction: 'New work is routed to other accounts of this provider because the current burn rate predicts exhaustion before reset.',
     run_slow: 'The run passed the warning clock. It keeps working until the hard limit.',
     role_coverage: 'A role the flow needs (master, intake, verify, dev) has fewer than two ready accounts, so one quota limit or outage could stop it. Sign in or add an account with that role, ideally from another provider.',
-    role_health: 'This AI account failed too many of its latest runs in this role, so the role is switched off for it; its other roles keep working. AI Flow gives the role one easy probation ticket a day and switches it back on after two in a row succeed. Thresholds are on the Command Center, under AI quality by role.',
+    role_health: 'A role is switched off for an account only while the pool keeps at least two enabled accounts and no more than half are switched off. If every eligible account scores badly, AI Flow keeps the role on and reports the most frequent failure kind. Completed pull requests and clean no-change runs are successes. A corrected history or installed missing tool restores the role immediately; otherwise successful probation runs can restore it without a day-long wait. Failure counts and involved tickets appear above. Thresholds are on the Command Center, under AI quality by role.',
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
@@ -4065,7 +4312,7 @@ function renderMachines() {
     h += '<span>Configured AI sessions <strong>' + esc(assignedSessions) + ' / 8</strong></span>';
     h += '<span>Last heartbeat <strong>' + esc(nodeLastSeen(n)) + '</strong></span></div>';
     if (state.addAccount === n.name && consoleCan('nodes.manage')) {
-      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
+      h += '<form class="project-form machine-form" id="account-add-' + esc(n.name) + '" onsubmit="return false"><label>AI<select name="provider" aria-label="AI provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="grok">Grok</option></select></label>';
       h += '<label>Sessions at once<input name="sessions" type="number" min="1" max="' + availableSessions + '" value="1"' + (availableSessions < 1 ? ' disabled' : '') + '></label>';
       h += '<div class="small">' + availableSessions + ' of the machine’s eight AI sessions are available.</div><div class="wide job-options">' + jobChecks(['develop', 'verify'], 'data-new-job') + '</div>';
       h += '<div class="project-actions wide"><button class="btn primary" data-act="machine-account-save" data-name="' + esc(n.name) + '"' + (availableSessions < 1 ? ' disabled' : '') + '>Create sign-in link and code</button><button class="btn" data-act="machine-account-cancel">Cancel</button></div></form>';
@@ -4133,8 +4380,8 @@ function renderMachines() {
     var j = state.join, projects = data.projects || [];
     h += '<section class="panel" data-block="add-machine"><div class="panel-h"><h2>Add a machine</h2><span class="hint">The one-time command expires after five minutes.</span></div>';
     h += '<form class="project-form" id="machines-join-form" onsubmit="return false"><label>Machine name<input id="machine-name" required maxlength="63" value="' + esc(j.name) + '"></label>';
-    h += '<label>Role<select id="machine-role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
-    h += '<label>Project<select id="machine-project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
+    h += '<label>Role<select id="machine-role" aria-label="Machine role"><option value="worker"' + (j.role === 'worker' ? ' selected' : '') + '>worker</option><option value="control"' + (j.role === 'control' ? ' selected' : '') + '>control</option></select></label>';
+    h += '<label>Project<select id="machine-project" aria-label="Machine project">' + projects.map(function (p) { return '<option value="' + esc(p.key) + '"' + (j.project === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') + '</select></label>';
     h += '<div><button class="btn primary" data-act="machine-join-create"' + (j.busy || !projects.length ? ' disabled' : '') + '>' + (j.busy ? 'Creating…' : 'Show one-time command') + '</button></div>';
     if (j.error) h += '<div class="err wide" role="alert">' + esc(j.error) + '</div>';
     if (j.command) h += '<label class="wide">Command expires in <span class="mono" data-countdown="' + esc(j.expires_at) + '"></span><textarea rows="2" readonly onclick="this.select()">' + esc(j.command) + '</textarea></label><div><button class="btn" data-act="machine-copy-join">Copy command</button></div>';
@@ -4195,6 +4442,7 @@ function renderProjects() {
       h += '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
+        h += '<button class="btn sm" data-act="project-environment" data-key="' + esc(p.key) + '">Environment</button>';
         h += '<button class="btn sm" data-act="project-pause" data-key="' + esc(p.key) + '" data-paused="' + (p.status !== 'paused') + '">' + (p.status === 'paused' ? 'Resume' : 'Pause') + '</button>';
         h += '<button class="btn sm danger" data-act="project-remove" data-key="' + esc(p.key) + '">Remove</button>';
       }
@@ -4276,6 +4524,7 @@ function renderProjects() {
     }
     h += '</section>';
   }
+  if (consoleCan('projects.manage')) h += projectEnvironmentPanels(state);
   root.innerHTML = h;
 }
 
@@ -4971,6 +5220,7 @@ document.addEventListener('click', function (e) {
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'system-check-run') runSystemCheck();
   else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
+  else if (act === 'capacity-refresh') { S.capacity.loadedAt = 0; loadCapacity(true); }
   else if (act === 'dashboard-card') openDashboardCard(el.getAttribute('data-card'));
   else if (act === 'flow-step') openDashboardWorkFilter(el.getAttribute('data-status'));
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);
@@ -5071,6 +5321,12 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-repositories-close') { S.projectAdmin.repositoryEditor = null; renderProjects(); }
   else if (act === 'project-repository-add') { var addSelect = $('[data-repository-add]'); addProjectRepository(addSelect ? addSelect.value : ''); }
   else if (act === 'project-repositories-save') saveProjectRepositories();
+  else if (act === 'project-environment') loadProjectEnvironment(el.getAttribute('data-key'));
+  else if (act === 'project-environment-close') { S.projectAdmin.envEditor = null; renderProjects(); }
+  else if (act === 'project-environment-add') { var envEd = S.projectAdmin.envEditor; if (envEd && envEd.data) { envEd.data.items.push({ name: '', kind: 'base_url', value: '', runs: ['dev', 'verify'], description: '' }); renderProjects(); } }
+  else if (act === 'project-environment-remove') { var envEd2 = S.projectAdmin.envEditor; if (envEd2 && envEd2.data) { envEd2.data.items.splice(Number(el.getAttribute('data-index')), 1); renderProjects(); } }
+  else if (act === 'project-environment-save') saveProjectEnvironment();
+  else if (act === 'environment-scan') runEnvironmentScan();
   else if (act === 'github-refresh') loadGitHubIntegrations();
   else if (act === 'github-manifest') githubManifestStart();
   else if (act === 'github-add-token') addGitHubToken();
@@ -5234,6 +5490,8 @@ function downloadBackupKey() {
   }).catch(function (e) { S.backup.error = String(e.message || e); renderBackup(); });
 }
 document.addEventListener('input', function (e) {
+  if (e.target && e.target.matches('[data-user-email]')) S.userAdmin.addForm.email = e.target.value;
+  if (e.target && e.target.matches('[data-user-name]')) S.userAdmin.addForm.name = e.target.value;
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
@@ -5258,7 +5516,21 @@ document.addEventListener('input', function (e) {
         fieldName === 'containers' ? (e.target.value === 'inherit' ? null : e.target.value === 'true') : e.target.value;
     }
   }
+  if (e.target && e.target.matches('[data-env-field], [data-env-run]')) {
+    var envEditor = S.projectAdmin.envEditor, envItems = envEditor && envEditor.data && envEditor.data.items;
+    var envItem = envItems && envItems[Number(e.target.getAttribute('data-index'))];
+    if (envItem && e.target.matches('[data-env-run]')) {
+      var runName = e.target.getAttribute('data-env-run');
+      envItem.runs = (envItem.runs || []).filter(function (r) { return r !== runName; });
+      if (e.target.checked) envItem.runs.push(runName);
+    } else if (envItem) {
+      var envField = e.target.getAttribute('data-env-field');
+      envItem[envField] = envField === 'name' ? e.target.value.toUpperCase() : e.target.value;
+      if (envField === 'kind') { if (envItem.kind === 'secret') envItem.value = ''; renderProjects(); }
+    }
+  }
   if (e.target && e.target.matches('[data-reviewer-token]')) S.reviewerToken = e.target.value;
+  if (e.target && e.target.matches('[data-review-note]')) S.reviewNoteDrafts[e.target.closest('[data-review-card]').getAttribute('data-key')] = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-actor]')) S.knowledge.actor = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-search]')) S.knowledge.search = e.target.value;
   if (e.target && e.target.matches('[data-learning-field]') && S.knowledge.itemEditor) {
@@ -5273,6 +5545,11 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
+  if (e.target && e.target.matches('.new-role')) S.userAdmin.addForm.roles = Array.from(e.target.closest('.project-form').querySelectorAll('.new-role:checked')).map(function (item) { return item.value; });
+  if (e.target && e.target.matches('[data-user-all]') && e.target.closest('.project-form') &&
+      $('[data-user-add]', e.target.closest('.project-form'))) S.userAdmin.addForm.all = e.target.checked;
+  if (e.target && e.target.matches('[data-user-projects]') && e.target.closest('.project-form') &&
+      $('[data-user-add]', e.target.closest('.project-form'))) S.userAdmin.addForm.projects = Array.from(e.target.options).filter(function (option) { return option.selected; }).map(function (option) { return option.value; });
   if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.matches('[data-notify-kind-select]')) {
     S.notifications.form.kind = e.target.value;
@@ -5375,6 +5652,7 @@ document.addEventListener('input', function (e) {
   if (e.target.id === 'rh-percent') S.rh.percent = e.target.value;
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (JOIN_FIELDS[e.target.id]) S.join[JOIN_FIELDS[e.target.id]] = e.target.value;
+  if (e.target.id === 'machine-name') S.machines.join.name = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key') && e.target.getAttribute('data-sh-field') !== 'screenshot') {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {}; S.sh.forms[key][field] = e.target.value;
@@ -5399,6 +5677,8 @@ document.addEventListener('change', function (e) {
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (e.target.id === 'join-role') S.join.role = e.target.value;
   if (e.target.id === 'join-project') S.join.project = e.target.value;
+  if (e.target.id === 'machine-role') S.machines.join.role = e.target.value;
+  if (e.target.id === 'machine-project') S.machines.join.project = e.target.value;
   if (e.target.getAttribute && e.target.getAttribute('data-sh-key')) {
     var key = e.target.getAttribute('data-sh-key'), field = e.target.getAttribute('data-sh-field');
     S.sh.forms[key] = S.sh.forms[key] || {};

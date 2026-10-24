@@ -50,9 +50,9 @@ _SEMVER = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][A-Za-z0
 _REPORTED_VERSION = re.compile(
     r"(?<![A-Za-z0-9])v?(\d+(?:\.\d+){1,2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?(?:\+[A-Za-z0-9][A-Za-z0-9.-]*)?)(?![A-Za-z0-9])")
 _PYTHON_VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\Z")
-_INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp",
-                  "playwright", "playwright-browser", "gh", "claude", "codex", "codex-code-mode-host",
-                  "grok", "opencode", "gitleaks", "xdebug", "cosign", "podman")
+_INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp", "podman",
+                  "playwright", "chromium", "firefox", "webkit", "gh", "claude", "codex", "codex-code-mode-host",
+                  "grok", "opencode", "gitleaks", "xdebug", "cosign")
 
 
 class OperationError(RuntimeError):
@@ -622,25 +622,55 @@ def _install_playwright(version: str) -> None:
     _link_playwright(env)
 
 
-def _install_playwright_browser(version: str) -> None:
+def _check_playwright_browser_launch(browser: str, root: Path) -> str:
     import logging
+    display = {"chromium": "Chromium", "firefox": "Firefox", "webkit": "WebKit"}[browser]
+    playwright = shutil.which("playwright")
+    node = shutil.which("node")
+    if not playwright or not node:
+        raise OperationError(f"{display} cannot start: Playwright or Node.js is unavailable")
+    package_dir = Path(playwright).resolve().parent
+    script = ("const p=require(process.argv[1]); const b=p[process.argv[2]]; "
+              "(async()=>{const x=await b.launch({headless:true}); await x.close();})()"
+              ".catch(e=>{console.error(e.message||String(e));process.exit(1)})")
+    prefix: list[str] = []
+    if os.geteuid() == 0 and shutil.which("runuser"):
+        prefix = ["runuser", "-u", _AI_USER, "--"]
+    with tempfile.TemporaryDirectory(prefix="aiflow4-browser-") as home:
+        os.chmod(home, 0o777)
+        env = _installer_env(HOME=home, PLAYWRIGHT_BROWSERS_PATH=str(root))
+        try:
+            result = subprocess.run([*prefix, node, "-e", script, str(package_dir), browser], capture_output=True,
+                                    text=True, timeout=60, env=env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OperationError(f"{display} could not be started as {_AI_USER} ({type(exc).__name__})") from exc
+    if result.returncode:
+        detail = _output_tail(result) or "no message"
+        library = re.search(r"error while loading shared libraries:\s*([^\s:]+)", detail, re.IGNORECASE)
+        if library:
+            raise OperationError(f"{display} cannot start: system library {library.group(1)} is missing")
+        if "Executable doesn't exist" in detail or "Please run" in detail:
+            raise OperationError(f"{display} browser files are missing from {root}")
+        logging.getLogger("aiflow4.node").warning("%s launch check failed: %s", display, detail)
+        raise OperationError(f"{display} cannot start headless as {_AI_USER}: {detail}")
+    return f"{display} launch check passed"
+
+
+def _install_playwright_browser(version: str, browser: str) -> None:
+    import logging
+    if browser not in {"chromium", "firefox", "webkit"}:
+        raise OperationError("browser must be Chromium, Firefox, or WebKit")
+    display = {"chromium": "Chromium", "firefox": "Firefox", "webkit": "WebKit"}[browser]
     if not shutil.which("playwright"):
         _install_playwright(version)
     root = Path(PLAYWRIGHT_BROWSERS_DIR)
     root.mkdir(parents=True, exist_ok=True)
     env = _installer_env(PLAYWRIGHT_BROWSERS_PATH=str(root))
-    _run_installer("Playwright Chromium installer", ["playwright", "install", "--with-deps", "chromium"], 1800, env)
-    # The worker consumes this shared install; never report it ready based on root's access alone.
-    try:
-        access = subprocess.run(["chmod", "-R", "a+rX", str(root)], capture_output=True, text=True, timeout=300)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise OperationError(f"The shared Chromium install could not be made readable by {_AI_USER} "
-                             f"({type(exc).__name__})") from exc
-    if access.returncode:
-        raise OperationError(f"The shared Chromium install could not be made readable by {_AI_USER} "
-                             f"(exit {access.returncode})")
-    reported = _check_browser_launch(root)
-    logging.getLogger("aiflow4.node").info("Chromium launch check passed: %s", reported)
+    _run_installer(f"Playwright {display} installer", ["playwright", "install", "--with-deps", browser], 1800, env)
+    # the AI user runs the browser but root installed it
+    subprocess.run(["chmod", "-R", "a+rX", str(root)], capture_output=True, timeout=300)
+    reported = _check_playwright_browser_launch(browser, root)
+    logging.getLogger("aiflow4.node").info("%s launch check passed: %s", display, reported)
 
 
 def _install_gitleaks(version: str) -> None:
@@ -744,8 +774,8 @@ def _install_component(name: str, version: str, packages: list[str]) -> None:
     if name == "playwright":
         _install_playwright(version)
         return
-    if name == "playwright-browser":
-        _install_playwright_browser(version)
+    if name in {"chromium", "firefox", "webkit"}:
+        _install_playwright_browser(version, name)
         return
     if name == "gitleaks":
         _install_gitleaks(version)

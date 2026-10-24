@@ -12,6 +12,10 @@ candidate tarball, creates a small CI-only control repo, and joins two nodes thr
 checks that both agents report online heartbeats, then submits a real development claim using one node's token.
 The worker units are disabled in this fixture so the claim remains available for the smoke check. The rollout runs
 with a 10 s soak, one node per wave and `smoke-node-a` as the canary, so it finishes within the job.
+After the candidate install and rollout checks, the script also runs the isolated Playwright console suite against
+the job's test Redis and PostgreSQL services. That suite uses its own sample control plane; it does not write test
+users, tickets or review actions into the installed candidate. See [Console browser tests](console-browser-tests.md)
+for the pull request workflow, browser coverage and sanitized failure trace artifacts.
 
 For an ordinary release, the nodes start from the preceding published signed release, which control also serves:
 

@@ -456,5 +456,17 @@ INSTALL_CANDIDATE_B
   wait_for_release smoke-node-b "$VERSION"
 fi
 
-echo "Install smoke passed: control and both nodes ran $VERSION; heartbeat, claim, upgrade, rollback and the" \
-  "rollout halt on a failed install succeeded."
+# The browser suite uses its own test control plane on the shared CI Redis/PostgreSQL services. The installed
+# candidate has completed its real clean-install, sign-in, join, claim and rollout checks above; no browser fixture
+# data or test credentials are written into the installed control's database or artifacts.
+: "${AIFLOW4_TEST_REDIS_URL:?AIFLOW4_TEST_REDIS_URL must point to the clean-install test Redis service}"
+: "${AIFLOW4_TEST_DATABASE_URL:?AIFLOW4_TEST_DATABASE_URL must point to the clean-install test PostgreSQL service}"
+PLAYWRIGHT_TRACES=${AIFLOW4_PLAYWRIGHT_TRACE_DIR:-${RUNNER_TEMP:-$WORK}/aiflow-playwright-traces}
+mkdir -p "$PLAYWRIGHT_TRACES"
+(
+  cd "$ROOT"
+  AIFLOW4_PLAYWRIGHT_TRACE_DIR="$PLAYWRIGHT_TRACES" uv run --frozen pytest tests/v4/test_console_browser.py -q
+)
+
+echo "Install smoke passed: control and both nodes ran $VERSION; heartbeat, claim, upgrade, rollback, rollout halt" \
+  "on a failed install and the console browser suite succeeded."

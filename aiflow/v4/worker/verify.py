@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
@@ -21,11 +22,20 @@ from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, pr_title
 from .dev import api_node, related_block, with_knowledge_context
 from .gitops import Git
-from .notes import note, project_env
+from .notes import environment_notes, note, project_env
+from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
+POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
+
+
+def deferred_criteria(text: str) -> list[str]:
+    """Read the reviewer AI's explicit list of criteria that need the post-merge environment."""
+    match = POST_MERGE_CHECKS.search(text or "")
+    return list(dict.fromkeys(re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()[:600]
+                              for line in (match.group(1).splitlines() if match else []) if line.strip()))[:20]
 
 
 def findings_of(text: str) -> str:
@@ -33,7 +43,7 @@ def findings_of(text: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_prompt(c: Claimed, pr: dict) -> str:
+def build_prompt(c: Claimed, pr: dict, env: dict[str, str] | None = None) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "verify.md").read_text(encoding="utf-8")
     checks = "\n".join(f"   - {x}" for x in c.project.get("checks") or []) or "   - the project's test suite"
     if c.project.get("containers"):
@@ -42,7 +52,10 @@ def build_prompt(c: Claimed, pr: dict) -> str:
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"],
                       pr_number=pr["number"], branch=pr["branch"], checks=checks,
                       dev_summary=pr.get("dev_summary") or "(none)", description=t["description"] or "(no description)",
-                      related=related_block(c.related))
+                      related=related_block(c.related),
+                      environment=environment_notes(
+                          c.project.get("environment"), "verify",
+                          project_env(t["project"], c.project.get("environment"), "verify") if env is None else env))
     return with_knowledge_context(prompt, c.context_pack)
 
 
@@ -88,24 +101,37 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                                   node=api_node(api)))
         logs = Path(srv_root) / "logs" / "runs"
         logs.mkdir(parents=True, exist_ok=True)
-        spec = RunSpec(prompt=build_prompt(c, pr), cwd=str(wt), account_home=str(Path(srv_root) / "accounts" / c.account),
-                       model=c.model, effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
-                       control_url=control_url, run_token=c.run_token, log_path=str(logs / f"{key}-{c.run_id}.jsonl"),
-                       extra_env=project_env(project["key"]))
-        adapter = get_adapter(c.provider)
-        base_argv = adapter.argv
-        adapter.argv = lambda s: run_as + base_argv(s)
         events = {"n": 0}
 
         def on_progress(ev: dict) -> None:
             events["n"] += 1
             hb.progress = {"phase": "verify-ai", "events": events["n"], "elapsed_s": int(time.time() - t0)}
 
-        if project.get("containers"):
+        env = project_env(project["key"], project.get("environment"), "verify")
+        spec = RunSpec(prompt=build_prompt(c, pr, env), cwd=str(wt),
+                       account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model,
+                       effort=c.effort, timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
+                       control_url=control_url, run_token=c.run_token,
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
+        adapter = get_adapter(c.provider)
+        base_argv = adapter.argv
+        adapter.argv = lambda s: run_as + base_argv(s)
+        wordpress = declares_wordpress(project.get("stacks") or project.get("stack"))
+        if project.get("containers") or wordpress:
             from .containers import ContainerRuntime
-            with ContainerRuntime(spec, run_as):
-                res = adapter.run(spec, on_progress, stop=hb.lost)
+            runtime = ContainerRuntime(spec, run_as)
         else:
+            runtime = nullcontext()
+        # The site is started through the container runtime, so its limits and crash cleanup own it.
+        with runtime as containers:
+            if wordpress:
+                hb.progress = {"phase": "wordpress-site"}
+                start_wordpress_site(containers, wt, project, c.run_id, spec)
+                jira("comment", body=note(
+                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
+                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
+                    node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
         result.update(tokens_in=res.tokens_in, tokens_out=res.tokens_out, cost_usd=res.cost_usd, quota=res.quota,
                       error_kind=res.error_kind, reset_at=res.reset_at.isoformat() if res.reset_at else None,
@@ -118,9 +144,10 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         verdict_m = VERDICT.search(text)
         verdict = verdict_m.group(1) if verdict_m else ""
         findings = findings_of(text)
+        post_merge = deferred_criteria(text)
         result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
                              "duration_s": int(res.duration_s), "log": res.log_path,
-                             "qc_passed": False, "ci": []}
+                             "qc_passed": False, "ci": [], "post_merge_criteria": post_merge}
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result

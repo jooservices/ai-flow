@@ -331,10 +331,14 @@ class GitHubApp:
         if data and data.get("errors"):
             raise GitHubError(f"ready for review: {data['errors']}")
 
-    def merge_pr(self, repo: str, number: int, title: str = "", method: str = "squash") -> dict:
-        """Mark ready and merge; returns {merged, sha, message}. A refused merge (conflict, stale head) is not raised."""
+    def merge_pr(self, repo: str, number: int, title: str = "", method: str = "squash", sha: str = "") -> dict:
+        """Mark ready and merge; returns {merged, sha, message}. A refused merge (conflict, stale head) is not raised.
+
+        `sha` pins the merge to the commit whose checks were read: GitHub refuses (409) when the branch moved on."""
         self.ready_for_review(repo, number)
         body: dict[str, Any] = {"merge_method": method}
+        if sha:
+            body["sha"] = sha
         if title:
             body["commit_title"] = f"{title} (#{number})"[:250]
         r = self.c.request("PUT", f"/repos/{self.org}/{repo}/pulls/{number}/merge", json=body, headers={

@@ -12,6 +12,8 @@ from aiflow.v4.core.settings import read_env_file
 from aiflow.v4.node import agent as node_agent
 from aiflow.v4.node import operations
 from aiflow.v4.control.ui import mount_ui
+from aiflow.v4.control import runtime_settings
+from aiflow.v4.install.secrets import update_env
 
 SESSION_SECRET = "runtime-settings-test-session-secret-32-bytes"
 OWNER_COOKIE = "aiflow4_session"
@@ -83,7 +85,7 @@ def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_valu
                                                          "value": invalid_secret * 200})
     assert invalid.status_code == 422 and invalid_secret not in invalid.text
 
-    secret_value = secrets.token_urlsafe(24)
+    secret_value = "$NAME"
     monkeypatch.setattr(operations, "RUNTIME_SECRET_FILE", secret_file)
     monkeypatch.setattr(operations, "_control_compose_file", lambda: (tmp_path / "compose.yaml", {}))
     restarted = []
@@ -102,6 +104,7 @@ def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_valu
     assert secret_value not in json.dumps(operation)
     result = operations.execute(operation)
     finish_operation(client, "control", control_token, operation, result)
+    assert "EXTERNAL_API_TOKEN='$NAME'" in secret_file.read_text()
     assert read_env_file(secret_file)["EXTERNAL_API_TOKEN"] == secret_value
     assert restarted == ["control-api-a", "control-api-b"]
 
@@ -122,9 +125,13 @@ def test_project_setting_drains_node_restarts_worker_and_restores_acceptance(
     project_dir.mkdir()
     project_file = project_dir / "TESTWP.env"
     project_file.write_text("FEATURE_MODE=old-mode\n")
+    control_dir = tmp_path / "control-projects"
+    control_dir.mkdir()
+    (control_dir / "TESTWP.env").write_text("FEATURE_MODE=old-mode\n")
+    ctx.settings.project_env_dir = str(control_dir)
+    control_token = join_and_heartbeat(client, "control", role="control", settings_dir=control_dir)
     token = join_and_heartbeat(client, "node1", settings_dir=project_dir)
     sign_in(client, ctx)
-    ctx.settings.project_env_dir = str(tmp_path / "control-projects")
     services = []
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", project_dir)
     monkeypatch.setattr(operations, "_wait_for_worker_idle", lambda units: True)
@@ -140,10 +147,18 @@ def test_project_setting_drains_node_restarts_worker_and_restores_acceptance(
 
     operation = next_operation(client, "node1", token)
     assert value not in json.dumps(operation)
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", project_dir)
     result = operations.execute(operation)
     finish_operation(client, "node1", token, operation, result)
     assert read_env_file(project_file)["FEATURE_MODE"] == value
     assert services == ["aiflow4-worker@codex-01.service"]
+    assert ctx.db.one("SELECT accepting_work,status FROM nodes WHERE name='node1'") == {
+        "accepting_work": False, "status": "draining"}
+    central_operation = next_operation(client, "control", control_token)
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", control_dir)
+    central_result = operations.execute(central_operation)
+    finish_operation(client, "control", control_token, central_operation, central_result)
+    assert read_env_file(control_dir / "TESTWP.env")["FEATURE_MODE"] == value
     node = ctx.db.one("SELECT accepting_work,status FROM nodes WHERE name='node1'")
     assert node["accepting_work"] is True and node["status"] == "online"
     status = client.get(f"/v1/runtime-settings/changes/{response.json()['change_id']}")
@@ -175,6 +190,11 @@ def test_failed_worker_health_check_reports_service_and_restores_previous_value(
     project_file = project_dir / "TESTWP.env"
     previous = "old-runtime-value"
     project_file.write_text(f"SERVICE_TOKEN={previous}\n")
+    control_dir = tmp_path / "control-projects"
+    control_dir.mkdir()
+    (control_dir / "TESTWP.env").write_text("SERVICE_TOKEN=old-central-value\n")
+    ctx.settings.project_env_dir = str(control_dir)
+    join_and_heartbeat(client, "control", role="control", settings_dir=control_dir)
     token = join_and_heartbeat(client, "node1")
     sign_in(client, ctx)
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", project_dir)
@@ -203,8 +223,9 @@ def test_failed_worker_health_check_reports_service_and_restores_previous_value(
     assert restarted == ["aiflow4-worker@codex-01.service", "aiflow4-worker@codex-01.service"]
     status = client.get(f"/v1/runtime-settings/changes/{saved.json()['change_id']}")
     assert status.status_code == 200 and status.json()["status"] == "failed"
-    assert status.json()["operations"][0]["result"]["failed_service"] == "aiflow4-worker@codex-01.service"
-    assert "previous value restored" in status.json()["operations"][0]["result"]["error"]
+    failed = next(item for item in status.json()["operations"] if item["node"] == "node1")
+    assert failed["result"]["failed_service"] == "aiflow4-worker@codex-01.service"
+    assert "previous value restored" in failed["result"]["error"]
     assert replacement not in status.text
 
 
@@ -213,6 +234,10 @@ def test_active_work_is_not_restarted_when_drain_times_out(client, ctx, tmp_path
     project_dir.mkdir()
     project_file = project_dir / "TESTWP.env"
     project_file.write_text("FEATURE_MODE=before\n")
+    control_dir = tmp_path / "control-projects"
+    control_dir.mkdir()
+    ctx.settings.project_env_dir = str(control_dir)
+    join_and_heartbeat(client, "control", role="control", settings_dir=control_dir)
     token = join_and_heartbeat(client, "node1")
     sign_in(client, ctx)
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", project_dir)
@@ -236,7 +261,8 @@ def test_active_work_is_not_restarted_when_drain_times_out(client, ctx, tmp_path
     assert restarted == []
     result = client.get(f"/v1/runtime-settings/changes/{queued.json()['change_id']}").json()
     assert result["status"] == "failed"
-    assert "active worker did not become idle" in result["operations"][0]["result"]["error"]
+    failed = next(item for item in result["operations"] if item["node"] == "node1")
+    assert "active worker did not become idle" in failed["result"]["error"]
 
 
 def test_project_failure_rolls_back_successful_peer_before_resuming_work(client, ctx, tmp_path, monkeypatch):
@@ -246,6 +272,12 @@ def test_project_failure_rolls_back_successful_peer_before_resuming_work(client,
     first_file, second_file = first_dir / "TESTWP.env", second_dir / "TESTWP.env"
     first_file.write_text("SERVICE_TOKEN=old-node-one\n")
     second_file.write_text("SERVICE_TOKEN=old-node-two\n")
+    control_dir = tmp_path / "control-projects"
+    control_dir.mkdir()
+    control_file = control_dir / "TESTWP.env"
+    control_file.write_text("SERVICE_TOKEN=old-control-copy\n")
+    ctx.settings.project_env_dir = str(control_dir)
+    control_token = join_and_heartbeat(client, "control", role="control", settings_dir=control_dir)
     first_token = join_and_heartbeat(client, "node1", settings_dir=first_dir)
     second_token = join_and_heartbeat(client, "node2", settings_dir=second_dir)
     ctx.repo().nodes["node2"] = Node(name="node2", projects=["TESTWP"])
@@ -253,7 +285,7 @@ def test_project_failure_rolls_back_successful_peer_before_resuming_work(client,
                                        roles=["dev", "verify", "master"]))
     sign_in(client, ctx)
     mount_ui(client.app, ctx)
-    ctx.settings.project_env_dir = str(tmp_path / "control-projects")
+    ctx.settings.project_env_dir = str(control_dir)
     monkeypatch.setattr(operations, "_wait_for_worker_idle", lambda _units: True)
     active_node = {"name": "node1"}
     restarts = {"node1": 0, "node2": 0}
@@ -268,6 +300,13 @@ def test_project_failure_rolls_back_successful_peer_before_resuming_work(client,
     queued = client.post("/v1/runtime-settings", json={"scope": "project", "project": "TESTWP",
                                                         "key": "SERVICE_TOKEN", "value": saved_value})
     assert queued.status_code == 202
+
+    active_node["name"] = "control"
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", control_dir)
+    control_operation = next_operation(client, "control", control_token)
+    control_result = operations.execute(control_operation)
+    finish_operation(client, "control", control_token, control_operation, control_result)
+    assert read_env_file(control_file)["SERVICE_TOKEN"] == saved_value
 
     active_node["name"] = "node1"
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", first_dir)
@@ -301,15 +340,23 @@ def test_project_failure_rolls_back_successful_peer_before_resuming_work(client,
     assert saved_value not in json.dumps(rollback_result)
     finish_operation(client, "node1", first_token, rollback, rollback_result)
 
+    active_node["name"] = "control"
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", control_dir)
+    control_rollback = next_operation(client, "control", control_token)
+    assert control_rollback["payload"]["action"] == "runtime_setting_rollback"
+    control_rollback_result = operations.execute(control_rollback)
+    finish_operation(client, "control", control_token, control_rollback, control_rollback_result)
+
     assert read_env_file(first_file)["SERVICE_TOKEN"] == "old-node-one"
     assert read_env_file(second_file)["SERVICE_TOKEN"] == "old-node-two"
+    assert read_env_file(control_file)["SERVICE_TOKEN"] == "old-control-copy"
     assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node1'")["accepting_work"] is True
     assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node2'")["accepting_work"] is True
     result = client.get(f"/v1/runtime-settings/changes/{queued.json()['change_id']}")
     assert result.status_code == 200 and result.json()["status"] == "failed"
     assert result.json()["recovery_status"] == "restored"
-    assert len(result.json()["rollbacks"]) == 1
-    assert result.json()["rollbacks"][0]["status"] == "completed"
+    assert len(result.json()["rollbacks"]) == 2
+    assert all(row["status"] == "completed" for row in result.json()["rollbacks"])
     assert saved_value not in result.text and "rollback_envelope" not in result.text
     page = client.get("/settings")
     assert "previous value was restored on all affected machines" in page.text
@@ -325,3 +372,56 @@ def test_control_backup_credentials_are_refused_instead_of_claiming_to_update_co
         assert "control-loops" not in response.text
         assert "opaque-test-value" not in response.text
     assert ctx.db.one("SELECT count(*) AS n FROM node_operations WHERE action LIKE 'runtime-setting%%'")["n"] == 0
+
+
+def test_runtime_setting_timestamps_change_per_key_not_per_file(tmp_path):
+    project_dir = tmp_path / "projects"
+    project_dir.mkdir()
+    project_file = project_dir / "TESTWP.env"
+    project_file.write_text("FIRST=old\nSECOND=unchanged\n")
+    before = {item["name"]: item["changed_at"]
+              for item in node_agent.runtime_settings_inventory(project_dir)["TESTWP"]}
+
+    update_env(project_file, force={"FIRST": "new"}, track_timestamps=True)
+    after = {item["name"]: item["changed_at"]
+             for item in node_agent.runtime_settings_inventory(project_dir)["TESTWP"]}
+
+    assert after["FIRST"] != before["FIRST"]
+    assert after["SECOND"] == before["SECOND"]
+
+    control_after = {item["name"]: item["changed_at"]
+                     for item in runtime_settings._file_rows(project_file, "project", "TESTWP")}
+    assert control_after == after
+
+
+def test_replacement_worker_receives_backed_up_project_values_before_starting_workers(
+        client, ctx, tmp_path, monkeypatch):
+    control_dir = tmp_path / "control-projects"
+    control_dir.mkdir()
+    source = control_dir / "TESTWP.env"
+    update_env(source, force={"SERVICE_TOKEN": "central-copy"}, track_timestamps=True)
+    ctx.settings.project_env_dir = str(control_dir)
+
+    key_file = tmp_path / "replacement-node.key"
+    monkeypatch.setenv("AIFLOW4_NODE_OPERATION_KEY_FILE", str(key_file))
+    public_key = node_public_key(key_file)
+    joined = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "replacement",
+                                                         "role": "worker", "project": "TESTWP"})
+    assert joined.status_code == 200
+    enrolled = client.post("/v1/nodes/join", json={"join_token": joined.json()["token"]})
+    assert enrolled.status_code == 200
+    token = enrolled.json()["node_token"]
+    response = client.post("/v1/nodes/replacement/heartbeat", headers={"Authorization": f"Bearer {token}"}, json={
+        "slots_total": 2, "slots_used": 0, "release_version": "v4.0.0", "release_protocol": 1,
+        "runtime_settings": {}, "runtime_settings_public_key": public_key,
+    })
+    assert response.status_code == 200, response.text
+    entries = response.json()["desired"]["runtime_settings_bootstrap"]
+    assert len(entries) == 1
+    assert "central-copy" not in response.text
+
+    replacement_dir = tmp_path / "replacement-projects"
+    replacement_dir.mkdir()
+    node_agent.apply_runtime_settings_bootstrap("replacement", entries, replacement_dir)
+    assert read_env_file(replacement_dir / "TESTWP.env")["SERVICE_TOKEN"] == "central-copy"
+    assert node_agent.runtime_settings_inventory(replacement_dir)["TESTWP"][0]["changed_at"] == entries[0]["changed_at"]

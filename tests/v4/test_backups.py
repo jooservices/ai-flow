@@ -172,6 +172,9 @@ def _restore_database_snapshot(path: Path, database_url: str) -> None:
 
 def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
     source_roots = configure_paths(ctx, tmp_path / "original", control_repo)
+    source_roots["projects"] = tmp_path / "original" / "projects"
+    source_roots["projects"].mkdir()
+    ctx.settings.project_env_dir = str(source_roots["projects"])
     ctx.settings.database_url = test_database_url
     fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     db.run("INSERT INTO tickets (key,project,status,summary,description) VALUES ('SAMPLE-229','SAMPLE','Done','Original ticket','Original database data')")
@@ -187,6 +190,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     (source_roots["jira"] / "jira.env").write_text("JIRA_API_TOKEN=encrypted in backup\n")
     (source_roots["github"] / "app.pem").write_text("github app key\n")
     (source_roots["console"] / "admin-password").write_text("admin secret\n")
+    (source_roots["projects"] / "TESTWP.env").write_text("FEATURE_FLAG=central-backup-value\n")
     key = secrets.token_bytes(32)
     backups.install_key(ctx.settings.backup_key_file, key)
 
@@ -224,7 +228,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
     target_db.migrate()
     target_db.close()
     restore_base = tmp_path / "restored"
-    restore_roots = {name: restore_base / name for name in ("control", "console", "jira", "github")}
+    restore_roots = {name: restore_base / name for name in ("control", "console", "jira", "github", "projects")}
     restore_roots["repository"] = restore_base / "repository"
     for path in restore_roots.values():
         path.mkdir(parents=True)
@@ -245,6 +249,7 @@ def test_sample_installation_full_backup_restore_round_trip(ctx, db, test_databa
         assert (restore_roots["jira"] / "jira.env").read_text() == "JIRA_API_TOKEN=encrypted in backup\n"
         assert (restore_roots["github"] / "app.pem").read_text() == "github app key\n"
         assert (restore_roots["console"] / "admin-password").read_text() == "admin secret\n"
+        assert (restore_roots["projects"] / "TESTWP.env").read_text() == "FEATURE_FLAG=central-backup-value\n"
         assert (restore_roots["repository"] / "knowledge" / "sample-data.md").read_text() == "repository knowledge content\n"
         assert not (restore_roots["control"] / "backup.key").exists()
     finally:

@@ -3572,6 +3572,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
+        runtime_settings_bootstrap = runtime_settings.bootstrap_settings_for_node(
+            ctx, node, node_projects, inventory, body.runtime_settings_public_key, body.workers)
         return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
                             "sign_ins": [{"account": row["id"], "provider": row["provider"],
                                           "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
@@ -3581,6 +3583,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "project_stacks": project_stacks,
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
+                            "runtime_settings_bootstrap": runtime_settings_bootstrap,
                             "tool_repairs": tool_repairs,
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}

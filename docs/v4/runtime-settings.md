@@ -16,24 +16,34 @@ never carry a value in plaintext; the result's encrypted recovery snapshot is om
 
 ## Files and key inventory
 
-The screen lists key names, whether a value is set, the file's last-change time, and the machines that report a
-project key. It never reads a value back to the browser. This applies to settings as well as keys recognized as
-secrets. Names containing `TOKEN`, `PASSWORD`, `SECRET`, `PRIVATE_KEY`, `API_KEY`, `CREDENTIAL`, or `BASIC` are
-labelled **Secret**; other names are labelled **Setting**.
+The screen lists key names, whether a value is set, that key's last-change time, and the machines that report a
+project key. Each env file stores a timestamp comment per managed key; changing one key leaves the other keys'
+timestamps intact. Legacy entries without metadata start with the file's existing modification time. The screen
+never reads a value back to the browser. This applies to settings as well as keys recognized as secrets. Names
+containing `TOKEN`, `PASSWORD`, `SECRET`, `PRIVATE_KEY`, `API_KEY`, `CREDENTIAL`, or `BASIC` are labelled **Secret**;
+other names are labelled **Setting**.
 
 | Screen location | File | Consumer |
 | --- | --- | --- |
 | Control runtime secret or setting | `/etc/aiflow/secrets/runtime.env` | `control-api-a` and `control-api-b` |
-| Project environment | `/etc/aiflow/projects/<KEY>.env` on each registered machine serving that project | Worker services assigned to those machines |
+| Project environment | Backed up copy: `/etc/aiflow/projects/<KEY>.env` on the control host; working copies: the same path on each registered machine serving that project | Worker services assigned to those machines |
 
 Control runtime changes for `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` are refused. These
 credentials are consumed by scheduled backups in `control-loops`, which does not load `runtime.env`; the screen
 does not claim to update or restart that process. Other non-reserved control runtime keys are applied to both API
 containers. Jira, GitHub, installation and generated control credentials keep their existing flows.
 
-The control installer creates the runtime env file and the projects directory with owner-only permissions. The
-Jira, GitHub, console-login and generated control secret stores keep their existing flows and are not included in
-this screen. The first console-less installation still uses `aiflow4 secret set NAME`.
+The control installer creates the runtime env file and the projects directory with owner-only permissions. A project
+change includes the control host's backed up copy in the same coordinated node operation as the worker copies. If
+any machine fails, the coordinator rolls back every successful copy before work resumes. The encrypted control
+backup contains this canonical copy; when a replacement worker first heartbeats without running workers, the
+control API sends its missing project settings encrypted to that node, and the node writes them before starting
+assigned workers. The node response never contains these values in plaintext. Changes written to the control
+runtime file use single-quoted Compose env-file values, so `$NAME` and `${NAME}` remain literal through a restart.
+Control runtime values containing quotes or backslashes are refused because the shared env-file readers do not
+interpret those escape sequences. The Jira, GitHub, console-login and generated control secret stores keep their
+existing flows and are not included in this screen. The first console-less installation still uses
+`aiflow4 secret set NAME`.
 
 Key names use uppercase environment-variable syntax. Values are non-empty printable ASCII without spaces or line
 breaks so the existing env-file reader and atomic writer preserve them as one value. The write API, page, audit
@@ -68,6 +78,8 @@ No shell command is required from the owner.
 ## Backup and restore
 
 The control backup's stored-secrets component includes `/etc/aiflow/secrets/runtime.env` and the project env files
-visible in `/etc/aiflow/projects` on the control host, in addition to the existing control, Jira, GitHub and
-console stores. It retains the existing encrypted bundle and restrictive restore permissions. The control API
-mounts these paths read-only for inventory; node agents write their own project files locally.
+in `/etc/aiflow/projects` on the control host, in addition to the existing control, Jira, GitHub and console
+stores. Settings managed from this screen have a canonical copy there; node agents write encrypted deliveries to
+each worker's local project file. Restoring the encrypted backup restores the canonical copy, which replacement
+workers receive on their first heartbeat before their workers start. The control API mounts these paths read-only
+for inventory; the control node agent writes the canonical project copy as part of the coordinated operation.

@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -32,6 +33,7 @@ OWNER_SECRETS: dict[str, tuple[str, str]] = {
 }
 _SAFE_VALUE = re.compile(r"[\x21-\x7e]+")  # printable ASCII without spaces: safe in a compose/systemd env file
 _SECRET_KEY = re.compile(r"PASSWORD|TOKEN|SECRET|BASIC|JIRA_EMAIL")
+_SETTING_TIMESTAMP = re.compile(r"# AIFLOW4-SETTING-TIME ([A-Z][A-Z0-9_]{0,127}) (\S+)\Z")
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -44,15 +46,36 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+def read_env_timestamps(path: str | Path, keys=()) -> dict[str, str]:
+    """Return per-key change times; legacy entries use the file time until their next managed write."""
+    target = Path(path)
+    if not target.is_file():
+        return {}
+    try:
+        fallback = datetime.fromtimestamp(target.stat().st_mtime, timezone.utc).isoformat()
+        entries = read_env(target)
+        timestamps = {}
+        for line in target.read_text(encoding="utf-8").splitlines():
+            match = _SETTING_TIMESTAMP.fullmatch(line)
+            if match:
+                timestamps[match.group(1)] = match.group(2)[:40]
+        wanted = set(keys) if keys else set(entries)
+        return {key: timestamps.get(key, fallback) for key in wanted if key in entries}
+    except OSError:
+        return {}
+
+
 def ensure_dir(path: Path, mode: int = 0o700) -> None:
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, mode)
 
 
 def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[str, str] | None = None,
-               header: str = "", mode: int = 0o600) -> bool:
+               header: str = "", mode: int = 0o600, track_timestamps: bool = False,
+               compose_literal: bool = False, timestamps: dict[str, str] | None = None) -> bool:
     """Add `keep` keys that are missing and set `force` keys; other lines stay. Written atomically, `mode` from the
-    first byte; returns whether the content changed (an unchanged file is not rewritten)."""
+    first byte; returns whether the content changed (an unchanged file is not rewritten). Runtime setting callers
+    can keep per-key timestamps and quote control values for Compose env-file parsing."""
     lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else ([f"# {header}"] if header else [])
     current = read_env(path)
     wanted = dict(force or {})
@@ -60,15 +83,34 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
         if not current.get(key):
             wanted[key] = value
     out, seen = [], set()
+    now = datetime.now(timezone.utc).isoformat()
+    changed_at = read_env_timestamps(path) if track_timestamps else {}
+    if track_timestamps:
+        for key, value in current.items():
+            raw = value
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+                raw = raw[1:-1]
+            if key in wanted and raw != wanted[key]:
+                changed_at[key] = (timestamps or {}).get(key, now)
+        for key in wanted:
+            changed_at.setdefault(key, (timestamps or {}).get(key, now))
     for line in lines:
+        if track_timestamps and _SETTING_TIMESTAMP.fullmatch(line):
+            continue
         key = line.split("=", 1)[0].strip() if "=" in line and not line.startswith("#") else ""
         if key in wanted:
             if key in seen:
                 continue
-            line = f"{key}={wanted[key]}"
+            value = wanted[key]
+            line = f"{key}='{value}'" if compose_literal else f"{key}={value}"
             seen.add(key)
         out.append(line)
-    out += [f"{k}={v}" for k, v in wanted.items() if k not in seen]
+    for key, value in wanted.items():
+        if key not in seen:
+            rendered = f"'{value}'" if compose_literal else value
+            out.append(f"{key}={rendered}")
+    if track_timestamps:
+        out += [f"# AIFLOW4-SETTING-TIME {key} {stamp}" for key, stamp in sorted(changed_at.items())]
     text = "\n".join(out) + "\n"
     if path.is_file() and path.read_text(encoding="utf-8") == text:
         os.chmod(path, mode)

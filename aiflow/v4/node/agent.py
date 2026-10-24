@@ -27,6 +27,7 @@ from .. import VERSION
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
 from ..core.settings import read_env_file
+from ..install.secrets import read_env_timestamps, update_env
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -166,7 +167,7 @@ def worker_states() -> list[dict]:
 
 
 def runtime_settings_inventory(projects_dir: str | Path = "/etc/aiflow/projects") -> dict[str, list[dict]]:
-    """Report project env key names, set state, and file mtime; never include a value in the heartbeat."""
+    """Report project env key names, set state, and per-key change time; never include values in the heartbeat."""
     out: dict[str, list[dict]] = {}
     root = Path(projects_dir)
     if not root.is_dir():
@@ -177,12 +178,38 @@ def runtime_settings_inventory(projects_dir: str | Path = "/etc/aiflow/projects"
             continue
         try:
             entries = read_env_file(path)
-            changed_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+            timestamps = read_env_timestamps(path, entries)
         except OSError:
             continue
-        out[project] = [{"name": key, "is_set": bool(value), "changed_at": changed_at}
+        out[project] = [{"name": key, "is_set": bool(value), "changed_at": timestamps.get(key, "")}
                         for key, value in sorted(entries.items()) if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)]
     return out
+
+
+def apply_runtime_settings_bootstrap(node: str, entries: list[dict],
+                                     projects_dir: str | Path = "/etc/aiflow/projects") -> None:
+    """Install encrypted project settings supplied at heartbeat before the node starts assigned workers."""
+    from ..core.runtime_settings_crypto import decrypt_value
+
+    root = Path(projects_dir)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        project, key = str(entry.get("project") or ""), str(entry.get("name") or "")
+        changed_at = str(entry.get("changed_at") or "")[:40]
+        if (not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project)
+                or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
+                or not changed_at or not isinstance(entry.get("envelope"), dict)):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        context = f"runtime-settings-bootstrap:{node}:{project}:{key}:{changed_at}"
+        value = decrypt_value(entry["envelope"], context)
+        if not re.fullmatch(r"[\x21-\x7e]{1,4096}", value):
+            raise ValueError("runtime setting bootstrap value is invalid")
+        path = root / f"{project}.env"
+        if path.is_symlink():
+            raise ValueError("runtime setting bootstrap path is invalid")
+        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
+                   track_timestamps=True, timestamps={key: changed_at})
 
 
 def credential_expiries(states: list[dict]) -> dict[str, str | None]:
@@ -824,6 +851,14 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            bootstrap = desired.get("runtime_settings_bootstrap") or []
+            if bootstrap:
+                try:
+                    apply_runtime_settings_bootstrap(name, bootstrap)
+                except Exception as exc:  # noqa: BLE001 - do not start workers without backed-up settings applied
+                    log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
+                    stop.wait(every_s)
+                    continue
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),

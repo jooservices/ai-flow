@@ -15,7 +15,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..install.secrets import read_env
+from ..install.secrets import read_env, read_env_timestamps
 from ..core.runtime_settings_crypto import encrypt_value
 from .db import J
 
@@ -70,12 +70,9 @@ def _file_rows(path: Path, scope: str, project: str = "") -> list[dict[str, Any]
     if path.is_symlink() or not path.is_file():
         return []
     values = read_env(path)
-    try:
-        changed = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
-    except OSError:
-        changed = ""
+    timestamps = read_env_timestamps(path, values)
     return [{"scope": scope, "project": project, "name": key, "is_secret": is_secret(key),
-             "is_set": bool(value), "changed_at": changed, "nodes": []}
+             "is_set": bool(value), "changed_at": timestamps.get(key, ""), "nodes": []}
             for key, value in sorted(values.items()) if KEY.fullmatch(key)]
 
 
@@ -118,7 +115,7 @@ def _targets(ctx, scope: str, project: str = "") -> tuple[list[dict], list[str]]
             raise HTTPException(409, "the control host agent must be online to restart control services safely")
         return targets, services
 
-    rows = ctx.db.all("SELECT name,status,token_hash,last_heartbeat,accepting_work,projects,dynamic,"
+    rows = ctx.db.all("SELECT name,role,status,token_hash,last_heartbeat,accepting_work,projects,dynamic,"
                       "runtime_settings_public_key"
                       " FROM nodes WHERE removed_at IS NULL ORDER BY name")
     configured = [row for row in rows if row.get("token_hash") and _serves_project(ctx, row, project)]
@@ -132,13 +129,31 @@ def _targets(ctx, scope: str, project: str = "") -> tuple[list[dict], list[str]]
         units = _worker_units(ctx, node["name"])
         if not node.get("runtime_settings_public_key"):
             raise HTTPException(409, f"machine {node['name']} needs a current node-agent heartbeat")
-        targets.append({"name": node["name"], "units": units,
+        targets.append({"name": node["name"], "units": units, "drain_work": bool(units),
                         "resume_accepting": bool(node.get("accepting_work", True)),
                         "runtime_settings_public_key": node["runtime_settings_public_key"]})
         services.extend(f"{node['name']}: {unit}" for unit in units)
     if not targets:
         raise HTTPException(409, "no online machine is currently registered to serve this project")
-    return targets, sorted(set(services)) or [f"worker services on {t['name']}" for t in targets]
+
+    # Keep one authoritative copy of UI-managed project settings on the control host. It is part of the encrypted
+    # control backup and is used to seed replacement workers. Apply it through the same node-operation coordinator
+    # so a worker failure also rolls this copy back.
+    reported_services = sorted(set(services)) or [f"worker services on {target['name']}" for target in targets]
+    control_nodes = [row for row in rows if row.get("role") == "control" and row.get("token_hash")]
+    if not control_nodes:
+        raise HTTPException(409, "the control host agent must be online to keep project settings in backup")
+    control = control_nodes[0]
+    heartbeat = control.get("last_heartbeat")
+    if (control.get("status") != "online" or not heartbeat or (now - heartbeat).total_seconds() > 75
+            or not control.get("runtime_settings_public_key")):
+        raise HTTPException(409, f"control host {control['name']} must be online before project settings can be changed")
+    existing = next((target for target in targets if target["name"] == control["name"]), None)
+    if not existing:
+        targets.append({"name": control["name"], "units": [], "drain_work": False,
+                        "resume_accepting": bool(control.get("accepting_work", True)),
+                        "runtime_settings_public_key": control["runtime_settings_public_key"]})
+    return targets, reported_services
 
 
 def _display_inventory(ctx) -> dict[str, Any]:
@@ -187,6 +202,46 @@ def _project_services(ctx, project: str) -> list[str]:
         return services
     except HTTPException:
         return []
+
+
+def bootstrap_settings_for_node(ctx, node: str, projects: list[str], inventory: dict[str, list[dict]],
+                                public_key: str, workers: list[dict]) -> list[dict]:
+    """Return missing central project values encrypted for an idle node's first worker start."""
+    if workers or not public_key:
+        return []
+    directory = Path(ctx.settings.project_env_dir)
+    encrypted: list[dict] = []
+    for project in projects:
+        if not PROJECT.fullmatch(str(project)):
+            continue
+        pending = ctx.db.one("SELECT 1 AS active FROM node_operations WHERE node=%s"
+                             " AND action='runtime-setting-project' AND status IN ('queued','running')"
+                             " AND payload->>'project'=%s LIMIT 1", (node, project))
+        if pending:
+            continue
+        path = directory / f"{project}.env"
+        if path.is_symlink() or not path.is_file():
+            continue
+        values = read_env(path)
+        current = {str(entry.get("name")): entry for entry in inventory.get(project, [])
+                   if isinstance(entry, dict)}
+        timestamps = read_env_timestamps(path, values)
+        for key, value in sorted(values.items()):
+            if not KEY.fullmatch(key) or not value:
+                continue
+            local = current.get(key)
+            if local and local.get("is_set"):
+                continue
+            changed_at = timestamps.get(key, "")
+            if not changed_at:
+                continue
+            context = f"runtime-settings-bootstrap:{node}:{project}:{key}:{changed_at}"
+            try:
+                envelope = encrypt_value(public_key, value, context)
+            except (ValueError, TypeError):
+                raise HTTPException(409, f"machine {node} has an invalid runtime-setting encryption key") from None
+            encrypted.append({"project": project, "name": key, "changed_at": changed_at, "envelope": envelope})
+    return encrypted
 
 
 def _recent_changes(ctx) -> list[dict]:
@@ -353,6 +408,10 @@ def install(app: FastAPI, ctx, console_user, audit) -> None:
         if not KEY.fullmatch(body.key) or not VALUE.fullmatch(body.value):
             raise HTTPException(422, "key or value has an unsupported format")
         if body.scope == "secret":
+            # Single-quoted Compose env-file values keep dollar references literal. Quotes and backslashes are
+            # excluded because the shared env-file readers intentionally do not interpret escape sequences.
+            if "'" in body.value or "\\" in body.value:
+                raise HTTPException(422, "control runtime values do not support quotes or backslashes")
             if body.project:
                 raise HTTPException(422, "a runtime secret does not have a project name")
             if body.key in _RESERVED or body.key.startswith("AIFLOW4_"):
@@ -384,7 +443,7 @@ def install(app: FastAPI, ctx, console_user, audit) -> None:
                 connection.execute("INSERT INTO node_operations (id,node,action,actor,payload)"
                                    " VALUES (%s,%s,%s,%s,%s)",
                                    (operation_id, target["name"], action, user.subject, J(payload)))
-                if body.scope == "project":
+                if body.scope == "project" and target.get("drain_work", True):
                     connection.execute("UPDATE nodes SET accepting_work=false,status='draining' WHERE name=%s",
                                        (target["name"],))
                 op_ids.append({"id": operation_id, "node": target["name"]})

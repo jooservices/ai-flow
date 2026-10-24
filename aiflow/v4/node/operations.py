@@ -990,6 +990,8 @@ def _execute_runtime_setting(payload: dict[str, Any]) -> dict[str, Any]:
     if (scope not in {"secret", "project"} or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
             or not re.fullmatch(r"[\x21-\x7e]{1,4096}", value)):
         raise OperationError("runtime setting request is invalid")
+    if scope == "secret" and ("'" in value or "\\" in value):
+        raise OperationError("control runtime value has an unsupported format")
     if scope == "project":
         if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project):
             raise OperationError("runtime project name is invalid")
@@ -1006,7 +1008,8 @@ def _execute_runtime_setting(payload: dict[str, Any]) -> dict[str, Any]:
                               separators=(",", ":"))
         rollback_context = f"{payload.get('change_id')}:rollback:{payload.get('operation_id')}"
         rollback_envelope = encrypt_value(node_public_key(), snapshot, f"runtime-setting-rollback:{rollback_context}")
-        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen")
+        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
+                   track_timestamps=True, compose_literal=scope == "secret")
     except OSError:
         raise OperationError("runtime env file could not be written") from None
     except (ValueError, TypeError):

@@ -72,6 +72,14 @@ def test_sweep_trims_idle_databases_beyond_the_limit_but_protects_the_active_ses
     assert exists(admin, session_db)
 
 
+def test_sweeper_cannot_remove_the_pytest_session_database_between_tests(admin, test_database_url):
+    session_db = conninfo_to_dict(test_database_url)["dbname"]
+    now = int(time.time()) + 3600
+    dropped = testdb.sweep(DATABASE_URL, now=now, max_databases=0, only={session_db})
+    assert session_db not in dropped
+    assert exists(admin, session_db)
+
+
 def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, tmp_path, monkeypatch):
     old = admin.make(testdb.new_name(int(time.time()) - 5 * 3600))
     (tmp_path / "TESTFLOW.env").write_text(f"OTHER=1\nAIFLOW4_TEST_DATABASE_URL='{DATABASE_URL}'\n")

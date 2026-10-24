@@ -19,6 +19,7 @@ from typing import Any
 
 from . import scale_proof
 from .db import J
+from . import environment as environment_reports
 from ..core.controlrepo import epic_for_ticket
 
 log = logging.getLogger(__name__)
@@ -460,6 +461,11 @@ def evaluate(ctx, project: Any, version: dict[str, Any]) -> dict[str, Any]:
     else:
         reasons = [f"{t['key']}: missing {', '.join(t['missing'])}" for t in tickets if t["missing"]]
     selected_repository = str(version.get("repository") or (repositories[0] if repositories else project.repo))
+    pending = environment_reports.pending_post_merge(ctx, project.key, [ticket["key"] for ticket in tickets])
+    deferred = {item["ticket"]: item["criteria"] for item in pending}
+    for ticket in tickets:
+        if ticket["key"] in deferred:
+            ticket["post_merge_criteria"] = deferred[ticket["key"]]
     if selected_repository != project.repo:
         project = project_for_version(ctx, project, {**version, "repository": selected_repository})
     if not check_commands(project):

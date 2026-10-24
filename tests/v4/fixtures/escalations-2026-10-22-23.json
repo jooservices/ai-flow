@@ -1,6 +1,8 @@
 {
   "note": "Questions that tickets put to the owner on 2026-10-22 and 2026-10-23 (13 tickets in Needs owner at once; 18 escalations against 21 answers in two hours). JAIF-130, JAIF-220, JAIF-222, JOOWP-301, JOOWP-303, JOOWP-304, JOOWP-308 and JOOWP-312 are the ones named in JAIF-255; the others are the rest of the same families. 'reaches_person' is what must be true once triage has run.",
-  "node_tools": {"playwright-browser": "Chromium 1.64.1", "playwright": "1.64.1", "node": "v24.22.0", "git": "git version 2.43.0"},
+  "node_tools": {"chromium": "Chromium Playwright 1.64.1", "firefox": "Firefox Playwright 1.64.1",
+                  "webkit": "WebKit Playwright 1.64.1", "playwright": "Version 1.64.1", "node": "v24.22.0",
+                  "git": "git version 2.43.0"},
   "escalations": [
     {"at": "2026-10-22T07:41:00Z", "ticket": "JAIF-130", "expected_class": "missing_tool_or_environment", "reaches_person": false,
      "description": "Acceptance criteria:\n- AC1: the retry works",

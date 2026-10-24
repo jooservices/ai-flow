@@ -15,10 +15,23 @@ When a check of the ticket needs a missing tool or service, the AI ends with:
 RESULT: BLOCKED: MISSING-TOOL: php, composer - phpunit cannot run
 ```
 
-The worker also recognises a blocked reason that plainly says a known tool is missing ("composer is not installed",
-"php: command not found"). Such a run ends with outcome `tool_missing`, the ticket goes back to To Do with a comment
-(no question to the owner), and the control plane stores one open row per ticket and requirement in `tool_waits`
-(requirement, machine, project, run). A genuine requirement conflict still goes to Needs owner.
+The worker accepts either the explicit `MISSING-TOOL(S)` or `MISSING-SERVICE(S)` marker above, or adapter evidence from
+an actually executed command: the command must return shell exit code 127, the adapter must confirm the executable
+does not resolve on the PATH given to the AI process, and the command must be one simple invocation of the same
+catalogue executable named by the shell's `command not found` diagnostic. Exit code and output text alone are not
+enough: an installed `php` command can print the same diagnostic and exit 127. Plain phrases in a blocked explanation
+or summary are not sufficient either (for example, "composer is not installed"). Such a verified run ends with outcome
+`tool_missing`, the ticket goes back to To Do with a comment (no question to the owner), and the control plane stores
+one open row per ticket and requirement in `tool_waits` (requirement, machine, project, run). A genuine requirement
+conflict still goes to Needs owner.
+
+Limit for Claude runs: command evidence needs the exit status of the command. The Claude adapter passes it on only
+when the CLI's `tool_result` block carries `exit_code`; the stream-json output normally does not (it only sets
+`is_error`). Without an exit code the command is never accepted as evidence, so a Claude run is classified
+`tool_missing` through the explicit `MISSING-TOOL` marker alone. This errs on the side of not parking tickets.
+
+A dev run that ends cleanly with no file changes is stored with outcome `no_changes`. It does not count against the
+role score, but the ticket still waits the usual retry backoff (2, 4, 8, 16, then 30 minutes) before it is offered again.
 
 ## Waiting and offering again
 

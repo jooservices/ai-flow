@@ -9,17 +9,20 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
-- [Role health](../../docs/v4/role-health.md): a role is switched off for an AI account that keeps failing it, gets one easy probation ticket a day and returns after two successes; the Command Center compares success rate, cost and rework
+- [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
+- [Environment of the runs](../../docs/v4/environment.md): tickets carry requirements only; test services, base URLs, databases, browsers and secrets by name live in the project configuration and reach runs as environment variables; server wording is rejected at intake, removed with a record, and found by a scan of open tickets; missing environment items are reported by name
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
-- [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright and Chromium with system libraries, and report a browser that cannot launch as a tool problem
-- [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, Chromium and its libraries go into a shared folder, and a headless launch as the AI user proves it
+- [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
+- [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
+- [Isolated WordPress test sites](../../docs/v4/wordpress-runs.md): WordPress dev and verify runs get a seeded PHP 8.3 site on a per-run Podman network, with browser environment and cleanup
 - [Test services](../../docs/v4/test-services.md): the node agent prepares PostgreSQL (pgvector) and Redis for projects that declare them, reports them in the heartbeat and holds work while they are unhealthy
 - [Only real business decisions reach a person](../../docs/v4/escalations.md): every escalation is classified, an owner decision register is applied and cited, a new decision is asked once with options, unreachable criteria are amended, refusals explain the allowed alternative, the failing CI log tail is available, and Command Center shows the weekly numbers
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
@@ -67,12 +70,15 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
 - [Command Center V2](../../docs/v4/command-center-v2.md): implementation guide and design prototype for the warm theme, combined Dashboard, role views, Work board picker and Ctrl K search
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
+- [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Scale proof](../../docs/v4/scale-proof.md): 100 projects, 50 machines and 200 simulated AI sessions measured against written performance budgets on every release; a regression blocks the release and files tickets
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
+- [Codex sandbox and Git commits](../../docs/v4/codex-sandbox.md): Codex edits with `workspace-write`; the worker commits outside the sandbox to keep shared mirror metadata protected
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
 - [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
 - [Account quota awareness](../../docs/v4/quota-awareness.md): record account usage, forecast burn and reset risk, route around accounts likely to run out, and show estimates and seven-day history
+- [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error
 - [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 
 ## Tools on a node
@@ -108,7 +114,8 @@ A project's `stack` in `aiflow-control/projects/<KEY>.yaml` selects the extra to
 | `php-8.3` | `php`, `composer`, `wp` |
 | `python-3.12` | `python3`, `uv` |
 | `node-24` | `node` |
-| `playwright` | `node`, `playwright`, Chromium browser |
+| `playwright` | `node`, `playwright`, Chromium, Firefox and WebKit browsers |
+| `wordpress` | `podman`, `node`, `playwright`, Chromium, Firefox and WebKit; isolated site per run |
 
 Every node reports the node-wide tools above plus these stack tools, with each tool's version or `missing`,
 in its heartbeat. The Command Center node drawer shows a missing required tool in red. While a tool is

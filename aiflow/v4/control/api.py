@@ -39,15 +39,15 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
-from ..core import backups as control_backups
+from ..core import backups as control_backups, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
-               ba_chat, runtime_settings, shared_accounts, support_bundle, tooling, version_release)
+from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
+               role_health, rollout, runtime_settings, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -1120,6 +1120,11 @@ class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]
     component: str = ""
+
+
+class LogReadBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    source_id: str = Field(min_length=1, max_length=256)
 
 
 class NodeOperationResultBody(BaseModel):
@@ -4027,10 +4032,63 @@ def create_app(ctx: Ctx) -> FastAPI:
     def node_operations(name: str, request: Request) -> dict:
         console_user(request, {"console.read"})
         rows = ctx.db.all("SELECT id, node, action, actor, status, result, created_at, started_at, completed_at"
-                          " FROM node_operations WHERE node=%s ORDER BY created_at DESC LIMIT 50", (name,))
+                          " FROM node_operations WHERE node=%s AND action <> 'read_logs'"
+                          " ORDER BY created_at DESC LIMIT 50", (name,))
         for row in rows:
             row["id"] = str(row["id"])
         return {"node": name, "operations": rows}
+
+    @app.get("/v1/log-sources")
+    def log_sources(request: Request) -> JSONResponse:
+        console_user(request, "view.logs")
+        return JSONResponse({"sources": log_viewer.source_catalog(ctx)},
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    @app.post("/v1/logs", status_code=202)
+    def request_log_read(body: LogReadBody, request: Request) -> JSONResponse:
+        user = console_user(request, "view.logs")
+        source = log_viewer.find_source(ctx, body.source_id)
+        if source is None:
+            raise HTTPException(404, "unknown log source")
+        if not source["available"]:
+            raise HTTPException(409, "log source is unavailable")
+        operation_id = str(uuid.uuid4())
+        payload = {"action": "read_logs", "source": source["id"], "kind": source["kind"],
+                   "target": source["target"], "lines": log_sources_core.MAX_LOG_LINES}
+        with ctx.db.pool.connection() as connection:
+            connection.execute("DELETE FROM node_operations WHERE action='read_logs'"
+                               " AND status IN ('completed','failed') AND created_at < now() - interval '15 minutes'")
+            connection.execute("INSERT INTO node_operations (id,node,action,actor,payload)"
+                               " VALUES (%s,%s,'read_logs',%s,%s)",
+                               (operation_id, source["node"], user.subject, J(payload)))
+        return JSONResponse({"id": operation_id, "source": source["id"], "status": "queued"}, status_code=202,
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    @app.get("/v1/logs/requests/{operation_id}")
+    def log_read_status(operation_id: str, request: Request) -> JSONResponse:
+        console_user(request, "view.logs")
+        try:
+            parsed_id = str(uuid.UUID(operation_id))
+        except ValueError as exc:
+            raise HTTPException(404, "unknown log request") from exc
+        row = ctx.db.one("SELECT id,payload,status,result FROM node_operations"
+                         " WHERE id=%s AND action='read_logs'"
+                         " AND created_at >= now() - interval '15 minutes'", (parsed_id,))
+        if not row:
+            raise HTTPException(404, "unknown log request")
+        status = str(row["status"])
+        result = row.get("result") or {}
+        if status == "completed" and result.get("available"):
+            lines = log_viewer.redact_log_lines(result.get("lines"))
+            available = True
+            message = "" if lines else "No recent log lines for this source."
+        elif status in {"failed", "completed"}:
+            lines, available, message = [], False, "This log source is unavailable right now."
+        else:
+            lines, available, message = [], None, "Waiting for the node agent to read this source."
+        return JSONResponse({"id": str(row["id"]), "source": (row.get("payload") or {}).get("source", ""),
+                             "status": status, "available": available, "lines": lines, "message": message},
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
     def probe_project(name: str, key: str):
         """The project when this machine serves it (a probe of anything else is refused)."""
@@ -4128,6 +4186,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             if not operation:
                 raise HTTPException(404, "unknown or completed node operation")
             payload = operation["payload"] or {}
+            result = (log_viewer.safe_node_result(body.result, status) if operation["action"] == "read_logs"
+                      else body.result)
             # Runtime values are delivered only to the node agent and removed from the durable queue record
             # as soon as it has applied or rolled them back. A successful project operation remains drained until
             # every serving node has applied the change, or the coordinator has rolled successful peers back.
@@ -4136,7 +4196,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 " payload=CASE WHEN action LIKE 'runtime-setting%%'"
                 " THEN payload - 'value_envelope' - 'rollback_envelope' ELSE payload END"
                 " WHERE id=%s AND node=%s AND status='running'",
-                (status, J(body.result), parsed_id, node))
+                (status, J(result), parsed_id, node))
             if operation["action"].startswith("runtime-setting") and payload.get("change_id"):
                 runtime_settings.reconcile_node_change(connection, str(payload["change_id"]))
         updated = operation
@@ -4144,7 +4204,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(404, "unknown or completed node operation")
         ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
                         reason=f"{updated['action']} finished", data={"operation_id": parsed_id,
-                                                                     "healthy": body.result.get("healthy")})
+                                                                     "healthy": result.get("healthy")})
         return {"id": parsed_id, "status": status}
 
     # --- releases: nodes follow a tagged, signed release written by aiflow4-deploy ---------------------------

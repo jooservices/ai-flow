@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import psycopg
 import pytest
@@ -65,9 +67,26 @@ def test_sweep_trims_idle_databases_beyond_the_limit_but_protects_the_active_ses
     ages = [now - 700 - i for i in range(4)]
     mine = [admin.make(testdb.new_name(a)) for a in ages]
     session_db = conninfo_to_dict(test_database_url)["dbname"]
-    testdb.sweep(DATABASE_URL, now=now, max_databases=1, protected_databases={session_db})
+    testdb.sweep(DATABASE_URL, now=now, max_databases=1)
     assert exists(admin, fresh)  # younger than ten minutes: never trimmed for crowding
     assert not any(exists(admin, n) for n in mine)
+    assert exists(admin, session_db)  # the session fixture's keepalive connection protects it without an allowlist
+
+
+def test_concurrent_sweeps_do_not_drop_the_active_session_database(admin, test_database_url):
+    session_db = conninfo_to_dict(test_database_url)["dbname"]
+    start = Barrier(3)
+
+    def sweep_at_once():
+        start.wait(timeout=10)
+        return testdb.sweep(DATABASE_URL, now=int(time.time()) + 3 * 3600, max_databases=1)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sweeps = [pool.submit(sweep_at_once) for _ in range(2)]
+        start.wait(timeout=10)
+        for sweep in sweeps:
+            sweep.result(timeout=30)
+
     assert exists(admin, session_db)
 
 

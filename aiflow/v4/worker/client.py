@@ -16,7 +16,8 @@ class ControlClient:
         self.c = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout,
                               headers={"Authorization": f"Bearer {node_token}"})
 
-    def call(self, method: str, path: str, json: Any = None, params: dict | None = None, retries: int = 4) -> Any:
+    def call(self, method: str, path: str, json: Any = None, params: dict | None = None, retries: int = 4,
+             allow_not_found: bool = False) -> Any:
         last: Exception | None = None
         for attempt in range(retries):
             try:
@@ -25,6 +26,8 @@ class ControlClient:
                 last = e
                 time.sleep(min(20, 2 ** attempt))
                 continue
+            if r.status_code == 404 and allow_not_found:
+                return None
             if r.status_code == 409:
                 raise Conflict(r.text[:300])
             if r.status_code >= 500 or (r.status_code == 404 and r.text.strip() == "404 page not found"):

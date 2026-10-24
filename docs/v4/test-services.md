@@ -14,8 +14,9 @@ services: [postgres, redis]
 
 * `databases` is the old name of the same setting. It is read as `services` when the project file is loaded
   (`Project.__post_init__` in `aiflow/v4/core/controlrepo.py`), so a file that lists `databases: [postgres, redis]`
-  and no `services` makes the machines prepare and report both. A name that is no test service stays in
-  `databases` and does nothing.
+  and no `services` makes the machines prepare and report both. A name that is no test service (for example a
+  typo such as `postgress`) makes that one project file invalid: `ControlRepo.load` skips the project, logs a warning
+  and records the reason in `ControlRepo.invalid_projects`, and every other project still loads.
 * The next save from the Projects screen (or from the flow doctor) writes `services` and removes `databases` from the
   file, so the migration is also visible in the file.
 

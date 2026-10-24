@@ -44,7 +44,19 @@ def test_project_file_rejects_unknown_legacy_database_names(control_repo):
     write_project(control_repo, "databases: [postgres, postgress]\n")
 
     with pytest.raises(ValueError, match="unknown legacy database/test service names: postgress"):
-        ControlRepo.load(control_repo)
+        Project(key="TESTWP", repo="o/x", databases=["postgres", "postgress"])
+
+
+def test_bad_project_file_does_not_stop_other_projects_loading(control_repo):
+    write_project(control_repo, "databases: [postgres, postgress]\n")
+    (control_repo / "projects" / "GOOD.yaml").write_text("key: GOOD\nrepo: o/good\ndatabases: [redis]\n",
+                                                         encoding="utf-8")
+
+    repo = ControlRepo.load(control_repo)
+
+    assert repo.projects["GOOD"].required_services == ["redis"]
+    assert "TESTWP" not in repo.projects
+    assert "postgress" in repo.invalid_projects["TESTWP"]
 
 
 def test_project_with_services_makes_machines_prepare_and_report_them(client, ctx, control_repo):

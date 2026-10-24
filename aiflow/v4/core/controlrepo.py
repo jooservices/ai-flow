@@ -6,6 +6,7 @@ repo and branches, the policy of a project).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -229,6 +230,7 @@ class ControlRepo:
     policy_projects: dict[str, dict[str, Any]] = field(default_factory=dict)
     policy_archived: bool = False
     ref: str = ""
+    invalid_projects: dict[str, str] = field(default_factory=dict)  # project file stem -> why it was skipped
 
     @classmethod
     def load(cls, root: str | Path) -> "ControlRepo":
@@ -255,9 +257,16 @@ class ControlRepo:
             n = Node(**{k: v for k, v in d.items() if k in Node.__dataclass_fields__})
             nodes[n.name] = n
         projects: dict[str, Project] = {}
+        invalid_projects: dict[str, str] = {}
         for p in sorted((r / "projects").glob("*.yaml")):
             d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            pr = Project(**{k: v for k, v in d.items() if k in Project.__dataclass_fields__})
+            try:
+                pr = Project(**{k: v for k, v in d.items() if k in Project.__dataclass_fields__})
+            except (TypeError, ValueError) as exc:
+                # One bad project file must not stop the others loading: quarantine it and keep the reason for the alert.
+                invalid_projects[p.stem] = str(exc)
+                logging.getLogger(__name__).warning("project file %s skipped: %s", p.name, exc)
+                continue
             projects[pr.key] = pr
         ref = ""
         head = r / ".git" / "HEAD"
@@ -275,7 +284,8 @@ class ControlRepo:
                 policy_projects[p.stem] = data
         return cls(root=r, versions=y("versions.lock", {}), policy={} if policy_archived else y("policy/default.yaml", {}),
                    profiles=y("profiles.yaml", {}), sa=y("sa.yaml", {}), accounts=accounts, nodes=nodes,
-                   projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref)
+                   projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref,
+                   invalid_projects=invalid_projects)
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.runs_on(node)]

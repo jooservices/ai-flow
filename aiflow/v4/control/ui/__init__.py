@@ -107,12 +107,14 @@ def mount_ui(app: FastAPI, ctx) -> None:
             r["id"] = str(r["id"])
             r["cost_usd"] = float(r["cost_usd"])
         from ..timeline import timeline
+        from .. import merge_flow
         capacity_decision = None if not decision else {
             "account": decision["account_id"], "provider": decision["provider"],
             "assigned_at": decision["started_at"].isoformat(), "estimate": decision.get("estimate") or {},
             "reason": decision.get("reason") or "", "account_fit": decision.get("account_fit") or {}}
         return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
                 "writes": writes, "timeline": timeline(ctx.db, key), "capacity_decision": capacity_decision,
+                "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
     @app.get("/v1/services")

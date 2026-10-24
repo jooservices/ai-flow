@@ -67,7 +67,9 @@ OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
               "/v1/integrations/jira/oauth/callback", "/v1/integrations/github/manifest/callback",
-              "/v1/integrations/github/setup"}
+              "/v1/integrations/github/setup",
+              # GitHub calls it without a session; the HMAC signature of the configured secret is the credential
+              "/v1/github/webhook"}
 OPEN_PREFIXES = ("/v1/auth/",)
 
 

@@ -1,5 +1,8 @@
-"""Codex: `codex exec --json` in the workspace-write sandbox (spike S2: needs bubblewrap; .git is read-only,
-so the AI cannot commit; network is opened by config for package installs). Account isolation by CODEX_HOME.
+"""Codex: `codex exec --json` in the workspace-write sandbox.
+
+The AI edits the worktree, then the worker commits and pushes after the process exits. In particular, do not
+give Codex writable access to a worktree's shared Git metadata: it belongs to the repository mirror and is
+shared by linked worktrees. Network is opened by config for package installs. Account isolation by CODEX_HOME.
 """
 from __future__ import annotations
 
@@ -10,10 +13,14 @@ class CodexAdapter(Adapter):
     provider = "codex"
 
     def argv(self, spec: RunSpec) -> list[str]:
-        cmd = ["codex", "exec", "--json", "--cd", spec.cwd, "--sandbox", spec.sandbox,
+        # The worker owns Git mutations. Keep Codex contained even if a caller accidentally requests the
+        # broader mode; workspace-write still permits edits in cwd and the explicit shared scratch root.
+        sandbox = "workspace-write" if spec.sandbox == "danger-full-access" else spec.sandbox
+        cmd = ["codex", "exec", "--json", "--cd", spec.cwd, "--sandbox", sandbox,
                "-c", 'approval_policy="never"', "-c", "features.apps=false"]
-        if spec.sandbox == "workspace-write":
+        if sandbox == "workspace-write":
             cmd += ["-c", "sandbox_workspace_write.network_access=true",
+                    "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
                     # the shared caches and temp dir on disk (see scratch_env) are writable inside the sandbox
                     "-c", f'sandbox_workspace_write.writable_roots=["{scratch_root(spec)}"]']
         if spec.model:

@@ -719,7 +719,7 @@ def _develop_autodeploy(tmp_path, *, active=False, decision=None, healthy=True, 
     if api_port is None:
         served = f'*"/v1/deploy/state"*) cat {state} ;; *"/v1/deploy/ci-state"*) echo \'{{"state":"{ci}"}}\' ;; '
     else:  # the real curl, aimed at the test server instead of port 80
-        served = ('*"/v1/deploy/"*) args=(); for a in "$@"; do '
+        served = ('*"/v1/deploy/"*|*"/healthz"*|*"/cc"*) args=(); for a in "$@"; do '
                   f'args+=("${{a/\\/\\/127.0.0.1\\//\\/\\/127.0.0.1:{api_port}\\/}}"); done; '
                   f'exec {shutil.which("curl")} "${{args[@]}}" ;; ')
     curl_stub = (f'case "$*" in *"/v1/state"*) exit 22 ;; {served}*/healthz*|*/cc*) exit {0 if healthy else 7} ;;'

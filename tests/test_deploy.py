@@ -395,11 +395,12 @@ class DeploySupervisorTests(unittest.TestCase):
         supervisor = self.supervisor(runner)
         first = threading.Thread(target=supervisor.deploy_after_merge,
                                  args=("JAIF-1", self.repo, "develop", self.project))
-        first.start()
-        self.assertTrue(started.wait(3))
-        supervisor.deploy_after_merge("JAIF-2", self.repo, "develop", self.project)
-        finish_first.set()
-        first.join(3)
+        with patch("aiflow.deploy.time.time_ns", return_value=1):
+            first.start()
+            self.assertTrue(started.wait(3))
+            supervisor.deploy_after_merge("JAIF-2", self.repo, "develop", self.project)
+            finish_first.set()
+            first.join(3)
 
         self.assertFalse(first.is_alive())
         self.assertEqual(len(calls), 2)

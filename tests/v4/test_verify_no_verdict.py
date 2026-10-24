@@ -159,3 +159,35 @@ def test_untried_account_that_cannot_receive_the_ticket_does_not_hold_the_retry_
     # node1 stays online but stops accepting work: codex-01 cannot take the ticket, so claude-01 gets the retry
     ctx.db.run("UPDATE nodes SET accepting_work=false WHERE name='node1'")
     assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
+
+
+def test_candidate_refused_after_eligible_does_not_hold_the_retry_back(client, ctx, monkeypatch):
+    from aiflow.v4.control import licensing
+    cc = join(client, "cc")
+    join(client, "node1")
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "claude-01")
+    assert ("TESTWP-50", "verify") not in offered(client, cc, "claude-01")  # codex-01 is untried and offered
+    real = licensing.enforce_project_entitlement
+    calls = []
+
+    def refuse_first(ctx_, project, **kwargs):
+        calls.append(project)
+        if len(calls) % 2 == 1:  # the check for the untried account, made while claude-01's list is built
+            raise licensing.LicenseError("plan limit")
+        return real(ctx_, project, **kwargs)
+
+    monkeypatch.setattr(licensing, "enforce_project_entitlement", refuse_first)
+    # eligible() still lists the ticket for codex-01, but the final candidate list does not: claude-01 gets the retry
+    assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
+
+
+def test_offline_account_does_not_keep_the_ticket_from_being_exhausted(client, ctx):
+    join(client, "cc")  # codex-01's machine never joins: it is offline
+    in_verify(ctx)
+    for minutes in (8, 2):
+        no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=minutes)
+    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "labels": ["aiflow-ready"]}) == ["claude-01"]
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
+                      " AND closed_at IS NULL")["n"] == 1

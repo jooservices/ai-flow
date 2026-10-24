@@ -4529,7 +4529,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
-            verify_cooling = {r["ticket_key"] for r in ctx.db.all(verify_retry.VERIFY_BACKOFF_SQL, {"step": "verify"})}
+            verify_cooling = verify_retry.cooling(ctx.db)
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
                                 " AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "verify"):
@@ -4539,7 +4539,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 dev = last_dev(t["key"], done=True)
                 if not dev or not dev["pr_url"]:
                     continue
-                if dev["account_id"] == acc.id or not verify_retry.may_take(ctx, t, acc.id, dev["account_id"], eligible):
+                if dev["account_id"] == acc.id or not verify_retry.may_take(ctx, t, acc.id, dev["account_id"], final_offers):
                     continue  # never grade your own work; no-verdict rules: verify_retry.py
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
@@ -4788,6 +4788,25 @@ def create_app(ctx: Ctx) -> FastAPI:
                 allowed.append(ticket)
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
+
+    probing = [False]
+
+    def final_offers(account: str, node: str) -> list[dict]:
+        """What /v1/work/candidates would return to this account now (entitlement, rollout, 20-ticket limit).
+
+        The verify retry rule asks it for other accounts; while it runs, nested asks answer nothing so that two
+        accounts cannot wait on each other.
+        """
+        if probing[0]:
+            return []
+        probing[0] = True
+        try:
+            tickets, _reason = entitled_candidates(account, node)
+        except licensing.LicenseError:
+            return []
+        finally:
+            probing[0] = False
+        return tickets[:20] if rollout.node_compatible(ctx, node, RELEASES)["compatible"] else []
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:

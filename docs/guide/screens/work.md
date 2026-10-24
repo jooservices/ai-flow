@@ -19,5 +19,5 @@ New pages need no change to the proxy rule: only `/o2` and `/gatus` are kept awa
 
 ## Common tasks
 
-- Open an epic to see only its tickets.
+- Open an epic to see only its tickets. An epic is never offered to an AI as work, whatever its labels; it moves to In Progress when its first child starts and to Done when all its children are Done or Declined.
 - A ticket that failed three runs in a row has a `ticket_stuck` incident: see its [runbook](../runbooks/ticket_stuck.md).

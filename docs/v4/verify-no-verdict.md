@@ -44,3 +44,15 @@ control UI like all others.
 The Delivery Dashboard section "Needs attention" lists tickets that have waited more than 30 minutes for verification
 (since the dev run finished), with the accounts that tried, their no-verdict counts and which are not offered the
 ticket again. The data is `slow_verifications` in `/v1/state`.
+
+## API contracts touched
+
+- `POST /v1/work/claim` refuses an epic, and a verification this account may not take (barred, or an untried account
+  goes first).
+- `GET /v1/capacity` leaves epics out of the idle and capacity counts.
+- `GET /v1/state` carries `slow_verifications` for the Dashboard.
+- `GET /v1/deploy/state` leaves epics out of the work counts.
+
+An untried account defers the retry only when the final candidate list (`GET /v1/work/candidates`: entitlement,
+rollout and the 20-ticket limit included) really offers it this ticket. An account that is not barred but has no
+machine that is online and accepting work is not counted as eligible, so it cannot keep a ticket from the incident.

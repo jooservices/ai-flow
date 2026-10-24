@@ -65,6 +65,22 @@ _AUDIT_EXE = re.compile(rb'\bexe="((?:\\.|[^"\\])*)"')
 _AUDIT_PATH = re.compile(rb'\bname="((?:\\.|[^"\\])*)"')
 
 
+def notify_systemd(message: str) -> bool:
+    """Send a readiness/status message to systemd without an extra dependency."""
+    address = os.environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+            connection.connect(address)
+            connection.sendall(message.encode("utf-8"))
+        return True
+    except OSError:
+        return False
+
+
 def _audit_interventions(raw: bytes) -> list[dict]:
     """Extract human shell/config changes without retaining command arguments or file contents."""
     groups: dict[bytes, list[bytes]] = {}
@@ -105,7 +121,7 @@ def _audit_interventions(raw: bytes) -> list[dict]:
             command = os.path.basename(exe.group(1).decode("utf-8", "replace").replace(r"\x22", '"'))[:120]
             results.append({"source_key": f"{timestamp}:{serial}:shell", "source": "shell", "actor": actor,
                             "action": "execute", "target": command, "happened_at": happened_at,
-                            "reason": "Interactive host command captured by audit; no reason was supplied"})
+                            "reason": f"Interactive host session invoked {command}; auditd captured the executable name."})
         if b"PATH" in types and b"SYSCALL" in types:
             paths = [m.group(1).decode("utf-8", "replace") for line in lines if _AUDIT_TYPE.search(line)
                      and _AUDIT_TYPE.search(line).group(1) == b"PATH" for m in _AUDIT_PATH.finditer(line)]
@@ -113,7 +129,7 @@ def _audit_interventions(raw: bytes) -> list[dict]:
                 results.append({"source_key": f"{timestamp}:{serial}:config:{filename}", "source": "configuration",
                                 "actor": actor, "action": "write", "target": filename[:120],
                                 "happened_at": happened_at,
-                                "reason": "Interactive host file change captured by audit; no reason was supplied"})
+                                "reason": f"Interactive host session changed {filename}; auditd captured the file name."})
     return _group_interventions(results)
 
 
@@ -838,6 +854,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
     probe_thread: threading.Thread | None = None
     probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
+    ready_notified = False
     try:
         while not stop.is_set():
             try:
@@ -854,6 +871,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
                     "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+                if not ready_notified:
+                    ready_notified = notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
                     pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",

@@ -624,10 +624,9 @@ def test_adding_a_machine_and_an_ai_account_while_sign_in_is_on(fresh):
     assert probed.status_code == 200, probed.text
     beat = machine_api.post("/v1/nodes/node3/heartbeat", json={"tools": TOOLS, "slots_total": 2}, headers=headers)
     assert beat.status_code == 200 and account_id in beat.json()["desired"]["accounts"]
+    # A successful credential probe automatically completes the recovery and retires the interactive handoff.
     details = client.get(f"/v1/accounts/{account_id}/sign-in")
-    assert details.status_code == 200 and details.json()["code"] == "ABCD-EFGH"
-    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
-    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    assert details.status_code == 404
     # A machine's own work request is authorized by its node token without a console cookie.
     assert machine_api.get("/v1/work/candidates", params={"account": account_id}, headers=headers).status_code == 200
 

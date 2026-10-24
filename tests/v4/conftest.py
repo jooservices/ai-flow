@@ -438,8 +438,14 @@ def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), pr
             priority, list(blocked_by)))
 
 
-def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
+def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP", *, heartbeat: bool = True):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    assert joined.status_code == 200, joined.text
+    if heartbeat:
+        ready = client.post(f"/v1/nodes/{name}/heartbeat", json={},
+                            headers={"Authorization": "Bearer " + joined.json()["node_token"]})
+        assert ready.status_code == 200, ready.text
+    return joined

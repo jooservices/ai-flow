@@ -65,7 +65,8 @@ BEGIN
     INSERT INTO operator_interventions (source_key, source, actor, action, target, reason, details)
     VALUES ('db:' || txid_current()::text || ':' || TG_TABLE_NAME || ':' || TG_OP,
             'database', session_user, lower(TG_OP), TG_TABLE_NAME,
-            'Direct database change; no reason was supplied',
+            format('Interactive database session issued %s against table %I; statement text and row values are excluded.',
+                   lower(TG_OP), TG_TABLE_NAME),
             jsonb_build_object('table', TG_TABLE_NAME, 'operation', TG_OP, 'application_name', app_name))
     ON CONFLICT (source_key) DO NOTHING;
     RETURN NULL;
@@ -109,7 +110,8 @@ BEGIN
         INSERT INTO operator_interventions (source_key, source, actor, action, target, reason, details)
         VALUES ('ddl:' || txid_current()::text || ':' || r.command_tag || ':' || r.object_identity,
                 'database', session_user, lower(r.command_tag), left(r.object_identity, 300),
-                'Direct schema change; no reason was supplied',
+                format('Interactive database session changed schema object %s with %s; SQL text is excluded.',
+                       r.object_identity, lower(r.command_tag)),
                 jsonb_build_object('command', r.command_tag, 'object_type', r.object_type))
         ON CONFLICT (source_key) DO NOTHING;
     END LOOP;
@@ -130,7 +132,8 @@ BEGIN
         INSERT INTO operator_interventions (source_key, source, actor, action, target, reason, details)
         VALUES ('drop:' || txid_current()::text || ':' || r.object_type || ':' || r.object_identity,
                 'database', session_user, lower(r.command_tag), left(r.object_identity, 300),
-                'Direct schema change; no reason was supplied',
+                format('Interactive database session dropped schema object %s with %s; SQL text is excluded.',
+                       r.object_identity, lower(r.command_tag)),
                 jsonb_build_object('command', r.command_tag, 'object_type', r.object_type))
         ON CONFLICT (source_key) DO NOTHING;
     END LOOP;
@@ -148,6 +151,7 @@ BEGIN
         CREATE EVENT TRIGGER aiflow4_operator_drop ON sql_drop EXECUTE FUNCTION aiflow4_capture_drop_intervention();
     END IF;
 EXCEPTION WHEN insufficient_privilege THEN
-    RAISE NOTICE 'event triggers need a superuser; schema changes are not audited on this server';
+    RAISE EXCEPTION 'Flow doctor audit requires a migration role that can create PostgreSQL event triggers; refusing to mark the migration applied without DDL auditing'
+        USING ERRCODE = '42501';
 END
 $$;

@@ -51,6 +51,8 @@ def _close_finding(ctx, subject: str, cause: str) -> None:
 
 def _cause(reason: str) -> str:
     value = reason.casefold()
+    if "no specific cause was observed" in value or "no cause found" in value:
+        return "unknown"
     if "no ai account is ready" in value or "no ready account" in value:
         return "no_ready_account"
     if "parked tickets" in value or "waiting for" in value:
@@ -73,7 +75,7 @@ def _cause(reason: str) -> str:
         return "machine_error"
     if "account" in value or "signed out" in value:
         return "account_error"
-    return "no_ready_account"
+    return "unknown"
 
 
 def _comment(ctx, ticket: str, text: str) -> None:
@@ -261,16 +263,16 @@ def _release_backoff(ctx) -> None:
         if ticket["key"] in cooling[step]:
             continue
         failed = ctx.db.one("SELECT id,account_id,node,ended_at,provider FROM runs WHERE ticket_key=%s AND step=%s"
-                            " AND status<>'running' AND outcome IN ('failed','timeout','lost')"
+                            " AND status<>'running' AND outcome IN ('failed','timeout','lost','no_changes')"
                             " ORDER BY started_at DESC LIMIT 1", (ticket["key"], step))
         if not failed or not failed["ended_at"]:
             continue
         streak = ctx.db.one("WITH recent AS (SELECT outcome,row_number() OVER (ORDER BY started_at DESC) AS n"
                             " FROM runs WHERE ticket_key=%s AND step=%s AND status<>'running'"
                             " AND started_at>now()-interval '1 day')"
-                            " SELECT count(*) AS n FROM recent r WHERE r.outcome IN ('failed','timeout','lost')"
+                            " SELECT count(*) AS n FROM recent r WHERE r.outcome IN ('failed','timeout','lost','no_changes')"
                             " AND NOT EXISTS (SELECT 1 FROM recent g WHERE g.n<r.n"
-                            " AND g.outcome NOT IN ('failed','timeout','lost'))", (ticket["key"], step))
+                            " AND g.outcome NOT IN ('failed','timeout','lost','no_changes'))", (ticket["key"], step))
         retry_minutes = min(30, 2 ** min(5, int((streak or {}).get("n") or 1)))
         if (datetime.now(timezone.utc) - failed["ended_at"]).total_seconds() < retry_minutes * 60:
             continue
@@ -288,9 +290,10 @@ ROUTE_EXCLUSION_TTL = timedelta(hours=2)
 
 
 def routable_machines(ctx, account, online: set[str]) -> list[str]:
-    """Machines routing would accept for the account: online, and not still pending a sign-in of this account."""
+    """Machines routing would accept for a new run: signed in, online, and with account/machine capacity."""
     pending = shared_accounts.pending_nodes(ctx.db, account.id)
-    return [name for name in account.machines if name in online and name not in pending]
+    return [name for name in account.machines if name in online and name not in pending
+            and shared_accounts.may_take(ctx.db, account, name)[0]]
 
 
 def _route_around_failed_assignment(ctx) -> None:
@@ -443,8 +446,8 @@ def _diagnose_idle_work(ctx) -> None:
                 ticket_reasons.append("impossible dependency on " + ", ".join(b["key"] for b in impossible))
             for reason in ticket_reasons:
                 cause = _cause(reason)
-                next_step = ("Flow doctor is checking every known queue gate: " + ", ".join(CHECKED)
-                             if cause == "no_ready_account" and "no cause found" in reason.casefold()
+                next_step = ("No specific cause was observed. Checked: " + ", ".join(CHECKED)
+                             if cause == "unknown"
                              else "Flow doctor retries safe repairs each minute; see the action log for the last attempt.")
                 _finding(ctx, ticket["key"], cause, reason, next_step)
 

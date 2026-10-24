@@ -1408,14 +1408,23 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
                   accepted: bool, result: str, payload: dict | None = None) -> None:
-        connection.execute(
+        entry = connection.execute(
             "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500],
-             J(with_connection(target, payload))))
-        # Writes through the API are product paths (review decisions, owner answers, console setup), not
-        # operator interventions. Interventions come only from out-of-band paths: the host audit forwarded by the
-        # node agent, direct SQL (database trigger) and non-flow Jira edits.
+             J(with_connection(target, payload)))).fetchone()
+        # A signed console principal is a human, even when the mutation goes through a product API route. Keep the
+        # intervention and write-audit entry in one transaction; the doctor creates its Bug on the next pass.
+        if accepted and entry and connection.execute(
+                "SELECT 1 AS person FROM console_users WHERE email=%s AND disabled=false", (actor,)).fetchone():
+            connection.execute(
+                "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
+                " VALUES (%s,'control-api',%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
+                (f"control-api:{entry['id']}", actor, f"{target}.{action}"[:120],
+                 (ticket or target)[:300],
+                 f"Authenticated console mutation: {action} on {target} completed as {result[:200]}.",
+                 J({"write_audit_id": entry["id"], "write_target": target, "write_action": action,
+                    "ticket": ticket, "result": result[:200]})))
 
     def with_connection(target: str, payload: dict | None) -> dict:
         """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
@@ -4173,7 +4182,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
-                              " AND removed_at IS NULL", (node,)) or {}
+                              " AND removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
+                              " AND last_heartbeat > now() - make_interval(secs => %s)",
+                              (node, shared_accounts.NODE_ONLINE_S))
+        # A worker process can start before its node agent has delivered a post-reboot heartbeat. Never route from
+        # persisted pre-reboot readiness: the heartbeat refreshes machine state and installed tools first.
+        if not node_row:
+            return []
         if not node_row.get("accepting_work", True):
             return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
@@ -6421,6 +6436,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
                        " idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
                        " WHERE id=%s", (account_id,))
+            # Provider authorization is complete when the node reports the first successful credential probe.
+            # Clearing this state here removes the former nodes.manage console confirmation from recovery.
+            completed = ctx.db.one(
+                "UPDATE managed_ai_accounts m SET sign_in_url='',sign_in_code='',sign_in_error='',"
+                " sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+                " sign_in_started_at=NULL,updated_at=now() FROM accounts a"
+                " WHERE m.id=%s AND m.node=%s AND m.removed_at IS NULL AND m.sign_in_status='completed'"
+                " AND a.id=m.id AND a.status IN ('idle','working') AND a.last_probe_at>=m.sign_in_started_at"
+                " RETURNING m.provider", (account_id, node))
+            if completed:
+                ctx.events.emit("account.sign_in_completed", account=account_id, provider=completed["provider"],
+                                node=node, outcome="ready", reason="successful credential probe confirmed provider sign-in")
         else:
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s,"
                        " cooldown_since=NULL, idle_since=NULL"

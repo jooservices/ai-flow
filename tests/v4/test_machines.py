@@ -136,8 +136,8 @@ def test_stopped_live_machine_cannot_be_reenrolled_with_the_same_name(client, ct
 
 def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, ctx, monkeypatch, tmp_path):
     owner_session(client, ctx)
-    node_auth = {"Authorization": f"Bearer {join_node(client, 'node1').json()['node_token']}"}
-    join_node(client, "node3")
+    node_auth = {"Authorization": f"Bearer {join_node(client, 'node1', heartbeat=False).json()['node_token']}"}
+    join_node(client, "node3", heartbeat=False)
 
     created = client.post("/v1/machines/node1/accounts", json={
         "provider": "codex", "sessions": 2, "jobs": ["develop", "verify", "intake", "master"]})
@@ -186,8 +186,8 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
         "windows": {"five_hour": {"utilization": 0.4, "resets_at": 1792561800},
                     "seven_day": {"utilization": 0.75, "resets_at": 1792638000}}}}, headers=node_auth)
     assert probe.status_code == 200
-    completed = client.post(f"/v1/accounts/{account_id}/sign-in/complete")
-    assert completed.status_code == 200 and completed.json()["signed_in"] is True
+    assert ctx.db.one("SELECT sign_in_status FROM managed_ai_accounts WHERE id=%s", (account_id,))["sign_in_status"] == "idle"
+    assert client.get(f"/v1/accounts/{account_id}/sign-in").status_code == 404
 
     usage_run = "89e035a2-2dcb-4791-b482-607d43883f5f"
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
@@ -255,8 +255,8 @@ def test_ai_account_capacity_live_controls_confirmation_quota_and_audit(client, 
     actions = {(row["target"], row["action"]) for row in audit if row["accepted"]}
     assert {("ai-account", action) for action in ("add", "sign_in_again", "update", "pause", "resume", "remove")} <= actions
     assert {("node", action) for action in ("stop_taking_work", "resume_work", "remove")} <= actions
-    assert ("ai-account", "sign_in_complete") in {(row["target"], row["action"]) for row in ctx.db.all(
-        "SELECT target,action FROM write_audit")}
+    assert ctx.db.one("SELECT outcome FROM events WHERE type='account.sign_in_completed' AND account=%s",
+                      (account_id,))["outcome"] == "ready"
 
 
 def test_removing_a_control_repo_account_tombstones_it_from_worker_scheduling(client, ctx):

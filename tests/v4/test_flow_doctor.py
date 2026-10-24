@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -9,10 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import psycopg
+import pytest
 
 from aiflow.v4 import cli
 from aiflow.v4.control import escalations, flow_doctor, role_health, tooling
-from aiflow.v4.control.db import J
+from aiflow.v4.control.db import DB, J
 from tests.v4.conftest import add_ticket, join_node
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +59,21 @@ def test_doctor_cause_mapping_keeps_specific_queue_gates_distinct():
         "account opencode-01 is signed out": "account_error",
     }
     assert {message: flow_doctor._cause(message) for message in cases} == cases
+    assert flow_doctor._cause("No specific cause was observed. Checked: account state and machine assignment") == "unknown"
+
+
+def test_unknown_idle_diagnosis_stays_unknown_with_a_ready_account_and_machine(ctx, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-2601")
+    online_node(ctx, "cc")
+    account_state(ctx, "claude-01", "idle")
+    monkeypatch.setattr(flow_doctor, "idle_reasons", lambda *_args: [
+        "No specific cause was observed. Checked: account state and machine assignment"])
+    flow_doctor._diagnose_idle_work(ctx)
+    finding = ctx.db.one("SELECT cause,detail,next_step FROM flow_doctor_findings WHERE subject='TESTWP-2601'")
+    assert ctx.db.one("SELECT status FROM accounts WHERE id='claude-01'")["status"] == "idle"
+    assert ctx.db.one("SELECT status FROM nodes WHERE name='cc'")["status"] == "online"
+    assert finding["cause"] == "unknown" and "no_ready_account" != finding["cause"]
+    assert "parked tickets and tool waits" in finding["next_step"] and "machine state" in finding["next_step"]
 
 
 def test_doctor_resolves_a_wait_for_a_non_tool_and_comments_on_the_ticket(ctx):
@@ -117,6 +134,18 @@ def test_doctor_requeues_a_ticket_after_retry_backoff_expires(ctx):
     action = ctx.db.one("SELECT action,outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-266'")
     assert action == {"action": "requeue_after_backoff", "outcome": "ready"}
     assert any(key == "TESTWP-266" and "retry released" in body for key, body in ctx.jira.comments)
+
+
+def test_doctor_records_release_after_no_changes_backoff_expires(ctx):
+    add_ticket(ctx.db, "TESTWP-2661")
+    old = datetime.now(timezone.utc) - timedelta(minutes=20)
+    run_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,%s,'TESTWP','dev','claude-01','claude','cc',1,"
+               "'finished','no_changes',%s,%s,%s)", (run_id, "TESTWP-2661", old, old, old))
+    flow_doctor._release_backoff(ctx)
+    assert ctx.db.one("SELECT action,outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-2661'") == \
+        {"action": "requeue_after_backoff", "outcome": "ready"}
 
 
 def test_doctor_fences_and_restarts_a_stale_worker_session(ctx):
@@ -181,6 +210,21 @@ def test_the_failed_route_is_excluded_from_candidates_after_the_doctor_moves_the
     assert offered("claude-01", cc)  # an expired exclusion no longer applies
 
 
+def test_candidate_routing_ignores_pre_reboot_node_state_until_a_fresh_heartbeat(client, ctx):
+    joined = join_node(client, "cc")
+    headers = {"Authorization": "Bearer " + joined.json()["node_token"]}
+    add_ticket(ctx.db, "TESTWP-2721")
+    account_state(ctx, "claude-01", "idle")
+    ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now()-interval '5 minutes' WHERE name='cc'")
+    def offered():
+        response = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
+        assert response.status_code == 200, response.text
+        return response.json()["tickets"]
+    assert "TESTWP-2721" not in {ticket["key"] for ticket in offered()}
+    client.post("/v1/nodes/cc/heartbeat", json={}, headers=headers)
+    assert "TESTWP-2721" in {ticket["key"] for ticket in offered()}
+
+
 def test_an_account_failure_excludes_the_account_not_its_machine(client, ctx):
     cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
     join_node(client, "node1")
@@ -211,6 +255,34 @@ def test_doctor_retries_a_failed_managed_account_signin(ctx):
         {"action": "retry_account_sign_in", "outcome": "queued"}
 
 
+def test_successful_managed_signin_probe_completes_recovery_without_console_confirmation(client, ctx):
+    request_id = str(uuid.uuid4())
+    ctx.db.run("INSERT INTO managed_ai_accounts (id,provider,node,roles,sign_in_request_id,sign_in_status,"
+               "sign_in_started_at) VALUES ('managed-opencode','opencode','cc',%s,%s,'waiting',now()-interval '1 minute')",
+               (["dev"], request_id))
+    ctx.db.run("INSERT INTO accounts (id,provider,node,roles,status)"
+               " VALUES ('managed-opencode','opencode','cc',%s,'signed_out')", (["dev"],))
+    joined = join_node(client, "cc")
+    headers = {"Authorization": "Bearer " + joined.json()["node_token"]}
+    waiting = client.post("/v1/nodes/cc/heartbeat", json={}, headers=headers).json()["desired"]
+    assert any(row["account"] == "managed-opencode" for row in waiting["sign_ins"])
+    completed = client.post("/v1/accounts/managed-opencode/sign-in/status", headers=headers,
+                            json={"request_id": request_id, "status": "completed"})
+    assert completed.status_code == 200, completed.text
+    ready_to_probe = client.post("/v1/nodes/cc/heartbeat", json={}, headers=headers).json()["desired"]
+    assert "managed-opencode" in ready_to_probe["workers"]
+    probe = client.post("/v1/accounts/managed-opencode/probe", headers=headers,
+                        json={"ok": True, "model": "opencode-test"})
+    assert probe.status_code == 200, probe.text
+    state = ctx.db.one("SELECT a.status,m.sign_in_status,m.sign_in_request_id,m.sign_in_started_at"
+                       " FROM accounts a JOIN managed_ai_accounts m ON m.id=a.id WHERE a.id='managed-opencode'")
+    assert state == {"status": "idle", "sign_in_status": "idle", "sign_in_request_id": "",
+                     "sign_in_started_at": None}
+    add_ticket(ctx.db, "TESTWP-2722")
+    candidates = client.get("/v1/work/candidates", params={"account": "managed-opencode"}, headers=headers)
+    assert "TESTWP-2722" in {ticket["key"] for ticket in candidates.json()["tickets"]}
+
+
 def test_role_coverage_requires_two_ready_providers_and_returns_reason_and_next_step(ctx):
     online_node(ctx, "cc")
     online_node(ctx, "node1")
@@ -235,6 +307,32 @@ def test_role_coverage_uses_routing_readiness_for_shared_accounts_pending_sign_i
     assert dev()["ready_accounts"] == ["claude-01"] and not dev()["healthy"]  # online machine, but not signed in
     ctx.db.run("UPDATE account_machines SET status='signed_in' WHERE account_id='codex-01'")
     assert sorted(dev()["ready_accounts"]) == ["claude-01", "codex-01"] and dev()["healthy"]
+
+
+@pytest.mark.parametrize("full_capacity", ["account_sessions", "machine_slots"])
+def test_role_coverage_excludes_shared_accounts_at_full_routing_capacity(ctx, full_capacity):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    ctx.db.run("UPDATE nodes SET slots_total=2 WHERE name IN ('cc','node1')")
+    for account_id in ("claude-01", "codex-01"):
+        ctx.repo().account(account_id).session_limit = 1
+        account_state(ctx, account_id, "idle")
+    if full_capacity == "account_sessions":
+        account_state(ctx, "claude-01", "working")
+        node, account, provider = "cc", "claude-01", "claude"
+    else:
+        ctx.db.run("UPDATE nodes SET slots_total=1 WHERE name='node1'")
+        node, account, provider = "node1", "opencode-01", "opencode"
+    now = datetime.now(timezone.utc)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,"
+               "started_at,heartbeat_at) VALUES (%s,%s,'TESTWP','dev',%s,%s,%s,1,'running','',%s,%s)",
+               (str(uuid.uuid4()), f"TESTWP-coverage-{full_capacity}", account, provider, node, now, now))
+    coverage = next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "dev")
+    if full_capacity == "account_sessions":
+        assert coverage["ready_accounts"] == ["codex-01"]
+    else:
+        assert coverage["ready_accounts"] == ["claude-01"]
+    assert not coverage["healthy"]
 
 
 def test_doctor_expedites_a_healthy_disabled_role_through_probation(ctx):
@@ -273,6 +371,26 @@ def test_api_and_database_actions_are_recorded_and_create_a_bug_ticket(client, c
     bug = ctx.db.one("SELECT bug_ticket_key FROM operator_interventions")
     assert bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"
     assert {"flow-bug", "operator-intervention"} <= set(ctx.jira.created[0]["labels"])
+
+
+def test_human_console_configuration_mutation_is_an_intervention_and_creates_a_bug(client, ctx):
+    from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
+
+    email, secret = "owner@example.test", "c" * 40
+    ctx.settings.console_session_secret = secret
+    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
+               (email, ["administrator"]))
+    expires = int(datetime.now(timezone.utc).timestamp()) + 3600
+    client.cookies.set(COOKIE_NAME, issue_session(email, ["administrator"], expires, secret))
+    changed = client.patch("/v1/accounts/claude-01", json={"sessions": 2})
+    assert changed.status_code == 200, changed.text
+    row = ctx.db.one("SELECT source,actor,action,target,reason FROM operator_interventions")
+    assert row["source"] == "control-api" and row["actor"] == email
+    assert row["action"] == "ai-account.update" and row["target"] == "claude-01"
+    assert "Authenticated console mutation" in row["reason"] and "updated" in row["reason"]
+    assert flow_doctor.create_intervention_bugs(ctx) == 1
+    bug = ctx.db.one("SELECT bug_ticket_key FROM operator_interventions")
+    assert bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"
 
 
 def test_one_session_of_many_commands_creates_one_bug_and_a_new_session_another(ctx):
@@ -333,6 +451,7 @@ def test_intervention_bugs_reach_intake_with_a_retry_and_workers_can_claim_them(
     app.state.sync_accounts()
     api = TestClient(app)
     api.headers.update({"Authorization": "Bearer " + join_node(api, "cc").json()["node_token"]})
+    api.post("/v1/nodes/cc/heartbeat", json={})  # worker candidates require a post-reboot heartbeat
     flow_doctor.record_operator_intervention(ctx, source_key="b1", source="shell", actor="ops", action="execute",
                                              target="systemctl restart", reason="stuck")
     original = ctx.jira.transition_to
@@ -361,6 +480,21 @@ def test_node_agent_collapses_a_session_of_commands_into_one_intervention():
     assert len(grouped) == 1 and grouped[0]["details"]["events"] == 4 and grouped[0]["source_key"] == "k0"
 
 
+def test_node_audit_reasons_name_the_observed_command_and_file_without_arguments():
+    from aiflow.v4.node import agent
+
+    raw = (b'type=SYSCALL msg=audit(1790000000.123:77): auid=1000 exe="/usr/bin/systemctl"\n'
+           b'type=EXECVE msg=audit(1790000000.123:77): argc=3 a0="systemctl" a1="restart" a2="secret-value"\n'
+           b'type=PATH msg=audit(1790000000.123:77): name="/etc/aiflow/node.env"\n')
+    events = agent._audit_interventions(raw)
+    assert len(events) == 2
+    shell = next(event for event in events if event["source"] == "shell")
+    config = next(event for event in events if event["source"] == "configuration")
+    assert "systemctl" in shell["reason"] and "no reason was supplied" not in shell["reason"]
+    assert "node.env" in config["reason"] and "no reason was supplied" not in config["reason"]
+    assert "secret-value" not in repr(events)
+
+
 def as_operator(ctx) -> None:
     """The test server has one login role, so make it a person's role: the registered role is the product."""
     ctx.db.run("DELETE FROM audit_product_roles")
@@ -384,9 +518,10 @@ def test_direct_database_writes_and_jira_changes_enter_the_intervention_ledger(c
     as_operator(ctx)
     with psycopg.connect(ctx.db.url, application_name="psql") as connection:
         connection.execute("UPDATE tickets SET summary=summary WHERE key='TESTWP-269'")
-    row = ctx.db.one("SELECT source,action,target,details->>'application_name' AS app"
+    row = ctx.db.one("SELECT source,action,target,reason,details->>'application_name' AS app"
                      " FROM operator_interventions WHERE source='database'")
-    assert row == {"source": "database", "action": "update", "target": "tickets", "app": "psql"}
+    assert row["source"] == "database" and row["action"] == "update" and row["target"] == "tickets"
+    assert row["app"] == "psql" and "issued update against table tickets" in row["reason"]
     issue = {"key": "TESTWP-269", "changelog": {"histories": [{"id": "history-1",
              "created": "2026-10-23T10:00:00.000+0000", "author": {"accountId": "human", "displayName": "Human"},
              "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]}]}}
@@ -422,6 +557,42 @@ def test_truncate_and_schema_changes_by_a_person_are_recorded(ctx):
     assert any(a == "create table" and "hand_made" in t for a, t in rows)
     assert any(a.startswith("drop") and "hand_made" in t for a, t in rows)
     assert any(a.startswith("drop") and "aiflow4_operator_audit" in t for a, t in rows)
+
+
+def test_restricted_migration_role_cannot_mark_flow_doctor_applied_without_ddl_audit(ctx, tmp_path):
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    migration = (ROOT / "aiflow/v4/control/migrations/018_flow_doctor.sql").read_text()
+    setup = re.search(r"DO \$\$\nBEGIN\n    IF NOT EXISTS \(SELECT 1 FROM pg_event_trigger.*?\nEND\n\$\$;", migration, re.S)
+    assert setup and "RAISE EXCEPTION" in migration and "RAISE NOTICE" not in migration
+    role = "aiflow_restricted_" + uuid.uuid4().hex[:12]
+    admin = psycopg.connect(ctx.db.url, autocommit=True)
+    owner = admin.execute("SELECT current_user").fetchone()[0]
+    restricted_db = None
+    try:
+        admin.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
+        admin.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(role), sql.Identifier(owner)))
+        admin.execute(sql.SQL("GRANT USAGE,CREATE ON SCHEMA public TO {}").format(sql.Identifier(role)))
+        admin.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_ddl")
+        admin.execute("DROP EVENT TRIGGER IF EXISTS aiflow4_operator_drop")
+        admin.execute(sql.SQL("ALTER TABLE schema_migrations OWNER TO {}").format(sql.Identifier(role)))
+        directory = tmp_path / "restricted-migration"
+        directory.mkdir()
+        (directory / "flow_doctor_audit_setup.sql").write_text(setup.group(0))
+        restricted_db = DB(make_conninfo(ctx.db.url, options=f"-c role={role}"))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="migration role that can create PostgreSQL event triggers"):
+            restricted_db.migrate(directory)
+        assert ctx.db.one("SELECT 1 AS found FROM schema_migrations WHERE version='flow_doctor_audit_setup'") is None
+    finally:
+        if restricted_db:
+            restricted_db.close()
+        admin.execute(sql.SQL("ALTER TABLE schema_migrations OWNER TO {}").format(sql.Identifier(owner)))
+        admin.execute(setup.group(0))
+        admin.execute(sql.SQL("REVOKE ALL ON SCHEMA public FROM {}").format(sql.Identifier(role)))
+        admin.execute(sql.SQL("REVOKE {} FROM {}").format(sql.Identifier(role), sql.Identifier(owner)))
+        admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+        admin.close()
 
 
 def test_dashboard_exposes_findings_actions_role_reason_and_intervention_totals(client, ctx):
@@ -471,7 +642,29 @@ def test_control_waits_for_database_and_redis_before_migration_and_workers_follo
     assert calls == ["database", "SELECT 1", "redis"] and attempts["db"] == 2
     worker_unit = (ROOT / "deploy/v4/node/systemd/aiflow4-worker@.service").read_text()
     node_unit = (ROOT / "deploy/v4/node/systemd/aiflow4-node-agent.service").read_text()
+    assert "Type=notify" in node_unit and "NotifyAccess=main" in node_unit
     assert "Requires=aiflow4-node-agent.service" in worker_unit and "After=network-online.target" in worker_unit
+    from aiflow.v4.node import agent
+    messages = []
+
+    class NotifySocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def connect(self, address):
+            messages.append(("address", address))
+
+        def sendall(self, data):
+            messages.append(("message", data))
+
+    monkeypatch.setenv("NOTIFY_SOCKET", "@aiflow-test")
+    monkeypatch.setattr(agent.socket, "socket", lambda *_args: NotifySocket())
+    assert agent.notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
+    assert messages == [("address", "\0aiflow-test"),
+                        ("message", b"READY=1\nSTATUS=First control heartbeat succeeded")]
     assert "auditd.service" in node_unit
     assert "restart: unless-stopped" in (ROOT / "deploy/v4/control/infra.yaml").read_text()
     assert "wait_for_control_stores(s)" in (ROOT / "aiflow/v4/cli.py").read_text()

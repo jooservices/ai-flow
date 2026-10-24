@@ -248,7 +248,7 @@ def test_one_inventory_joins_ten_nodes_concurrently_and_rejoin_keeps_one_record_
     names = [values["aiflow4_node_name"] for values in nodes.values()]
 
     def join_one(name):
-        response = join_node(client, name, role="worker", project="TESTWP")
+        response = join_node(client, name, role="worker", project="TESTWP", heartbeat=False)
         assert response.status_code == 200, response.text
         return response.json()["node"]
 

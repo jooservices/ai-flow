@@ -178,6 +178,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    # The changed pointer behavior lets Dashboard actions remain clickable beneath the toast area.
+    (re.compile(r"^\s*\.toasts\{"), "cc"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),

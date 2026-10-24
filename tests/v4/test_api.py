@@ -60,6 +60,43 @@ def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(cl
     assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": expired}).status_code == 403
 
 
+def test_developer_pr_lookup_is_fenced_and_scoped_to_the_run_repository(client, ctx):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-6")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-6", "account": "claude-01"},
+                          headers=cc).json()
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    ctx.github.prs.append({"repo": "test-aiflow-wp", "head": {"ref": "TESTWP-6-no-change", "sha": "abc123"},
+                           "state": "open", "number": 42, "html_url": url})
+
+    found = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                "repo": "jooservices/test-aiflow-wp",
+                                                "head": "TESTWP-6-no-change"}, headers=cc)
+    assert found.status_code == 200 and found.json() == {"found": True, "url": url, "number": 42,
+                                                         "head_sha": "abc123"}
+    missing = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                  "repo": "jooservices/test-aiflow-wp",
+                                                  "head": "TESTWP-6-other"}, headers=cc)
+    assert missing.status_code == 200 and missing.json() == {"found": False}
+    wrong_repo = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                     "repo": "jooservices/other", "head": "TESTWP-6-no-change"},
+                            headers=cc)
+    assert wrong_repo.status_code == 403
+
+
+def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(client, ctx):
+    add_ticket(ctx.db, "TESTWP-8", status="In Verify")
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/43"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,pr_url,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-8','TESTWP','dev','claude-01','claude','cc',1,'finished','done',%s,%s,%s,now()-interval '1 minute',now())",
+               (str(uuid.uuid4()), "Already done: no new changes were needed", J({"already_done": True, "no_changes": True}), url))
+
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-8")
+
+    assert ticket["last_run"]["already_done"] is True
+    assert ticket["last_run"]["pr_url"] == url
+
+
 def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_release(client):
     response = client.get("/v1/install.sh")
     assert response.status_code == 200

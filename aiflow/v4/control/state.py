@@ -165,7 +165,8 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                        "account": r["account_id"], "provider": r["provider"], "model": r["model"], "node": r["node"],
                        "outcome": r["outcome"] or r["status"], "error_kind": r["error_kind"], "duration_s": dur,
                        "cost_usd": float(r["cost_usd"]), "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
-                       "pr_url": r["pr_url"], "ended_age_s": _age(r["ended_at"])})
+                       "pr_url": r["pr_url"], "already_done": bool((r["details"] or {}).get("already_done")),
+                       "ended_age_s": _age(r["ended_at"])})
     tickets = db.all("SELECT key, project, status, type, priority, labels, summary, parent_key, blocked_by, done_at, jira_updated"
                      " FROM tickets ORDER BY project, key")
     ticket_index = {ticket["key"]: ticket for ticket in tickets}

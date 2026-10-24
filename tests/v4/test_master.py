@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import add_ticket, join_node
+from aiflow.v4.control.db import J
 
 
 MASTER_SCOPE = "master:global"
@@ -275,6 +276,16 @@ def test_master_actions_are_limited_to_safe_fenced_actions_and_audited(client, c
     retried = action(client, cc, master, action="retry", ticket="TESTWP-211",
                      intent="retry after the failed dev run", why="The previous run failed")
     assert retried.status_code == 200 and ctx.jira.status_of["TESTWP-211"] == "To Do"
+
+    add_ticket(ctx.db, "TESTWP-213")
+    ctx.jira.status_of["TESTWP-213"] = "To Do"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,summary,details)"
+               " VALUES (%s,'TESTWP-213','TESTWP','dev','codex-01','codex','node1',3,'finished','failed','no_work',%s,%s)",
+               (str(uuid.uuid4()), "no changes to verify: no committed work and no open pull request",
+                J({"no_changes": True, "no_work_reason": "no committed work and no open pull request"})))
+    doctor_retry = action(client, cc, master, action="retry", ticket="TESTWP-213",
+                          intent="retry after diagnosing no work on the branch", why="The failed run recorded no work")
+    assert doctor_retry.status_code == 200 and ctx.jira.status_of["TESTWP-213"] == "To Do"
 
     ctx.db.run("UPDATE accounts SET status='error',last_error='probe failed' WHERE id='codex-01'")
     paused = action(client, cc, master, action="pause_account", account_id="codex-01", pause_minutes=15,

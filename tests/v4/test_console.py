@@ -1343,6 +1343,28 @@ console.log(drawerTicket(ticket.key));
     assert "Repository" in result.stdout
 
 
+def test_board_card_shows_already_done_reason_and_clickable_pull_request():
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the console")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = r"""
+var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
+  priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
+  pr_url: 'https://github.com/jooservices/test-aiflow-wp/pull/42', already_done: true}};
+S.data = {tickets: [ticket], projects: [], nodes: [], accounts: [], active_runs: [], recent_runs: [],
+  incidents: [], events: [], totals: {}, versions: {}};
+console.log(card(ticket, {}));
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "Already done · sent to verification" in result.stdout
+    assert 'href="https://github.com/jooservices/test-aiflow-wp/pull/42"' in result.stdout
+    assert ">Pull request #42 " in result.stdout
+
+
 def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints():
     page = html()
     assert 'data-view="projects">Projects</button>' in page

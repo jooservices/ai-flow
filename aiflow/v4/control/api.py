@@ -5607,6 +5607,28 @@ def create_app(ctx: Ctx) -> FastAPI:
     async def github_git_proxy_post(git_path: str, request: Request) -> Response:
         return await github_git_proxy(git_path, request)
 
+    @app.get("/v1/github/pr")
+    def github_find_pr(run_id: str = Query(min_length=1), fence: int = Query(ge=1),
+                       repo: str = Query(min_length=1, max_length=200),
+                       head: str = Query(min_length=1, max_length=240), node: str = Depends(node_auth)) -> dict:
+        run = fenced(run_id, fence, "github", "find_pr", {"repo": repo, "head": head})
+        if run["node"] != node:
+            raise HTTPException(403, "run belongs to another node")
+        project = ctx.repo().projects.get(run["project"])
+        repository = repository_for_run(run, project)
+        if not project or not matches_run_repository(repository, repo):
+            raise HTTPException(403, "repository does not belong to the run's project")
+        pr = github_gateway(ctx, repository).find_pr(repository.split("/", 1)[-1], head)
+        found = {"found": bool(pr)}
+        if pr:
+            found.update(url=pr.get("html_url", ""), number=pr.get("number"))
+            head_sha = str((pr.get("head") or {}).get("sha") or "")
+            if head_sha:
+                found["head_sha"] = head_sha
+        audit("github", "find_pr", run["ticket_key"], run_id, fence, run["account_id"], True,
+              found.get("url", "not found"), {"repo": repository, "head": head})
+        return found
+
     @app.post("/v1/github/pr")
     def github_pr(body: PRBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "pr", {"repo": body.repo, "head": body.head})

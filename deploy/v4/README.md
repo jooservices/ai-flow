@@ -16,6 +16,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
+- [Already completed work](../../docs/v4/already-completed-work.md): clean developer runs reuse an open PR or open one for committed branch work, then send the ticket to verification; empty branches record a doctor-retryable failure
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name

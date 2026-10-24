@@ -71,12 +71,15 @@ def test_sweep_trims_idle_databases_beyond_the_limit_but_protects_the_active_ses
     assert exists(admin, session_db)
 
 
-def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, tmp_path, monkeypatch):
+def test_node_agent_sweeps_the_databases_named_in_the_project_env_files(admin, tmp_path, monkeypatch,
+                                                                       test_database_url):
     old = admin.make(testdb.new_name(int(time.time()) - 5 * 3600))
+    session_db = conninfo_to_dict(test_database_url)["dbname"]
     (tmp_path / "TESTFLOW.env").write_text(f"OTHER=1\nAIFLOW4_TEST_DATABASE_URL='{DATABASE_URL}'\n")
     (tmp_path / "TESTWP.env").write_text("WP_TESTS_DB_HOST=x\n")
     assert agent._test_database_urls(str(tmp_path)) == [DATABASE_URL]
     monkeypatch.setattr(agent, "_last_testdb_sweep", 0.0)
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) >= 1
     assert not exists(admin, old)
+    assert exists(admin, session_db)  # the session fixture keeps its active database out of the sweeper
     assert agent.sweep_test_databases(str(tmp_path), every_s=600) == 0  # not again within ten minutes

@@ -4,6 +4,8 @@ AI Flow spends the provider with plenty of quota first and keeps the one that ru
 it, so nobody has to move tickets between providers by hand. Everything is on **Machines and AI**, panel
 **AI provider routing**.
 
+**Console screens:** `machines`.
+
 ## Spend preference (headroom)
 
 For every window a provider reports (five hour, seven day, ...) the usage of its accounts is averaged. A window whose own
@@ -54,6 +56,7 @@ provider is held back) or `only` (a single provider).
 * `GET /v1/provider-routing`: ranking, headroom, windows, hold-back state, settings, recent decisions.
 * `PUT /v1/provider-routing/settings` (owner): `{"order": ["codex", "grok", "claude"], "ceilings": {"claude": 80}}`.
   Each change is audited.
+* `POST /v1/work/claim`: records the account and routing reason when an offered ticket is claimed.
 
 Settings are in `provider_routing_settings`, the hold-back state in `provider_routing_state`, decisions in `routing_decisions`
 (migration `018_provider_quota_routing.sql`). The code is `aiflow/v4/control/provider_routing.py`, wired in `eligible()` in `api.py`.

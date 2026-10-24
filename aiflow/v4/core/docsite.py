@@ -79,6 +79,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjectPickerOptions": ("work", "delivery"),
     "renderDBody": ("work", "delivery"),
     "renderReviews": ("review",),
+    "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
@@ -98,6 +99,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
+    "notificationConfigFromForm": ("notifications",),
+    "notificationFormSubmit": ("notifications",),
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
@@ -134,6 +137,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
     "renderRouting": ("machines",),
+    "loadRouting": ("machines",),
+    "applyRouting": ("machines",),
+    "moveRoutingProvider": ("machines",),
+    "saveRouting": ("machines",),
     "roleHealthPanel": ("machines",),
     "render": None,
     "viewOf": None,
@@ -184,6 +191,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"provider routing|routing:\s*\{|S\.routing|data-routing|routing-host|routing-(?:move|save)|"
+                r"/v1/provider-routing"), "machines"),
+    (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
@@ -192,6 +202,9 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
     (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
+    # The click handler resolves the clicked element from a text node first; the phone review buttons need it.
+    (re.compile(r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"
+                r"\btarget\.closest\(|\btarget\.id === 'overlay'|submitReview\(reviewKey"), "review"),
     (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )
 
@@ -1122,8 +1135,10 @@ def changed_views(base: str) -> set[str]:
                 old_index = old_first - 1 + (line_no - first)
                 if old_index < len(base_lines):
                     specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
-            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
-                             or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
+            # `data-block` is also used for an ordinary screen panel. Its renderer or view section identifies
+            # that screen; layout behavior itself is identified by the layout controls and state below.
+            layout_markup = ('id="layout-live"' in changed_line or 'data-layout-section="' in changed_line
+                             or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line
                              or re.search(r"\bloadLayouts\(\)", changed_line))

@@ -6584,9 +6584,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             status = ticket["status"]
             if status != "Needs owner":
                 status = reviewer_transition(key, run_id, fence, "Needs owner", "reviewer asked the AI")
-            if not escalations.open_escalation(ctx.db, key):  # triage only decides a raised escalation
-                escalations.record(ctx.db, key, ticket["project"], "review", run_id, escalations.AMBIGUITY, question,
-                                   "reviewer asked the AI")
+            escalations.raise_reviewer_question(ctx.db, key, ticket["project"], run_id, question)
             record_reviewer_action(ticket, run_id, fence, "ask-ai", question)
             finish_reviewer_run(key, run_id, fence, "question", question)
             return {"status": status, "thread": review_thread(key)}

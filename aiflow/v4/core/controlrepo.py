@@ -211,6 +211,8 @@ class ControlRepo:
     # True once machines and accounts were imported into the control database (docs/v4/inventory-in-database.md):
     # accounts and project assignments then come from the database, including assignments migrated from project YAML.
     inventory_in_db: bool = False
+    # Console-created project access retained separately until the one-time import makes nodes.projects authoritative.
+    managed_project_assignments: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, root: str | Path) -> "ControlRepo":
@@ -283,8 +285,9 @@ class ControlRepo:
         configured = None if self.inventory_in_db else self.nodes.get(node)
         dynamic = dynamic or self.inventory_in_db
         if configured:
-            assigned = list(configured.projects)
+            assigned = list(bound_projects) if self.inventory_in_db else list(configured.projects)
             if not self.inventory_in_db:
+                assigned.extend(self.managed_project_assignments.get(node, []))
                 assigned.extend(key for key, project in self.projects.items() if node in project.nodes)
             return [key for key in dict.fromkeys(assigned)
                     if key in self.projects and not self.projects[key].paused]

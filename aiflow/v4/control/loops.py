@@ -297,7 +297,7 @@ def watchdog(ctx: Ctx) -> None:
             where = "" if n["name"] in repo.nodes or repo.inventory_in_db else " and is not described in aiflow-control/nodes/"
             open_incident(ctx, "node_no_ai", n["name"], "warning", f"node {n['name']} has no AI account",
                           f"{n['name']} is online{where}, but no AI account is assigned to it, so it cannot take any ticket."
-                          " Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.")
+                          " Add and sign in to an AI account for this machine on the Machines and AI screen.")
         elif n["name"] in with_accounts or n["status"] != "online":
             close_incident(ctx, "node_no_ai", n["name"], "accounts assigned" if n["name"] in with_accounts else "node left")
     # orphans: Jira says In Progress but no run is working on it (a worker died between writes, a deploy, a manual

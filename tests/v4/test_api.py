@@ -880,6 +880,7 @@ def test_node_without_ai_accounts_is_flagged(client, ctx):
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title, detail FROM incidents WHERE kind='node_no_ai' AND subject='node3' AND closed_at IS NULL")
     assert inc["severity"] == "warning" and "no AI account" in inc["title"] and "not described" in inc["detail"]
+    assert "Machines and AI screen" in inc["detail"] and "accounts.yaml" not in inc["detail"]
     s = client.get("/v1/state").json()
     n = next(x for x in s["nodes"] if x["name"] == "node3")
     assert n["accounts_assigned"] == 0 and n["in_control_repo"] is False

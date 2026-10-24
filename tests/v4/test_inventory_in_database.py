@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import io
 import secrets
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
+import yaml
 
 from conftest import join_node
 from test_backups import configure_paths
@@ -91,10 +94,34 @@ def test_repo_inventory_is_imported_once_and_never_overwrites_screen_changes(cli
     token = join_node(client, "node1").json()["node_token"]
     assert ctx.db.one("SELECT 1 AS x FROM control_imports") is None
 
+    configured = ctx.repo()
+    configured.nodes["node1"].purpose = "CI worker"
+    configured.nodes["node1"].tools = ["python3"]
+    project_file = control_repo / "projects" / "TESTWP.yaml"
+    project_data = yaml.safe_load(project_file.read_text(encoding="utf-8"))
+    project_data["nodes"] = ["node1"]
+    project_file.write_text(yaml.safe_dump(project_data, sort_keys=False), encoding="utf-8")
+    configured.projects["TESTWP"].nodes = ["node1"]
+    ctx.github.files.update({
+        ("aiflow-control", "develop", "accounts.yaml"): "accounts: [{id: legacy-account}]\n",
+        ("aiflow-control", "develop", "nodes/node1.yaml"): "name: node1\n",
+        ("aiflow-control", "develop", "projects/TESTWP.yaml"): "key: TESTWP\nnodes: [node1]\n",
+    })
+
     first = client.app.state.import_inventory()
     assert first == {"imported": True, "machines": 2, "accounts": 3}
     assert ctx.db.one("SELECT parallel,roles FROM managed_ai_accounts WHERE id='codex-01'") == {
         "parallel": 1, "roles": ["dev", "verify", "master"]}
+    profile = ctx.db.one("SELECT profile FROM nodes WHERE name='node1'")["profile"]
+    assert profile["purpose"] == "CI worker" and profile["tools"] == ["python3"]
+    assert not (control_repo / "accounts.yaml").exists() and not (control_repo / "nodes").exists()
+    clean_project = yaml.safe_load(project_file.read_text(encoding="utf-8"))
+    assert "nodes" not in clean_project
+    assert ctx.repo().nodes["node1"].purpose == "CI worker"
+    assert {("aiflow-control", "accounts.yaml"), ("aiflow-control", "nodes/node1.yaml")} <= set(
+        ctx.github.deleted_files)
+    remote_project = yaml.safe_load(ctx.github.files[("aiflow-control", "develop", "projects/TESTWP.yaml")])
+    assert "nodes" not in remote_project
 
     # After the import the screen is the only place that changes accounts.
     assert client.patch("/v1/accounts/codex-01", json={"sessions": 4, "jobs": ["develop"]}).status_code == 200
@@ -119,7 +146,7 @@ def test_repo_inventory_is_imported_once_and_never_overwrites_screen_changes(cli
 def test_joined_machine_serves_its_project_after_the_import_without_the_node_file(client, ctx, control_repo):
     owner_session(client, ctx)
     client.app.state.import_inventory()
-    (control_repo / "nodes" / "node1.yaml").unlink()
+    assert not (control_repo / "nodes" / "node1.yaml").exists()
     ctx._configured_repo = lambda: ControlRepo.load(control_repo)
     joined = join_node(client, "node1")
     assert joined.status_code == 200, joined.text
@@ -148,6 +175,7 @@ def test_project_node_assignments_are_imported_and_then_read_from_database(clien
 def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
         client, ctx, db, test_database_url, control_repo, tmp_path, monkeypatch):
     owner_session(client, ctx)
+    ctx.repo().nodes["node1"].purpose = "backup profile"
     join_node(client, "backup-box")
     account_id = client.post("/v1/machines/backup-box/accounts", json={
         "provider": "codex", "name": "Backed up", "sessions": 3, "jobs": ["develop", "master"]}).json()["account"]
@@ -157,6 +185,14 @@ def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
     key = secrets.token_bytes(32)
     backups.install_key(ctx.settings.backup_key_file, key)
     (source_roots["control"] / "aiflow4.env").write_text(f"AIFLOW4_DATABASE_URL={test_database_url}\n")
+    # Simulate a legacy tree reappearing in a refreshed checkout: the backup still carries policy only.
+    (control_repo / "accounts.yaml").write_text("accounts: [{id: legacy-account}]\n")
+    (control_repo / "nodes").mkdir(exist_ok=True)
+    (control_repo / "nodes" / "legacy-box.yaml").write_text("name: legacy-box\n")
+    project_file = control_repo / "projects" / "TESTWP.yaml"
+    project_data = yaml.safe_load(project_file.read_text(encoding="utf-8"))
+    project_data["nodes"] = ["legacy-box"]
+    project_file.write_text(yaml.safe_dump(project_data, sort_keys=False), encoding="utf-8")
     commands: list[list[str]] = []
 
     def fake_pg(command, label, timeout=3600, env=None):
@@ -180,6 +216,16 @@ def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
     made = backups.create_backup(test_database_url, control_repo, ctx.settings, config, key,
                                  datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc))
     assert not any(part.startswith(("--table", "--exclude", "-t")) for part in commands[0])
+    plain = tmp_path / "backup-plain.aiflow4"
+    backups.decrypt_file(destination / made["name"], plain, key)
+    with tarfile.open(plain, "r:gz") as bundle:
+        repository_bytes = bundle.extractfile("control-repository.tar.gz").read()
+    with tarfile.open(fileobj=io.BytesIO(repository_bytes), mode="r:gz") as repository:
+        names = repository.getnames()
+        assert "repository/accounts.yaml" not in names
+        assert not any(name.startswith("repository/nodes/") for name in names)
+        project_entry = repository.extractfile("repository/projects/TESTWP.yaml").read().decode("utf-8")
+        assert "legacy-box" not in project_entry and "nodes:" not in project_entry
     # What changes after the backup is not in it.
     client.patch(f"/v1/accounts/{account_id}", json={"sessions": 1, "jobs": ["verify"]})
 
@@ -202,11 +248,16 @@ def test_backup_and_restore_keep_machines_accounts_roles_and_worker_counts(
             account = restored.execute("SELECT name,provider,node,roles,parallel FROM managed_ai_accounts WHERE id=%s",
                                        (account_id,)).fetchone()
             machines = {r["name"] for r in restored.execute("SELECT name FROM nodes").fetchall()}
+            assignments = {r["name"]: r["projects"] for r in restored.execute(
+                "SELECT name,projects FROM nodes").fetchall()}
+            profile = restored.execute("SELECT profile FROM nodes WHERE name='node1'").fetchone()["profile"]
             imported = restored.execute("SELECT 1 AS x FROM control_imports WHERE name='inventory'").fetchone()
             repo_account = restored.execute("SELECT parallel FROM managed_ai_accounts WHERE id='codex-01'").fetchone()
         assert account == {"name": "Backed up", "provider": "codex", "node": "backup-box",
                            "roles": ["dev", "master"], "parallel": 3}
         assert {"backup-box", "cc", "node1"} <= machines
+        assert "TESTWP" in assignments["backup-box"] and "TESTWP" in assignments["node1"]
+        assert profile["purpose"] == "backup profile"
         assert imported and repo_account == {"parallel": 1}  # the import marker travels too: it never runs again
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:

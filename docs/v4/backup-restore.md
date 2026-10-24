@@ -10,7 +10,8 @@ Each encrypted backup includes:
 
 - A PostgreSQL custom-format dump of the full control database.
 - Stored files from the control, Jira, GitHub and console secret directories. The backup encryption key is excluded.
-- The control repository's current files, without its `.git` directory.
+- The control repository's policy files, without its `.git` directory or legacy runtime inventory (`accounts.yaml`,
+  `nodes/` and project-level machine assignments). Machine profiles and assignments are in the database dump.
 - A separate snapshot of managed knowledge, memory and project reports. Restore verifies the snapshot against the
   restored database.
 

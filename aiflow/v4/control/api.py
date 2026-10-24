@@ -1268,7 +1268,14 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def import_inventory() -> dict:
         """Move the control repo's machines and accounts into the database, once (docs/v4/inventory-in-database.md)."""
-        result = inventory.import_control_repo(ctx.db, configured_repo())
+        source_repo = configured_repo()
+        result = inventory.import_control_repo(ctx.db, source_repo)
+        if inventory.is_imported(ctx.db):
+            try:
+                gateway = github_control_gateway(ctx)
+                inventory.remove_legacy_repository_inventory(gateway, Path(ctx.settings.control_repo).name)
+            except Exception as exc:  # noqa: BLE001 - checkout and backup filtering still protect runtime state
+                log.warning("legacy inventory cleanup in the control repository deferred (%s)", type(exc).__name__)
         if result["imported"]:
             log.info("imported %s machines and %s AI accounts from the control repo into the database",
                      result["machines"], result["accounts"])
@@ -3143,15 +3150,23 @@ def create_app(ctx: Ctx) -> FastAPI:
                     project_audit("add_project", key, user.subject, False, "; ".join(reasons), detail)
                     raise HTTPException(422, detail)
 
-                worker_nodes = {name for name, node in ctx.repo().nodes.items() if node.role == "worker"}
-                worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
+                worker_nodes = {row["name"] for row in ctx.db.all(
+                    "SELECT name FROM nodes WHERE role='worker' AND removed_at IS NULL")}
                 checks = [check.strip() for check in body.checks if check.strip()]
                 config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
                           "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
                           "limits": {"parallel": body.parallel_limit,
                                      "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
-                          "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
+                          "priority": body.priority, "paused": False}
                 content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+                if worker_nodes:
+                    connection.execute(
+                        "UPDATE nodes SET projects=CASE WHEN %s=ANY(projects) THEN projects"
+                        " ELSE array_append(projects,%s) END,"
+                        " managed_projects=CASE WHEN %s=ANY(managed_projects) THEN managed_projects"
+                        " ELSE array_append(managed_projects,%s) END"
+                        " WHERE name=ANY(%s) AND removed_at IS NULL",
+                        (key, key, key, key, sorted(worker_nodes)))
                 control_name = Path(ctx.settings.control_repo).name
                 try:
                     github = github_control_gateway(ctx)

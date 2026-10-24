@@ -287,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "import-inventory":
         from .control import inventory
+        from .control.github import GitHubApp
         from .core.controlrepo import ControlRepo
         from .control.db import DB
         db = DB(s.database_url)
@@ -295,6 +296,16 @@ def main(argv: list[str] | None = None) -> int:
             result = inventory.import_control_repo(db, ControlRepo.load(s.control_repo))
         finally:
             db.close()
+        app_dir = Path(s.github_app_dir)
+        if (app_dir / "app.json").is_file() and (app_dir / "app.pem").is_file():
+            try:
+                gateway = GitHubApp(s.github_app_dir, s.github_org)
+                cleaned = inventory.remove_legacy_repository_inventory(gateway, Path(s.control_repo).name)
+                if cleaned:
+                    print(f"removed {len(cleaned)} legacy inventory files or assignments from the control repo")
+            except Exception as exc:  # noqa: BLE001 - the API startup retries cleanup with its configured connection
+                logging.getLogger("aiflow4").warning("control-repository inventory cleanup deferred (%s)",
+                                                     type(exc).__name__)
         print("imported" if result["imported"] else "already imported; nothing changed",
               f"({result['machines']} machines, {result['accounts']} AI accounts)")
         return 0

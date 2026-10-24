@@ -3,27 +3,27 @@
 **Console screens:** Machines and AI (`machines`)
 
 A machine and the AI accounts on it are runtime facts of an installation, not source code. The owner manages them
-on the **Machines and AI** screen ([machines-and-ai.md](machines-and-ai.md)); nothing needs a file edit, a commit
-or a restart, and the control repository (`aiflow-control`) is never written.
+on the **Machines and AI** screen ([machines-and-ai.md](machines-and-ai.md)); screen changes need no file edit,
+commit or restart and do not write to the control repository.
 
 ## What is stored where
 
 | Fact | Where |
 | --- | --- |
-| Machines, their projects and heartbeat | control database, `nodes` |
+| Machines, their profiles, projects and heartbeat | control database, `nodes` |
 | AI accounts, provider, name, roles, workers, pause | control database, `managed_ai_accounts` |
 | Total session limit and extra machines of a shared account | `shared_accounts`, `account_machines` |
 | Rules, profiles, tool versions, project definitions | control repository (versioned policy) |
 
-`accounts.yaml`, `nodes/*.yaml` and project-level `nodes` assignments are no longer read for accounts, roles,
-worker counts or project assignment once the import below ran. Node project assignments and project-level machine
-assignments are copied to the database together. A node file may still carry hardware hints (`packages`, `services`,
-`tools`); they are setup details, not scheduling facts.
+`accounts.yaml`, `nodes/*.yaml` and project-level `nodes` assignments are imported once, then removed from the active
+checkout. Node profile fields (`purpose`, `notes`, `location`, capabilities, tools, packages and services) are
+preserved in `nodes.profile`; assignments are stored in `nodes.projects`. If a later repository refresh restores an
+old file, runtime scheduling ignores it and backups filter it out.
 
 ## Join, add, change
 
 - A machine that joins with its one-use token appears on the screen on its own and serves the project it joined
-  for (plus any project that lists it under `nodes`). No project file lists machines.
+  for. Project assignments are held in `nodes.projects`; project files do not list machines.
 - **Add AI account** takes provider, an optional name, jobs (roles) and sessions (workers). The account id stays
   generated (`<provider>-<machine>-NN`). Sign-in is a provider link and code shown on the screen.
 - Sessions and jobs are changed on the same screen. The node reads them on its next heartbeat, so a change is applied
@@ -41,16 +41,20 @@ assignments are copied to the database together. A node file may still carry har
 
 Older installations keep machines and accounts in `accounts.yaml` and `nodes/*.yaml`. On the first start of the
 control API after the upgrade they are copied into the database once, and the import is recorded in
-`control_imports`. It never runs again and never overwrites a row, so anything changed or removed on screen stays as
-it is. If a configured account could not be synced because of the licence limits, the import waits for a later start.
-Afterwards the files are ignored for these facts.
+`control_imports`. The importer removes those legacy files from the active checkout and commits their removal from
+the control repository's current branch, including stripping project-level `nodes` entries. It never imports again
+or overwrites a row, so anything changed or removed on screen stays as it is. If a configured account could not be
+synced because of licence limits, the import waits for a later start.
 
-Developers and CI can run it directly: `aiflow4 import-inventory` (a repeat prints "already imported").
+Developers and CI can run it directly: `aiflow4 import-inventory` (a repeat prints "already imported" and retries
+checkout cleanup if a refresh restored legacy files; when a GitHub App is configured, it also removes the legacy
+files and assignments from the repository's current branch).
 
 ## Backup and restore
 
-The backup is a full database dump ([backup-restore.md](backup-restore.md)), so machines, accounts, roles, worker
-counts and the import marker are in every backup and come back with a restore; the control repository part of the
-backup holds policy only.
+The backup is a full database dump ([backup-restore.md](backup-restore.md)), so machines, profiles, accounts, roles,
+worker counts and the import marker are in every backup and come back with a restore. The control repository backup
+component omits `accounts.yaml`, `nodes/` and project-level machine assignments, so it contains policy only even if
+a stale checkout has restored legacy files.
 
 Tests: `tests/v4/test_inventory_in_database.py`.

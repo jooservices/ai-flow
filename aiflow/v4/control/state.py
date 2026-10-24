@@ -76,7 +76,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                                            for s in desired_services],
                       "missing_tools": sorted(set(missing_tools(n["tools"], required)) | stack_gaps),
                       "heartbeat_age_s": age,
-                      "accounts_assigned": assigned.get(n["name"], 0), "in_control_repo": n["name"] in repo.nodes,
+                      "accounts_assigned": assigned.get(n["name"], 0),
+                      "in_control_repo": (not bool(n["dynamic"]) if repo.inventory_in_db
+                                          else n["name"] in repo.nodes),
                       "last_heartbeat": _iso(n["last_heartbeat"]),
                       "idle_since": _iso(n["idle_since"]),
                       "purpose": getattr(repo.nodes.get(n["name"]), "purpose", "") or "",

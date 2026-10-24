@@ -208,9 +208,14 @@ async function exerciseReviews(page, mode) {
   const reviewerToken = page.getByLabel('Reviewer access token', { exact: true });
   if (await reviewerToken.count()) await reviewerToken.fill(config.reviewerToken);
   const reviewTraffic = [];
+  const reviewResponses = [];
   page.on('request', (item) => {
     const url = new URL(item.url());
     if (url.pathname.startsWith('/v1/reviews/')) reviewTraffic.push(`${item.method()} ${url.pathname}`);
+  });
+  page.on('response', (item) => {
+    const url = new URL(item.url());
+    if (url.pathname.startsWith('/v1/reviews/')) reviewResponses.push({ path: url.pathname, status: item.status() });
   });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`${error.name}: ${error.message}`));
@@ -237,9 +242,32 @@ async function exerciseReviews(page, mode) {
     }
     const endpoint = action === 'ask-ai' ? 'ask-ai' : action === 'rework' ? 'rework' : action;
     const actionButton = card.getByRole('button', { name: buttonName, exact: true });
-    const response = page.waitForResponse((item) => item.request().method() === 'POST' &&
-      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 5000 }).catch(async (error) => {
-        const details = await page.evaluate((reviewKey) => ({
+    const expectedPath = `/v1/reviews/${key}/${endpoint}`;
+    const expectedRequest = `POST ${expectedPath}`;
+    await actionButton.waitFor({ state: 'visible' });
+    try {
+      await actionButton.click();
+    } catch (error) {
+      if (!String(error.message || error).includes('not attached to the DOM')) throw error;
+      // The 1-second console refresh replaces the review card while Playwright scrolls on small viewports.
+      await card.getByRole('button', { name: buttonName, exact: true }).click();
+    }
+    const waitForRequest = async (duration) => {
+      const deadline = Date.now() + duration;
+      while (!reviewTraffic.includes(expectedRequest) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return reviewTraffic.includes(expectedRequest);
+    };
+    let sent = await waitForRequest(500);
+    if (!sent && !page.isClosed()) {
+      // A phone viewport can scroll the last action beneath the browser's bottom control bar. Dispatch the click on
+      // the live DOM button once if the pointer event missed; the request listener below verifies the API dispatch.
+      await card.getByRole('button', { name: buttonName, exact: true }).evaluate((button) => button.click());
+      sent = await waitForRequest(4500);
+    }
+    if (!sent) {
+        const details = page.isClosed() ? { pageClosed: true } : await page.evaluate((reviewKey) => ({
           toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
           button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
             card.getAttribute('data-key') === reviewKey).flatMap((card) =>
@@ -249,11 +277,17 @@ async function exerciseReviews(page, mode) {
           noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
             card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
         }), key);
-        throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
-          `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${error.message}`);
-      });
-    await actionButton.click();
-    assert.equal((await response).status(), 200, `${buttonName} failed for ${key}`);
+      throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
+        `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}.`);
+    }
+    const responseDeadline = Date.now() + 5000;
+    let response = reviewResponses.find((item) => item.path === expectedPath);
+    while (!response && Date.now() < responseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      response = reviewResponses.find((item) => item.path === expectedPath);
+    }
+    assert.ok(response, `${buttonName} request had no response for ${key}`);
+    assert.equal(response.status, 200, `${buttonName} failed for ${key}`);
   }
 }
 

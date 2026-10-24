@@ -24,6 +24,16 @@ The ticket states why in the comments and in the field Blocked reason (`Kind: re
 | Human | a human review still requests changes | resolve it, move to To Do |
 | Quota, Offline | no AI available | nothing; it returns by itself |
 
+## Production SLO
+
+Review the **AI Flow production health and SLO** dashboard in OpenObserve over its rolling seven-day window. The production SLO is:
+
+- At least 90% of tickets that reach Done do so without human action.
+- A Blocked ticket that does not need the owner is resolved or handed over within 15 minutes.
+- Zero repeated failure signatures after a study case has been recalled.
+
+The dashboard definitions and event meanings are in [Observability](OBSERVABILITY.md). Its Done-without-human-action panel counts human-review events and externally observed Jira status changes as human involvement; the repeated-signature panel compares exact rework headlines after a recorded study-case recall.
+
 ## Operate (on WSL, `cd ~/Workspaces/JOOservices/projects/ai-flow`)
 - Status: `systemctl --user list-units 'aiflow-*'`; health: `bin/aiflow-health` (alerts are comments on JAIF-12, plus a daily AI usage summary).
 - Pause / resume: `bin/aiflow-work pause` (workers finish the current step and take nothing new), `bin/aiflow-work resume`.

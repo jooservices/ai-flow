@@ -9,7 +9,7 @@ view for the people who follow tickets day to day.
 
 - Pick the project at the top; the tiles show its tickets by state.
 - Search by key or title, and filter by ticket type or epic.
-- Open a ticket card for its runs, events and links to Jira. The card shows the pull request, the merge commit and the time between approval and merge. A ticket that is **Ready to merge** stays in the Human review column until the flow merges it (see `docs/v4/merged-means-done.md`). A ticket sent to **In Verify** because its work was already on the branch shows "Already done · sent to verification" and a link to its pull request (see `docs/v4/already-completed-work.md`).
+- Open a ticket card for its runs, events and links to Jira. The card shows the pull request, the merge commit and the time between approval and merge. A ticket that is **Ready to merge** stays in the Human review column until the flow merges it (see `docs/v4/merged-means-done.md`).
 
 ## Page addresses
 

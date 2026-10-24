@@ -141,9 +141,10 @@ _STATE_RECENT_RUN = _state_object({
     "node": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
     "duration_s": _state_nullable(_STATE_INTEGER), "cost_usd": _STATE_NUMBER,
     "tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER, "pr_url": _STATE_STRING,
+    "already_done": _STATE_BOOLEAN,
     "ended_age_s": _state_nullable(_STATE_INTEGER),
 }, ("id", "ticket", "summary", "step", "account", "provider", "model", "node", "outcome", "error_kind",
-    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "ended_age_s"))
+    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "already_done", "ended_age_s"))
 _STATE_ACCOUNT = _state_object({
     "id": _STATE_STRING, "provider": _STATE_STRING, "node": _STATE_STRING, "tier": _STATE_STRING,
     "roles": _STATE_STRING_ARRAY, "explicit_only": _STATE_BOOLEAN, "paused": _STATE_BOOLEAN,
@@ -6870,12 +6871,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if ticket.get("last_run"):
                     ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
                                           ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "ended_age_s")}
+                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
             data["active_runs"] = [{key: run[key] for key in ("id", "ticket", "project", "summary", "step",
                                                                   "elapsed_s", "heartbeat_age_s", "lease_ms", "progress")}
                                     for run in data["active_runs"]]
             data["recent_runs"] = [{key: run[key] for key in ("id", "ticket", "summary", "step", "outcome",
-                                                                  "error_kind", "duration_s", "pr_url", "ended_age_s")}
+                                                                  "error_kind", "duration_s", "pr_url", "already_done",
+                                                                  "ended_age_s")}
                                     for run in data["recent_runs"]]
             for ticket in data["tickets"]:
                 if ticket.get("run"):
@@ -6884,7 +6886,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if ticket.get("last_run"):
                     ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
                                           ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "ended_age_s")}
+                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
         return data
 
     @app.get("/v1/deploy/state")

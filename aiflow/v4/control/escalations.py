@@ -524,6 +524,16 @@ def record(db, ticket: str, project: str, source: str, run_id: str, cls: str, qu
                    reached_person, answer[:3000], resolution))
 
 
+def raise_reviewer_question(db, ticket: str, project: str, run_id: str, question: str) -> dict:
+    """The reviewer's latest question is the one triage decides: it replaces the question of an escalation that is
+    still open (a newer question must never be settled against an older one), or opens a new escalation."""
+    current = open_escalation(db, ticket)
+    if not current:
+        return record(db, ticket, project, "review", run_id, AMBIGUITY, question, "reviewer asked the AI")
+    return db.one("UPDATE escalations SET question=%s, class=%s, reason=%s, run_id=%s WHERE id=%s RETURNING *",
+                  (question[:3000], AMBIGUITY, "reviewer asked the AI", run_id or current["run_id"], current["id"]))
+
+
 def open_escalation(db, ticket: str) -> dict | None:
     return db.one("SELECT * FROM escalations WHERE ticket_key=%s AND resolution='open' ORDER BY id DESC LIMIT 1", (ticket,))
 
@@ -598,11 +608,12 @@ def dev_question(ctx, run: dict, question: str) -> dict:
         else:
             requirement = c.environment.replace("_", "-")
         if not tooling.requirement_is_accepted(ctx, project, requirement):
-            text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked. "
-                    f"The run failed with the original report: {question[:1200]}")
+            text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked, "
+                    "and it is not a reason to stop. Continue with the work: use what the machine provides, run the "
+                    "checks that can run, and state in your result exactly which check could not run and why.")
             settle(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason,
                    "unreportable_requirement", None, text)
-            return {**base, "resolved": True, "outcome": "failed", "answer": text}
+            return {**base, "resolved": True, "outcome": "auto_answered", "answer": text}
         if tooling.machine_has(node, requirement):
             version = (node.get("tools") or {}).get(requirement, "")
             text = (f"{requirement} is installed on {run['node']} ({version}); it is available to this run. "

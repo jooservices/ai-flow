@@ -209,7 +209,7 @@ def test_saving_ignores_unknown_blocks_and_refuses_unknown_pages_and_sizes(clien
     sign_in(client, ctx, "owner", "layout-valid@example.test")
     ok = client.put("/v1/console/layouts/machines", json={"blocks": [
         {"id": "no-such-block", "size": "full", "hidden": False}, {"id": "add-machine", "size": "medium", "hidden": False}]})
-    assert ok.status_code == 200 and ids(ok.json()["blocks"]) == ["add-machine", "machines"]
+    assert ok.status_code == 200 and ids(ok.json()["blocks"]) == ["add-machine", "machines", "routing"]
     stored = ctx.db.one("SELECT blocks FROM console_layouts WHERE email=%s AND page='machines'",
                         ("layout-valid@example.test",))
     assert ids(stored["blocks"]) == ["add-machine"]

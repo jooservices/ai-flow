@@ -45,7 +45,8 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
+from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, provider_routing, role_health,
+               rollout,
                shared_accounts, support_bundle, tooling, version_release)
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -853,6 +854,11 @@ class PRBody(BaseModel):
     title: str
     body: str = ""
     draft: bool = True
+
+
+class ProviderRoutingBody(BaseModel):
+    order: list[str] = []
+    ceilings: dict[str, int] = {}
 
 
 class RoleHealthSettingsBody(BaseModel):
@@ -4107,7 +4113,54 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str) -> list[dict]:
+    def routing_state(persist: bool = True) -> dict:
+        return provider_routing.evaluate(ctx.db, sorted({a.provider for a in ctx.repo().accounts}), persist=persist)
+
+    def apply_provider_routing(acc: Account, tickets: list[dict]) -> list[dict]:
+        """Offer a ticket to this account only when no account of a more preferred provider can take it.
+
+        Provider order: most headroom first, the owner's order among near ties, held-back providers last
+        (docs/v4/provider-routing.md). Ready accounts of preferred providers are asked with the same `eligible()`
+        rules, so a ticket is never held for an account that could not take it. A provider that is not held back
+        defers only while a preferred account has a free worker slot; a held-back one defers whenever a preferred
+        account is able to take the work. Its own label, and triage for a held-back provider, are never deferred.
+        """
+        state = routing_state()
+        mine = state["providers"].get(acc.provider)
+        if not mine or len(state["ranking"]) < 2 or mine["rank"] == 0:
+            return tickets
+        ahead = {p for p, s in state["providers"].items() if s["rank"] < mine["rank"]}
+        online = shared_accounts.online_nodes(ctx.db)
+        ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
+        offers: dict[tuple[str, str], set[tuple[str, str]]] = {}
+
+        def preferred_can_take(ticket: dict) -> bool:
+            for peer in ctx.repo().accounts:
+                if peer.provider not in ahead or peer.id not in ready:
+                    continue
+                for peer_node in peer.machines:
+                    if peer_node not in online or not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
+                        continue
+                    if not mine["held_back"] and not shared_accounts.may_take(ctx.db, peer, peer_node,
+                                                                              as_peer=True)[0]:
+                        continue
+                    if (peer.id, peer_node) not in offers:
+                        offers[(peer.id, peer_node)] = {(t["key"], t["step"]) for t in
+                                                        eligible(peer.id, peer_node, routing=False)}
+                    if (ticket["key"], ticket["step"]) in offers[(peer.id, peer_node)]:
+                        return True
+            return False
+
+        kept = []
+        for ticket in tickets:
+            labels = ticket.get("labels") or []
+            if f"ai-{acc.provider}" in labels or (mine["held_back"] and ticket["step"] in provider_routing.NEEDED_STEPS):
+                kept.append(ticket)
+            elif not preferred_can_take(ticket):
+                kept.append(ticket)
+        return kept
+
+    def eligible(account_id: str, node: str, routing: bool = True) -> list[dict]:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4282,8 +4335,10 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
-                                               for ticket in eligible(peer["id"], peer_node))
+                                               for ticket in eligible(peer["id"], peer_node, routing=False))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
+        if routing and out:
+            out = apply_provider_routing(acc, out)
         return out
 
     def master_ready(account_id: str, node: str) -> bool:
@@ -4456,6 +4511,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             if probation_id is not None:
                 role_health.drop_probation(ctx.db, probation_id)
             return JSONResponse({"claimed": False, "reason": f"held by {c.holder}"}, status_code=409)
+        if body.step != "master":  # why this ticket went to this account (Machines and AI screen)
+            try:
+                kind, reason = provider_routing.classify(routing_state(persist=False), acc.provider, body.step,
+                                                         t.get("labels") or [])
+                provider_routing.record(ctx.db, t["key"], body.step, acc.id, acc.provider, kind, reason)
+            except Exception as e:  # noqa: BLE001 - the record explains a choice; it never blocks the work
+                log.warning("routing decision for %s not recorded: %s", t["key"], e)
         model, effort = repo.model_for(acc.provider, "senior" if "tier-senior" in t["labels"] else acc.tier)
         run_token = secrets.token_urlsafe(32)
         p = repo.projects.get(t["project"])
@@ -6573,6 +6635,35 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/role-health")
     def role_health_state() -> dict:
         return role_health.summary(ctx)
+
+    def provider_routing_view() -> dict:
+        state = routing_state()
+        return {"order": state["order"], "providers": [state["providers"][p] for p in state["ranking"]],
+                "settings": state["settings"], "decisions": provider_routing.recent_decisions(ctx.db)}
+
+    @app.get("/v1/provider-routing")
+    def provider_routing_state() -> dict:
+        return provider_routing_view()
+
+    @app.put("/v1/provider-routing/settings")
+    def provider_routing_settings(body: ProviderRoutingBody, request: Request) -> dict:
+        user = console_user(request, {"console.manage"}, target="aiflow-control", action="provider_routing_settings")
+        known = {a.provider for a in ctx.repo().accounts}
+        try:
+            unknown = sorted((set(body.order) | set(body.ceilings)) - known)
+            if unknown:
+                raise ValueError(f"unknown provider: {', '.join(unknown)}")
+            provider_routing.set_settings(ctx.db, body.order, body.ceilings, user.subject)
+        except ValueError as e:
+            audit("aiflow-control", "provider_routing_settings", "", "", None, user.subject, False, str(e),
+                  body.model_dump())
+            raise HTTPException(422, str(e)) from e
+        audit("aiflow-control", "provider_routing_settings", "", "", None, user.subject, True, "saved",
+              body.model_dump())
+        ctx.events.emit("routing.settings", account=user.subject, outcome="saved",
+                        reason="provider order " + ", ".join(body.order) + "; ceilings "
+                        + ", ".join(f"{k} {v}%" for k, v in sorted(body.ceilings.items())))
+        return provider_routing_view()
 
     @app.put("/v1/role-health/settings")
     def role_health_settings(body: RoleHealthSettingsBody, request: Request) -> dict:

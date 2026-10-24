@@ -51,6 +51,7 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
     "machines": ("Machines and AI", [
         ("machines", "Machines and AI", "full"),
         ("add-machine", "Add a machine", "full"),
+        ("routing", "AI provider routing", "full"),
     ]),
     "knowledge": ("Knowledge", [
         ("header", "Knowledge and Skills", "full"),

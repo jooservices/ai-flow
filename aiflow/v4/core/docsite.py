@@ -129,6 +129,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "escalationsPanel": ("cc", "machines"),
     "renderCommandSearchResults": None,
     "renderRoleHealthSettings": ("machines",),
+    "renderRouting": ("machines",),
     "roleHealthPanel": ("machines",),
     "render": None,
     "viewOf": None,

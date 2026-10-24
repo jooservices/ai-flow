@@ -13,9 +13,9 @@ sign-in on, and takes only the documented steps:
 1. Install the control plane with `aiflow4-control-install --version vX.Y.Z --domain D`
    ([Install the control plane](control-install.md)). The installer turns sign-in on but does not create a user or
    write a password file.
-2. Open `/login`, create the first Administrator in browser setup, and continue with the signed-in session. Resume
-   optional steps at `/setup` from the Dashboard. Anonymous
-   callers get a redirect or `401`.
+2. Open `/login`, enter the installation ownership capability, create the first Administrator in browser setup,
+   and continue with the signed-in session. `/setup` redirects to the Dashboard afterwards; resume optional steps in
+   the Dashboard's "Finish setting up AI Flow" panel. Anonymous callers get a redirect or `401`.
 3. In Command Center, open **Projects**, load the connected Jira and GitHub catalogs, run preflight, and add the
    project (Jira key, repository, base branch).
 4. For each machine, copy the one-use join command from Command Center ([Join a node](node-join.md)). Machines

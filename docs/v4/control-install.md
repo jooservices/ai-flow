@@ -34,7 +34,7 @@ it. The steps run in this order, and each one prints `==> [n/11] step`:
 | os | server-installer v1.1.0: `plan --modules M`, then `apply --modules M` (see below) |
 | tools | AI Flow's own needs: `git`, `curl`, cosign, `aiflow4-deploy`, the `jooservices/ai-flow` checkout in `/srv/aiflow/control/repos/ai-flow` (for tag checks) |
 | release | `aiflow4-deploy --stage-only vX.Y.Z`: release assets, SHA-256 and cosign checks of the tarball and of `ghcr.io/jooservices/ai-flow/control-api:vX.Y.Z`, compose bundle in `/srv/aiflow/build/vX.Y.Z` |
-| secrets | generates any internal secrets that are missing (below) and writes `/etc/aiflow/control.env` (domain and join URL; no secrets) |
+| secrets | generates any internal secrets that are missing (below), asks for an ownership capability on an interactive first install, and writes `/etc/aiflow/control.env` (domain and join URL; no secrets) |
 | infra | copies `deploy/v4/control/infra.yaml`, `gatus.yaml` and `deploy/v4/o2/lab.env` of the release to `/srv/aiflow/control/infra/`, then `docker compose up -d`; waits for PostgreSQL and Redis |
 | migrate | for an upgrade, the pre-upgrade check first; then `aiflow4 migrate` from the release image |
 | admin | Console login is on (`AIFLOW4_CONSOLE_LOGIN=1`). On first browser visit, `/setup` saves the public address and creates the first Administrator; no email or password file is required. A legacy `--admin-email` may still seed a user for controlled CI installs; see [console login](console-login.md) |
@@ -88,7 +88,14 @@ URLs, so control-api is recreated with the new join URL.
 |---|---|---|
 | `postgres.env` | `POSTGRES_PASSWORD` (and the user and database names) | PostgreSQL |
 | `openobserve.env` | OpenObserve root user and password | OpenObserve |
-| `aiflow4.env` | database and Redis URLs, `AIFLOW4_JOIN_TOKEN` (provisioning key), `AIFLOW4_OWNER_TOKEN`, `AIFLOW4_REVIEWER_TOKEN`, `AIFLOW4_CONSOLE_SESSION_SECRET`, `O2_BASIC` | control-api, control-loops |
+| `aiflow4.env` | database and Redis URLs, `AIFLOW4_JOIN_TOKEN` (provisioning key), `AIFLOW4_OWNER_TOKEN`, `AIFLOW4_SETUP_OWNERSHIP_CAPABILITY`, `AIFLOW4_REVIEWER_TOKEN`, `AIFLOW4_CONSOLE_SESSION_SECRET`, `O2_BASIC` | control-api, control-loops |
+
+On an interactive first install, the installer asks twice for a 32-character-or-longer ownership capability with
+hidden input. Use that value in the browser's first-run setup screen. The installer stores it as
+`AIFLOW4_SETUP_OWNERSHIP_CAPABILITY` in the same root-only `aiflow4.env` file, and the browser setup consumes it
+atomically with first-Administrator creation. It is not returned by any public setup endpoint. A noninteractive
+install generates a random capability; provide it to the first owner through the installation's secure credential
+delivery channel before they open setup.
 
 They are never printed. Command output that the installer captures has every secret value replaced by `***`.
 They are not in the release tarball or the image: both are built from the repository, which holds no secrets

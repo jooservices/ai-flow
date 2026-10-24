@@ -236,7 +236,8 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
     app = sec.read_env(d / "aiflow4.env")
     pg = sec.read_env(d / "postgres.env")["POSTGRES_PASSWORD"]
     assert len(pg) >= 32 and app["AIFLOW4_DATABASE_URL"] == f"postgresql://aiflow:{pg}@aiflow4-postgres:5432/aiflow4"
-    for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
+    for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_SETUP_OWNERSHIP_CAPABILITY",
+                "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
                 "O2_BASIC"):
         assert len(app[key]) >= 32
     assert app["AIFLOW4_PUBLIC_URL"] == "https://aiflow.example.com"

@@ -2,13 +2,14 @@
 
 The first Administrator and public address are created together from the setup screen. Later setup actions reuse
 the existing Integrations, Machines and AI, Projects and node-join APIs; this module keeps their readiness, skip,
-resume and sample-ticket confirmation visible until a sample issue is confirmed in Jira Intake.
+resume and sample-ticket confirmation visible on the Dashboard until every step is ready.
 """
 from __future__ import annotations
 
 import re
 import secrets
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -47,6 +48,7 @@ STEP_ACTIONS = {
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}\Z")
 SETUP_COOKIE = "aiflow4_setup_nonce"
 SETUP_TTL_S = 1800
+OWNERSHIP_HEADER = "x-aiflow4-ownership"
 
 
 class BootstrapBody(BaseModel):
@@ -195,8 +197,71 @@ def _bootstrap_nonce(ctx, request: Request) -> tuple[str, bool]:
     return nonce, True
 
 
-def install(app: FastAPI, ctx) -> None:
-    """Mount bootstrap and progress routes. Bootstrap is the only route available before the first user exists."""
+def _validate_bootstrap_request(request: Request, ctx) -> tuple[str, str]:
+    nonce = request.cookies.get(SETUP_COOKIE, "")
+    supplied_nonce = request.headers.get("x-aiflow4-setup", "")
+    if (not nonce or not supplied_nonce or not secrets.compare_digest(nonce, supplied_nonce)
+            or not ctx.leases.r.get(_nonce_key(ctx, nonce))):
+        raise HTTPException(403, "Reload the setup screen before creating the first Administrator.")
+    capability = request.headers.get(OWNERSHIP_HEADER, "")
+    expected = str(getattr(ctx.settings, "setup_ownership_capability", "") or "")
+    if not expected:
+        raise HTTPException(503, "The installation ownership capability is not configured.")
+    if not capability or not secrets.compare_digest(capability, expected):
+        raise HTTPException(403, "Enter the installation ownership capability to create the first Administrator.")
+    return nonce, capability
+
+
+async def _bootstrap_payload(request: Request) -> BootstrapBody:
+    try:
+        payload = await request.json()
+        return BootstrapBody.model_validate(payload)
+    except (ValueError, ValidationError, TypeError):
+        raise HTTPException(422, "Enter a public address, a valid email, and a password with at least 12 characters.") from None
+
+
+def _normalized_bootstrap(body: BootstrapBody) -> tuple[str, str]:
+    try:
+        return validate_public_url(body.public_url), normalize_email(body.email)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+def _create_first_admin(ctx, public_url: str, email: str, password_hash: str, capability: str) -> None:
+    expected = str(getattr(ctx.settings, "setup_ownership_capability", "") or "")
+    if not expected or not secrets.compare_digest(capability, expected):
+        raise HTTPException(403, "The installation ownership capability is invalid.")
+    with ctx.db.pool.connection() as connection:
+        with connection.transaction():
+            connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                               ("aiflow4-first-admin",))
+            if connection.execute("SELECT 1 FROM console_users LIMIT 1").fetchone():
+                raise HTTPException(409, "An Administrator already exists. Sign in to continue.")
+            try:
+                licensing.lock_resource_admission(connection)
+                count = int(connection.execute(
+                    "SELECT count(*) AS count FROM console_users WHERE disabled=false").fetchone()["count"])
+                licensing.require_count_capacity(ctx.db, "users", count,
+                                                 public_key=ctx.settings.license_public_key,
+                                                 connection=connection)
+            except licensing.LicenseError as exc:
+                raise HTTPException(423, str(exc)) from None
+            claimed = connection.execute(
+                "UPDATE setup_wizard_state SET ownership_claimed_at=now(),updated_at=now()"
+                " WHERE id=true AND ownership_claimed_at IS NULL RETURNING id").fetchone()
+            if not claimed:
+                raise HTTPException(409, "The installation ownership capability was already used.")
+            connection.execute("INSERT INTO console_users (email,display_name,role,roles,password_hash)"
+                               " VALUES (%s,'','administrator',ARRAY['administrator']::text[],%s)",
+                               (email, password_hash))
+            connection.execute("UPDATE setup_wizard_state SET public_url=%s,updated_at=now() WHERE id=true",
+                               (public_url,))
+            connection.execute("INSERT INTO write_audit (target,action,ticket,actor,accepted,result,payload)"
+                               " VALUES ('setup','bootstrap','',%s,true,'first Administrator created',%s)",
+                               (email, J({"public_url": public_url})))
+
+
+def _register_setup_pages(app: FastAPI, ctx) -> None:
     @app.get("/setup", include_in_schema=False)
     def setup_page():
         # The wizard screen only creates the first Administrator; later steps live on the Dashboard panel.
@@ -209,6 +274,8 @@ def install(app: FastAPI, ctx) -> None:
     def setup_progress_script():
         return FileResponse(PROGRESS_SCRIPT, media_type="text/javascript", headers={"Cache-Control": "no-store"})
 
+
+def _register_status_route(app: FastAPI, ctx) -> None:
     @app.get("/v1/setup/status")
     def setup_status(request: Request):
         if user_count(ctx):
@@ -226,51 +293,19 @@ def install(app: FastAPI, ctx) -> None:
         response = JSONResponse(data, headers={"Cache-Control": "no-store"})
         return response
 
+
+def _register_bootstrap_route(app: FastAPI, ctx) -> None:
     @app.post("/v1/setup/bootstrap")
     async def bootstrap(request: Request):
-        nonce = request.cookies.get(SETUP_COOKIE, "")
-        supplied = request.headers.get("x-aiflow4-setup", "")
-        if (not nonce or not supplied or not secrets.compare_digest(nonce, supplied)
-                or not ctx.leases.r.get(_nonce_key(ctx, nonce))):
-            raise HTTPException(403, "Reload the setup screen before creating the first Administrator.")
+        nonce, capability = _validate_bootstrap_request(request, ctx)
         if ctx.settings.console_login and len(ctx.settings.console_session_secret.encode()) < 32:
             raise HTTPException(503, "console sign-in is not configured")
-        try:
-            payload = await request.json()
-            body = BootstrapBody.model_validate(payload)
-        except (ValueError, ValidationError, TypeError):
-            raise HTTPException(422, "Enter a public address, a valid email, and a password with at least 12 characters.") from None
-        try:
-            public_url = validate_public_url(body.public_url)
-            email = normalize_email(body.email)
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from None
+        body = await _bootstrap_payload(request)
+        public_url, email = _normalized_bootstrap(body)
         if len(body.password) < 12:
             raise HTTPException(422, "Use a password with at least 12 characters.")
         password_hash = hash_password(body.password)
-        with ctx.db.pool.connection() as connection:
-            with connection.transaction():
-                connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                                   ("aiflow4-first-admin",))
-                if connection.execute("SELECT 1 FROM console_users LIMIT 1").fetchone():
-                    raise HTTPException(409, "An Administrator already exists. Sign in to continue.")
-                try:
-                    licensing.lock_resource_admission(connection)
-                    count = int(connection.execute(
-                        "SELECT count(*) AS count FROM console_users WHERE disabled=false").fetchone()["count"])
-                    licensing.require_count_capacity(ctx.db, "users", count,
-                                                     public_key=ctx.settings.license_public_key,
-                                                     connection=connection)
-                except licensing.LicenseError as exc:
-                    raise HTTPException(423, str(exc)) from None
-                connection.execute("INSERT INTO console_users (email,display_name,role,roles,password_hash)"
-                                   " VALUES (%s,'','administrator',ARRAY['administrator']::text[],%s)",
-                                   (email, password_hash))
-                connection.execute("UPDATE setup_wizard_state SET public_url=%s,updated_at=now() WHERE id=true",
-                                   (public_url,))
-                connection.execute("INSERT INTO write_audit (target,action,ticket,actor,accepted,result,payload)"
-                                   " VALUES ('setup','bootstrap','',%s,true,'first Administrator created',%s)",
-                                   (email, J({"public_url": public_url})))
+        _create_first_admin(ctx, public_url, email, password_hash, capability)
         ctx.leases.r.delete(_nonce_key(ctx, nonce))
         # Each API replica reads the saved value on requests through the setup middleware below.
         ctx.settings.public_url = public_url
@@ -286,6 +321,8 @@ def install(app: FastAPI, ctx) -> None:
                                secure=public_url.lower().startswith("https://"), samesite="strict")
         return response
 
+
+def _register_step_route(app: FastAPI, ctx) -> None:
     @app.post("/v1/setup/steps/{step_id}")
     def update_step(step_id: str, body: SkipBody, request: Request):
         user = _administrator(request, ctx)
@@ -301,59 +338,112 @@ def install(app: FastAPI, ctx) -> None:
                "setup step skipped" if body.skipped else "setup step resumed", {"step": step_id})
         return status(ctx)
 
+
+@contextmanager
+def _sample_ticket_lock(ctx):
+    """Hold an installation-wide PostgreSQL lock while this request re-reads and confirms the sample issue."""
+    lock_name = "aiflow4-setup-sample-ticket"
+    with ctx.db.pool.connection() as connection:
+        connection.execute("SELECT pg_advisory_lock(hashtextextended(%s,0))", (lock_name,))
+        connection.commit()
+        try:
+            yield connection
+        finally:
+            connection.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (lock_name,))
+            connection.commit()
+
+
+def _audit_sample(connection, user, accepted: bool, result: str, project: str, key: str = "") -> None:
+    connection.execute("INSERT INTO write_audit (target,action,ticket,actor,accepted,result,payload)"
+                       " VALUES ('setup','sample_ticket','',%s,%s,%s,%s)",
+                       (user.subject, accepted, result[:300], J({"project": project, "ticket": key})))
+
+
+def _sample_issue_key(connection, ctx, body: SampleBody, user) -> tuple[str, str, Exception | None]:
+    row = connection.execute("SELECT completed_at,sample_ticket_key,sample_confirmed_at"
+                             " FROM setup_wizard_state WHERE id=true FOR UPDATE").fetchone()
+    key = str(row.get("sample_ticket_key") or "")
+    if row.get("completed_at"):
+        raise HTTPException(409, "Setup is complete. Follow ticket progress on the normal ticket and Dashboard screens.")
+    if row.get("sample_confirmed_at"):
+        raise HTTPException(409, f"Sample ticket {key} was already sent to Intake. Follow it on the ticket screens.")
+    if not jira_connected(ctx) or not ctx.jira:
+        raise HTTPException(409, "Connect Jira in Integrations before sending the sample ticket.")
+    project = body.project.strip().upper()
+    if project not in ctx.repo().projects:
+        raise HTTPException(422, "Choose a project already configured in Projects.")
+    if key:
+        return key, project, None
+    summary = "AI Flow setup sample ticket"
+    description = ("Sample ticket created by the AI Flow first-run setup wizard.\n\n"
+                   "This confirms that Jira is connected and this project can receive work in Intake.")
+    try:
+        key = ctx.jira.create_issue(project, summary, description, issuetype="Task",
+                                    labels=["aiflow-setup-sample"])
+        connection.execute("UPDATE setup_wizard_state SET sample_ticket_key=%s,updated_at=now() WHERE id=true",
+                           (key,))
+        return key, project, None
+    except Exception as exc:  # noqa: BLE001 - return a plain recovery action, never provider internals
+        return "", project, exc
+
+
+def _confirm_sample_issue(connection, ctx, user, key: str, project: str) -> Exception | None:
+    try:
+        current = ctx.jira.status(key)
+        if current != "Intake":
+            current = ctx.jira.transition_to(key, "Intake")
+        if current != "Intake":
+            raise RuntimeError("Jira did not confirm Intake")
+    except Exception as exc:  # noqa: BLE001
+        _audit_sample(connection, user, False, "sample issue not confirmed in Intake", project, key)
+        return exc
+    connection.execute("UPDATE setup_wizard_state SET sample_confirmed_at=now(),updated_at=now() WHERE id=true"
+                       " AND sample_confirmed_at IS NULL")
+    connection.execute("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
+                       " VALUES (%s,%s,'Intake','Task',%s,'AI Flow setup sample ticket',%s,now(),now())"
+                       " ON CONFLICT (key) DO UPDATE SET status='Intake',synced_at=now()",
+                       (key, project, ["aiflow-setup-sample"],
+                        "Sample ticket created by the AI Flow first-run setup wizard."))
+    _audit_sample(connection, user, True, "sample ticket confirmed in Intake", project, key)
+    return None
+
+
+def _send_sample_ticket(ctx, body: SampleBody, user) -> dict:
+    issue_error = confirmation_error = None
+    with _sample_ticket_lock(ctx) as connection:
+        with connection.transaction():
+            key, project, issue_error = _sample_issue_key(connection, ctx, body, user)
+        if issue_error:
+            with connection.transaction():
+                _audit_sample(connection, user, False, "could not create sample issue", project)
+        else:
+            with connection.transaction():
+                current = connection.execute("SELECT sample_confirmed_at FROM setup_wizard_state"
+                                             " WHERE id=true FOR UPDATE").fetchone()
+                if current.get("sample_confirmed_at"):
+                    raise HTTPException(409, f"Sample ticket {key} was already sent to Intake. Follow it on the ticket screens.")
+                confirmation_error = _confirm_sample_issue(connection, ctx, user, key, project)
+    if issue_error:
+        raise HTTPException(502, "AI Flow could not create the sample ticket in Jira. Check the connection and try again.") from issue_error
+    if confirmation_error:
+        raise HTTPException(502, f"Ticket {key} exists, but AI Flow could not confirm it in Intake. Check the Jira workflow and try again.") from confirmation_error
+    completed = status(ctx)["completed"]
+    ctx.events.emit("setup.sample_ticket", ticket=key, project=project, outcome="Intake",
+                    account=user.subject, reason="first-run setup sample confirmed")
+    tail = ("Setup is complete; follow its progress on the ticket and Dashboard screens." if completed
+            else "Skipped or unfinished steps stay on the Dashboard until you finish them.")
+    return {"ok": True, "ticket": key, "status": "Intake", "completed": completed,
+            "message": f"Sample ticket {key} was created in Intake. {tail}"}
+
+
+def _register_sample_ticket_route(app: FastAPI, ctx) -> None:
     @app.post("/v1/setup/sample-ticket")
     def sample_ticket(body: SampleBody, request: Request):
         user = _administrator(request, ctx)
-        if setup_complete(ctx):
-            raise HTTPException(409, "Setup is complete. Follow ticket progress on the normal ticket and Dashboard screens.")
-        row = _row(ctx)
-        key = str(row.get("sample_ticket_key") or "")
-        if row.get("sample_confirmed_at"):
-            raise HTTPException(409, f"Sample ticket {key} was already sent to Intake. Follow it on the ticket screens.")
-        if not jira_connected(ctx) or not ctx.jira:
-            raise HTTPException(409, "Connect Jira in Integrations before sending the sample ticket.")
-        project = body.project.strip().upper()
-        if project not in ctx.repo().projects:
-            raise HTTPException(422, "Choose a project already configured in Projects.")
-        if not key:
-            summary = "AI Flow setup sample ticket"
-            description = ("Sample ticket created by the AI Flow first-run setup wizard.\n\n"
-                           "This confirms that Jira is connected and this project can receive work in Intake.")
-            try:
-                key = ctx.jira.create_issue(project, summary, description, issuetype="Task",
-                                            labels=["aiflow-setup-sample"])
-                ctx.db.run("UPDATE setup_wizard_state SET sample_ticket_key=%s,updated_at=now() WHERE id=true",
-                           (key,))
-            except Exception as exc:  # noqa: BLE001 - return a plain recovery action, never provider internals
-                _audit(ctx, "sample_ticket", user.subject, False, "could not create sample issue", {"project": project})
-                raise HTTPException(502, "AI Flow could not create the sample ticket in Jira. Check the connection and try again.") from exc
-        try:
-            current = ctx.jira.status(key)
-            if current != "Intake":
-                current = ctx.jira.transition_to(key, "Intake")
-            if current != "Intake":
-                raise RuntimeError("Jira did not confirm Intake")
-        except Exception as exc:  # noqa: BLE001
-            _audit(ctx, "sample_ticket", user.subject, False, "sample issue not confirmed in Intake",
-                   {"project": project, "ticket": key})
-            raise HTTPException(502, f"Ticket {key} exists, but AI Flow could not confirm it in Intake. Check the Jira workflow and try again.") from exc
-        ctx.db.run("UPDATE setup_wizard_state SET sample_confirmed_at=now(),updated_at=now() WHERE id=true"
-                   " AND sample_confirmed_at IS NULL")
-        ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
-                   " VALUES (%s,%s,'Intake','Task',%s,'AI Flow setup sample ticket',%s,now(),now())"
-                   " ON CONFLICT (key) DO UPDATE SET status='Intake',synced_at=now()",
-                   (key, project, ["aiflow-setup-sample"],
-                    "Sample ticket created by the AI Flow first-run setup wizard."))
-        completed = status(ctx)["completed"]
-        _audit(ctx, "sample_ticket", user.subject, True, "sample ticket confirmed in Intake",
-               {"project": project, "ticket": key, "status": "Intake"})
-        ctx.events.emit("setup.sample_ticket", ticket=key, project=project, outcome="Intake",
-                        account=user.subject, reason="first-run setup sample confirmed")
-        tail = ("Setup is complete; follow its progress on the ticket and Dashboard screens." if completed
-                else "Skipped or unfinished steps stay on the Dashboard until you finish them.")
-        return {"ok": True, "ticket": key, "status": "Intake", "completed": completed,
-                "message": f"Sample ticket {key} was created in Intake. {tail}"}
+        return _send_sample_ticket(ctx, body, user)
 
+
+def _register_public_address_middleware(app: FastAPI, ctx) -> None:
     public_url_cache = {"read_at": 0.0}
 
     @app.middleware("http")
@@ -371,3 +461,13 @@ def install(app: FastAPI, ctx) -> None:
             except Exception:  # noqa: BLE001 - database availability is handled by the route doing the work
                 pass
         return await call_next(request)
+
+
+def install(app: FastAPI, ctx) -> None:
+    """Mount the bootstrap, setup progress and shared public-address behavior."""
+    _register_setup_pages(app, ctx)
+    _register_status_route(app, ctx)
+    _register_bootstrap_route(app, ctx)
+    _register_step_route(app, ctx)
+    _register_sample_ticket_route(app, ctx)
+    _register_public_address_middleware(app, ctx)

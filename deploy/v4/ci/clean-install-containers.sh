@@ -189,8 +189,12 @@ python3 -c 'import secrets,sys; open(sys.argv[1],"w").write(secrets.token_urlsaf
 chmod 600 "\$password_file"
 setup=\$(curl -fsS -c "\$jar" -H '$HOSTHDR' $URL/v1/setup/status)
 setup_token=\$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bootstrap_token"])' "\$setup")
+ownership_config=/root/aiflow4-acceptance-owner.curl
+python3 -c 'import json,sys; values=dict(line.rstrip("\n").split("=",1) for line in open(sys.argv[1]) if line.startswith("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY=")); open(sys.argv[2],"w").write("header = "+json.dumps("X-AIFLOW4-Ownership: "+values["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"])+"\n")' /etc/aiflow/secrets/control/aiflow4.env "\$ownership_config"
+chmod 600 "\$ownership_config"
 body=\$(python3 -c 'import json,sys; print(json.dumps({"public_url":"http://control.clean.test","email":sys.argv[1],"password":open(sys.argv[2]).read()}))' '$ADMIN' "\$password_file")
-[[ \$(curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' -H "X-AIFLOW4-Setup: \$setup_token" -H 'Content-Type: application/json' -b "\$jar" -c "\$jar" --data-binary @- $URL/v1/setup/bootstrap <<<"\$body") == 200 ]]
+[[ \$(curl -s -o /dev/null -w '%{http_code}' --config "\$ownership_config" -H '$HOSTHDR' -H "X-AIFLOW4-Setup: \$setup_token" -H 'Content-Type: application/json' -b "\$jar" -c "\$jar" --data-binary @- $URL/v1/setup/bootstrap <<<"\$body") == 200 ]]
+rm -f "\$ownership_config"
 [[ \$(code -b "\$jar" $URL/v1/state) == 200 ]]
 CHECK
 

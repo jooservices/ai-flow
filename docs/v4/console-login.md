@@ -10,16 +10,20 @@ table, landing page priority, people management and view-as behavior.
 
 The control installer turns on `AIFLOW4_CONSOLE_LOGIN=1` and generates the session signing key. It does not need an
 Administrator email or password. With no console user, `/login` serves the first-run setup screen instead of the
-sign-in form. The browser asks for the public address, email and password, then creates the first Administrator and
-signs them in. Passwords are stored only as salted scrypt hashes; the setup request and audit record do not retain
-the password. The selected public address is kept in PostgreSQL and used by every API replica for provider callbacks
-and generated links, so no environment file edit is needed.
+sign-in form. The browser asks for the public address, installation ownership capability, email and password, then
+creates the first Administrator and signs them in. The capability is checked against the installation's
+`AIFLOW4_SETUP_OWNERSHIP_CAPABILITY` and atomically consumed with first-user creation; the public status endpoint
+never returns it. On an interactive first install, choose the capability during the install command's hidden
+prompt and enter the same value in the browser.
+Passwords are stored only as salted scrypt hashes; the setup request and audit record do not retain the password.
+The selected public address is kept in PostgreSQL and used by every API replica for provider callbacks and generated
+links, so no environment file edit is needed.
 
-The wizard then checks Jira, GitHub, a machine, AI accounts, the first project and a sample ticket. Each incomplete
-step names the next action in plain words. Jira and GitHub actions stay in Integrations, machine join and account
-sign-in stay in Machines and AI, and project setup stays in Projects. A skipped step remains on the Dashboard with a
-resume link. The wizard locks after Jira confirms that the sample ticket exists in Intake; later ticket progress is
-followed on the normal ticket and Dashboard screens. The user-created password is never written to a local file.
+After the first Administrator exists, `/setup` redirects to the Dashboard. Its "Finish setting up AI Flow" panel
+checks Jira, GitHub, a machine, AI accounts, the first project and a sample ticket. Each incomplete step names the
+next action in plain words. Jira and GitHub actions stay in Integrations, machine join and account sign-in stay in
+Machines and AI, and project setup stays in Projects. A skipped step remains on the Dashboard with a resume link.
+The panel disappears only after every step is ready. The user-created password is never written to a local file.
 
 An existing Administrator is still supported: a prior install can keep using its account and sign in at `/login`.
 The optional installer `--admin-email` and `aiflow4 console-user seed` command remain available for controlled legacy
@@ -46,11 +50,11 @@ as before.
 | Endpoint | Purpose |
 |---|---|
 | `GET /login` | first-run setup when no console user exists, otherwise the sign-in page |
-| `GET /setup` | setup steps until a sample ticket is confirmed in Intake |
+| `GET /setup` | first Administrator bootstrap before any user exists; redirects to the Dashboard afterwards |
 | `GET /v1/setup/status` | checks each first-run step and reports its missing action |
-| `POST /v1/setup/bootstrap` | creates the first Administrator and saves the public address, once only |
+| `POST /v1/setup/bootstrap` | creates the first Administrator and saves the public address after the installation capability is supplied and consumed |
 | `POST /v1/setup/steps/{step}` | skip a step or resume it later |
-| `POST /v1/setup/sample-ticket` | creates and confirms the sample ticket in Intake; this finishes setup |
+| `POST /v1/setup/sample-ticket` | creates and confirms the sample ticket in Intake; the Dashboard panel remains until all steps are ready |
 | `POST /v1/auth/login` | `{email, password}`; returns the user and sets the HttpOnly `aiflow4_session` cookie (SameSite=Strict, Secure behind HTTPS, 12 hours) |
 | `POST /v1/auth/logout`, `GET /logout` | clears the cookie |
 | `GET /v1/auth/me` | the signed-in user, or 401 |

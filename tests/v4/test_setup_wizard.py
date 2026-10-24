@@ -1,6 +1,10 @@
 """First-run wizard: browser bootstrap, checked setup steps, skip/resume and Intake completion."""
 from __future__ import annotations
 
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -14,11 +18,13 @@ from conftest import FakeGitHub, FakeJira
 SECRET = "setup-wizard-session-secret-with-32-bytes"
 EMAIL = "First.Owner@Example.Test"
 PASSWORD = "a-new-browser-password-for-ai-flow"
+OWNERSHIP_CAPABILITY = "first-run-ownership-capability-with-over-32-characters"
 
 
 def make_client(ctx):
     ctx.settings.console_login = True
     ctx.settings.console_session_secret = SECRET
+    ctx.settings.setup_ownership_capability = OWNERSHIP_CAPABILITY
     ctx.settings.public_url = "https://initial.example.test"
     ctx.jira = None
     ctx.github = None
@@ -42,7 +48,8 @@ def bootstrap(client, url="http://console.example.test"):
     challenge = status(client)
     response = client.post("/v1/setup/bootstrap", json={"public_url": url, "email": EMAIL,
                                   "password": PASSWORD},
-                           headers={"X-AIFLOW4-Setup": challenge["bootstrap_token"]})
+                           headers={"X-AIFLOW4-Setup": challenge["bootstrap_token"],
+                                    "X-AIFLOW4-Ownership": OWNERSHIP_CAPABILITY})
     return challenge, response
 
 
@@ -66,6 +73,12 @@ class SetupJira(FakeJira):
         return target
 
 
+class SlowSetupJira(SetupJira):
+    def create_issue(self, *args, **kwargs):
+        time.sleep(0.15)
+        return super().create_issue(*args, **kwargs)
+
+
 class SetupJiraAuth:
     def __init__(self, connected):
         self.connected = connected
@@ -83,15 +96,24 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
 
     before = status(client)
     assert before["admin_exists"] is False
+    assert "ownership_capability" not in before
     assert by_id(before, "public_address")["missing"] == "Choose the address people use to open AI Flow."
     assert by_id(before, "jira")["missing"] == "Connect a Jira account in Integrations."
     no_nonce = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
                             "email": EMAIL, "password": PASSWORD})
     assert no_nonce.status_code == 403
 
+    wrong_owner = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
+                                "email": EMAIL, "password": PASSWORD},
+                              headers={"X-AIFLOW4-Setup": before["bootstrap_token"],
+                                       "X-AIFLOW4-Ownership": "not-the-installation-capability"})
+    assert wrong_owner.status_code == 403 and setup_wizard.user_count(ctx) == 0
+    assert ctx.db.one("SELECT ownership_claimed_at FROM setup_wizard_state WHERE id=true")["ownership_claimed_at"] is None
+
     bad_password = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
                                   "email": EMAIL, "password": "short"},
-                               headers={"X-AIFLOW4-Setup": before["bootstrap_token"]})
+                               headers={"X-AIFLOW4-Setup": before["bootstrap_token"],
+                                        "X-AIFLOW4-Ownership": OWNERSHIP_CAPABILITY})
     assert bad_password.status_code == 422 and setup_wizard.user_count(ctx) == 0
 
     challenge, created = bootstrap(client)
@@ -102,6 +124,7 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
     assert user["email"] == "first.owner@example.test" and user["role"] == "administrator"
     assert user["roles"] == ["administrator"] and PASSWORD not in user["password_hash"]
     assert ctx.db.one("SELECT public_url FROM setup_wizard_state WHERE id=true")["public_url"] == "http://console.example.test"
+    assert ctx.db.one("SELECT ownership_claimed_at FROM setup_wizard_state WHERE id=true")["ownership_claimed_at"] is not None
     assert ctx.settings.public_url == "http://console.example.test"
     assert ctx.settings.join_control_url == "https://control.example.test"
     audit = ctx.db.one("SELECT payload::text AS payload FROM write_audit WHERE target='setup' AND action='bootstrap'")
@@ -201,6 +224,27 @@ def test_sample_ticket_completes_only_after_jira_confirms_intake_and_then_locks_
     script = client.get("/ui/setup-progress.js")
     assert script.status_code == 200 and "Skip for now" in script.text and "Resume this step" in script.text
     assert 'data-block="first-run-setup"' in console
+    setup_page = client.get("/setup")
+    assert setup_page.status_code == 303
+
+
+def test_concurrent_sample_ticket_requests_create_only_one_jira_issue(ctx):
+    client = make_client(ctx)
+    _, created = bootstrap(client)
+    assert created.status_code == 200
+    jira = SlowSetupJira()
+    ctx.jira = jira
+    start = Barrier(2)
+
+    def send_sample():
+        start.wait(timeout=5)
+        return client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _index: send_sample(), range(2)))
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert len(jira.created) == 1 and jira.transitions == [("TESTWP-99", "Intake")]
+    assert ctx.db.one("SELECT sample_ticket_key FROM setup_wizard_state WHERE id=true")["sample_ticket_key"] == "TESTWP-99"
 
 
 def test_sample_ticket_failure_says_it_was_not_confirmed_and_keeps_setup_open(ctx):
@@ -233,6 +277,7 @@ def test_sample_ticket_stays_confirmed_after_the_flow_moves_it_and_is_never_re_t
     ctx.db.run("INSERT INTO accounts (id,provider,node,status) VALUES ('codex-move','codex','move-node','idle')")
     assert status(client)["completed"] is True
 
+
     # The flow picks the sample up: Jira no longer reports Intake.
     for moved in ("To Do", "In Progress"):
         jira.status_of["TESTWP-99"] = moved
@@ -251,6 +296,37 @@ def test_sample_ticket_stays_confirmed_after_the_flow_moves_it_and_is_never_re_t
     ctx.db.run("DELETE FROM accounts WHERE id='codex-move'")
     jira.status = lambda key: (_ for _ in ()).throw(AssertionError("status polling must not call Jira"))
     assert status(client)["completed"] is True
+
+
+def test_dashboard_setup_panel_disappears_after_completion():
+    script = Path(__file__).resolve().parents[2] / "aiflow/v4/control/ui/setup-progress.js"
+    browser_check = r"""
+const fs = require('node:fs');
+const status = { completed: false, steps: [
+  { id: 'public_address', title: 'Public address', ready: true, missing: '', skipped: false },
+  { id: 'administrator', title: 'Administrator', ready: true, missing: '', skipped: false },
+  { id: 'jira', title: 'Connect Jira', ready: false, missing: 'Connect Jira in Integrations.', skipped: false }
+] };
+const panel = { innerHTML: '' };
+global.window = {};
+global.S = { consoleUser: {}, view: 'cc', data: {} };
+global.consoleCan = () => true;
+global.document = { addEventListener: () => {}, querySelector: () => panel };
+global.renderDashboard = () => { panel.innerHTML = window.AIFlowSetup.panel(); };
+global.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(status) });
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+(async () => {
+  for (let i = 0; i < 10 && !panel.innerHTML; i += 1) await tick();
+  if (!panel.innerHTML.includes('Finish setting up AI Flow')) process.exitCode = 1;
+  status.completed = true;
+  window.AIFlowSetup.poll(true);
+  for (let i = 0; i < 10 && panel.innerHTML; i += 1) await tick();
+  if (panel.innerHTML !== '') process.exitCode = 2;
+})().catch(() => { process.exitCode = 3; });
+"""
+    result = subprocess.run(["node", "-e", browser_check, str(script)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr or f"Dashboard panel assertion exited {result.returncode}"
 
 
 def test_second_send_before_other_steps_are_done_does_not_re_transition(ctx):

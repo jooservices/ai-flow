@@ -33,6 +33,7 @@ button.primary,.button.primary{background:var(--accent);border-color:var(--accen
     <p class="note">Use the same address you opened in your browser. HTTPS is recommended for secure sign-in cookies and provider callbacks.</p>
     <form id="bootstrap-form" class="setup-form">
       <label for="public-url">Public address<input id="public-url" type="url" required autocomplete="url"></label>
+      <label for="ownership-capability">Installation ownership capability<input id="ownership-capability" type="password" required minlength="32" autocomplete="off"><span class="subtle">Enter the 32+ character code chosen during installation.</span></label>
       <label for="admin-email">Administrator email<input id="admin-email" type="email" required autocomplete="username"></label>
       <label for="admin-password">Password<input id="admin-password" type="password" required minlength="12" autocomplete="new-password"><span class="subtle">Use at least 12 characters.</span></label>
       <button id="bootstrap-submit" class="primary" type="submit">Create Administrator and continue</button>
@@ -53,7 +54,7 @@ button.primary,.button.primary{background:var(--accent);border-color:var(--accen
     .catch(function(e){if(e.message==='sign in as the Administrator to continue setup'){location.replace('/dashboard');return}$('bootstrap').hidden=false;setMessage('bootstrap-message',e.message)});
   $('public-url').value=location.origin;
   $('bootstrap-form').addEventListener('submit',function(event){event.preventDefault();if(busy)return;busy=true;$('bootstrap-submit').disabled=true;setMessage('bootstrap-message','');
-    api('/v1/setup/bootstrap',{method:'POST',headers:{'X-AIFLOW4-Setup':bootstrapToken},body:JSON.stringify({public_url:$('public-url').value,email:$('admin-email').value,password:$('admin-password').value})})
+    api('/v1/setup/bootstrap',{method:'POST',headers:{'X-AIFLOW4-Setup':bootstrapToken,'X-AIFLOW4-Ownership':$('ownership-capability').value},body:JSON.stringify({public_url:$('public-url').value,email:$('admin-email').value,password:$('admin-password').value})})
       .then(function(){location.replace('/dashboard')}).catch(function(e){setMessage('bootstrap-message',e.message)}).then(function(){busy=false;$('bootstrap-submit').disabled=false})
   });
 })();

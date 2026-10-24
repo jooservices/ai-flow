@@ -172,7 +172,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "viewAllowed": None,
     "syncMenuVisibility": None,
     "applyRoleNavigation": None,
-    "pollConsoleSession": None,
+    "pollConsoleSession": ("cc",),
     "loadPrefs": ("cc", "work"),
     "savePrefs": ("cc", "work"),
     "projTickets": ("work", "delivery"),
@@ -1161,7 +1161,8 @@ def changed_views(base: str) -> set[str]:
                 old_index = old_first - 1 + (line_no - first)
                 if old_index < len(base_lines):
                     specific_views |= _changed_navigation_views(base_lines[old_index], changed_line, all_views)
-            layout_markup = ('id="layout-live"' in changed_line or 'data-block="' in changed_line
+            layout_markup = ('id="layout-live"' in changed_line
+                             or ('data-block="' in changed_line and 'data-block="first-run-setup"' not in changed_line)
                              or 'data-layout-section="' in changed_line or "layouts: {" in changed_line
                              or "S.layouts." in changed_line or "layoutAction(act" in changed_line
                              or "applyLayout('delivery'" in changed_line

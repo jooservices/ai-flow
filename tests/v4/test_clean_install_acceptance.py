@@ -82,6 +82,7 @@ class Fresh:
         ctx.settings.console_login = True
         ctx.settings.console_session_secret = SESSION_SECRET
         ctx.settings.owner_token = env["AIFLOW4_OWNER_TOKEN"]
+        ctx.settings.setup_ownership_capability = env["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"]
         prepare_project_control(ctx, self.control_repo)
         self.app = create_app(ctx)
         mount_ui(self.app, ctx)
@@ -94,7 +95,8 @@ class Fresh:
         setup = self.client.get("/v1/setup/status")
         assert setup.status_code == 200 and setup.json()["admin_exists"] is False
         created = self.client.post("/v1/setup/bootstrap", json={"public_url": "http://127.0.0.1",
-            "email": ADMIN, "password": self.password}, headers={"X-AIFLOW4-Setup": setup.json()["bootstrap_token"]})
+            "email": ADMIN, "password": self.password}, headers={"X-AIFLOW4-Setup": setup.json()["bootstrap_token"],
+            "X-AIFLOW4-Ownership": ctx.settings.setup_ownership_capability})
         assert created.status_code == 200, created.text
         return self.client
 

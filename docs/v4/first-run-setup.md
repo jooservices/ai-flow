@@ -1,9 +1,14 @@
 # First-run setup
 
+**Console screens:** `cc`
+
 A new v4 control plane with no console user opens the setup wizard at `/login`. The first screen asks for the public
-address and creates the first Administrator with an email and password. The browser signs in that Administrator
-immediately. The password is stored only as a salted scrypt hash, and the public address is stored in PostgreSQL so
-both API replicas use it for OAuth callbacks and generated links.
+address, installation ownership capability, Administrator email and password. The browser signs in that
+Administrator immediately. The capability is the install-scoped `AIFLOW4_SETUP_OWNERSHIP_CAPABILITY`; on an
+interactive install, choose it during the install command's hidden prompt and enter the same value in the browser.
+It is verified and consumed atomically with account creation, and is never returned by setup status. The password is stored only as a salted
+scrypt hash, and the public address is stored in PostgreSQL so both API replicas use it for OAuth callbacks and
+generated links.
 
 ## Guided setup
 
@@ -22,8 +27,8 @@ the wizard presents the machine step first. Every check reports what is ready or
 words. Jira, GitHub, machine, account and project actions remain available in Integrations, Machines and AI, and
 Projects after setup.
 
-The setup screen (`/setup`, or `/login` before any user exists) only takes the public address and creates the
-Administrator. It is locked from that moment: `/setup` redirects to the Dashboard. Every later step is shown in the
+The setup screen (`/setup`, or `/login` before any user exists) creates the Administrator. It is locked from that
+moment: `/setup` redirects to the Dashboard. Every later step is shown in the
 "Finish setting up AI Flow" panel on the Dashboard (`ui/setup-progress.js`), with its check, its missing action, a link
 to Integrations, Machines and AI, or Projects, and a Skip or Resume button. The sample ticket step creates a Jira
 issue, moves it to Intake and confirms that status. If Jira cannot create or confirm the issue, the panel says what
@@ -41,12 +46,15 @@ step has been ready, completion is permanent. A second send is refused with 409 
 - `GET /setup` serves the bootstrap screen only while there is no Administrator, then redirects to the Dashboard.
 - `GET /v1/setup/status` checks each step and returns its plain-language missing action.
 - `POST /v1/setup/bootstrap` accepts the public address, Administrator email and password once. A short-lived
-  same-site setup nonce protects this first-use request.
+  same-site nonce protects against CSRF; the installation ownership capability authenticates the first owner and
+  is atomically consumed in the transaction that creates the Administrator.
 - `POST /v1/setup/steps/{step}` records a skip or resume for an optional step.
-- `POST /v1/setup/sample-ticket` creates the sample and confirms Intake in Jira; `completed` is true only when all steps are ready.
+- `POST /v1/setup/sample-ticket` creates the sample and confirms Intake in Jira; requests serialize across API
+  replicas and re-read setup state before creating an issue. `completed` is true only when all steps are ready.
 
 An optional legacy installer `--admin-email` can still seed an Administrator for controlled CI or migration
-workflows. A fresh install needs only `aiflow4-control-install --version vX.Y.Z --domain D`, then browser setup.
+workflows. A fresh interactive install needs only `aiflow4-control-install --version vX.Y.Z --domain D`; choose
+the hidden ownership capability during that command, then use it in browser setup.
 
 Tests: `tests/v4/test_setup_wizard.py`, `tests/v4/test_control_install.py`, and
 `tests/v4/test_clean_install_acceptance.py`.

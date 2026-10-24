@@ -134,9 +134,21 @@ def import_control_repo(db, repo: ControlRepo) -> dict:
                 for key, project in repo.projects.items():
                     for name in project.nodes or []:
                         project_assignments.setdefault(name, []).append(key)
-                for name in sorted(set(repo.nodes) | set(project_assignments)):
+                # Startup sync can replace nodes.projects with the current file assignments before this one-time
+                # import runs. Keep projects created through the console, which are stored separately in
+                # nodes.managed_projects, in the imported runtime assignments as well.
+                managed_project_assignments = {
+                    row["name"]: list(row["managed_projects"] or [])
+                    for row in conn.execute(
+                        "SELECT name,managed_projects FROM nodes WHERE removed_at IS NULL AND managed_projects<>'{}'"
+                    ).fetchall()
+                }
+                for name in sorted(set(repo.nodes) | set(project_assignments) | set(managed_project_assignments)):
                     node = repo.nodes.get(name)
-                    projects = list(dict.fromkeys([*(node.projects if node else []), *project_assignments.get(name, [])]))
+                    projects = list(dict.fromkeys([
+                        *(node.projects if node else []), *project_assignments.get(name, []),
+                        *managed_project_assignments.get(name, []),
+                    ]))
                     profile = ({"capabilities": node.capabilities, "purpose": node.purpose, "notes": node.notes,
                                 "location": node.location, "tools": node.tools, "packages": node.packages,
                                 "services": node.services} if node else {})

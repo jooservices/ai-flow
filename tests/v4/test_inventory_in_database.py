@@ -143,6 +143,26 @@ def test_repo_inventory_is_imported_once_and_never_overwrites_screen_changes(cli
     assert "ghost-01" not in desired["accounts"]
 
 
+def test_startup_sync_before_import_preserves_console_project_assignments(client, ctx):
+    owner_session(client, ctx)
+    configured = ctx.repo()
+    configured.projects["NEWAPP"] = Project(key="NEWAPP", repo="jooservices/new-app")
+    # Project creation through the console records the machine assignment separately. The startup sync below
+    # refreshes nodes.projects from the legacy node file before the delayed one-time import runs.
+    ctx.db.run("UPDATE nodes SET managed_projects=ARRAY['NEWAPP'] WHERE name='node1'")
+
+    assert client.app.state.sync_accounts() == []
+    assert ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"] == ["TESTWP"]
+    assert ctx.db.one("SELECT managed_projects FROM nodes WHERE name='node1'")["managed_projects"] == ["NEWAPP"]
+
+    assert client.app.state.import_inventory()["imported"] is True
+
+    assignments = ctx.db.one("SELECT projects FROM nodes WHERE name='node1'")["projects"]
+    assert assignments == ["TESTWP", "NEWAPP"]
+    runtime = ctx.repo()
+    assert runtime.projects_for_node("node1", assignments) == ["TESTWP", "NEWAPP"]
+
+
 def test_roles_of_an_imported_multi_machine_account_change_on_screen(client, ctx):
     owner_session(client, ctx)
     join_node(client, "node2")

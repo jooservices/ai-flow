@@ -26,23 +26,15 @@ or standard input with `aiflow4 node join --join-token-file /path/to/token` or
 
 ## Accounts and sign-in
 
-Enrollment does not carry an AI provider credential, API key, OAuth token, or AI account home. AI Flow returns
-only the account IDs already assigned to that node in `aiflow-control/accounts.yaml`, then creates their
-separate directories under `/srv/aiflow/accounts/` owned by `aiflow-worker`.
+After its first heartbeat, the machine appears in the **Machines and AI** screen. Open the machine there to add
+an AI account by choosing its provider, name, roles (jobs), and worker count (sessions). The node creates the
+account's private home and starts the provider sign-in handoff. Complete sign-in from the screen using the
+provider link and code; when the node confirms the account is ready, it can take work for its assigned roles.
+Provider credentials stay in the account's home on the machine and are not sent to the control plane.
 
-Map an account to the node name in `aiflow-control/accounts.yaml` before installing if the node should start
-work immediately. After installation, the owner completes that provider's sign-in as `aiflow-worker`. For a
-Codex account, for example:
-
-```sh
-sudo -u aiflow-worker env HOME=/srv/aiflow/accounts/codex-01 codex login --device-auth
-```
-
-Other installed CLIs use their own interactive sign-in command, such as `claude auth login` or
-`opencode auth login`, with `HOME` set to the matching account directory. Authentication files stay in that
-directory and are never sent to the control plane. Once an assigned account is signed in, its worker probes
-the CLI, the node reports online with its required tools, and the worker can claim ready tickets in the
-enrolled project.
+Manage account assignments and sign-in from **Machines and AI**. Do not add assignments to `accounts.yaml` or
+sign in through a shell; after the one-time import, the control database and screen own these runtime facts.
+See [Machines and AI management](machines-and-ai.md) for account changes and machine operations.
 
 ## server-installer profile proposal
 

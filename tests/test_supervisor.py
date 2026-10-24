@@ -1154,6 +1154,28 @@ class SendBackTests(unittest.TestCase):
         })
         self.assertEqual([incident.id for incident in incidents], ["rework:JAIF-9"])
 
+    def test_feedback_item_summaries_are_in_round_history_and_final_blocked_comment(self):
+        sup = make()
+        for round_number in range(1, 5):
+            feedback_text = f"add the missing validation for round {round_number}"
+            sup.send_back("JAIF-9", FakeRepo(), f"failed check {round_number}", "", [{
+                "id": f"review:R{round_number}",
+                "kind": "review",
+                "who": "reviewer",
+                "bot": False,
+                "where": "review",
+                "text": feedback_text,
+            }])
+
+        history = json.loads(sup.redis.get("rework-history:JAIF-9"))
+        blocked_comment = sup.jira.comments[-1][1]
+        self.assertEqual(len(history), 4)
+        for round_number, entry in enumerate(history, start=1):
+            feedback_text = f"add the missing validation for round {round_number}"
+            self.assertIn(feedback_text, entry["reason"])
+            self.assertIn(f"Round {round_number}: failed check {round_number}", blocked_comment)
+            self.assertIn(feedback_text, blocked_comment)
+
     def test_blocking_resets_the_counters_so_an_unblock_starts_fresh(self):
         sup = make()
         sup.redis.data.update({"attempts:K-1:developer": "3", "attempts:K-1:qa": "2", "cycles:K-1": "7", "dev:K-1": "Codex"})

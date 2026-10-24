@@ -1456,7 +1456,25 @@ class Supervisor:
             history = []
         if not isinstance(history, list):
             history = []
-        failing_reason = (headline + (f"\n{details.strip()}" if details.strip() else ""))[:1000]
+        reason_parts = [headline]
+        if details.strip():
+            reason_parts.append(details.strip())
+        if items:
+            summaries = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id", "unknown"))
+                who = str(item.get("who", "unknown"))
+                where = str(item.get("where", "unknown"))
+                item_text = str(item.get("text", "")).strip()
+                summary = f"Feedback item {item_id} from {who} at {where}"
+                if item_text:
+                    summary += f": {item_text[:800]}"
+                summaries.append(summary)
+            if summaries:
+                reason_parts.append("Feedback item summaries:\n" + "\n".join(f"- {summary}" for summary in summaries))
+        failing_reason = "\n".join(reason_parts)[:8000]
         history.append({"round": cycles, "reason": failing_reason})
         self.redis.set(f"rework-history:{key}", json.dumps(history), 30 * DAY)
         self.redis.delete(f"qa:{key}")

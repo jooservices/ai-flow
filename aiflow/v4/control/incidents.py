@@ -250,8 +250,11 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
     """Why the projects with ready tickets get no worker: the concrete cause, so a person knows what to fix."""
     repo = ctx.repo()
     reasons: list[str] = []
-    nodes = ctx.db.all("SELECT name, status, tools, metrics, projects, dynamic FROM nodes")
-    online = [n for n in nodes if n["status"] == "online"]
+    from .shared_accounts import NODE_ONLINE_S
+    nodes = ctx.db.all("SELECT name,status,accepting_work,tools,metrics,projects,dynamic,"
+                       "(last_heartbeat IS NOT NULL AND last_heartbeat > now()-make_interval(secs => %s))"
+                       " AS heartbeat_fresh FROM nodes WHERE removed_at IS NULL", (NODE_ONLINE_S,))
+    online = [n for n in nodes if n["status"] == "online" and n["accepting_work"] and n["heartbeat_fresh"]]
     ticket_keys = ticket_keys or set()
     if not online:
         reasons.append("no node is online")

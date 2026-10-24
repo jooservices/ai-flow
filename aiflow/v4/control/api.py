@@ -2269,7 +2269,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.put("/v1/notifications/channels")
     async def notification_channel_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         payload = await notification_json(request)
         config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
         if str(payload.get("kind") or "").strip().lower() == "telegram" and config.get("ba_chat_enabled"):
@@ -2280,22 +2280,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "channel_save", "", "", None, user.subject, True,
+              "notification channel saved", {"channel_id": channel["id"], "kind": channel["kind"],
+                                               "enabled": channel["enabled"]})
         return {"channel": channel}
 
     @app.delete("/v1/notifications/channels/{channel_id}")
     def notification_channel_delete(channel_id: int, request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         if not notify.delete_channel(ctx.db, channel_id):
             raise HTTPException(404, "notification channel was not found")
+        audit("notifications", "channel_delete", "", "", None, user.subject, True,
+              "notification channel deleted", {"channel_id": channel_id})
         return {"deleted": True}
 
     @app.put("/v1/notifications/preferences")
     async def notification_preferences_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         try:
             preferences = notify.save_preferences(ctx.db, await notification_json(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "preferences_save", "", "", None, user.subject, True,
+              "notification routing preferences saved",
+              {"route_count": sum(len(ids) for ids in preferences["routes"].values()),
+               "quiet_hours_enabled": bool(preferences["quiet_start"] and preferences["quiet_end"])})
         return {"preferences": preferences}
 
     @app.post("/v1/notifications/channels/{channel_id}/test")

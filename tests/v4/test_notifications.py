@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from aiflow.v4.control import notify
+from aiflow.v4.control import flow_doctor, notify
 from aiflow.v4.control.console_auth import COOKIE_NAME, issue_session
 from aiflow.v4.control.ui import mount_ui
 from tests.v4.conftest import add_ticket
@@ -108,6 +108,41 @@ def test_admin_screen_channel_test_results_and_hidden_credentials(client, ctx, m
     sign_in(client, ctx, "lead")
     assert client.get("/v1/notifications").status_code == 403
     assert client.get("/notifications").status_code == 403
+
+
+def test_human_notification_configuration_changes_are_interventions_and_create_a_bug(client, ctx):
+    email, secret = "notification-admin@example.test", "n" * 40
+    ctx.settings.console_session_secret = secret
+    ctx.db.run("INSERT INTO console_users (email,role,roles,password_hash) VALUES (%s,'administrator',%s,'test')",
+               (email, ["administrator"]))
+    expires = int(datetime.now(timezone.utc).timestamp()) + 3600
+    client.cookies.set(COOKIE_NAME, issue_session(email, ["administrator"], expires, secret))
+
+    saved = client.put("/v1/notifications/channels", json={
+        "name": "Build notifications", "kind": "webhook",
+        "config": {"url": "https://hooks.example.test/notifications", "auth_token": "never-audit-this"},
+    })
+    assert saved.status_code == 200, saved.text
+    channel_id = saved.json()["channel"]["id"]
+    preferences = client.put("/v1/notifications/preferences", json={
+        "routes": {"critical_incident": [channel_id]},
+    })
+    assert preferences.status_code == 200, preferences.text
+    deleted = client.delete(f"/v1/notifications/channels/{channel_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    interventions = ctx.db.all("SELECT source,actor,action,target,reason,details FROM operator_interventions"
+                               " ORDER BY id")
+    assert [row["action"] for row in interventions] == [
+        "notifications.channel_save", "notifications.preferences_save", "notifications.channel_delete"]
+    assert all(row["source"] == "control-api" and row["actor"] == email for row in interventions)
+    assert all("Authenticated principal" in row["reason"] for row in interventions)
+    assert "never-audit-this" not in str(interventions)
+
+    assert flow_doctor.create_intervention_bugs(ctx) == 1
+    bug = ctx.db.one("SELECT bug_ticket_key FROM operator_intervention_sessions WHERE actor=%s", (email,))
+    assert bug and bug["bug_ticket_key"] and ctx.jira.created[0]["issuetype"] == "Bug"
+    assert {"flow-bug", "operator-intervention"} <= set(ctx.jira.created[0]["labels"])
 
 
 def test_route_selection_for_each_alert_kind_and_quiet_hours(client, ctx, monkeypatch):

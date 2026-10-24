@@ -123,6 +123,68 @@ def test_doctor_drops_a_dependency_on_a_backlog_ticket_and_explains_it(ctx):
     assert any(key == "TESTWP-264" and "cannot complete" in body for key, body in ctx.jira.comments)
 
 
+def test_doctor_retries_a_dependency_explanation_after_a_transient_jira_comment_failure(ctx, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-2651", status="Backlog")
+    add_ticket(ctx.db, "TESTWP-2641", blocked_by=("TESTWP-2651",))
+    ctx.jira.links_by_ticket = {"TESTWP-2641": [{"id": "43", "other": "TESTWP-2651", "direction": "inward"}]}
+    comment = ctx.jira.comment
+    calls = []
+
+    def fail_once(ticket, body):
+        calls.append((ticket, body))
+        if len(calls) == 1:
+            raise RuntimeError("temporary Jira outage")
+        return comment(ticket, body)
+
+    monkeypatch.setattr(ctx.jira, "comment", fail_once)
+    flow_doctor._fix_impossible_dependencies(ctx)
+    pending = ctx.db.one("SELECT attempts,delivered_at FROM flow_doctor_comment_outbox"
+                         " WHERE ticket_key='TESTWP-2641'")
+    assert pending == {"attempts": 1, "delivered_at": None}
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-2641'") == \
+        {"outcome": "comment_pending"}
+    assert ctx.db.one("SELECT blocked_by FROM tickets WHERE key='TESTWP-2641'")["blocked_by"] == []
+    assert not ctx.jira.comments
+
+    flow_doctor._fix_impossible_dependencies(ctx)
+    delivered = ctx.db.one("SELECT attempts,delivered_at FROM flow_doctor_comment_outbox"
+                           " WHERE ticket_key='TESTWP-2641'")
+    assert delivered["attempts"] == 2 and delivered["delivered_at"]
+    assert ctx.db.one("SELECT outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-2641'") == \
+        {"outcome": "removed"}
+    assert len(ctx.jira.comments) == 1 and "dependency repaired" in ctx.jira.comments[0][1]
+
+
+@pytest.mark.parametrize("machine_state", ["drained", "stale"])
+def test_role_coverage_and_idle_diagnosis_ignore_drained_or_stale_machines(ctx, machine_state):
+    add_ticket(ctx.db, f"TESTWP-coverage-{machine_state}")
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+    if machine_state == "drained":
+        ctx.db.run("UPDATE nodes SET accepting_work=false WHERE name IN ('cc','node1')")
+    else:
+        ctx.db.run("UPDATE nodes SET last_heartbeat=now()-interval '5 minutes' WHERE name IN ('cc','node1')")
+
+    coverage = next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "dev")
+    assert coverage["ready_accounts"] == [] and not coverage["healthy"]
+    reasons = flow_doctor.idle_reasons(ctx, {"TESTWP"}, {f"TESTWP-coverage-{machine_state}"})
+    assert "no node is online" in reasons
+    assert "no online node serves TESTWP" in reasons
+
+
+def test_role_coverage_excludes_an_account_on_a_drained_machine(ctx):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+    ctx.db.run("UPDATE nodes SET accepting_work=false WHERE name='cc'")
+
+    coverage = next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "dev")
+    assert coverage["ready_accounts"] == ["codex-01"] and not coverage["healthy"]
+
+
 def test_doctor_requeues_a_ticket_after_retry_backoff_expires(ctx):
     add_ticket(ctx.db, "TESTWP-266")
     old = datetime.now(timezone.utc) - timedelta(minutes=20)
@@ -183,6 +245,38 @@ def test_doctor_routes_around_an_account_or_machine_failure(ctx):
     action = ctx.db.one("SELECT action,account_id,node,outcome FROM flow_doctor_actions WHERE ticket_key='TESTWP-268'")
     assert action == {"action": "move_ticket_to_ready_account", "account_id": "codex-01", "node": "node1",
                       "outcome": "released"}
+
+
+@pytest.mark.parametrize("error_kind", ["machine", "tool"])
+def test_doctor_routes_a_failed_verification_away_from_its_machine(client, ctx, error_kind):
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+    node1 = {"Authorization": "Bearer " + join_node(client, "node1").json()["node_token"]}
+    add_ticket(ctx.db, "TESTWP-2681", status="In Verify")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-2681','TESTWP','dev','opencode-01','opencode',"
+               "'cc',1,'finished','done','https://github.com/jooservices/test-aiflow-wp/pull/2681',%s,%s,%s)",
+               (str(uuid.uuid4()), old - timedelta(minutes=1), old - timedelta(minutes=1), old - timedelta(minutes=1)))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-2681','TESTWP','verify','claude-01','claude','cc',"
+               "1,'failed','failed',%s,%s,%s,%s)", (str(uuid.uuid4()), error_kind, old, old, old))
+
+    flow_doctor._route_around_failed_assignment(ctx)
+    exclusion = ctx.db.one("SELECT step,account_id,node FROM flow_doctor_route_exclusions"
+                           " WHERE ticket_key='TESTWP-2681'")
+    assert exclusion == {"step": "verify", "account_id": "", "node": "cc"}
+    assert ctx.db.one("SELECT action,account_id,node FROM flow_doctor_actions WHERE ticket_key='TESTWP-2681'") == \
+        {"action": "move_ticket_to_ready_account", "account_id": "codex-01", "node": "node1"}
+
+    def offered(account: str, headers: dict):
+        response = client.get("/v1/work/candidates", params={"account": account}, headers=headers)
+        assert response.status_code == 200, response.text
+        return {ticket["key"] for ticket in response.json()["tickets"]}
+
+    assert "TESTWP-2681" not in offered("claude-01", cc)
+    assert "TESTWP-2681" in offered("codex-01", node1)
 
 
 def test_the_failed_route_is_excluded_from_candidates_after_the_doctor_moves_the_ticket(client, ctx):

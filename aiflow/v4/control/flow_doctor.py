@@ -78,19 +78,54 @@ def _cause(reason: str) -> str:
     return "unknown"
 
 
-def _comment(ctx, ticket: str, text: str) -> None:
+def _comment(ctx, ticket: str, text: str) -> bool:
     if not ctx.jira:
-        return
+        return False
     try:
         ctx.jira.comment(ticket, text)
+        return True
     except Exception as exc:  # noqa: BLE001 - retries on a later doctor pass must not stop other fixes
         log.warning("doctor could not comment on %s (%s)", ticket, type(exc).__name__)
+        return False
+
+
+def _retry_pending_comments(ctx, action_keys: list[str] | None = None) -> None:
+    """Deliver persisted Jira explanations, keeping failures visible and retryable on the next doctor pass."""
+    if not ctx.jira:
+        return
+    query = ("SELECT action_key,ticket_key,body FROM flow_doctor_comment_outbox WHERE delivered_at IS NULL"
+             + (" AND action_key=ANY(%s)" if action_keys is not None else "") + " ORDER BY id LIMIT 100")
+    rows = ctx.db.all(query, (action_keys,) if action_keys is not None else ())
+    for row in rows:
+        if _comment(ctx, row["ticket_key"], row["body"]):
+            ctx.db.run("UPDATE flow_doctor_comment_outbox SET delivered_at=now(),attempts=attempts+1,last_error='' "
+                       "WHERE action_key=%s AND delivered_at IS NULL", (row["action_key"],))
+            changed = ctx.db.one("UPDATE flow_doctor_actions SET outcome='removed' WHERE action_key=%s"
+                                 " AND outcome='comment_pending' RETURNING action,ticket_key",
+                                 (row["action_key"],))
+            if changed:
+                ctx.events.emit("flow_doctor.action", ticket=changed["ticket_key"], outcome="removed",
+                                reason=changed["action"], data={"action": changed["action"],
+                                                                 "comment_delivered": True})
+        else:
+            ctx.db.run("UPDATE flow_doctor_comment_outbox SET attempts=attempts+1,"
+                       "last_error='Jira comment delivery failed' WHERE action_key=%s AND delivered_at IS NULL",
+                       (row["action_key"],))
+
+
+def _routing_ready_nodes(ctx) -> set[str]:
+    """Machines candidate routing can use now: accepting work with a fresh, online heartbeat."""
+    return {row["name"] for row in ctx.db.all(
+        "SELECT name FROM nodes WHERE removed_at IS NULL AND status='online' AND accepting_work=true"
+        " AND last_heartbeat IS NOT NULL AND last_heartbeat > now() - make_interval(secs => %s)",
+        (shared_accounts.NODE_ONLINE_S,))}
 
 
 def _serving_online_nodes(ctx, project: str) -> list[dict]:
     repo = ctx.repo()
     rows = ctx.db.all("SELECT name,status,tools,metrics,projects,dynamic FROM nodes WHERE removed_at IS NULL")
-    return [row for row in rows if row["status"] == "online"
+    ready = _routing_ready_nodes(ctx)
+    return [row for row in rows if row["name"] in ready
             and project in repo.projects_for_node(row["name"], row["projects"] or [], row["dynamic"])]
 
 
@@ -137,6 +172,7 @@ def _fix_tool_waits(ctx) -> None:
 
 
 def _fix_impossible_dependencies(ctx) -> None:
+    _retry_pending_comments(ctx)
     if not ctx.jira:
         return
     for ticket in ctx.db.all("SELECT key,blocked_by FROM tickets WHERE cardinality(blocked_by)>0"
@@ -168,14 +204,16 @@ def _fix_impossible_dependencies(ctx) -> None:
             removed.append(blocker)
         if removed:
             names = ", ".join(f"{b['key']} ({b['status']})" for b in removed)
-            _comment(ctx, ticket["key"],
-                     "AI Flow · Flow doctor · dependency repaired\n"
-                     f"What: Removed the blocking link to {names}.\n"
-                     "Why: The blocker is parked, in Backlog, or declined and cannot complete.\n"
-                     "Next: This ticket is available to normal work routing.")
-            record_action(ctx, f"bad-dependency:{ticket['key']}:{','.join(b['key'] for b in removed)}",
-                          "drop_impossible_dependency", ticket=ticket["key"], outcome="removed",
-                          detail=names)
+            action_key = f"bad-dependency:{ticket['key']}:{','.join(b['key'] for b in removed)}"
+            comment = ("AI Flow · Flow doctor · dependency repaired\n"
+                       f"What: Removed the blocking link to {names}.\n"
+                       "Why: The blocker is parked, in Backlog, or declined and cannot complete.\n"
+                       "Next: This ticket is available to normal work routing.")
+            ctx.db.run("INSERT INTO flow_doctor_comment_outbox (action_key,ticket_key,body) VALUES (%s,%s,%s)"
+                       " ON CONFLICT (action_key) DO NOTHING", (action_key, ticket["key"], comment))
+            record_action(ctx, action_key, "drop_impossible_dependency", ticket=ticket["key"],
+                          outcome="comment_pending", detail=names)
+            _retry_pending_comments(ctx, [action_key])
 
 
 def _queue_node_operation(ctx, node: str, action: str, payload: dict, action_key: str,
@@ -299,8 +337,9 @@ def routable_machines(ctx, account, online: set[str]) -> list[str]:
 def _route_around_failed_assignment(ctx) -> None:
     """Release tickets from failed account/machine assignments when another ready route exists."""
     repo = ctx.repo()
-    online = shared_accounts.online_nodes(ctx.db)
-    queue = ctx.db.all("SELECT key,status FROM tickets WHERE status='To Do' AND 'aiflow-ready'=ANY(labels)"
+    online = _routing_ready_nodes(ctx)
+    queue = ctx.db.all("SELECT key,status FROM tickets WHERE (status='In Verify' OR"
+                       " (status='To Do' AND 'aiflow-ready'=ANY(labels)))"
                        " AND NOT ('aiflow-hold'=ANY(labels))")
     roles = {"dev": "dev", "verify": "verify", "intake": "intake_refiner", "impact": "intake_refiner"}
     for ticket in queue:
@@ -358,7 +397,7 @@ def _retry_signins(ctx) -> None:
             # Device authorization requires a person to open the link. Retire that handoff and keep the
             # affected role moving through an already-ready account whenever one is configured.
             repo = ctx.repo()
-            online = shared_accounts.online_nodes(ctx.db)
+            online = _routing_ready_nodes(ctx)
             coverage = {item["role"]: item for item in role_coverage(ctx, persist=False)}
             replacements = []
             roles = sorted(set(row.get("roles") or []) & set(coverage))
@@ -409,7 +448,7 @@ def _retry_signins(ctx) -> None:
 def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     """Current ready-account count by role, requiring two separate providers."""
     repo = ctx.repo()
-    online = shared_accounts.online_nodes(ctx.db)
+    online = _routing_ready_nodes(ctx)
     disabled = role_health.disabled_roles(ctx.db)
     accounts = {row["id"]: row for row in ctx.db.all("SELECT id,status,provider FROM accounts")}
     results = []

@@ -67,7 +67,9 @@ def test_jira_version_release_targets_the_repository_of_its_epic_tickets():
 
 def test_jira_version_membership_is_partitioned_by_repository_for_release_gates(monkeypatch):
     class DB:
-        def all(self, _query, _params):
+        def all(self, query, _params):
+            if "environment_post_merge_checks" in query:
+                return []
             return [
                 {"key": "JOOWP-2", "type": "Epic", "parent_key": None},
                 {"key": "JOOWP-3", "type": "Epic", "parent_key": None},
@@ -237,7 +239,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     api = _API({"/v1/github/token": {"token": "github-token"},
                 "/v1/github/pr": lambda body: (calls["prs"].append(body) or {"url": "https://github.com/jooservices/wordpress-core/pull/4", "number": 4})})
     monkeypatch.setattr(dev, "Git", Git)
-    monkeypatch.setattr(dev, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
+    monkeypatch.setattr(dev, "project_env", lambda _key, *_a, **_k: {"WP_CORE_VERSION": "6.8.3"})
 
     _fake_container_runtime(monkeypatch, calls, dev, "http://127.0.0.1:40123", "private-to-run")
     monkeypatch.setattr(dev, "get_adapter", lambda _provider: _adapter(
@@ -290,7 +292,7 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
     api = _API({"/v1/github/token": {"token": "github-token"}, "/v1/github/checks": {"checks": []},
                 "/v1/github/merge": {"merged": True, "sha": "b" * 40}})
     monkeypatch.setattr(verify, "Git", Git)
-    monkeypatch.setattr(verify, "project_env", lambda _key: {"WP_CORE_VERSION": "6.8.3"})
+    monkeypatch.setattr(verify, "project_env", lambda _key, *_a, **_k: {"WP_CORE_VERSION": "6.8.3"})
 
     _fake_container_runtime(monkeypatch, calls, verify, "http://127.0.0.1:40124", "private-to-verify")
     monkeypatch.setattr(verify, "get_adapter", lambda _provider: _adapter(

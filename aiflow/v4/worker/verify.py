@@ -31,11 +31,23 @@ CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
 POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
 
 
-def deferred_criteria(text: str) -> list[str]:
-    """Read the reviewer AI's explicit list of criteria that need the post-merge environment."""
+def deferred_criteria(text: str) -> list[dict[str, str]]:
+    """Read deferred criteria and their explicitly selected configured check command."""
     match = POST_MERGE_CHECKS.search(text or "")
-    return list(dict.fromkeys(re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()[:600]
-                              for line in (match.group(1).splitlines() if match else []) if line.strip()))[:20]
+    out = []
+    for line in (match.group(1).splitlines() if match else []):
+        value = re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()
+        if not value:
+            continue
+        mapped = re.match(r"^(AC\d+)\s*:\s*(.*?)\s*\|\s*check\s*:\s*`?(.+?)`?$", value, re.I)
+        if mapped:
+            out.append({"id": mapped.group(1).upper(), "text": mapped.group(2).strip()[:600],
+                        "check": mapped.group(3).strip()[:500]})
+        else:
+            criterion = re.match(r"^(AC\d+)\s*:\s*(.*)$", value, re.I)
+            out.append({"id": criterion.group(1).upper() if criterion else "",
+                        "text": (criterion.group(2) if criterion else value)[:600], "check": ""})
+    return list({(item["id"], item["text"]): item for item in out}.values())[:20]
 
 
 def findings_of(text: str) -> str:

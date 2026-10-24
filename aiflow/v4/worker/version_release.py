@@ -85,12 +85,6 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
             clean_output = _redact(output or "", env)[-12_000:]
             report["checks"].append({"command": command, "passed": proc.returncode == 0,
                                      "exit_code": proc.returncode, "output": clean_output})
-        report["post_merge_results"] = [
-            {"ticket": item["key"], "criteria": item.get("post_merge_criteria") or [],
-             "status": "passed" if report["checks"] and all(x["passed"] for x in report["checks"]) else "failed",
-             "head_sha": head, "checks": [{"command": x["command"], "passed": x["passed"]} for x in report["checks"]]}
-            for item in project.get("post_merge_criteria") or []
-        ]
         if hb.lost.is_set():
             raise LeaseLost()
         result = api.call("POST", f"/v1/version-releases/{version['id']}/complete",

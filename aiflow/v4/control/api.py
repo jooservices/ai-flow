@@ -726,6 +726,7 @@ class HeartbeatBody(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
+    environment_items: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ClaimBody(BaseModel):
@@ -747,6 +748,14 @@ class VersionReleaseCompleteBody(BaseModel):
     head_sha: str = ""
     source_sha: str = ""
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+
+class PostMergeCompleteBody(BaseModel):
+    run_id: str
+    fence: int
+    head_sha: str = ""
+    checks: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     error: str = ""
 
 
@@ -3466,6 +3475,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                     body.release_protocol, body.slots_used, node))
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
+        environment_reports.confirm_node_environment(ctx, node, body.environment_items)
         tooling.resolve_available(ctx, node, node_state)
         tool_repairs = tooling.install_requests(ctx, node, node_state, repo)
         for account_id, expires_at in body.credential_expiries.items():
@@ -3555,6 +3565,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                             "release": release,
                             "projects": node_projects,
                             "project_stacks": project_stacks,
+                            "project_environment": {key: [item.name for item in repo.projects[key].environment_items
+                                                           if item.secret]
+                                                    for key in node_projects if key in repo.projects},
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
                             "tool_repairs": tool_repairs,
@@ -4300,6 +4313,19 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if not allowed("verify", t):
                     continue
                 out.append({**t, "step": "verify", "probation": probation("verify")})
+        if "release" in roles:
+            post_merge_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "post_merge"})}
+            pending = [item for project_key in projects
+                       for item in environment_reports.pending_post_merge(ctx, project_key)]
+            for waiting in pending:
+                t = ctx.db.one("SELECT * FROM tickets WHERE key=%s", (waiting["ticket"],))
+                if not t or t["key"] in held or t["key"] in post_merge_cooling:
+                    continue
+                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
+                    continue
+                if not allowed("release", t):
+                    continue
+                out.append({**t, "step": "post_merge", "probation": probation("release")})
         if "master" in roles:
             triage_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "triage"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
@@ -4621,7 +4647,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         # Once development starts, verify and rework keep the repository that produced the PR even if
         # the owner changes the epic mapping while that work waits for review.
         prior_repository = str(((prior_dev or {}).get("details") or {}).get("repository") or "")
-        if p and prior_repository and body.step in {"dev", "verify", "qa", "triage"}:
+        if p and prior_repository and body.step in {"dev", "verify", "qa", "triage", "post_merge"}:
             prior_settings = ((prior_dev or {}).get("details") or {}).get("repository_settings")
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
@@ -4717,6 +4743,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                 extra["triage_question"] = owner_answer["question"]
         if body.step == "triage":
             extra.update(triage_context)
+        if body.step == "post_merge":
+            extra["post_merge_criteria"] = next(
+                (item["criteria"] for item in environment_reports.pending_post_merge(ctx, t["project"], [t["key"]])), [])
         if body.step == "intake":
             # owners answer intake questions in comments as often as in the description
             try:
@@ -4747,7 +4776,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                         {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
                          "work_minutes": p.work_minutes(),
                          "environment": ([item.public() for item in p.environment_items]
-                                         if body.step in ("dev", "verify") else []),
+                                         if body.step in ("intake", "dev", "verify", "post_merge") else []),
                          "merge": {"method": (p.merge or {}).get("method", "squash"),
                                    "auto": bool((p.merge or {}).get("auto", True)),
                                    "require_human": bool((p.merge or {}).get("require_human", False))}}
@@ -4903,11 +4932,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
                        (J({"repository": project.repo, "repository_settings": selected_settings,
-                          "github_connection": connection_id,
-                          "post_merge_criteria": [{"ticket": item["key"],
-                                                   "criteria": item.get("post_merge_criteria") or []}
-                                                  for item in snapshot["tickets"]
-                                                  if item.get("post_merge_criteria")]}), run_id))
+                          "github_connection": connection_id}), run_id))
             ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
                        " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
                        " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
@@ -4934,10 +4959,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                         "release_branch": release_branch, "source_sha": source_sha,
                         "environment": ([item.public() for item in project.environment_items
                                          if "post_merge" in item.runs]),
-                        "post_merge_criteria": [{"key": item["key"],
-                                                 "post_merge_criteria": item.get("post_merge_criteria") or []}
-                                                for item in snapshot["tickets"]
-                                                if item.get("post_merge_criteria")],
                         "containers": bool(project.settings_for_repo(project.repo).get("containers")),
                         "work_minutes": project.work_minutes()}
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
@@ -5001,24 +5022,37 @@ def create_app(ctx: Ctx) -> FastAPI:
             result = version_release.complete(release_ctx, project, version, run, report)
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
-            post_merge_results = environment_reports.record_post_merge_results(
-                ctx, run, version["name"], report,
-                (run.get("details") or {}).get("post_merge_criteria") or [])
-            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
-                       (J({"post_merge_results": post_merge_results}), body.run_id))
             return version_release.publish_failed(release_ctx, project, version, run, exc)
         check_report = dict(report)
         if result.get("status") in ("stale", "blocked"):
             check_report["error"] = check_report.get("error") or str(result.get("reason") or result["status"])
-        post_merge_results = environment_reports.record_post_merge_results(
-            ctx, run, version["name"], check_report,
-            (run.get("details") or {}).get("post_merge_criteria") or [])
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
-                                                                              "checks": body.checks,
-                                                                              "post_merge_results": post_merge_results}),
+                                                                              "checks": body.checks}),
                     body.run_id))
         return result
+
+    @app.post("/v1/environment/post-merge/complete")
+    def environment_post_merge_complete(body: PostMergeCompleteBody, node: str = Depends(node_auth)) -> dict:
+        run = fenced(body.run_id, body.fence, "environment", "post_merge_complete",
+                     {"checks": len(body.checks), "head_sha": body.head_sha[:12]})
+        if run["step"] != "post_merge" or run["node"] != node:
+            raise HTTPException(403, "only the active post-merge run on this node can record these results")
+        row = ctx.db.one("SELECT criteria FROM environment_post_merge_checks WHERE ticket_key=%s"
+                         " AND project=%s AND status='pending'", (run["ticket_key"], run["project"]))
+        if not row:
+            raise HTTPException(409, "ticket has no pending post-merge criteria")
+        allowed_checks = {str(item.get("check") or "") for item in row["criteria"] or []
+                          if isinstance(item, dict) and item.get("check")}
+        if any(str(item.get("command") or "") not in allowed_checks for item in body.checks):
+            raise HTTPException(422, "post-merge result contains a check not mapped to this ticket")
+        report = {"head_sha": body.head_sha, "checks": body.checks, "error": body.error}
+        results = environment_reports.record_post_merge_results(ctx, run, report)
+        if not results:
+            raise HTTPException(409, "post-merge result was already recorded")
+        ctx.db.run("UPDATE runs SET head_sha=%s,details=details || %s WHERE id=%s",
+                   (body.head_sha, J({"post_merge_results": results}), body.run_id))
+        return {"recorded": True, "results": results}
 
     # --- runs -----------------------------------------------------------------------------------------------
     @app.post("/v1/runs/{run_id}/heartbeat")
@@ -5045,7 +5079,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
         if body.pr_url:
             details["pr_url_source"] = "current"
-        if run["step"] == "verify" and body.outcome == "merged":
+        if run["step"] == "verify" and body.outcome in ("merged", "human"):
             details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
                 ctx, run, details.get("post_merge_criteria") or [])
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
@@ -5717,7 +5751,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if not project or not matches_run_repository(repository, body.repo):
             raise HTTPException(403, "repository does not belong to the run's project")
         permissions = ({"contents": "read", "metadata": "read"}
-                       if run["step"] in ("triage", "version_release") else
+                       if run["step"] in ("triage", "version_release", "post_merge") else
                        {"contents": "write", "metadata": "read", "workflows": "write"})
         if run["step"] == "version_release" and not version_release.enabled(project):
             raise HTTPException(403, "project is not enabled for version releases")

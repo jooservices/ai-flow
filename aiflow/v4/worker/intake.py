@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
-from ..core.environment import find_server_wording, kinds_of, redact, rejection_message
+from ..core.environment import find_server_wording, is_server_question, kinds_of, redact, rejection_message
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
@@ -149,10 +149,16 @@ def build_prompt(c: Claimed, spec: str) -> str:
     labels = list(t.get("labels") or [])
     label_context = ", ".join(f"{label} ({'recognized' if is_known_label(label) else 'unrecognized; preserve'})"
                                for label in labels) or "(none)"
+    from ..core.environment import items_of
+    environment_items = items_of(c.project.get("environment") or [])
+    environment_context = ("\n".join(f"- {item.name} ({item.kind}; runs: {', '.join(item.runs)})"
+                                    for item in environment_items)
+                           or "- none configured")
     outline = "\n".join(_outline_section(section) for section in required_sections(issue_type))
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], base=c.project["base"], spec=spec,
                       issue_type=issue_type, original_issue_type=t.get("type") or "Task",
                       template_outline=outline, label_context=label_context,
+                      environment=environment_context,
                       description=t["description"] or "(no description)",
                       comments="\n".join(comments) or "(no comments)")
     return with_knowledge_context(prompt, c.context_pack)
@@ -228,9 +234,15 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             removed, needs = parse_removals(res.final_text or "")
             return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
         if kind == "questions":
+            if is_server_question(text):
+                return environment_questions(c, jira, result, project.get("environment") or [], t0)
             return questions(c, jira, result, text, t0, api_node(api))
         if kind == "invalid":
             result["summary"] = text[:1000]
+            jira("comment", body=note(c, "rewrite rejected", what="The intake rewrite did not meet the ready check",
+                                      why=redact(text), result="The ticket remains in Intake and its description was not changed",
+                                      next_="Describe the product requirement and observable acceptance criteria; remove where or how it runs",
+                                      t0=t0))
             return result
         result["summary"] = (f"no usable answer ({res.error_kind or 'missing INTAKE line'}): "
                              f"{(res.error_message or (res.final_text or '').strip())[-400:]}")[:1000]
@@ -299,4 +311,19 @@ def questions(c: Claimed, jira, result: dict, text: str, t0: float | None, node:
     jira("transition", to="Needs owner")
     result.update(outcome="questions", summary=("questions for the owner:\n" + text)[:1500])
     result.setdefault("details", {})["questions"] = text
+    return result
+
+
+def environment_questions(c: Claimed, jira, result: dict, items: list[dict], t0: float | None) -> dict:
+    """Answer run-location questions from the project environment flow without escalating them to the owner."""
+    from ..core.environment import for_step, items_of
+    names = [item.name for item in for_step(items_of(items), "dev")]
+    available = ", ".join(names) if names else "no environment items are configured for development runs"
+    answer = ("AI Flow provides the run environment from the project configuration. Configured development items: "
+              f"{available}. If an item is missing during a run, report MISSING-ENV with its configured name; the flow "
+              "doctor will provide it or open one environment ticket. This run-location question does not need an owner decision.")
+    jira("comment", body=note(c, "environment question answered", what="The run environment is provided by AI Flow",
+                              result=answer, next_="The ticket stays in Intake for another refinement pass", t0=t0))
+    result.update(outcome="environment_question_answered", summary=answer[:1000])
+    result.setdefault("details", {})["environment_items"] = names
     return result

@@ -172,6 +172,13 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     ("machine", r"\bshared\s+(?:docker|database|db|redis|postgres(?:ql)?|mysql|mariadb|wordpress|environment|"
                r"integration environment|site)\b"),
     ("machine", r"\bWSL2?\b|\b(?:my|your|the owner'?s)\s+(?:laptop|pc|computer|machine)\b"),
+    # Generic machine references still leave a run-location question, even when no hostname follows.
+    ("machine", r"\b(?:run|test|execute|deploy|install|build|start)\b.{0,80}\b(?:on|at|against|to)\s+(?:the\s+)?(?:server|machine)\b"),
+    ("host", r"\b(?:use|connect(?:\s+to)?|access|run|test|deploy)\s+(?:the\s+)?host"
+             r"(?!\s+(?:or|and|for|is|to|with|on|as|at|should|could|would)\b)"
+             r"(?:\s+[a-z0-9][a-z0-9.-]*)?\b"),
+    ("host", r"\bhost\s+(?!or\b|and\b|for\b|is\b|to\b|with\b|on\b|as\b|at\b|should\b|could\b|would\b)"
+             r"[a-z0-9][a-z0-9.-]*\b"),
     ("network", r"\b(?:vpn|vlan|subnet|bastion|intranet|dmz)\b|\bjump\s?host\b|\bport[- ]forward\w*|\bfirewall rule\b"),
     ("access instruction", r"\b(?:ssh|rdp|scp|sftp|telnet)\s+(?:in)?to\b|\b(?:ssh|rdp)\s+(?:access|key|session|tunnel)\b|"
                            r"\bssh\s+[\w.-]+@"),
@@ -220,7 +227,8 @@ def find_server_wording(text: str) -> list[dict[str, str]]:
 SERVER_QUESTION = re.compile(
     r"\b(?:servers?|hosts?|vms?|machines?|ip address(?:es)?|address(?:es)?|network|vpn|ssh|credentials|"
     r"logins?|passwords?|base urls?|endpoints? to use)\b|"
-    r"\bwhere\s+(?:(?:should|can|do|would)\s+i\s+)?(?:run|test|deploy|connect|access)\b",
+    r"\bwhere\s+(?:(?:should|can|do|would)\s+i\s+)?(?:run|test|deploy|connect|access)\b|"
+    r"\b(?:which|what)\s+(?:address|url|host|server|machine|network)\b",
     re.I,
 )
 

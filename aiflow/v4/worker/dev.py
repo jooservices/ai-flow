@@ -25,7 +25,7 @@ from ..core.toolchains import (has_missing_marker, parse_command_not_found_requi
                                parse_missing_requirements)
 from .client import Conflict, ControlClient
 from .gitops import Git
-from .notes import environment_notes, note, project_env
+from .notes import environment_notes, environment_status, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
@@ -254,8 +254,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
         if moved:
             hb.progress["repo_change"] = f"{moved['old_repo']} -> {repo}"
+        env = project_env(project["key"], project.get("environment"), "dev")
         jira("transition", to="In Progress")
-        jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
+        jira("fields", fields={"Workspace": environment_status(project.get("environment"), "dev", env),
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
         jira("comment", body=note(c, "started", what=f"Develop the ticket on branch {branch} from {start}"
                                   + (f", with the latest {project['base']} merged in ({len(conflicts)} conflicted files to resolve)" if conflicts else ""),
@@ -272,7 +273,6 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        env = project_env(project["key"], project.get("environment"), "dev")
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
@@ -293,8 +293,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 hb.progress = {"phase": "wordpress-site"}
                 site_notes = start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
-                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
-                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)

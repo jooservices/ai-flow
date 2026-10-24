@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
+from ..core.environment import find_server_wording, kinds_of, redact, rejection_message
 from .client import Conflict, ControlClient
 from .dev import REPO_ROOT, Claimed, Heartbeat, LeaseLost, api_node, with_knowledge_context
 from .gitops import Git
@@ -26,6 +27,8 @@ log = logging.getLogger("aiflow4.intake")
 KIND = re.compile(r"^INTAKE:\s*(REWRITE|QUESTIONS)\b", re.M)
 DESCRIPTION = re.compile(r"^DESCRIPTION:\s*\n<<<\s*\n(.*?)\n>>>\s*$", re.M | re.S)
 QUESTIONS = re.compile(r"^QUESTIONS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
+REMOVED = re.compile(r"^REMOVED:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
+ENVIRONMENT_NEEDS = re.compile(r"^ENVIRONMENT NEEDS:\s*\n((?:[ \t]*[-*].*(?:\n|$))+)", re.M)
 SPEC_CHARS = 20_000
 # The common template headings and the additions for each supported Jira issue type. Keep these in the same order
 # as docs/v4/issue-types.md; unknown Jira types deliberately use the Story template without changing the Jira type.
@@ -100,10 +103,33 @@ def parse(text: str, issue_type: str | None = "Story") -> tuple[str, str]:
         gaps = template_gaps(d.group(1).strip(), issue_type)
         if gaps:
             return "invalid", "the rewrite does not follow the template; it lacks " + ", ".join(gaps)
+        wording = find_server_wording(d.group(1).strip())
+        if wording:  # not ready: a ticket names the requirement, not the host (docs/v4/environment.md)
+            return "invalid", "the rewrite is not a requirement only: " + rejection_message(wording)
         return "rewrite", d.group(1).strip()
     if kind == "QUESTIONS" and q:
         return "questions", q.group(1).strip()
     return "", ""
+
+
+def _bullets(match: re.Match[str] | None) -> list[str]:
+    return [re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip() for line in (match.group(1).splitlines() if match else [])
+            if line.strip()]
+
+
+def parse_removals(text: str) -> tuple[list[str], list[str]]:
+    """What the AI says it removed and the environment needs it found behind that wording (both optional)."""
+    return _bullets(REMOVED.search(text or "")), _bullets(ENVIRONMENT_NEEDS.search(text or ""))
+
+
+def readiness_problems(description: str, issue_type: str | None = "Story") -> list[str]:
+    """Why a description cannot mark a ticket ready: template gaps, and any host, IP address, machine, network or
+    access instruction. Used by the intake check and by the open-ticket scan."""
+    problems = [f"lacks {gap}" for gap in template_gaps(description, issue_type)]
+    wording = find_server_wording(description)
+    if wording:
+        problems.append(rejection_message(wording))
+    return problems
 
 
 def read_spec(worktree: Path | None) -> str:
@@ -144,7 +170,7 @@ def _outline_section(section: str) -> str:
         return f"{section}\n- <tests, checks and documentation needed for this ticket>"
     prompts = {
         "Steps to reproduce:": "<reproducible steps>", "Expected result:": "<what should happen>",
-        "Actual result:": "<what happens now>", "Environment:": "<affected environment and versions>",
+        "Actual result:": "<what happens now>", "Environment:": "<affected product, client and versions; never a machine, host, network or account>",
         "Question:": "<question the spike must answer>", "Timebox:": "<time limit>",
         "Output:": "<decision, findings or prototype expected>", "Problem:": "<existing maintainability problem>",
         "Risk:": "<risk of leaving the problem in place>", "Threat:": "<security threat or attack path>",
@@ -199,7 +225,8 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
             return result
         kind, text = parse(res.final_text or "", c.ticket.get("type"))
         if kind == "rewrite":
-            return refined(c, jira, result, text, t0, api_node(api))
+            removed, needs = parse_removals(res.final_text or "")
+            return refined(c, jira, result, text, t0, api_node(api), api=api, removed=removed, needs=needs)
         if kind == "questions":
             return questions(c, jira, result, text, t0, api_node(api))
         if kind == "invalid":
@@ -222,12 +249,40 @@ def run_intake(api: ControlClient, c: Claimed, srv_root: str, control_url: str, 
         hb.stop.set()
 
 
-def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, node: str) -> dict:
-    """Keep the author's text as a comment first, then replace the description, mark it ready and queue it."""
+def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, node: str, api=None,
+            removed: list[str] | None = None, needs: list[str] | None = None) -> dict:
+    """Keep the author's text as a comment first, then replace the description, mark it ready and queue it.
+
+    When the author named a host, an address, a machine, a network or an access instruction, that wording is not kept
+    in Jira: the comment holds the original with a marker in its place and a record of what was removed, the full
+    record is stored by the control plane, and a real need behind the wording becomes (or joins) an environment ticket."""
     original = (c.ticket.get("description") or "").strip() or "(empty)"
+    found = find_server_wording(original)
+    removal_lines: list[str] = []
+    if found or removed or needs:
+        stored = list(dict.fromkeys([*(removed or []), *(f"{f['kind']}: {f['text']}" for f in found)]))
+        tickets = []
+        if api is not None:
+            reply = api.call("POST", "/v1/environment/removals", {"run_id": c.run_id, "fence": c.fence,
+                                                                   "removed": stored[:50], "needs": (needs or [])[:20]})
+            tickets = reply.get("environment_tickets") or []
+        if found:
+            removal_lines.append("Removed from the ticket: " + ", ".join(kinds_of(found)) + f" ({len(found)} place(s));"
+                                 " the requirement behind it is kept")
+        removal_lines += [f"Removed: {redact(line)}" for line in (removed or [])]
+        removal_lines += [f"Environment need: {redact(t['need'])} -> {t['ticket'] or 'recorded for an environment ticket'}"
+                          + (" (opened)" if t.get("created") else " (linked)") for t in tickets]
+        result.setdefault("details", {})["removed_wording"] = [f["kind"] for f in found]
+        result["details"]["environment_tickets"] = [t["ticket"] for t in tickets if t.get("ticket")]
+        original = redact(original)
+    kept = "Original description:\n\n" + original
+    if removal_lines:
+        kept += "\n\n" + "\n".join(removal_lines)
     jira("comment", body=note(c, "original description kept", what="The ticket is rewritten into the AI Flow template",
-                              why="The description lacked parts of the template; this comment keeps the author's words",
-                              result="Original description:\n\n" + original, t0=t0, node=node))
+                              why=("The description lacked parts of the template" if not removal_lines else
+                                   "The description lacked parts of the template and named where or how something runs")
+                                  + "; this comment keeps the author's words",
+                              result=kept, t0=t0, node=node))
     jira("description", body=description)
     jira("fields", add_labels=["aiflow-ready"])
     jira("transition", to="To Do")

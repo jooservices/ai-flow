@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, rework_rounds, runner, usage
+from . import agents, deploy, events, github, operator_status, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -1891,20 +1891,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  memory: {'ON' if memory.get('AIFLOW_MEMORY_URL') and memory.get('AIFLOW_MEMORY_TOKEN') else 'off'} -> {memory.get('AIFLOW_MEMORY_URL') or 'no memory_url'}"
                   + ("" if memory.get('AIFLOW_MEMORY_TOKEN') else " (needs AIFLOW_MEMORY_TOKEN in Workspaces/.env)")
                   + ("" if memory.get('AIFLOW_MEMORY_AI_TOKEN') else "; the AIs get no aiflow-mem access without AIFLOW_MEMORY_AI_TOKEN"))
-            policy = config.operator_policy
-            runtime_switch, flow_pause = "unknown (Redis unavailable)", "unknown (Redis unavailable)"
-            runtime_redis = Redis(config.redis_host, config.redis_port, config.redis_db, config.redis_prefix,
-                                  config.redis_password, config.redis_user)
-            try:
-                runtime_switch = "OFF" if runtime_redis.get("operator:off") is not None else "ON"
-                flow_pause = "paused" if runtime_redis.get("paused") is not None else "running"
-            except RedisError:
-                pass
-            finally:
-                runtime_redis.close()
-            print(f"  operator: policy {'ON' if policy.enabled else 'OFF (config/operator.toml)'}, runtime switch {runtime_switch}, "
-                  f"flow {flow_pause}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
-                  f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; use `aiflow-work operator on|off`")
+            print(operator_status.check_line(config, Redis, RedisError))
             for project in config.registry.projects.values():
                 deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
                                   if project.deploy_command.strip() else "disabled")

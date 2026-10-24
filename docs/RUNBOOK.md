@@ -66,9 +66,11 @@ Jira allows Epic -> Story, Task or Bug -> Sub-task. A Story cannot contain Tasks
 
 ## Operator (incidents handled by the supervisor)
 Policy and limits: `docs/OPERATOR.md`; thresholds: `JOOservices/config/operator.toml` (off without the file or with `enabled = false`).
-- **Read what it did**: every run is an audit comment on the ticket (on the health ticket for a worker or AI-pool incident): `AI Flow operator (<AI>) ... Saw / Outcome / Did / Refused`. The AI logs are `Workspaces/.tmp/aiflow/logs/operator-*.log`.
-- **Questions for you**: tickets with the label `needs-owner` stay Blocked; the comment starts with the question, the options and the recommendation. Answer in a comment and move the ticket to To Do.
-- **Switch it off**: `bin/aiflow-work operator off` (on: `operator on`), or `bin/aiflow-work pause` for the whole flow, or `enabled = false` in the policy file followed by `restart`.
+- **Read the audit comment**: it starts `AI Flow operator (<AI>) on <machine> handled <incident>`. `Saw` is the incident summary, `Outcome` says RESOLVED, ESCALATE or NO-ACTION, `Did` lists completed actions and `Refused` lists requested actions the supervisor rejected. Limit escalations use `system` as the actor and include the exhausted limit in the outcome. Ticket incidents are commented on their ticket; worker and AI-pool incidents use the health ticket. The AI logs are `Workspaces/.tmp/aiflow/logs/operator-*.log`.
+- **Questions for you**: tickets with the label `needs-owner` keep their current status (a Blocked ticket stays Blocked); the comment starts with the question, the options and the recommendation. Answer in a comment and move the ticket to To Do.
+- **Switch it off**: `bin/aiflow-work operator off` sets the separate operator switch in Redis; restore it with `bin/aiflow-work operator on`. `bin/aiflow-work check` shows that runtime switch and whether the whole flow is paused. `bin/aiflow-work pause` also stops the operator and workers from taking new work; resume with `bin/aiflow-work resume`. Setting `enabled = false` in the policy file disables the operator by policy.
+- **Limits**: when an incident reaches its per-ticket daily limit or the global hourly/daily cap is exhausted, the operator does not start another AI run. It marks the ticket `needs-owner`, posts the question and a system audit comment, then waits for owner review.
+- **Drill**: on a real test ticket, verify that an answerable Blocked question is answered and moved to To Do, and that a credential question gets `needs-owner` with no automated resolution. Keep the operator audit comments on both tickets as the evidence.
 
 ## The control and the workers of each project
 `aiflow-control.service` (one per machine) keeps the running workers equal to the TOML files and runs the operator. Install: `bin/install-wsl-service --control`.

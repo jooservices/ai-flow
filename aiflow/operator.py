@@ -205,14 +205,18 @@ class Operator:
     def count(self, name: str) -> int:
         return int(self.redis.get(name) or 0)
 
-    def limits_reached(self) -> bool:
+    def global_limit(self) -> tuple[str, int, int] | None:
+        """Return the first exhausted global run cap, if any."""
         now = datetime.now(timezone.utc)
-        return (self.count(f"operator:runs:h:{now:%Y%m%d%H}") >= self.policy.max_runs_per_hour
-                or self.count(f"operator:runs:d:{now:%Y%m%d}") >= self.policy.max_runs_per_day)
+        hourly = self.count(f"operator:runs:h:{now:%Y%m%d%H}")
+        if hourly >= self.policy.max_runs_per_hour:
+            return "max_runs_per_hour", hourly, self.policy.max_runs_per_hour
+        daily = self.count(f"operator:runs:d:{now:%Y%m%d}")
+        if daily >= self.policy.max_runs_per_day:
+            return "max_runs_per_day", daily, self.policy.max_runs_per_day
+        return None
 
     def run_next(self) -> bool:
-        if self.limits_reached():
-            return False
         for value in self.redis.list_values("operator:queue"):
             try:
                 raw = json.loads(value)
@@ -231,10 +235,21 @@ class Operator:
 
     def handle(self, incident: Incident) -> bool:
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        limit = self.global_limit()
+        if limit:
+            name, count, maximum = limit
+            period = "hourly" if name == "max_runs_per_hour" else "daily"
+            detail = f"The operator reached its global {period} limit ({count}/{maximum}); this incident needs owner review."
+            events.emit("operator.limit", incident=incident.id, limit=name)
+            self.escalate(incident, detail, "Wait for the limit window to reset; review the incident manually", "Review the incident manually")
+            self.audit(incident, "system", f"ESCALATE: {detail}", ["escalated to the owner because the global run limit was reached"], [])
+            self.redis.set(f"operator:cool:{incident.id}", "1", DAY)
+            return True
         if incident.ticket and self.count(f"operator:ticket:{incident.ticket}:{day}") >= self.policy.retries_per_ticket_per_day:
             events.emit("operator.limit", incident=incident.id, limit="retries_per_ticket_per_day")
-            self.escalate(incident, f"The operator already tried {incident.ticket} {self.policy.retries_per_ticket_per_day} time(s) today and the problem is still there.",
-                          "", "")
+            detail = f"The operator already tried {incident.ticket} {self.policy.retries_per_ticket_per_day} time(s) today and the problem is still there."
+            self.escalate(incident, detail, "Review the existing operator comments; retry after fixing the cause", "Review the cause before another attempt")
+            self.audit(incident, "system", f"ESCALATE: {detail}", ["escalated to the owner because the per-ticket run limit was reached"], [])
             self.redis.set(f"operator:cool:{incident.id}", "1", DAY)
             return True
         if not self.redis.acquire("operator:run", self.cfg.owner, self.policy.run_minutes * 60 + 120):
@@ -313,7 +328,7 @@ class Operator:
             self.audit(incident, agent, "no usable RESULT line (" + why + ")", done, refused)
             return True
         kind, detail = result
-        if kind == "NO-ACTION":
+        if kind in ("NO-ACTION", "ESCALATE"):
             refused.extend(f"{name} {json.dumps(args, sort_keys=True)[:200]}" for name, args in actions[:MAX_ACTIONS])
             if len(actions) > MAX_ACTIONS:
                 refused.append(f"{len(actions) - MAX_ACTIONS} action(s) over the limit of {MAX_ACTIONS}")

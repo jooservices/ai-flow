@@ -36,7 +36,9 @@ MAX_BODY = 64 * 1024
 
 class Tokens:
     def __init__(self, entries: list[dict[str, Any]]) -> None:
-        self.entries = [e for e in entries if e.get("token") and e.get("role") in ("client", "admin")]
+        self.entries = [e for e in entries if isinstance(e, dict) and isinstance(e.get("token"), str) and e["token"]
+                        and e.get("role") in ("client", "admin") and isinstance(e.get("namespaces", []), list)
+                        and all(isinstance(namespace, str) for namespace in e.get("namespaces", []))]
 
     @classmethod
     def load(cls, path: Path) -> "Tokens":
@@ -84,6 +86,33 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("the request body must be a JSON object")
         return data
 
+    def scoped_request(self, operation: str, who: dict[str, Any], admin: bool) -> None:
+        if not admin:
+            return self.reply(403, {"error": "the scoped notes need an admin token"})
+        if operation not in OPERATIONS:
+            return self.reply(404, {"error": "no such operation"})
+        data = self.payload()
+        spaces = who.get("namespaces", [])
+        namespace = str(data.get("namespace") or "")
+        global_scope = bool(data.get("global_scope"))
+        if operation == "get":
+            result = self.scoped.get(**data)
+            if result and result.get("namespace") and not allowed(who, result["namespace"]):
+                result = None
+            return self.reply(200, {"result": result})
+        if namespace and not allowed(who, namespace):
+            return self.reply(403, {"error": "namespace not allowed for this token"})
+        if global_scope and operation in {"add", "update", "status", "consolidate"} and "*" not in spaces:
+            return self.reply(403, {"error": "global scoped notes need an all-namespaces admin token"})
+        if not namespace and not global_scope and operation not in ("stats", "projects") and "*" not in spaces:
+            return self.reply(403, {"error": "a namespace is required for this operation"})
+        if operation in ("stats", "projects") and not namespace and "*" not in spaces:
+            data["namespaces"] = spaces
+        try:
+            return self.reply(200, {"result": getattr(self.scoped, operation)(**data)})
+        except TypeError as error:
+            return self.reply(400, {"error": f"bad arguments: {str(error)[:200]}"})
+
     def handle_request(self, method: str) -> None:
         path = self.path.split("?")[0].rstrip("/")
         if method == "GET" and path == "/health":
@@ -108,13 +137,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"items": items})
             if method == "POST" and path == "/v1/entries":
                 data = self.payload()
-                if not allowed(who, str(data.get("namespace", ""))) or (data.get("scope") == "global" and not admin and "*" not in who.get("namespaces", [])):
+                if not allowed(who, str(data.get("namespace", ""))) or (data.get("scope") == "global" and "*" not in who.get("namespaces", [])):
                     return self.reply(403, {"error": "namespace not allowed for this token"})
                 status = str(data.get("status", "fresh")) if admin else "fresh"
                 entry_id, created = self.store.put(data, actor, status)
                 return self.reply(201 if created else 200, {"id": entry_id, "created": created})
             if method == "GET" and path == "/v1/stats":
-                return self.reply(200, self.store.stats())
+                spaces = who.get("namespaces", [])
+                return self.reply(200, self.store.stats() if "*" in spaces else self.store.stats(namespaces=spaces))
             match = re.fullmatch(rf"/v1/entries/({ID})", path)
             if method == "GET" and match:
                 return self.reply(200, self.store.get(match.group(1), who.get("namespaces")))
@@ -127,6 +157,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.store.feedback(entry_id, actor, str(data.get("jira_key", "")), bool(data.get("helpful")))
                 elif not admin:
                     return self.reply(403, {"error": f"{action} needs an admin token"})
+                elif not item["namespace"] and "*" not in who.get("namespaces", []):
+                    return self.reply(403, {"error": "global entries need an all-namespaces admin token"})
                 elif action == "decay":
                     self.store.decay(entry_id, actor, str(self.payload().get("reason", "decayed by an admin")))
                 else:
@@ -134,20 +166,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"id": item["id"], "ok": True})
             match = re.fullmatch(r"/v1/scoped/(\w+)", path)
             if method == "POST" and match:
-                operation = match.group(1)
-                if not admin:
-                    return self.reply(403, {"error": "the scoped notes need an admin token"})
-                if operation not in OPERATIONS:
-                    return self.reply(404, {"error": "no such operation"})
-                data = self.payload()
-                if not allowed(who, str(data.get("namespace") or "")):
-                    return self.reply(403, {"error": "namespace not allowed for this token"})
-                try:
-                    return self.reply(200, {"result": getattr(self.scoped, operation)(**data)})
-                except TypeError as error:
-                    return self.reply(400, {"error": f"bad arguments: {str(error)[:200]}"})
+                return self.scoped_request(match.group(1), who, admin)
             if method == "POST" and path == "/v1/curate":
-                return self.reply(200, self.store.curate(actor)) if admin else self.reply(403, {"error": "curate needs an admin token"})
+                if not admin:
+                    return self.reply(403, {"error": "curate needs an admin token"})
+                if "*" not in who.get("namespaces", []):
+                    return self.reply(403, {"error": "curate needs an all-namespaces admin token"})
+                return self.reply(200, self.store.curate(actor))
             return self.reply(404, {"error": "no such route"})
         except guard.Rejected as error:
             return self.reply(422, {"error": str(error)})
@@ -158,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         except TypeError as error:
             return self.reply(400, {"error": f"bad request: {type(error).__name__}"})
         except Exception as error:
-            self.log(f"memory service: {type(error).__name__}: {str(error)[:200]}")
+            self.log(f"memory service: {type(error).__name__}")
             return self.reply(503, {"error": "the memory database is not available"})
 
     def do_GET(self) -> None:  # noqa: N802
@@ -183,7 +208,7 @@ def fill_vectors(store: Store, stop: threading.Event, wake: threading.Event, log
         try:
             done = store.embed_pending()
         except Exception as error:
-            log(f"memory vectors: {type(error).__name__}: {str(error)[:150]}")
+            log(f"memory vectors: {type(error).__name__}")
             done = 0
         if done:
             pending_before = True

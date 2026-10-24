@@ -1,42 +1,28 @@
-"""The store against a real PostgreSQL. Runs only where the pg8000 driver is installed and the shared Docker of this Mac has the
-database `ai_memory_test` (scripts/docker/shared provision-project ai-memory --postgres). Otherwise it is skipped.
-Run: uv run --with pg8000 python -m unittest tests.test_memory_pg"""
+"""The store against a real PostgreSQL database supplied by the test environment."""
+import sqlite3
 import unittest
-from pathlib import Path
 
 try:
-    import pg8000.dbapi
+    import psycopg  # noqa: F401
 except ImportError:
-    pg8000 = None
+    psycopg = None
 
-from aiflow import config
 from aiflow.memory import guard
+from aiflow.memory.scoped import Scoped
 from aiflow.memory.store import NotFound, Store
+from tests.memory_pg_support import MemoryTestDatabase, database_url
 
-ROOT = Path(__file__).resolve().parents[4]
-DATABASE = "ai_memory_test"  # never any other database: the tests empty the tables
-
-
-def connect_factory():
-    env = config.read_env_file(ROOT / ".env")
-    if not env.get("WORKSPACES_POSTGRES_USER"):
-        return None
-    port = int(env.get("WORKSPACES_POSTGRES_PORT", "15435"))
-    return lambda: pg8000.dbapi.connect(user=env["WORKSPACES_POSTGRES_USER"], password=env["WORKSPACES_POSTGRES_PASSWORD"], host="127.0.0.1", port=port, database=DATABASE)
-
-
-@unittest.skipIf(pg8000 is None, "pg8000 is not installed")
+@unittest.skipIf(psycopg is None, "psycopg is not installed")
 class StorePgTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        connect = connect_factory()
-        if connect is None:
-            raise unittest.SkipTest("no root .env")
-        cls.store = Store(connect)
-        try:
-            cls.store.migrate()
-        except Exception as error:
-            raise unittest.SkipTest(f"no PostgreSQL database {DATABASE}: {type(error).__name__}")
+        cls.database = MemoryTestDatabase(database_url())
+        cls.store = cls.database.store
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "database"):
+            cls.database.close()
 
     def setUp(self):
         self.store.run("truncate memory_feedback, memory_event, memory_entry cascade", fetch=False)
@@ -124,3 +110,47 @@ class StorePgTests(unittest.TestCase):
         self.put()
         self.assertEqual(self.titles("'; drop table memory_entry; --"), [])
         self.assertEqual(self.store.stats()["entries"][0]["count"], 1)
+
+    def test_scoped_entries_projects_and_devices_match_the_sqlite_workspace_rules(self):
+        reference = sqlite3.connect(":memory:")
+        reference.executescript("""
+            create table note(scope text, namespace text, project text, title text, content text, status text);
+            create table project(namespace text, name text, description text, stable integer);
+            create table device(namespace text, name text, role text, status text, notes text);
+        """)
+        scoped = Scoped(self.store)
+        rows = [("global", "", "", "Global advice", "shared advice"),
+                ("namespace", "JOOservices", "", "Company advice", "shared advice"),
+                ("project", "JOOservices", "JAIF", "Project advice", "shared advice"),
+                ("namespace", "OtherCo", "", "Other company advice", "shared advice")]
+        ids = []
+        for scope, namespace, project, title, content in rows:
+            entry_id = scoped.add(title, content, namespace=namespace or None, project=project or None, global_scope=scope == "global")
+            ids.append(entry_id)
+            reference.execute("insert into note values (?, ?, ?, ?, ?, 'fresh')", (scope, namespace, project, title, content))
+        reference.commit()
+        expected = [row[0] for row in reference.execute(
+            "select title from note where scope = 'global' or (namespace = ? and (scope = 'namespace' or (scope = 'project' and project = ?))) order by rowid",
+            ("JOOservices", "JAIF"))]
+        found = scoped.search("advice", namespace="JOOservices", project="JAIF")
+        self.assertEqual(sorted(item["title"] for item in found), sorted(expected))
+        self.assertNotIn("Other company advice", [item["title"] for item in found])
+
+        scoped.status(ids[2], "verified", namespace="JOOservices", project="JAIF")
+        reference.execute("update note set status = 'verified' where title = 'Project advice'")
+        self.assertEqual([item["title"] for item in scoped.list(namespace="JOOservices", project="JAIF", status="verified")],
+                         [row[0] for row in reference.execute("select title from note where status = 'verified'")])
+
+        scoped.project_update("JOOservices", "JAIF", description="AI Flow project", stable=True)
+        reference.execute("insert into project values ('JOOservices', 'JAIF', 'AI Flow project', 1)")
+        project = scoped.projects("JOOservices")[0]
+        self.assertEqual((project["name"], project["description"], project["stable"]),
+                         reference.execute("select name, description, stable from project").fetchone())
+        device_id = scoped.device_add("JOOservices", "build-node", role="worker", notes="shared device")
+        reference.execute("insert into device values ('JOOservices', 'build-node', 'worker', 'active', 'shared device')")
+        scoped.device_update(device_id, "JOOservices", status="maintenance")
+        reference.execute("update device set status = 'maintenance' where name = 'build-node'")
+        device = scoped.device_list("JOOservices")[0]
+        self.assertEqual((device["name"], device["role"], device["status"], device["notes"]),
+                         reference.execute("select name, role, status, notes from device").fetchone())
+        reference.close()

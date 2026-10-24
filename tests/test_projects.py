@@ -38,6 +38,15 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual((ai.human_on_deployment, crawler.human_on_deployment), (True, False))
         self.assertEqual((ai.database, crawler.database), ("ai-flow", ""))
 
+    def test_project_memory_service_can_be_selected_or_inherited(self):
+        write(self.dir / "aiflow.toml", '[defaults]\nmemory_url = "default-memory-service"\n')
+        write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nmemory_url = "project-memory-service"\n')
+        ai, crawler = self.load().project("JAIF-1"), self.load().project("JOOCX-1")
+        self.assertEqual((ai.memory_url, crawler.memory_url), ("default-memory-service", "project-memory-service"))
+
+        write(self.dir / "aiflow.toml", "[defaults]\n")
+        self.assertIsNone(self.load().project("JAIF-1").memory_url)
+
     def test_project_loop_limit_overrides_global_and_accepts_the_legacy_name(self):
         write(self.dir / "aiflow.toml", '[runtime]\nmax_cycles = 5\n[defaults]\n')
         write(self.dir / "aiflow" / "crawler.toml", '[project]\njira_key = "JOOCX"\nrepo = "crawlerx"\nloop_limit = 2\n')
@@ -110,6 +119,7 @@ class RegistryTest(unittest.TestCase):
             "method": ('[project]\njira_key = "ABC"\nrepo = "x"\nmerge_method = "ff"\n', "merge_method"),
             "deploy timeout": ('[project]\njira_key = "ABC"\nrepo = "x"\ndeploy_timeout_minutes = 0\n', "deploy_timeout_minutes"),
             "deploy scope": ('[project]\njira_key = "ABC"\nrepo = "x"\ndeploy_on = "release"\n', "deploy_on must be"),
+            "memory url type": ('[project]\njira_key = "ABC"\nrepo = "x"\nmemory_url = true\n', "`memory_url` must be str"),
             "section": ('[proj]\njira_key = "ABC"\n', "[project]"),
             "syntax": ("[project\n", "aiflow"),
         }

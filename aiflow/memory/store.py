@@ -228,9 +228,13 @@ class Store:
             self.run("update memory_entry set use_count = use_count + 1, last_used_at = now() where id = any(%s::uuid[])", ([i["id"] for i in items],), fetch=False)
         return items
 
-    def stats(self) -> dict[str, Any]:
-        by = self.run("select status, kind, count(*) from memory_entry group by status, kind order by status, kind")
-        events = self.run("select count(*) from memory_event")
+    def stats(self, namespaces: list[str] | None = None) -> dict[str, Any]:
+        where = "" if namespaces is None else " where namespace = '' or namespace = any(%s)"
+        args = () if namespaces is None else (namespaces,)
+        by = self.run(f"select status, kind, count(*) from memory_entry{where} group by status, kind order by status, kind", args)
+        event_sql = "select count(*) from memory_event" if namespaces is None else (
+            "select count(*) from memory_event e join memory_entry m on m.id = e.entry_id where m.namespace = '' or m.namespace = any(%s)")
+        events = self.run(event_sql, () if namespaces is None else args)
         return {"entries": [{"status": s, "kind": k, "count": n} for s, k, n in by], "events": events[0][0]}
 
     # ---- the curator ---------------------------------------------------------------------------------------------

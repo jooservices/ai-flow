@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -134,14 +135,15 @@ class WiringTests(unittest.TestCase):
     def test_jira_writes_emit(self):
         from aiflow.jira import Jira
         from pathlib import Path
-        jira = Jira(Path("/tmp"))
-        jira._run = lambda *a: "{}"
-        (Path("/tmp") / ".tmp").mkdir(exist_ok=True)
-        self.assertTrue(jira.transition("JAIF-1", "Done"))
-        jira.comment("JAIF-1", "hello")
-        jira.link("JAIF-1", "JAIF-2")
-        jira.set_agent("JAIF-1", "Claude")
-        self.assertEqual(self.names(), ["jira.transition", "jira.comment", "jira.link", "jira.agent"])
+        with tempfile.TemporaryDirectory() as root:
+            jira = Jira(Path(root))
+            jira._run = lambda *a: "{}"
+            (Path(root) / ".tmp").mkdir(exist_ok=True)
+            self.assertTrue(jira.transition("JAIF-1", "Done"))
+            jira.comment("JAIF-1", "hello")
+            jira.link("JAIF-1", "JAIF-2")
+            jira.set_agent("JAIF-1", "Claude")
+            self.assertEqual(self.names(), ["jira.transition", "jira.comment", "jira.link", "jira.agent"])
 
     def test_a_failed_transition_is_an_event_too(self):
         from aiflow.jira import Jira, JiraError

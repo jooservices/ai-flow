@@ -163,7 +163,7 @@ def stamp(seconds_ago):
 
 
 def make(blockers=None, redis=None, **env):
-    cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test", **env})
+    cfg = replace(load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test", **env}), root=Path(tempfile.gettempdir()))
     return Supervisor(cfg, FakeJira(blockers), redis or FakeRedis())
 
 

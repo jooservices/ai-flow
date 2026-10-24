@@ -102,6 +102,7 @@ class Scoped:
             clean = guard.check_entry(dict(kind=entry_type, scope=scope, namespace=namespace, project=project, title=title, body=content, tags=[]), relaxed=True)
         except guard.Rejected as error:
             raise ValueError(str(error)) from error
+        guard.scan_secrets(tags, jira_issue_key or "", source, created_by)
         if project:
             self.run("insert into memory_project (namespace, name) values (%s, %s) on conflict do nothing", (namespace, project), fetch=False)
         digest = guard.content_hash(entry_type, clean["title"], clean["body"])
@@ -166,6 +167,7 @@ class Scoped:
                content: str | None = None, entry_type: str | None = None, tags: str | None = None, jira_issue_key: str | None = None,
                source: str | None = None) -> bool:
         check_scope(namespace, project, global_scope)
+        guard.scan_secrets(*(str(value) for value in (title, content, entry_type, tags, jira_issue_key, source) if value is not None))
         sets, values = [], []
         for column, value in (("title", title), ("body", content), ("kind", entry_type), ("tags_raw", tags), ("jira_key", jira_issue_key), ("source", source)):
             if value is None:
@@ -191,7 +193,7 @@ class Scoped:
         new_title, new_body, new_kind = (title.strip() if title is not None else current["title"]), (content.strip() if content is not None else current["content"]), \
             (entry_type or current["type"])
         try:
-            guard.scan_secrets(new_title, new_body)
+            guard.scan_secrets(new_title, new_body, tags or "", jira_issue_key or "", source or "")
         except guard.Rejected as error:
             raise ValueError(str(error)) from error
         sets += ["content_hash = %s", "updated_at = now()"]
@@ -251,9 +253,15 @@ class Scoped:
                            f"and e.verified_at is null and e.created_at < now() - make_interval(days => %s) returning e.seq", (*args, older_than_days))
         return {"promoted": len(promoted), "decayed": len(decayed)}
 
-    def stats(self) -> dict[str, int]:
+    def stats(self, namespace: str | None = None, namespaces: list[str] | None = None) -> dict[str, int]:
         counts = {"total": 0}
-        for kind, status, amount in self.run("select kind, status, count(*) from memory_entry group by kind, status order by kind, status"):
+        if namespace:
+            where, args = " where namespace = '' or namespace = %s", (namespace,)
+        elif namespaces is not None:
+            where, args = " where namespace = '' or namespace = any(%s)", (namespaces,)
+        else:
+            where, args = "", ()
+        for kind, status, amount in self.run(f"select kind, status, count(*) from memory_entry{where} group by kind, status order by kind, status", args):
             counts["total"] += int(amount)
             counts[f"{kind}:{status}"] = int(amount)
         return counts
@@ -261,9 +269,15 @@ class Scoped:
     # ---- projects ----------------------------------------------------------------------------------------------------------------
     PROJECT_COLUMNS = ("id", "namespace", "name", "description", "tags", "github_url", "jira_key", "jira_project_url", "published_as", "version", "stable")
 
-    def projects(self, namespace: str | None = None) -> list[dict[str, Any]]:
+    def projects(self, namespace: str | None = None, namespaces: list[str] | None = None) -> list[dict[str, Any]]:
         sql = f"select {', '.join(self.PROJECT_COLUMNS)} from memory_project"
-        rows = self.run(sql + (" where namespace = %s" if namespace else "") + " order by namespace, name", (namespace,) if namespace else ())
+        if namespace:
+            sql, args = sql + " where namespace = %s", (namespace,)
+        elif namespaces is not None:
+            sql, args = sql + " where namespace = any(%s)", (namespaces,)
+        else:
+            args = ()
+        rows = self.run(sql + " order by namespace, name", args)
         return [{**dict(zip(self.PROJECT_COLUMNS, row)), "stable": int(row[-1])} for row in rows]
 
     def project_update(self, namespace: str, name: str, description: str | None = None, tags: str | None = None, github_url: str | None = None,
@@ -302,9 +316,9 @@ class Scoped:
         namespace, name = namespace.strip(), name.strip()
         if not namespace or not name:
             raise ValueError("Namespace and device name are required.")
+        guard.scan_secrets(name, role, host, ip, model, firmware, location, status, notes)
         if status not in DEVICE_STATUSES:
             raise ValueError(f"Unsupported device status: {status}")
-        guard.scan_secrets(name, notes, host, location)
         return int(self.run("insert into memory_device (namespace, name, role, host, ip, model, firmware, location, status, notes) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) returning id",
                             (namespace, name, role.strip(), host.strip(), ip.strip(), model.strip(), firmware.strip(), location.strip(), status, notes.strip()))[0][0])
 
@@ -349,7 +363,7 @@ class Scoped:
     def import_entry(self, origin: str, seq: int, uuid: str, scope: str, namespace: str, project: str, kind: str, title: str, body: str, tags_raw: str,
                      jira_key: str, source: str, status: str, created_by: str, updated_by: str, created_at: str, updated_at: str,
                      verified_at: str | None) -> bool:
-        guard.scan_secrets(title, body)
+        guard.scan_secrets(title, body, tags_raw, jira_key, source, created_by, updated_by)
         if project:
             self.run("insert into memory_project (namespace, name) values (%s, %s) on conflict do nothing", (namespace, project), fetch=False)
         rows = self.run(

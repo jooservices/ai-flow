@@ -20,7 +20,7 @@ from .incidents import find_incidents as find_incidents
 from .jira import Jira, JiraError
 from .lock import Redis, RedisError
 from .memory import cases as memory_cases
-from .memory.client import Memory
+from .memory.client import Memory, spool_path
 from .project_database import ProjectDatabase, ticket_database_id
 
 STAGES = {"To Do": "developer", "In Progress": "developer", "In Review": "reviewer", "Review passed": "pr", "In QA": "gate",
@@ -171,6 +171,7 @@ class Supervisor:
             jira.on_transition = lambda key, to: self.record_status(key, to, "supervisor")
         self.memory = Memory(cfg.memory.get("AIFLOW_MEMORY_URL", ""), cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
                              spool=cfg.root / ".tmp" / "aiflow" / "memory-spool.jsonl", log=lambda m: log(m))
+        self.project_memories: dict[str, Memory] = {}
         self._priorities: dict[str, tuple[float, str]] = {}
 
     # ---- selection -------------------------------------------------------------------------------------------
@@ -1033,13 +1034,14 @@ class Supervisor:
     # ---- shared memory ---------------------------------------------------------------------------------------
     def recall(self, key: str, view: dict[str, Any], repo: Repo) -> str:
         """Verified knowledge for this ticket as a prompt block. Advice only: a down service gives an empty block."""
-        if not self.memory.enabled:
+        memory = self.memory_for(key)
+        if not memory.enabled:
             return "(the shared memory is not configured)"
         project = self.cfg.project(key)
         description = str(view.get("description", ""))
         parsed = sections(description)
         wanted = " ".join([str(view.get("summary", "")), (parsed.get("ac") or parsed.get("acceptance criteria") or "")[:600], parsed.get("scopes", "")[:300]])
-        items = self.memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
+        items = memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
         events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items),
                     case_ids=",".join(str(i["id"])[:8] for i in items if i.get("kind") == "case"))
         if items:
@@ -1048,18 +1050,21 @@ class Supervisor:
 
     def remember_lessons(self, key: str, repo: Repo, agent: str, text: str) -> None:
         """The `MEMORY:` lines of an AI's final message become fresh entries (verified later by confirmation or feedback)."""
-        if not self.memory.enabled:
+        memory = self.memory_for(key)
+        if not memory.enabled:
             return
         project = self.cfg.project(key)
         for kind, title, body in memory_cases.lessons(text):
-            entry_id = self.memory.propose(dict(kind=kind, scope="project", namespace=project.company, project=project.jira_key, repo=repo.name,
+            entry_id = memory.propose(dict(kind=kind, scope="project", namespace=project.company, project=project.jira_key, repo=repo.name,
                                                 jira_key=key, title=title, body=body, tags=[project.jira_key.lower(), repo.name.lower(), agent.lower()],
                                                 source={"jira": key}, created_by=agent))
             events.emit("memory.propose", ticket=key, kind=kind, title=title[:120], agent=agent, id=entry_id or "")
 
     def remember_case(self, key: str, repo: Repo, pr: dict[str, Any]) -> None:
-        """A merged and Done ticket becomes a `case`, written by the supervisor from what it already has (no AI, no tokens)."""
-        if not self.memory.enabled:
+        """A Done ticket becomes a `case`, written by the supervisor from available ticket and completion context."""
+        memory = self.memory_for(key)
+        marker = f"memory:case:{key}"
+        if not memory.enabled or self.redis.get(marker):
             return
         project = self.cfg.project(key)
         try:
@@ -1068,23 +1073,40 @@ class Supervisor:
         except (JiraError, ValueError, TypeError) as error:
             log(f"{key}: no case written ({error})")
             return
+        has_handover = bool(memory_cases.handover(comments))
         rounds = int(self.redis.get(f"cycles:{key}") or 0)
         entry = memory_cases.build_case(key, summary, project.company, repo.name, self.change_type(key), self.state(key, "dev"),
                                         str(pr.get("url", "")), comments, rounds, self.state(key, "rework"))
-        entry_id = self.memory.propose(entry) if entry else None
-        events.emit("memory.case", ticket=key, written=bool(entry_id), has_handover=bool(entry), rework_rounds=rounds)
+        entry_id = memory.propose(entry) if entry else None
+        self.redis.set(marker, entry_id or "queued", 365 * DAY)
+        events.emit("memory.case", ticket=key, written=bool(entry_id), has_handover=has_handover, rework_rounds=rounds)
         if rounds == 0:  # merged without a single rework: the recalled knowledge did not mislead
             for recalled in json.loads(self.redis.get(f"recalled:{key}") or "[]"):
-                self.memory.feedback(recalled, key, True)
+                memory.feedback(recalled, key, True)
+
+    def memory_for(self, key: str) -> Memory:
+        """Return this project's service client, inheriting the runtime URL when the project has no override."""
+        project = self.cfg.project(key)
+        project_url = getattr(project, "memory_url", None)
+        url = project_url if project_url is not None else getattr(self.cfg, "memory", {}).get("AIFLOW_MEMORY_URL", "")
+        default_url = getattr(self.memory, "url", "")
+        if url.rstrip("/") == default_url.rstrip("/"):
+            return self.memory
+        if url not in self.project_memories:
+            self.project_memories[url] = Memory(url, self.cfg.memory.get("AIFLOW_MEMORY_TOKEN", ""),
+                                                 spool=spool_path(self.cfg.root, url, default_url), log=lambda message: log(message))
+        return self.project_memories[url]
 
     def memory_env(self, key: str, repo: Repo) -> dict[str, str]:
         """What `bin/aiflow-mem` needs inside the AI process: the address, the read/propose token, and the defaults of this ticket."""
-        token, url = self.cfg.memory.get("AIFLOW_MEMORY_AI_TOKEN", ""), self.cfg.memory.get("AIFLOW_MEMORY_URL", "")
+        token = self.cfg.memory.get("AIFLOW_MEMORY_AI_TOKEN", "")
+        project = self.cfg.project(key)
+        url = project.memory_url if project.memory_url is not None else self.cfg.memory.get("AIFLOW_MEMORY_URL", "")
         if not (token and url):
             return {}
-        project = self.cfg.project(key)
         return {"AIFLOW_MEMORY_URL": url, "AIFLOW_MEMORY_TOKEN": token, "AIFLOW_MEMORY_NAMESPACE": project.company,
-                "AIFLOW_MEMORY_PROJECT": project.jira_key, "AIFLOW_MEMORY_REPO": repo.name, "AIFLOW_MEMORY_TICKET": key, "AIFLOW_MEMORY_ACTOR": "ai"}
+                "AIFLOW_MEMORY_PROJECT": project.jira_key, "AIFLOW_MEMORY_REPO": repo.name, "AIFLOW_MEMORY_TICKET": key, "AIFLOW_MEMORY_ACTOR": "ai",
+                "AIFLOW_MEMORY_SCOPED_STORAGE": "postgres"}
 
     def execute(self, role: str, agent: str, key: str, view: dict[str, Any], workdir: Path, branch: str, base: str,
                 repo: Repo, slot_owner: str | None = None, session_owner: str | None = None) -> tuple[str, str, tuple[str, str] | None, bool]:
@@ -1482,6 +1504,7 @@ class Supervisor:
             current = self.jira.view(key)
             if current.get("status") == "Done":
                 self.clear_blocked_reason(key)
+                self.remember_case(key, repo, pr)
                 return True
             pr = gh.view(int(pr["number"]))
             if pr.get("state") == "MERGED":
@@ -1503,6 +1526,7 @@ class Supervisor:
             try:
                 if self.jira.view(key).get("status") == "Done":
                     self.clear_blocked_reason(key)
+                    self.remember_case(key, repo, {})
                     return True
             except JiraError as error:
                 log(f"{key}: cannot confirm ticket state before blocking ({error})")
@@ -1515,6 +1539,7 @@ class Supervisor:
             current = self.jira.view(key)
             if current.get("status") == "Done":
                 self.clear_blocked_reason(key)
+                self.remember_case(key, repo, {})
                 return True
             gh = GitHub(repo.github_slug())
             pr = self.gate_pr(key, gh)
@@ -1841,9 +1866,9 @@ class Supervisor:
             cleanup_status = f"Cleanup failed ({error}); remove the worktree by hand."
         self.release_slot(key, repo.name)
         events.emit("ticket.done", ticket=key, repo=repo.name, base=base, pr=pr.get("number"), cleanup=cleanup_status[:120])
-        self.remember_case(key, repo, pr)
         self.jira.comment(key, f"AI Flow: {message} {cleanup_status}")
         self.jira.transition(key, "Done")
+        self.remember_case(key, repo, pr)
         self.clear_blocked_reason(key)
         self.teardown_ticket_database(key)
         self.after_merge(key, repo, base)

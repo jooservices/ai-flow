@@ -22,9 +22,21 @@ from typing import Any, Callable, Iterable
 
 # Files that many tickets change at once. Entries are fnmatch globs on the repository path.
 HOT_FILES: tuple[str, ...] = (
+    # Oversized files present in the develop baseline (JAIF-273). The old-flow paths stay covered without changing
+    # those files; the v4 giant-file check reports their baseline size and prevents further growth.
+    "aiflow/supervisor.py",
     "aiflow/v4/control/ui/console.html",
     "aiflow/v4/control/api.py",
+    "aiflow/v4/worker/containers.py",
+    "tests/test_supervisor.py",
+    "tests/v4/test_console.py",
+    # Shared fixtures and test suites are common coordination points across otherwise separate feature tickets.
     "tests/v4/conftest.py",
+    "tests/v4/fixtures/*",
+    "tests/v4/test_*.py",
+    "tests/v4/*_suite.cjs",
+    # A node-agent change can affect every project served by a machine.
+    "aiflow/v4/node/agent.py",
     "pyproject.toml",
     "uv.lock",
     "CHANGELOG.md",
@@ -42,7 +54,7 @@ AREAS: dict[str, tuple[str, tuple[str, ...]]] = {
     "changelog": ("changelog", ("CHANGELOG.md",)),
 }
 
-PATH = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:py|html|js|cjs|md|sql|yml|yaml|toml|lock|json|sh|css|txt))\b")
+PATH = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:py|html|js|cjs|md|sql|yml|yaml|toml|lock|jsonl|json|sh|css|txt))\b")
 HISTORY_RUNS = 8
 
 

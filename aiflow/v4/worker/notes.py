@@ -17,12 +17,30 @@ def note(c, headline: str, what: str = "", why: str = "", result: str = "", next
     return "\n".join(lines)
 
 
-def project_env(project_key: str, runtime_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Node-local environment for a project's AI runs (test service URLs and the like), from
-    /etc/aiflow/projects/<KEY>.env (root-only on the node, never in the control repo)."""
+def project_env(project_key: str, items: list[dict] | None = None, step: str = "dev",
+                runtime_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment of a project's AI runs. The environment section of the project configuration (`items`, as the
+    claim carries it) gives the values of its test services, URLs, databases and browsers to the runs allowed to use
+    them, and the node-local /etc/aiflow/projects/<KEY>.env (root-only, never in the control repo) holds the secrets
+    those items name; the file also keeps working for variables the section does not list. Per-run values
+    (such as the throw-away WordPress URL and credentials) always take precedence over static values."""
+    from ..core.environment import for_step, items_of, run_environment
     from ..core.settings import read_env_file
     from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
-    # The browser folder is part of every run's environment; project settings may override it. Per-run values
-    # (such as the throw-away WordPress URL and credentials) always take precedence over static project values.
+    node_env = read_env_file(f"/etc/aiflow/projects/{project_key}.env")
+    configured = items_of(items or [])
+    all_configured_names = {item.name for item in configured}
+    allowed_names = {item.name for item in for_step(configured, step)}
+    # Keep legacy node-local variables working, but do not leak a configured item's value into
+    # a run whose project permissions exclude that name.
+    node_env = {name: value for name, value in node_env.items()
+                if name not in all_configured_names or name in allowed_names}
+    # the shared browsers folder is part of every run's environment; a project file may override it
     return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-            **read_env_file(f"/etc/aiflow/projects/{project_key}.env"), **(runtime_env or {})}
+            **node_env, **run_environment(configured, step, node_env), **(runtime_env or {})}
+
+
+def environment_notes(items: list[dict] | None, step: str, env: dict[str, str]) -> str:
+    """The names (never the values of secrets) of the environment items of this run, for the run notes."""
+    from ..core.environment import items_of, notes_block
+    return notes_block(items_of(items or []), step, env)

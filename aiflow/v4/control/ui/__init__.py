@@ -94,6 +94,11 @@ def mount_ui(app: FastAPI, ctx) -> None:
         runs = ctx.db.all("SELECT id, step, account_id, provider, model, node, fence, status, outcome, error_kind,"
                           " started_at, ended_at, tokens_in, tokens_out, cost_usd, branch, pr_url, head_sha, summary"
                           " FROM runs WHERE ticket_key=%s ORDER BY started_at DESC LIMIT 20", (key,))
+        decision = ctx.db.one(
+            "SELECT account_id,provider,started_at,details->'capacity'->'estimate' AS estimate,"
+            "details->'capacity'->'assignment_reason' AS reason,details->'capacity'->'account_fit' AS account_fit "
+            "FROM runs WHERE ticket_key=%s AND step='dev' AND details->'capacity' ? 'estimate' "
+            "ORDER BY started_at DESC LIMIT 1", (key,))
         events = ctx.db.all("SELECT ts, type, account, node, outcome, reason, data FROM events WHERE ticket=%s"
                             " ORDER BY id DESC LIMIT 80", (key,))
         writes = ctx.db.all("SELECT ts, target, action, actor, fence, accepted, result FROM write_audit WHERE ticket=%s"
@@ -102,8 +107,14 @@ def mount_ui(app: FastAPI, ctx) -> None:
             r["id"] = str(r["id"])
             r["cost_usd"] = float(r["cost_usd"])
         from ..timeline import timeline
+        from .. import merge_flow
+        capacity_decision = None if not decision else {
+            "account": decision["account_id"], "provider": decision["provider"],
+            "assigned_at": decision["started_at"].isoformat(), "estimate": decision.get("estimate") or {},
+            "reason": decision.get("reason") or "", "account_fit": decision.get("account_fit") or {}}
         return {"ticket": t, "repository": t["repository"], "runs": runs, "events": events,
-                "writes": writes, "timeline": timeline(ctx.db, key),
+                "writes": writes, "timeline": timeline(ctx.db, key), "capacity_decision": capacity_decision,
+                "merge": merge_flow.facts(t), "moves": merge_flow.moves(ctx.db, key),
                 "jira_url": f"{ctx.settings.jira_site}/browse/{key}"}
 
     @app.get("/v1/services")

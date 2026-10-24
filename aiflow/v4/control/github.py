@@ -342,7 +342,11 @@ class GitHubApp:
         r = self.c.request("PUT", f"/repos/{self.org}/{repo}/pulls/{number}/update-branch", json={}, headers={
             "Authorization": f"Bearer {self.token(repo, {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read', 'workflows': 'write'})[0]}"})
         data = r.json() if r.content else {}
-        return {"ok": r.status_code in (200, 202), "message": f"{r.status_code}: {data.get('message', '')}"}
+        message = str(data.get("message", ""))
+        # Only a 422 that names the merge is a real conflict; 401/403 (permission), 404 and 5xx are other failures.
+        conflict = r.status_code == 422 and "conflict" in message.lower()
+        return {"ok": r.status_code in (200, 202), "conflict": conflict, "status": r.status_code,
+                "message": f"{r.status_code}: {message}"}
 
     def checks(self, repo: str, sha: str) -> list[dict]:
         """Check runs and commit statuses of a commit: name, state (pending|success|failure|neutral), url."""

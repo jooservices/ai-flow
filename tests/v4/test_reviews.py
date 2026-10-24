@@ -172,6 +172,25 @@ def test_refused_approval_is_recorded_on_jira_pr_and_audit(client, ctx, monkeypa
                       (key,))["accepted"] is False
 
 
+def test_approval_and_skip_gate_merge_through_the_merge_queue(client, ctx, monkeypatch):
+    from aiflow.v4.control import merge_queue
+    monkeypatch.setattr(control_api, "HUMAN_QUEUE_WAIT_S", 0)
+    add_review_ticket(ctx, "TESTWP-110")
+    add_review_ticket(ctx, "TESTWP-111")
+    # an earlier ready pull request of the same repository is first in the queue: the approval waits behind it
+    repository = ctx.repo().projects["TESTWP"].repo
+    merge_queue.turn(ctx.db, repository, 7, "TESTWP-7")
+    response = client.post("/v1/reviews/TESTWP-110/approve", headers={"Authorization": "Bearer review-secret"})
+    assert response.status_code == 200 and response.json()["merged"] is False
+    assert "merge queue" in response.json()["message"] and not getattr(ctx.github, "merged", [])
+    assert [e["number"] for e in merge_queue.snapshot(ctx.db, repository)] == [7]  # the approval gave up its place
+    merge_queue.finish(ctx.db, repository, 7, True)
+    approved = client.post("/v1/reviews/TESTWP-111/skip-gate", headers={"Authorization": "Bearer review-secret"})
+    assert approved.status_code == 200 and approved.json()["merged"] is True
+    assert len(ctx.github.merged) == 1
+    assert ctx.db.one("SELECT state FROM merge_queue WHERE repo=%s AND number=42", (repository,))["state"] == "merged"
+
+
 def test_reviewer_rework_records_comment_label_and_returns_ticket_to_todo(client, ctx):
     add_review_ticket(ctx, "TESTWP-84")
     response = client.post("/v1/reviews/TESTWP-84/rework", json={"comment": "Please add coverage for retries."},

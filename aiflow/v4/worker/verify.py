@@ -290,7 +290,7 @@ def merge_with_retries(api: ControlClient, c: Claimed, pr: dict, title: str, met
             time.sleep(QUEUE_POLL_S)
             continue
         attempt += 1
-        if m.get("conflict"):  # GitHub could not bring the branch up to date: a real conflict
+        if m.get("conflict") or m.get("update_failed"):  # a real conflict, or an update that failed for another reason
             return m
         msg = (m.get("message") or "").lower()
         if m.get("updated"):  # the branch was brought up to date on this turn; CI runs again on the new head

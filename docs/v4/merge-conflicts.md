@@ -26,11 +26,21 @@ The wait counts from the moment the ticket was first held back (table `hot_file_
 The record is removed when nothing blocks the ticket any more, so a later block starts a new wait. The ticket list
 `POST /v1/work/claim` accepts and `GET /v1/work/candidates` offers follow this rule.
 
+The check when candidates are listed is a snapshot, so the claim reserves the files again: after the per-ticket lease
+is taken, `hotfiles.reserve` writes one row per predicted hot file into `hot_file_reservations` (migration
+`020_hot_file_reservations.sql`), in one transaction under an advisory lock. Of two simultaneous claims for different
+tickets only the first gets a shared file; the second is answered `409` ("hot file ... is reserved by <ticket>") and
+its lease is released. A reservation is dropped as stale when its run is no longer running and its ticket has no open
+pull request (In Verify, Human review). A ticket that waited past `MAX_WAIT` takes the files over.
+
 ## Automatic branch update (`aiflow/v4/worker/verify.py`)
 
 A verify run that finds the pull request behind the base asks GitHub to merge the base in. A clean merge is done by AI
 Flow (`details.auto_updated`), the verify worktree moves to the new head and CI runs on it. Only a real conflict, which
-GitHub refuses, is sent back to a developer AI: outcome `rework`, reason "conflicts with <base>".
+GitHub refuses, is sent back to a developer AI: outcome `rework`, reason "conflicts with <base>". GitHub's
+update-branch answer is classified: only a `422` that names a merge conflict is a conflict. A permission error or a
+service error (`401`, `403`, `404`, `5xx`) is reported as `update_failed`, leaves the queue and is not sent to a
+developer AI.
 
 ## One file per topic
 
@@ -51,6 +61,21 @@ waiting pull request has the turn; the others get `queued` with their position a
 heartbeat keeps running, up to 45 minutes). On its turn the pull request is brought up to date with the base, which
 includes the pull request merged just before it; CI runs on the new head, then it merges. A conflict at that point is
 a real conflict and goes to rework. An entry whose run ended, or that was silent for 20 minutes, is dropped.
+
+The turn, the branch update and the merge run under a per-repository lock (a PostgreSQL session advisory lock on its
+own connection, `merge_queue.repo_lock`). A request that finds the lock taken gets `queued` and asks again, so two
+concurrent requests never merge at once; the lock is released when the merge ends, raises or the control process dies.
+
+Human-review approval (`POST /v1/reviews/{key}/approve`) and skip-gate use the same queue: the click waits up to 90
+seconds for its turn. When the branch had to be brought up to date first, or the turn did not come, nothing is merged
+on that click and the reviewer approves again.
+
+## Routes
+
+The claim reservation is in `POST /v1/work/claim`; the queue is behind `POST /v1/github/merge`,
+`POST /v1/reviews/{key}/approve` and `POST /v1/reviews/{key}/skip-gate`. The control API's
+`POST /v1/github/token`, `GET /v1/github/git/{git_path:path}`, `POST /v1/github/git/{git_path:path}` and
+`GET /v1/state` are unchanged by this work.
 
 ## Command Center: work lost to conflicts
 

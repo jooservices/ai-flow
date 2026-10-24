@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -118,6 +119,50 @@ def test_waiting_ticket_is_released_after_the_maximum_wait(client, ctx):
     ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-1'")
     assert "TESTWP-2" in keys()
     assert ctx.db.one("SELECT 1 AS x FROM hot_file_blocked WHERE ticket_key='TESTWP-2'") is None
+
+
+def test_simultaneous_claims_reserve_a_hot_file_for_one_ticket_only(db):
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def go(key):
+        barrier.wait(5)
+        results[key] = hotfiles.reserve(db, key, f"run-{key}", [CONSOLE, "pyproject.toml"])
+
+    threads = [threading.Thread(target=go, args=(k,)) for k in ("TESTWP-1", "TESTWP-2")]
+    [t.start() for t in threads]
+    [t.join(10) for t in threads]
+    winners = [k for k, v in results.items() if v is None]
+    assert len(winners) == 1
+    loser = next(k for k in results if k not in winners)
+    assert results[loser] == (winners[0], sorted([CONSOLE, "pyproject.toml"]))
+    # a released (stale) reservation frees the files; a forced one (waited past MAX_WAIT) takes them over
+    assert hotfiles.reserve(db, loser, "run-x", [CONSOLE], force=True) is None
+    hotfiles.unreserve(db, "run-x")
+    assert hotfiles.reserve(db, winners[0], "run-y", [CONSOLE]) is None
+
+
+def test_stale_reservation_is_dropped(db):
+    assert hotfiles.reserve(db, "TESTWP-1", "gone", [CONSOLE]) is None
+    assert hotfiles.reserve(db, "TESTWP-2", "run-2", [CONSOLE]) == ("TESTWP-1", [CONSOLE])  # fresh: still held
+    db.run("UPDATE hot_file_reservations SET reserved_at = now() - interval '1 hour'")  # no running run, no open PR
+    assert hotfiles.reserve(db, "TESTWP-2", "run-2", [CONSOLE]) is None
+
+
+def test_claim_refuses_a_hot_file_reserved_by_a_concurrent_claim(client, ctx):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-1")
+    add_ticket(ctx.db, "TESTWP-2")
+    describe(ctx.db, "TESTWP-1", "Card", "Edit " + CONSOLE)
+    describe(ctx.db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
+    # TESTWP-1 reserved the file in a claim that is not visible as a running run yet: eligibility cannot see it
+    assert hotfiles.reserve(ctx.db, "TESTWP-1", "run-1", [CONSOLE]) is None
+    refused = client.post("/v1/work/claim", json={"ticket": "TESTWP-2", "account": "claude-01"}, headers=cc)
+    assert refused.status_code == 409 and "reserved by TESTWP-1" in refused.json()["reason"]
+    assert ctx.db.one("SELECT 1 AS x FROM runs WHERE ticket_key='TESTWP-2'") is None
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-1", "account": "claude-01"}, headers=cc).json()
+    assert claim["claimed"]
+    assert ctx.db.one("SELECT ticket_key FROM hot_file_reservations WHERE path=%s", (CONSOLE,))["ticket_key"] == "TESTWP-1"
 
 
 # --- AC2: automatic update ------------------------------------------------------------------------------------------
@@ -342,8 +387,8 @@ def test_a_silent_or_finished_run_cannot_block_the_queue(db):
 
 
 class QueueGitHub:
-    def __init__(self, behind=0, update_ok=True):
-        self.behind, self.update_ok, self.updates = behind, update_ok, 0
+    def __init__(self, behind=0, update_ok=True, failure="conflict"):
+        self.behind, self.update_ok, self.updates, self.failure = behind, update_ok, 0, failure
 
     def pr(self, repo, number):
         return {"base": {"ref": "develop"}, "head": {"ref": f"b{number}", "sha": f"sha{number}-{self.updates}"}}
@@ -355,7 +400,11 @@ class QueueGitHub:
         self.updates += 1
         if self.update_ok:
             self.behind = 0
-        return {"ok": self.update_ok, "message": "422: merge conflict" if not self.update_ok else "202"}
+        if self.update_ok:
+            return {"ok": True, "conflict": False, "status": 202, "message": "202"}
+        if self.failure == "conflict":
+            return {"ok": False, "conflict": True, "status": 422, "message": "422: merge conflict"}
+        return {"ok": False, "conflict": False, "status": 403, "message": "403: Resource not accessible"}
 
 
 def test_merge_next_serializes_and_rebases_on_the_previous_merge(db):
@@ -380,6 +429,68 @@ def test_merge_next_reports_a_real_conflict_and_frees_the_queue(db):
     res = merge_queue.merge_next(db, gh, "o/r", 1, "TESTWP-1", "", lambda: {"merged": True})
     assert res["conflict"] and not res["merged"]
     assert merge_queue.turn(db, "o/r", 2, "TESTWP-2")["turn"]
+
+
+def test_a_failed_update_that_is_not_a_conflict_does_not_go_back_to_a_developer(db):
+    gh = QueueGitHub(behind=3, update_ok=False, failure="permission")
+    res = merge_queue.merge_next(db, gh, "o/r", 1, "TESTWP-1", "", lambda: {"merged": True})
+    assert not res["merged"] and not res.get("conflict") and res["update_failed"]
+    assert "403" in res["message"]
+    assert merge_queue.turn(db, "o/r", 2, "TESTWP-2")["turn"]  # the queue is free again
+
+
+def test_verify_does_not_turn_an_update_failure_into_a_conflict(monkeypatch):
+    monkeypatch.setattr(verify.time, "sleep", lambda _s: None)
+    api = _API({"/v1/github/merge": {"merged": False, "update_failed": True, "message": "could not update"}})
+    hb = SimpleNamespace(lost=SimpleNamespace(is_set=lambda: False), progress={})
+    out = verify.merge_with_retries(api, _claim(project()), pr_info(), "t", "squash", hb)
+    assert not out["merged"] and not out.get("conflict") and out["update_failed"]
+
+
+def test_concurrent_merge_requests_merge_one_at_a_time(db):
+    """Both calls find themselves first in the queue; the repository lock lets only one merge at a time."""
+    entered, release = threading.Event(), threading.Event()
+    active, peak, merged = [], [], []
+
+    def slow_merge(n):
+        def merge():
+            active.append(n)
+            peak.append(len(active))
+            entered.set()
+            release.wait(5)
+            active.remove(n)
+            merged.append(n)
+            return {"merged": True, "sha": f"m{n}"}
+        return merge
+
+    gh = QueueGitHub()
+    results = {}
+    first = threading.Thread(target=lambda: results.update(
+        a=merge_queue.merge_next(db, gh, "o/r", 1, "TESTWP-1", "", slow_merge(1))))
+    first.start()
+    assert entered.wait(5)
+    # a second request for the same repository arrives while the first merge is still running
+    db.run("UPDATE merge_queue SET enqueued_at = now() + interval '1 second' WHERE number=1")  # it would see itself first
+    second = merge_queue.merge_next(db, gh, "o/r", 2, "TESTWP-2", "", slow_merge(2))
+    assert not second["merged"] and second["queued"] and not merged
+    release.set()
+    first.join(5)
+    assert results["a"]["merged"] and max(peak) == 1
+    # another repository is not held up by this lock
+    with merge_queue.repo_lock(db, "o/other") as other:
+        assert other
+    with merge_queue.repo_lock(db, "o/r") as again:
+        assert again  # released after the merge
+
+
+def test_the_repository_lock_is_released_when_the_merge_raises(db):
+    def boom():
+        raise RuntimeError("github down")
+
+    with pytest.raises(RuntimeError):
+        merge_queue.merge_next(db, QueueGitHub(), "o/r", 1, "TESTWP-1", "", boom)
+    with merge_queue.repo_lock(db, "o/r") as locked:
+        assert locked
 
 
 def test_verify_waits_in_the_queue_then_merges(monkeypatch):

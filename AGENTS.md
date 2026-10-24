@@ -12,10 +12,9 @@ This repository holds two generations of AI Flow. The current work is **v4**, a 
   `AIFLOW4_TEST_DATABASE_URL` (shared test services: Redis keys are prefixed per test; each pytest session
   creates its own database on that PostgreSQL server (copied from `AIFLOW4_TEST_DATABASE_TEMPLATE` when set, a database that already carries pgvector) and drops it at the end, so parallel runs do not interfere).
 - Do not add dependencies unless the ticket asks for them; `uv.lock` must stay consistent with `pyproject.toml`.
-- Document a new feature in its own file `docs/v4/<topic>.md` and add its one-line link as its own file
-  `deploy/v4/topics/<topic>.md` (format in `docs/v4/merge-conflicts.md`); do not edit the "Topics" list in
-  `deploy/v4/README.md`. Many tickets run in parallel: appending to one shared file causes merge conflicts on
-  every branch.
+- Document a new feature in its own file `docs/v4/<topic>.md` and add one line linking it under "Topics" in
+  `deploy/v4/README.md`. Many tickets run in parallel: appending long sections to one shared file causes merge
+  conflicts on every branch.
 - Do not commit, push or change branches: AI Flow commits your work (a resolved merge included) and opens the
   pull request. Finishing with uncommitted changes is expected.
 - Never print secrets, tokens or the contents of `/etc/aiflow`.

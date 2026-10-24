@@ -131,6 +131,49 @@ def clear_blocked(db, ticket_key: str) -> None:
     db.run("DELETE FROM hot_file_blocked WHERE ticket_key=%s", (ticket_key,))
 
 
+RESERVATION_GRACE_S = 120  # a claim inserts its running run row right after it reserved
+
+
+def blocked_since(db, ticket_key: str) -> datetime | None:
+    row = db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key=%s", (ticket_key,))
+    return row["blocked_at"] if row else None
+
+
+def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], force: bool = False) -> tuple[str, list[str]] | None:
+    """Reserve the hot files of a claimed dev run, atomically with the claim.
+
+    Everything runs in one transaction under an advisory lock, so of two simultaneous claims only the first gets a
+    shared file. Returns (holder ticket, shared files) when another ticket holds one, else None and the files are
+    reserved. A reservation is stale (and dropped here) when its run is not running any more and its ticket is not
+    waiting in verify or human review. `force` (the ticket waited longer than MAX_WAIT) takes the files over."""
+    paths = sorted(set(hot))
+    if not paths:
+        return None
+    with db.pool.connection() as conn:
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext('aiflow4-hot-file-reservations'))")
+            conn.execute(
+                "DELETE FROM hot_file_reservations h WHERE h.reserved_at < now() - %s * interval '1 second'"
+                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id::text = h.run_id AND r.status = 'running')"
+                " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key"
+                " AND t.status IN ('In Verify', 'Human review'))", (RESERVATION_GRACE_S,))
+            held = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
+                                " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path",
+                                (paths, ticket_key)).fetchall()
+            if held and not force:
+                return held[0]["ticket_key"], [r["path"] for r in held if r["ticket_key"] == held[0]["ticket_key"]]
+            for path in paths:
+                conn.execute(
+                    "INSERT INTO hot_file_reservations (path, ticket_key, run_id) VALUES (%s,%s,%s)"
+                    " ON CONFLICT (path) DO UPDATE SET ticket_key=EXCLUDED.ticket_key, run_id=EXCLUDED.run_id,"
+                    " reserved_at=now()", (path, ticket_key, run_id))
+    return None
+
+
+def unreserve(db, run_id: str) -> None:
+    db.run("DELETE FROM hot_file_reservations WHERE run_id=%s", (run_id,))
+
+
 def released_by_wait(blocked_since: datetime | None, now: datetime | None = None) -> bool:
     """A ticket that waited longer than MAX_WAIT since it was first held back starts anyway."""
     if blocked_since is None:

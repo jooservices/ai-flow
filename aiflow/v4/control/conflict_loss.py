@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 COMPLETED = ("merged", "human", "rework", "failed")
 DEFINITION = ("Share lost to conflicts: verifications sent back for rework only because the branch conflicts with "
-              "the base branch, divided by all completed verifications (merged, reworked, failed). "
+              "the base branch, divided by all completed verifications (merged, handed to a person, reworked, failed). "
               "Time spent: those verifications plus the dev rework runs they triggered and the re-verifications "
               "that followed. Branches that AI Flow updates automatically with a clean merge are not counted.")
 

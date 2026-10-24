@@ -13,7 +13,8 @@ for STALE_AFTER_S is dropped so it cannot block the queue. Entries are kept as `
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 log = logging.getLogger("aiflow4.merge_queue")
 STALE_AFTER_S = 1200  # a verify run waits for CI on the new head between two calls
@@ -56,7 +57,8 @@ def advance(github, repo_name: str, number: int) -> dict[str, Any]:
     """On the pull request's turn: bring its branch up to date with the base.
 
     Returns {"state": "current"} when nothing is behind, {"state": "updated", "head_sha"} after a clean update, or
-    {"state": "conflict", "message"} when GitHub could not merge the base in (a real conflict)."""
+    {"state": "conflict", "message"} when GitHub reports a merge conflict, or {"state": "error", "message"} for any
+    other failure (permission, service): that is not a conflict."""
     try:
         pr = github.pr(repo_name, number)
         base, head = (pr.get("base") or {}).get("ref"), (pr.get("head") or {}).get("ref")
@@ -67,27 +69,64 @@ def advance(github, repo_name: str, number: int) -> dict[str, Any]:
     if not behind:
         return {"state": "current", "head_sha": (pr.get("head") or {}).get("sha", "")}
     res = github.update_branch(repo_name, number)
-    if not res.get("ok"):
+    if res.get("ok"):
+        return {"state": "updated", "head_sha": github.pr(repo_name, number)["head"]["sha"]}
+    if res.get("conflict"):  # only a real merge conflict goes back to a developer AI
         return {"state": "conflict", "message": res.get("message", "")}
-    return {"state": "updated", "head_sha": github.pr(repo_name, number)["head"]["sha"]}
+    return {"state": "error", "message": res.get("message", "") or "the branch update failed"}
+
+
+@contextmanager
+def repo_lock(db, repo: str) -> Iterator[bool]:
+    """Hold the merge lock of one repository from the queue turn through the merge (False: another call holds it).
+
+    A session advisory lock on its own connection: it is released here, and by PostgreSQL when the control process
+    dies, so a crashed merge never blocks the repository."""
+    key = f"aiflow4-merge-queue:{repo}"
+    with db.pool.connection() as conn:
+        got = bool(conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (key,)).fetchone()["got"])
+        try:
+            yield got
+        finally:
+            if got:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+
+def _waiting(place: dict[str, Any], message: str = "") -> dict[str, Any]:
+    ahead = ", ".join(place["ahead"])
+    return {"merged": False, "queued": True, "position": place["position"], "ahead": place["ahead"],
+            "message": message or f"waiting in the merge queue behind {ahead}"}
 
 
 def merge_next(db, github, repo: str, number: int, ticket_key: str, run_id: str,
                merge: Callable[[], dict]) -> dict[str, Any]:
-    """The whole queue step for one `/v1/github/merge` call. `merge()` performs the real merge."""
+    """The whole queue step for one `/v1/github/merge` call. `merge()` performs the real merge.
+
+    The turn, the branch update and the merge run under the repository lock, so two concurrent calls can never
+    both merge: one that finds the lock taken is told to wait and asks again."""
     repo_name = repo.split("/", 1)[-1]
     place = turn(db, repo, number, ticket_key, run_id)
     if not place["turn"]:
-        return {"merged": False, "queued": True, "position": place["position"], "ahead": place["ahead"],
-                "message": f"waiting in the merge queue behind {', '.join(place['ahead'])}"}
-    step = advance(github, repo_name, number)
-    if step["state"] == "conflict":
-        leave(db, repo, number)
-        return {"merged": False, "conflict": True, "message": step["message"] or "conflicts with the base"}
-    if step["state"] == "updated":
-        return {"merged": False, "updated": True, "head_sha": step["head_sha"], "mergeable_state": "unknown",
-                "message": "branch brought up to date with the base; waiting for checks on the new head"}
-    res = merge()
-    if res.get("merged"):
-        finish(db, repo, number, True)
-    return res
+        return _waiting(place)
+    with repo_lock(db, repo) as locked:
+        if not locked:
+            return _waiting(place, "another merge of this repository is in progress; waiting for it")
+        place = turn(db, repo, number, ticket_key, run_id)  # the queue may have changed while the lock was taken
+        if not place["turn"]:
+            return _waiting(place)
+        step = advance(github, repo_name, number)
+        if step["state"] == "conflict":
+            leave(db, repo, number)
+            return {"merged": False, "conflict": True, "message": step["message"] or "conflicts with the base"}
+        if step["state"] == "error":
+            # permission or service failure: not a conflict, so the work is not sent back to a developer AI
+            leave(db, repo, number)
+            return {"merged": False, "update_failed": True,
+                    "message": "the branch could not be brought up to date: " + step["message"]}
+        if step["state"] == "updated":
+            return {"merged": False, "updated": True, "head_sha": step["head_sha"], "mergeable_state": "unknown",
+                    "message": "branch brought up to date with the base; waiting for checks on the new head"}
+        res = merge()
+        if res.get("merged"):
+            finish(db, repo, number, True)
+        return res

@@ -675,6 +675,7 @@ var S = {
   dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
+  dashboardDisagreements: { rows: null, error: '', loading: false, loadedAt: 0 },
   dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
   layouts: { person: '', pages: {}, busy: false, mode: '', drag: null, chain: Promise.resolve() },
@@ -744,6 +745,7 @@ function viewOf(path) {
   return 'cc';
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
+function inColumn(ticket, column) { return ticket.status === column || (column === 'Human review' && ticket.status === 'Ready to merge'); }
 var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
@@ -968,7 +970,7 @@ function doing(a) {
   return 'waiting for a ready ticket';
 }
 function runTone(o) { return { done: 'ok', PASS: 'ok', DONE: 'ok', merged: 'ok', answered: 'ok', escalated: 'crit', human: 'info', rework: 'warn', blocked: 'warn', quota: 'warn', failed: 'crit', timeout: 'crit', lost: 'crit', released: 'muted', running: 'info' }[o] || 'muted'; }
-function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
+function stTone(s) { return { 'Done': 'ok', 'In Progress': 'info', 'In Verify': 'info', 'Human review': 'info', 'Ready to merge': 'info', 'Needs owner': 'crit', 'Intake': 'warn' }[s] || 'muted'; }
 
 /* ---------- fetch ---------- */
 function poll() {
@@ -1639,6 +1641,33 @@ function loadDashboardWaiting(force) {
     else if ((S.view === 'work' || S.view === 'delivery') && S.data) renderDBody();
   });
 }
+function loadDashboardDisagreements() {
+  var state = S.dashboardDisagreements;
+  if (state.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
+  if (state.rows !== null && Date.now() - state.loadedAt < 30000) return;
+  state.loading = true;
+  fetch('/v1/dashboard/disagreements', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) { state.rows = d.tickets || []; state.error = ''; })
+    .catch(function (e) { state.error = String(e.message || e); if (state.rows === null) state.rows = []; })
+    .then(function () {
+      state.loading = false; state.loadedAt = Date.now();
+      if (S.view === 'cc' && S.data) renderDashboard();
+    });
+}
+function disagreementsPanel() {
+  var state = S.dashboardDisagreements, rows = state.rows || [];
+  var h = '<section class="panel" data-block="disagreements" id="p-disagreements"><div class="panel-h"><h2>Jira and GitHub disagree</h2><span class="hint">More than five minutes apart · the flow keeps fixing them</span></div>';
+  if (state.error) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (state.rows === null) return h + '<div class="muted">Loading…</div></section>';
+  if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>';
+  h += '<div class="tablebox"><table><thead><tr><th>Ticket</th><th>Jira</th><th>Pull request</th><th>The flow will set</th><th>For</th><th>Why it is not fixed yet</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
+  });
+  return h + '</tbody></table></div></section>';
+}
 function loadDashboardQuota(force) {
   if (!S.consoleUser || !consoleCan('view.dashboard') || consoleCan('view.machines_ai')) return;
   var quota = S.dashboardQuota, user = S.consoleUser.user || '';
@@ -1937,10 +1966,11 @@ function renderDashboard() {
   var canSeeMachines = !S.consoleUser || consoleCan('view.machines_ai');
   var root = $('#view-cc'); if (!root) return;
   if (!canSeeMachines) loadDashboardQuota(false);
+  loadDashboardDisagreements();
   var oldSearch = $('#dash-project-search'), focusSearch = oldSearch && document.activeElement === oldSearch;
   var cursor = focusSearch && oldSearch.selectionStart;
   var d = D(), tickets = d.tickets.filter(function (t) { return t.type !== 'Epic'; }), totals = d.totals || {};
-  var inFlightStatuses = ['In Progress', 'In Verify', 'Human review'];
+  var inFlightStatuses = ['In Progress', 'In Verify', 'Human review', 'Ready to merge'];
   var inFlight = tickets.filter(function (t) { return inFlightStatuses.indexOf(t.status) >= 0; }).length;
   var waiting = dashboardVisibleWaitingTickets(d.tickets, S.dashboardWaiting.keys);
   var waitingCount = waiting.length;
@@ -1968,7 +1998,7 @@ function renderDashboard() {
     return (left - right) * S.dashboardSortDir;
   });
   var recentRuns = d.active_runs.slice().sort(function (a, b) { return (a.elapsed_s || 0) - (b.elapsed_s || 0); }).slice(0, 8);
-  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return t.status === c[0]; }).length; });
+  var flowCounts = STATUS_COLS.map(function (c) { return tickets.filter(function (t) { return inColumn(t, c[0]); }).length; });
   var flowMax = Math.max.apply(null, flowCounts.concat([1]));
   var flow = STATUS_COLS.map(function (c, index) {
     var count = flowCounts[index], color = c[0] === 'Done' ? 'var(--good)' :
@@ -2017,7 +2047,7 @@ function renderDashboard() {
   h += '</section><section class="panel" data-block="waiting"><div class="panel-h"><h2>Waiting for you</h2><span class="hint">Human review or owner decision</span></div><div class="att">';
   if (!waiting.length) h += '<div class="empty">Nothing is waiting on a person.</div>';
   waiting.slice(0, 12).forEach(function (t) { h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(t.key) + '"><span class="pill" data-tone="' + (t.status === 'Needs owner' ? 'warn' : 'info') + '">' + esc(t.status) + '</span><span class="t"><span class="mono muted">' + esc(t.key) + '</span> ' + esc(t.summary) + '<span class="d">' + esc(t.project) + '</span></span><span class="muted">Open</span></button>'; });
-  h += '</div></section>' + escalationsPanel() + '</section>';
+  h += '</div></section>' + disagreementsPanel() + escalationsPanel() + '</section>';
   var tokenTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.tokens || 0); }, 0);
   var costTotal = (S.dashboardUsage || []).reduce(function (n, row) { return n + Number(row.cost_usd || 0); }, 0);
   var providers = Object.keys(PROVIDER).filter(function (key) { return (S.dashboardUsage || []).some(function (row) { return row.key === key; }) || d.accounts.some(function (a) { return a.provider === key; }); });
@@ -2513,7 +2543,7 @@ function projTickets() { return D().tickets.filter(function (t) { return S.proje
 function dashboardWorkStatusMatches(ticket, filter) {
   if (!filter || filter === 'all') return true;
   if (filter === 'done') return ticket.status === 'Done';
-  if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review'].indexOf(ticket.status) >= 0;
+  if (filter === 'in-flight') return ['In Progress', 'In Verify', 'Human review', 'Ready to merge'].indexOf(ticket.status) >= 0;
   if (filter === 'waiting') return dashboardVisibleWaitingTickets(D().tickets, S.dashboardWaiting.keys).some(function (row) { return row.key === ticket.key; });
   return ticket.status === filter;
 }
@@ -2657,7 +2687,7 @@ function renderDBody() {
 
   h += '<section class="panel" data-block="board"' + (boardOnly ? '' : ' id="d-board"') + ' aria-labelledby="h-board"><div class="panel-h"><h2 id="h-board">Board</h2><span class="hint">Mirrors Jira every 20 s; cards move as workers claim, finish and verify</span></div><div class="board">';
   STATUS_COLS.forEach(function (c) {
-    var items = list.filter(function (t) { return t.status === c[0]; });
+    var items = list.filter(function (t) { return inColumn(t, c[0]); });
     if (c[0] === 'Done') items.sort(function (a, b) { return (a.updated_age_s || 0) - (b.updated_age_s || 0); });
     h += '<div class="col"><div class="col-h"><span>' + c[1] + '</span><span class="count">' + items.length + '</span></div>';
     if (!items.length) h += '<div class="col-empty">Nothing here</div>';
@@ -3726,6 +3756,21 @@ function timeSec(tl) {
   h += '</div><div class="legend">' + Object.keys(TL_KIND).filter(function (k) { return (tt.seconds_by_kind || {})[k] != null; }).map(function (k) { return '<span><i class="tl-' + k + '"></i>' + TL_KIND[k] + '</span>'; }).join('') + '</div></div>';
   return h;
 }
+function mergeSec(det) {
+  var m = det.merge || {}, moves = det.moves || [];
+  var link = m.pr_url ? '<a href="' + esc(m.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
+  var h = '<div class="dsec" data-merge-facts><h4>Pull request and merge</h4><div class="facts">' + fact('Pull request', link) + fact('State on GitHub', esc(m.pr_state || '—')) +
+    fact('Approved', m.approved_at ? when(m.approved_at) : '—') + fact('Merged', m.merged_at ? when(m.merged_at) + (m.merged_by ? ' · ' + esc(m.merged_by) : '') : '—') +
+    fact('Merge commit', m.merge_sha ? '<span class="mono">' + esc(String(m.merge_sha).slice(0, 10)) + '</span>' : '—') +
+    fact('Approval to merge', m.approval_to_merge_s != null ? mmss(m.approval_to_merge_s) : '—') + '</div>';
+  if (m.note) h += '<div class="small">' + esc(m.note) + '</div>';
+  if (moves.length) {
+    h += '<h4>Moves and their cause</h4><ul class="checklist">';
+    moves.forEach(function (v) { h += '<li><span class="mono small">' + when(v.ts) + '</span> ' + esc((v.from_status || '—') + ' → ' + v.to_status) + ' · <b>' + esc(v.cause) + '</b>' + (v.detail ? ' · ' + esc(v.detail) : '') + '</li>'; });
+    h += '</ul>';
+  }
+  return h + '</div>';
+}
 function drawerTicket(key) {
   var t = ticketBy(key) || { key: key, summary: key, status: '?', type: '', labels: [], blocked_by: [] };
   var det = S.ticket[key];
@@ -3745,6 +3790,7 @@ function drawerTicket(key) {
     var passed = t.status === 'Done';
     b += '<div class="dsec"><h4>Acceptance criteria</h4><ul class="checklist">' + acs.map(function (a) { return '<li><span class="' + (passed ? 'ico-ok' : 'ico-pend') + '">' + (passed ? ICON.ok : ICON.pend) + '</span><span>' + esc(a) + '</span></li>'; }).join('') + '</ul></div>';
   }
+  if (det.merge) b += mergeSec(det);
   if (det.timeline) b += timeSec(det.timeline);
   if (det.capacity_decision) {
     var decision = det.capacity_decision, estimate = decision.estimate || {};

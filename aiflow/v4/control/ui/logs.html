@@ -76,8 +76,8 @@
       }
       renderSources();
     }
-    async function pollRequest(id, attempt) {
-      if (id !== state.request) return;
+    async function pollRequest(id, attempt, token) {
+      if (token !== state.request) return;
       if (attempt >= 35) {
         showLines({ available: false, message: 'The node agent did not return logs. Try again when the node is available.' });
         state.busy = false; renderSources(); return;
@@ -87,22 +87,22 @@
         const data = await jsonRequest('/v1/logs/requests/' + encodeURIComponent(id));
         if (data.status === 'queued' || data.status === 'running') {
           showLines({ available: null, message: 'Waiting for the node agent to read this source…' });
-          pending = true; window.setTimeout(() => pollRequest(id, attempt + 1), 1000); return;
+          pending = true; window.setTimeout(() => pollRequest(id, attempt + 1, token), 1000); return;
         }
         showLines(data);
       } catch (error) { showLines({ available: false, message: 'Log source could not be read. ' + error.message }); }
-      finally { if (!pending && id === state.request) { state.busy = false; renderSources(); } }
+      finally { if (!pending && token === state.request) { state.busy = false; renderSources(); } }
     }
     async function readSource(sourceId) {
       const source = state.sources.find(item => item.id === sourceId);
       if (!source || !source.available || state.busy) return;
-      state.selected = sourceId; state.busy = true; state.request++;
+      state.selected = sourceId; state.busy = true; const token = ++state.request;
       renderSources();
       showLines({ available: null, message: 'Requesting recent log lines…' });
       try {
         const data = await jsonRequest('/v1/logs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ source_id: sourceId }) });
-        pollRequest(data.id, 0);
+        pollRequest(data.id, 0, token);
       } catch (error) {
         state.busy = false; renderSources();
         showLines({ available: false, message: 'Log source could not be read. ' + error.message });

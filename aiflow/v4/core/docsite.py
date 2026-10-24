@@ -237,6 +237,7 @@ SCREEN_LINE_VIEWS += (
                 r"get\('status'\)"), "work"),
     (re.compile(r"history\.replaceState|boardPath|renderDBody\(\); tick\(\)"), "work"),
     (re.compile(r"pollDashboardUsage"), "cc"),
+    (re.compile(r"logs-nav"), "cc"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.

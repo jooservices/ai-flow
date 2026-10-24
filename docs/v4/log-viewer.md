@@ -2,6 +2,8 @@
 
 **Assumes:** AI Flow v4 is installed, a node is registered, and the person has an authenticated Command Center session.
 
+**Console screens:** Command Center (`cc`), which carries the **Host/service logs** link, and the separate `/logs` page.
+
 The administrator opens **Host/service logs** from the Command Center. The screen lists named sources for every
 registered node and can request a snapshot of the latest 100 lines from one source. It does not follow new lines
 live. Reads run through the node agent with fixed argument lists; the screen has no command or file-path input.
@@ -12,6 +14,16 @@ Only the `administrator` role can open `/logs` or use the log-source and log-req
 `super_admin` role aliases normalize to `administrator`. Other roles, including SA and Team Lead, cannot see the
 navigation link and receive an authorization refusal from both the screen route and APIs. An authenticated
 session is required even when the general console login gate is disabled.
+
+## API
+
+- `GET /v1/log-sources` lists the sources the person may read.
+- `POST /v1/logs` queues a read of one listed source (body: `source_id`) and returns the request id.
+- `GET /v1/logs/requests/{operation_id}` returns the status and, once done, the redacted lines or an
+  unavailable/empty message.
+- `GET /v1/nodes/{name}/operations` (the general operation log) never includes log output.
+- `POST /v1/nodes/{name}/operations/{operation_id}/result` is how the node agent posts the result; the control API
+  redacts and bounds log output before storing it.
 
 ## Listed sources
 

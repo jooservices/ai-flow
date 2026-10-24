@@ -1,5 +1,7 @@
 # Machines, AI accounts and worker counts live in the database
 
+**Console screens:** Machines and AI (`machines`)
+
 A machine and the AI accounts on it are runtime facts of an installation, not source code. The owner manages them
 on the **Machines and AI** screen ([machines-and-ai.md](machines-and-ai.md)); nothing needs a file edit, a commit
 or a restart, and the control repository (`aiflow-control`) is never written.

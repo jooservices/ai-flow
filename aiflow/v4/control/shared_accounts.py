@@ -166,13 +166,17 @@ def may_take(db, acc: Account, node: str, *, as_peer: bool = False) -> tuple[boo
     return True, ""
 
 
-def claim_run(db, acc: Account, values: tuple) -> bool:
+def claim_run(db, acc: Account, values: tuple, *, max_node_runs: int | None = None,
+              hostname: str = "", max_host_runs: int | None = None) -> bool:
     """Atomically enforce account and machine capacity limits before inserting a running session."""
     node = str(values[7])
     if not acc.runs_on(node):
         return False
     with db.pool.connection() as conn:
         with conn.transaction():
+            if hostname:
+                # Serialize claims by host so workers on separate machines share the same load budget.
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("host-load:" + hostname,))
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("account-sessions:" + acc.id,))
             machines = sorted(set(acc.machines))
             # All claims take machine locks in the same order. Shared claims also use the locked counts to enforce
@@ -180,6 +184,17 @@ def claim_run(db, acc: Account, values: tuple) -> bool:
             for machine in machines:
                 conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                              (f"aiflow4-machine-sessions:{machine}",))
+            if max_node_runs is not None:
+                current = conn.execute("SELECT count(*) AS n FROM runs WHERE node=%s AND status='running'",
+                                       (node,)).fetchone()
+                if int(current["n"] or 0) >= max_node_runs:
+                    return False
+            if hostname and max_host_runs is not None:
+                current_host = conn.execute(
+                    "SELECT count(*) AS n FROM runs r JOIN nodes n ON n.name=r.node"
+                    " WHERE r.status='running' AND lower(n.metrics->>'hostname')=%s", (hostname,)).fetchone()
+                if int(current_host["n"] or 0) >= max_host_runs:
+                    return False
             # the limit is read under the lock, so a concurrent change is never missed
             stored = conn.execute("SELECT session_limit FROM shared_accounts WHERE id=%s", (acc.id,)).fetchone()
             if stored:

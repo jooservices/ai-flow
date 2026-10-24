@@ -2191,6 +2191,10 @@ function renderCC() {
     var mm = n.metrics || {};
     h += '<span class="small mono">' + esc(mm.hostname || '—') + (n.purpose ? ' · ' + esc(n.purpose) : '') + '</span>';
     h += nodeMetrics(n);
+    var loadState = n.load_state || {}, hostLoadState = n.host_load_state || {};
+    if (loadState.mode === 'held') h += '<span class="offnote" style="color:var(--crit)">' + esc(loadState.reason || 'Held back by machine load') + ' · observed ' + esc(when(loadState.measured_at)) + '</span>';
+    else if (loadState.mode === 'throttled') h += '<span class="offnote" style="color:var(--warn)">' + esc(loadState.reason || 'Reduced offers due to machine load') + ' · observed ' + esc(when(loadState.measured_at)) + '</span>';
+    if (hostLoadState.mode === 'held') h += '<span class="offnote" style="color:var(--crit)">' + esc(hostLoadState.reason || 'Held back by host load') + ' · observed ' + esc(when(hostLoadState.measured_at)) + '</span>';
     h += '<span class="slots">Slots ' + sl + '<span>' + runs + ' / ' + n.slots_total + '</span><span class="spacer"></span><span class="mono">' + relLabel(n) + '</span> · <span class="mono" data-since="' + (n.heartbeat_age_s == null ? '' : n.heartbeat_age_s) + '" data-fmt="ago"></span></span>';
     h += '<span class="node-accs">';
     if (!accs.length) h += '<span class="node-acc"><span class="what">No accounts assigned (aiflow-control/accounts.yaml)</span></span>';
@@ -3805,6 +3809,22 @@ function drawerNode(name) {
   if (!accs.length) b += '<div class="empty">No accounts assigned.</div>';
   accs.forEach(function (a) { b += '<div class="node-acc" style="font-size:13px"><span class="sdot" data-tone="' + accTone(a) + '"></span><span class="who">aiflow4-worker@' + esc(a.id) + '</span><span class="what">' + esc(doing(a)) + '</span></div>'; });
   b += '</div>';
+  var machineLimits = n.load_limits || { cpu_load_per_cpu: 0.85, memory_used_pct: 85, disk_free_pct: 10 };
+  var hostLimits = n.host_load_limits || { cpu_load_per_cpu: 0.85 };
+  var loadState = n.load_state || {}, hostLoadState = n.host_load_state || {};
+  b += '<div class="dsec"><h4>Load-aware offers</h4><div class="small">Held-back offers resume below the limit by a fixed recovery margin: 0.05 load per CPU or 5 percentage points. Existing runs continue.</div>';
+  if (loadState.mode === 'held') b += '<div class="offnote" style="color:var(--crit);margin-top:6px">' + esc(loadState.reason || 'Machine held back') + ' · observed ' + esc(when(loadState.measured_at)) + '</div>';
+  else if (loadState.mode === 'throttled') b += '<div class="offnote" style="color:var(--warn);margin-top:6px">' + esc(loadState.reason || 'Offers reduced by half') + ' · observed ' + esc(when(loadState.measured_at)) + '</div>';
+  if (hostLoadState.mode === 'held') b += '<div class="offnote" style="color:var(--crit);margin-top:6px">' + esc(hostLoadState.reason || 'Host held back') + ' · observed ' + esc(when(hostLoadState.measured_at)) + '</div>';
+  if (consoleCan('nodes.manage')) {
+    b += '<div class="flexrow" style="margin-top:8px"><label>CPU load / CPU <input id="load-cpu-limit" type="number" min="0.01" max="8" step="0.01" value="' + esc(machineLimits.cpu_load_per_cpu) + '" style="width:92px"></label>';
+    b += '<label>Memory used % <input id="load-memory-limit" type="number" min="0.01" max="100" step="0.1" value="' + esc(machineLimits.memory_used_pct) + '" style="width:92px"></label>';
+    b += '<label>Free disk % <input id="load-disk-limit" type="number" min="0" max="99.9" step="0.1" value="' + esc(machineLimits.disk_free_pct) + '" style="width:92px"></label>';
+    b += '<label>Host CPU load / CPU <input id="load-host-cpu-limit" type="number" min="0.01" max="8" step="0.01" value="' + esc(hostLimits.cpu_load_per_cpu) + '"' + (m.hostname ? '' : ' disabled title="Set after this machine reports its hostname"') + ' style="width:92px"></label>';
+    b += '<button class="btn sm primary" data-act="node-load-save" data-node="' + esc(n.name) + '">Save load limits</button></div>';
+    if (!m.hostname) b += '<div class="small">Host limits become editable after the next machine heartbeat reports its hostname.</div>';
+  }
+  b += '</div>';
   if (consoleCan('nodes.manage')) {
     b += '<div class="dsec"><h4>Install and repair</h4>';
     if (n.status === 'online' && n.has_agent) {
@@ -3989,6 +4009,18 @@ function machineRequest(url, options) {
   return fetch(url, options || {}).then(function (r) {
     return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); return d; });
   });
+}
+function saveMachineLoadLimits(name) {
+  var payload = {
+    cpu_load_per_cpu: Number($('#load-cpu-limit').value),
+    memory_used_pct: Number($('#load-memory-limit').value),
+    disk_free_pct: Number($('#load-disk-limit').value),
+    host_cpu_load_per_cpu: $('#load-host-cpu-limit').value === '' ? null : Number($('#load-host-cpu-limit').value)
+  };
+  machineRequest('/v1/machines/' + encodeURIComponent(name) + '/load-limits', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }).then(function () { toast('Load limits saved', name + ' will use the new machine and host limits.', 'ok'); poll(); })
+    .catch(function (e) { toast('Could not save load limits', String(e.message || e), 'warn'); });
 }
 function openMachineForm() { S.machines.addMachine = !S.machines.addMachine; S.machines.error = ''; renderMachines(); }
 function submitMachineJoin() {
@@ -5196,6 +5228,7 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'node-install') startNodeOperation(el.getAttribute('data-node'), 'install');
   else if (act === 'node-repair') startNodeOperation(el.getAttribute('data-node'), 'repair');
+  else if (act === 'node-load-save') saveMachineLoadLimits(el.getAttribute('data-node'));
   else if (act === 'join-command') createJoinCommand(el.getAttribute('data-node'));
   else if (act === 'add-node') {
     var newName = window.prompt('Node name');

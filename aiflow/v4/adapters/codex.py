@@ -20,6 +20,7 @@ class CodexAdapter(Adapter):
                "-c", 'approval_policy="never"', "-c", "features.apps=false"]
         if sandbox == "workspace-write":
             cmd += ["-c", "sandbox_workspace_write.network_access=true",
+                    "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
                     # the shared caches and temp dir on disk (see scratch_env) are writable inside the sandbox
                     "-c", f'sandbox_workspace_write.writable_roots=["{scratch_root(spec)}"]']
         if spec.model:

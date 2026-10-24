@@ -30,6 +30,7 @@ def test_codex_downgrades_danger_full_access_and_only_adds_scratch_root(tmp_path
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert "danger-full-access" not in argv
     assert argv[argv.index("--cd") + 1] == str(worktree)
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in argv
     roots_arg = next(arg for arg in argv if arg.startswith("sandbox_workspace_write.writable_roots="))
     assert json.loads(roots_arg.partition("=")[2]) == [str(scratch_root(spec))]
 

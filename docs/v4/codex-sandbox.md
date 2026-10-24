@@ -33,9 +33,10 @@ would be much broader than one ticket's worktree.
 ## Verification and boundaries
 
 The adapter test checks that even a `RunSpec` requesting `danger-full-access` produces `--sandbox workspace-write`
-and adds only the shared scratch/cache root. Codex's `workspace-write` mode supplies write access to `--cd`'s
-worktree; Git metadata is not added as a writable root. A linked-worktree test exercises the worker's post-run
-commit path with `Git.commit_all`.
+and adds only the shared scratch/cache root. It also sets `sandbox_workspace_write.exclude_slash_tmp=true`, since
+Codex otherwise includes `/tmp` among the sandbox's writable locations. Codex's `workspace-write` mode supplies
+write access to `--cd`'s worktree; Git metadata is not added as a writable root. A linked-worktree test exercises
+the worker's post-run commit path with `Git.commit_all`.
 
 This decision accepts write access to the worktree and the shared scratch/cache root, as required for edits and
 package caches. Writes elsewhere, including the repository mirror's Git metadata, remain outside the configured

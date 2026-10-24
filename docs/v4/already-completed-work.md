@@ -13,3 +13,11 @@ marked in run details and has a zero role-health failure score; an ordinary fail
 
 The check applies only to a clean result. A failed verdict, tool or service issue, or other worker error keeps its
 normal failure path. Pull requests are looked up by the exact repository and branch through the fenced control API.
+
+**Console screens:** `work`, `delivery`
+
+## Interfaces
+
+- `GET /v1/github/pr` finds the open pull request of a run's branch (repository and head), fenced to the run.
+- `GET /v1/state` and `GET /v1/deploy/state` carry `already_done` on each ticket's last run, which the board uses
+  to show "Already done · sent to verification" and the pull request link.

@@ -106,6 +106,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
     "renderRuntimeSettings": ("settings",),
+    "loadRuntimeSettings": ("settings",),
+    "pollRuntimeSettingChange": ("settings",),
+    "saveRuntimeSetting": ("settings",),
     "addProjectRepository": ("projects",),
     "saveProjectRepositories": ("projects",),
     "githubAppTarget": ("integrations",),
@@ -182,6 +185,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),

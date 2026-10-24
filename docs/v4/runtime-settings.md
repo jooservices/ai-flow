@@ -9,7 +9,10 @@ tokens are not editable here.
 
 The console API is `GET /v1/runtime-settings` to list key metadata, `POST /v1/runtime-settings` to set a value and
 queue its restart, and `GET /v1/runtime-settings/changes/{change_id}` to read the result. The request body contains
-`scope`, `project`, `key`, and `value`; responses contain metadata and service results only.
+`scope`, `project`, `key`, and `value`; responses contain metadata and service results only. The control-node
+protocol uses `POST /v1/nodes/{name}/heartbeat` to advertise a public encryption key and key-name inventory, and
+`POST /v1/nodes/{name}/operations/{operation_id}/result` to report an operation outcome. The heartbeat and result
+never carry a value in plaintext; the result's encrypted recovery snapshot is omitted from owner responses.
 
 ## Files and key inventory
 
@@ -22,6 +25,11 @@ labelled **Secret**; other names are labelled **Setting**.
 | --- | --- | --- |
 | Control runtime secret or setting | `/etc/aiflow/secrets/runtime.env` | `control-api-a` and `control-api-b` |
 | Project environment | `/etc/aiflow/projects/<KEY>.env` on each registered machine serving that project | Worker services assigned to those machines |
+
+Control runtime changes for `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` are refused. These
+credentials are consumed by scheduled backups in `control-loops`, which does not load `runtime.env`; the screen
+does not claim to update or restart that process. Other non-reserved control runtime keys are applied to both API
+containers. Jira, GitHub, installation and generated control credentials keep their existing flows.
 
 The control installer creates the runtime env file and the projects directory with owner-only permissions. The
 Jira, GitHub, console-login and generated control secret stores keep their existing flows and are not included in
@@ -44,10 +52,14 @@ The page shows the affected services before saving and submits a **Save and rest
   accepting work, and reporting its node encryption key before the change is accepted. The control API stops new
   assignments to those machines, then each node waits for its affected workers to leave `working` or `probing`
   state and remain idle for five seconds. The wait is bounded at 65 minutes. Worker services restart one at a time;
-  stopped worker units read the new file when they next start.
+  stopped worker units read the new file when they next start. The machines remain drained until every apply
+  operation passes its health checks. If one machine fails, queued peer changes are cancelled and each successful
+  peer receives an encrypted snapshot of its own prior file to restore and health-check before work resumes.
 - After a failed write, restart, or health check, the node atomically restores the previous file and checks the
   affected services against that restored value. A node resumes its prior work-acceptance state when its operation
-  reports. The Settings page polls each operation and names the node and service that failed.
+  reports, once the fleet coordinator confirms the whole change succeeded or recovered. If a peer rollback or its
+  health check fails, the screen names the node and service and the affected machines remain paused. Operation
+  results and the owner screen expose only key names and recovery outcomes; snapshots stay encrypted to their node.
 
 If a project machine is offline or already draining, save is refused and no file changes. If active work does not
 drain before the timeout, the node keeps the previous value and reports the failure without restarting a worker.

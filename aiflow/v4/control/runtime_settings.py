@@ -29,6 +29,9 @@ _RESERVED = {
     "POSTGRES_PASSWORD", "ZO_ROOT_USER_PASSWORD",
 }
 _SECRET_WORDS = ("TOKEN", "PASSWORD", "SECRET", "PRIVATE_KEY", "API_KEY", "CREDENTIAL", "BASIC")
+# These values are read by control-loops for scheduled S3 backups. That process does not load runtime.env,
+# so reject them here rather than accept a change that would appear successful but leave backup auth unchanged.
+_UNSUPPORTED_CONTROL_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 
 
 class RuntimeSettingBody(BaseModel):
@@ -203,20 +206,138 @@ def _recent_changes(ctx) -> list[dict]:
 
 
 def _change_status(ctx, change_id: str) -> dict:
-    rows = ctx.db.all("SELECT id,node,status,result,created_at,completed_at,payload->'services' AS services"
+    rows = ctx.db.all("SELECT id,node,status,result,created_at,completed_at,payload->'services' AS services,"
+                      "payload->>'phase' AS phase"
                       " FROM node_operations WHERE payload->>'change_id'=%s ORDER BY node", (change_id,))
     if not rows:
         raise HTTPException(404, "runtime setting operation not found")
-    operations = []
+    operations, rollbacks = [], []
     for row in rows:
         result = row.get("result") or {}
-        operations.append({"id": str(row["id"]), "node": row["node"], "status": row["status"],
-                           "result": result, "services": row.get("services") or [],
-                           "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None})
-    failed = [row for row in operations if row["status"] == "failed"]
-    complete = all(row["status"] in {"completed", "failed"} for row in operations)
-    return {"id": change_id, "status": "failed" if failed else "completed" if complete else "running",
-            "operations": operations}
+        # The encrypted pre-change file snapshot is a one-time node-to-node rollback capability. Never return it
+        # from the owner API; only show the safe outcome fields needed by the Settings screen.
+        safe_result = {key: result[key] for key in ("healthy", "key", "scope", "project", "services", "set",
+                                                     "error", "failed_service", "cancelled") if key in result}
+        payload = {"phase": row.get("phase") or "apply"}
+        item = {"id": str(row["id"]), "node": row["node"], "status": row["status"],
+                "result": safe_result, "services": row.get("services") or [],
+                "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None}
+        (rollbacks if payload.get("phase") == "rollback" else operations).append(item)
+
+    apply_failures = [item for item in operations if item["status"] == "failed"
+                      and not item["result"].get("cancelled")]
+    apply_terminal = all(item["status"] in {"completed", "failed"} for item in operations)
+    rollback_terminal = all(item["status"] in {"completed", "failed"} for item in rollbacks)
+    if not apply_failures:
+        status = "completed" if apply_terminal else "running"
+        recovery = "not_needed"
+    elif not apply_terminal or not rollback_terminal:
+        status, recovery = "rolling_back", "pending"
+    else:
+        status = "failed"
+        unrecovered_apply = any(any(marker in str(item["result"].get("error") or "")
+                                    for marker in ("previous value could not be restored", "rollback health failed"))
+                                for item in apply_failures)
+        successful_nodes = {item["node"] for item in operations if item["status"] == "completed"}
+        restored_nodes = {item["node"] for item in rollbacks
+                          if item["status"] == "completed" and item["result"].get("healthy") is True}
+        recovery = "restored" if not unrecovered_apply and successful_nodes <= restored_nodes else "failed"
+    recovery_failure = next((item for item in operations if item["status"] == "failed" and not
+                             item["result"].get("cancelled") and any(
+                                 marker in str(item["result"].get("error") or "") for marker in
+                                 ("previous value could not be restored", "rollback health failed"))), None)
+    if recovery_failure is None:
+        recovery_failure = next((item for item in rollbacks if item["status"] == "failed"), None)
+    return {"id": change_id, "status": status, "recovery_status": recovery,
+            "recovery_node": recovery_failure["node"] if recovery_failure else "",
+            "recovery_error": recovery_failure["result"].get("error", "") if recovery_failure else "",
+            "operations": operations, "rollbacks": rollbacks}
+
+
+def reconcile_node_change(connection, change_id: str) -> None:
+    """Coordinate a fleet change: keep project nodes drained until apply succeeds or every rollback finishes."""
+    def rows():
+        return connection.execute(
+            "SELECT id,node,action,actor,status,payload,result FROM node_operations"
+            " WHERE payload->>'change_id'=%s ORDER BY id FOR UPDATE", (change_id,)).fetchall()
+
+    current = rows()
+    applies = [row for row in current if (row["payload"] or {}).get("phase") != "rollback"]
+    rollbacks = [row for row in current if (row["payload"] or {}).get("phase") == "rollback"]
+    failures = [row for row in applies if row["status"] == "failed"
+                and not (row["result"] or {}).get("cancelled")]
+
+    if not failures:
+        if applies and all(row["status"] == "completed" for row in applies):
+            for row in applies:
+                connection.execute("UPDATE node_operations SET result=result-'rollback_envelope' WHERE id=%s",
+                                   (row["id"],))
+            _resume_change_nodes(connection, applies)
+        return
+
+    # Operations not yet claimed must not apply the new value after a peer has failed. Mark them terminal so the
+    # screen can explain the aborted fleet change; a node already running is allowed to finish and is rolled back
+    # immediately when its completion arrives.
+    for row in applies:
+        if row["status"] == "queued":
+            connection.execute("UPDATE node_operations SET status='failed',completed_at=now(),result=%s WHERE id=%s",
+                               (J({"healthy": False, "cancelled": True,
+                                   "error": "not applied because another machine failed"}), row["id"]))
+
+    current = rows()
+    applies = [row for row in current if (row["payload"] or {}).get("phase") != "rollback"]
+    rollbacks = [row for row in current if (row["payload"] or {}).get("phase") == "rollback"]
+    rollback_for = {str((row["payload"] or {}).get("rollback_for") or "") for row in rollbacks}
+    for row in applies:
+        result, payload = row["result"] or {}, row["payload"] or {}
+        if row["status"] != "completed" or not result.get("healthy") or not result.get("rollback_envelope"):
+            continue
+        if str(row["id"]) in rollback_for:
+            continue
+        rollback_id = str(uuid.uuid4())
+        rollback_context = f"{change_id}:rollback:{row['id']}"
+        rollback_payload = {"action": "runtime_setting_rollback", "phase": "rollback",
+                            "change_id": change_id, "rollback_for": str(row["id"]),
+                            "scope": payload.get("scope"), "project": payload.get("project"),
+                            "key": payload.get("key"), "rollback_context": rollback_context,
+                            "rollback_envelope": result["rollback_envelope"],
+                            "units": payload.get("units") or [], "services": payload.get("services") or [],
+                            "resume_accepting": payload.get("resume_accepting", True)}
+        connection.execute("INSERT INTO node_operations (id,node,action,actor,payload) VALUES (%s,%s,%s,%s,%s)",
+                           (rollback_id, row["node"], "runtime-setting-rollback", row["actor"], J(rollback_payload)))
+        # Move the encrypted recovery capability to the rollback operation so it is not retained twice.
+        connection.execute("UPDATE node_operations SET result=result-'rollback_envelope' WHERE id=%s", (row["id"],))
+
+    current = rows()
+    applies = [row for row in current if (row["payload"] or {}).get("phase") != "rollback"]
+    rollbacks = [row for row in current if (row["payload"] or {}).get("phase") == "rollback"]
+    apply_terminal = all(row["status"] in {"completed", "failed"} for row in applies)
+    rollback_terminal = all(row["status"] in {"completed", "failed"} for row in rollbacks)
+    if not apply_terminal or not rollback_terminal:
+        return
+    rollback_ok = all(row["status"] == "completed" and (row["result"] or {}).get("healthy") is True
+                      for row in rollbacks)
+    apply_recovery_ok = not any(
+        row["status"] == "failed" and any(
+            marker in str((row["result"] or {}).get("error") or "")
+            for marker in ("previous value could not be restored", "rollback health failed"))
+        for row in applies)
+    successful_have_rollback = all(
+        row["status"] != "completed" or str(row["id"]) in rollback_for or
+        any(str((rb["payload"] or {}).get("rollback_for") or "") == str(row["id"]) for rb in rollbacks)
+        for row in applies)
+    if rollback_ok and apply_recovery_ok and successful_have_rollback:
+        _resume_change_nodes(connection, applies)
+
+
+def _resume_change_nodes(connection, applies: list[dict]) -> None:
+    resumed: dict[str, bool] = {}
+    for row in applies:
+        payload = row["payload"] or {}
+        resumed[row["node"]] = bool(payload.get("resume_accepting", True))
+    for name, accepting in resumed.items():
+        connection.execute("UPDATE nodes SET accepting_work=%s,status=CASE WHEN %s THEN 'online' ELSE 'draining' END"
+                           " WHERE name=%s", (accepting, accepting, name))
 
 
 def install(app: FastAPI, ctx, console_user, audit) -> None:
@@ -236,6 +357,8 @@ def install(app: FastAPI, ctx, console_user, audit) -> None:
                 raise HTTPException(422, "a runtime secret does not have a project name")
             if body.key in _RESERVED or body.key.startswith("AIFLOW4_"):
                 raise HTTPException(422, "this key is reserved for AI Flow connection or installation settings")
+            if body.key in _UNSUPPORTED_CONTROL_KEYS:
+                raise HTTPException(422, "backup storage credentials are not supported by Runtime settings")
             targets, services = _targets(ctx, "secret")
             action = "runtime-setting-control"
         else:
@@ -254,9 +377,10 @@ def install(app: FastAPI, ctx, console_user, audit) -> None:
                 except (ValueError, TypeError):
                     raise HTTPException(409, f"machine {target['name']} has an invalid runtime-setting encryption key") from None
                 payload = {"action": "runtime_setting_project" if body.scope == "project" else "runtime_setting_control",
-                           "change_id": change_id, "scope": body.scope, "project": body.project,
-                           "key": body.key, "value_envelope": value_envelope, "units": target["units"],
-                           "services": services, "resume_accepting": target["resume_accepting"]}
+                           "phase": "apply", "change_id": change_id, "scope": body.scope,
+                           "project": body.project, "key": body.key, "value_envelope": value_envelope,
+                           "units": target["units"], "services": services,
+                           "resume_accepting": target["resume_accepting"]}
                 connection.execute("INSERT INTO node_operations (id,node,action,actor,payload)"
                                    " VALUES (%s,%s,%s,%s,%s)",
                                    (operation_id, target["name"], action, user.subject, J(payload)))

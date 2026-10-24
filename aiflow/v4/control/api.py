@@ -3994,23 +3994,35 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(404, "unknown node operation") from exc
         status = body.status
         with ctx.db.pool.connection() as connection:
+            candidate = connection.execute(
+                "SELECT action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running'",
+                (parsed_id, node)).fetchone()
+            if not candidate:
+                raise HTTPException(404, "unknown or completed node operation")
+            candidate_payload = candidate["payload"] or {}
+            if candidate["action"].startswith("runtime-setting") and candidate_payload.get("change_id"):
+                # Serialize every node result for a change before locking operation rows. This prevents two
+                # completing nodes from each holding one row and deadlocking while the fleet coordinator locks
+                # the whole change set.
+                connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                                   (str(candidate_payload["change_id"]),))
             operation = connection.execute(
                 "SELECT id,action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
                 (parsed_id, node)).fetchone()
             if not operation:
                 raise HTTPException(404, "unknown or completed node operation")
             payload = operation["payload"] or {}
-            if operation["action"] == "runtime-setting-project":
-                resume = payload.get("resume_accepting")
-                connection.execute("UPDATE nodes SET accepting_work=%s,status=CASE WHEN %s THEN 'online' ELSE 'draining' END"
-                                   " WHERE name=%s", (bool(resume), bool(resume), node))
             # Runtime values are delivered only to the node agent and removed from the durable queue record
-            # as soon as it has applied or rolled them back. The remaining metadata contains names only.
+            # as soon as it has applied or rolled them back. A successful project operation remains drained until
+            # every serving node has applied the change, or the coordinator has rolled successful peers back.
             connection.execute(
                 "UPDATE node_operations SET status=%s,result=%s,completed_at=now(),"
-                " payload=CASE WHEN action LIKE 'runtime-setting%%' THEN payload - 'value_envelope' ELSE payload END"
+                " payload=CASE WHEN action LIKE 'runtime-setting%%'"
+                " THEN payload - 'value_envelope' - 'rollback_envelope' ELSE payload END"
                 " WHERE id=%s AND node=%s AND status='running'",
                 (status, J(body.result), parsed_id, node))
+            if operation["action"].startswith("runtime-setting") and payload.get("change_id"):
+                runtime_settings.reconcile_node_change(connection, str(payload["change_id"]))
         updated = operation
         if not updated:
             raise HTTPException(404, "unknown or completed node operation")

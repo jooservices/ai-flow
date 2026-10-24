@@ -6,6 +6,7 @@ import secrets
 from pathlib import Path
 
 from aiflow.v4.control.console_auth import issue_session
+from aiflow.v4.core.controlrepo import Account, Node
 from aiflow.v4.core.runtime_settings_crypto import node_public_key
 from aiflow.v4.core.settings import read_env_file
 from aiflow.v4.node import agent as node_agent
@@ -236,3 +237,91 @@ def test_active_work_is_not_restarted_when_drain_times_out(client, ctx, tmp_path
     result = client.get(f"/v1/runtime-settings/changes/{queued.json()['change_id']}").json()
     assert result["status"] == "failed"
     assert "active worker did not become idle" in result["operations"][0]["result"]["error"]
+
+
+def test_project_failure_rolls_back_successful_peer_before_resuming_work(client, ctx, tmp_path, monkeypatch):
+    first_dir, second_dir = tmp_path / "node1-projects", tmp_path / "node2-projects"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first_file, second_file = first_dir / "TESTWP.env", second_dir / "TESTWP.env"
+    first_file.write_text("SERVICE_TOKEN=old-node-one\n")
+    second_file.write_text("SERVICE_TOKEN=old-node-two\n")
+    first_token = join_and_heartbeat(client, "node1", settings_dir=first_dir)
+    second_token = join_and_heartbeat(client, "node2", settings_dir=second_dir)
+    ctx.repo().nodes["node2"] = Node(name="node2", projects=["TESTWP"])
+    ctx.repo().accounts.append(Account(id="codex-02", provider="codex", node="node2", tier="middle",
+                                       roles=["dev", "verify", "master"]))
+    sign_in(client, ctx)
+    mount_ui(client.app, ctx)
+    ctx.settings.project_env_dir = str(tmp_path / "control-projects")
+    monkeypatch.setattr(operations, "_wait_for_worker_idle", lambda _units: True)
+    active_node = {"name": "node1"}
+    restarts = {"node1": 0, "node2": 0}
+
+    def restart(_unit):
+        restarts[active_node["name"]] += 1
+        # node2's first restart fails, while its own restore restart and node1's coordinated rollback pass.
+        return active_node["name"] != "node2" or restarts["node2"] > 1
+
+    monkeypatch.setattr(operations, "_restart_worker", restart)
+    saved_value = secrets.token_urlsafe(20)
+    queued = client.post("/v1/runtime-settings", json={"scope": "project", "project": "TESTWP",
+                                                        "key": "SERVICE_TOKEN", "value": saved_value})
+    assert queued.status_code == 202
+
+    active_node["name"] = "node1"
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", first_dir)
+    first_operation = next_operation(client, "node1", first_token)
+    first_result = operations.execute(first_operation)
+    assert saved_value not in json.dumps(first_result)
+    finish_operation(client, "node1", first_token, first_operation, first_result)
+    assert read_env_file(first_file)["SERVICE_TOKEN"] == saved_value
+    assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node1'")["accepting_work"] is False
+
+    active_node["name"] = "node2"
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", second_dir)
+    second_operation = next_operation(client, "node2", second_token)
+    try:
+        operations.execute(second_operation)
+    except operations.OperationError as error:
+        failure = {"healthy": False, "error": str(error),
+                   "failed_service": "aiflow4-worker@codex-02.service"}
+    else:
+        raise AssertionError("node2's worker restart should have failed")
+    finish_operation(client, "node2", second_token, second_operation, failure, status="failed")
+    assert read_env_file(second_file)["SERVICE_TOKEN"] == "old-node-two"
+    assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node1'")["accepting_work"] is False
+    assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node2'")["accepting_work"] is False
+
+    active_node["name"] = "node1"
+    monkeypatch.setattr(operations, "PROJECT_ENV_DIR", first_dir)
+    rollback = next_operation(client, "node1", first_token)
+    assert rollback["payload"]["action"] == "runtime_setting_rollback"
+    rollback_result = operations.execute(rollback)
+    assert saved_value not in json.dumps(rollback_result)
+    finish_operation(client, "node1", first_token, rollback, rollback_result)
+
+    assert read_env_file(first_file)["SERVICE_TOKEN"] == "old-node-one"
+    assert read_env_file(second_file)["SERVICE_TOKEN"] == "old-node-two"
+    assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node1'")["accepting_work"] is True
+    assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node2'")["accepting_work"] is True
+    result = client.get(f"/v1/runtime-settings/changes/{queued.json()['change_id']}")
+    assert result.status_code == 200 and result.json()["status"] == "failed"
+    assert result.json()["recovery_status"] == "restored"
+    assert len(result.json()["rollbacks"]) == 1
+    assert result.json()["rollbacks"][0]["status"] == "completed"
+    assert saved_value not in result.text and "rollback_envelope" not in result.text
+    page = client.get("/settings")
+    assert "previous value was restored on all affected machines" in page.text
+    assert "previous value could not be confirmed across the fleet" in page.text
+
+
+def test_control_backup_credentials_are_refused_instead_of_claiming_to_update_control_loops(client, ctx):
+    sign_in(client, ctx)
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        response = client.post("/v1/runtime-settings", json={"scope": "secret", "key": key,
+                                                               "value": "opaque-test-value"})
+        assert response.status_code == 422
+        assert "control-loops" not in response.text
+        assert "opaque-test-value" not in response.text
+    assert ctx.db.one("SELECT count(*) AS n FROM node_operations WHERE action LIKE 'runtime-setting%%'")["n"] == 0

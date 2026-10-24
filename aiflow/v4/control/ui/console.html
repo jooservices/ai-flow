@@ -3267,7 +3267,7 @@ function loadRuntimeSettings() {
       state.data = d; state.error = '';
       state.changes = d.changes || [];
       if (!state.project && (d.projects || []).length) state.project = d.projects[0];
-      state.changes.filter(function (change) { return change.status === 'running'; })
+      state.changes.filter(function (change) { return change.status === 'running' || change.status === 'rolling_back'; })
         .forEach(function (change) { pollRuntimeSettingChange(change.id); });
     }).catch(function (e) { state.error = String(e.message || e); })
     .then(function () { state.busy = false; renderRuntimeSettings(); });
@@ -3279,16 +3279,28 @@ function pollRuntimeSettingChange(changeId) {
       var state = S.runtimeSettings;
       state.changes = [change].concat((state.changes || []).filter(function (item) { return item.id !== change.id; }));
       if (S.view === 'settings') renderRuntimeSettings();
-      if (change.status === 'running') setTimeout(function () { pollRuntimeSettingChange(change.id); }, 2500);
+      if (change.status === 'running' || change.status === 'rolling_back') setTimeout(function () { pollRuntimeSettingChange(change.id); }, 2500);
       else if (change.status === 'completed') {
         state.notice = 'All affected services restarted and passed their health checks.';
         loadRuntimeSettings();
       } else {
-        var failed = (change.operations || []).filter(function (item) { return item.status === 'failed'; })[0];
+        var failed = (change.operations || []).filter(function (item) {
+          return item.status === 'failed' && !(item.result && item.result.cancelled);
+        })[0];
         var service = failed && failed.result && (failed.result.failed_service || failed.result.error);
-        state.error = service ? 'Restart failed on ' + failed.node + ': ' + service + '. The previous value was restored.' :
-          'Restart failed. The previous value was restored.';
-        renderRuntimeSettings(); loadRuntimeSettings();
+        if (change.recovery_status === 'restored') {
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. The previous value was restored on all affected machines.';
+        } else if (change.recovery_status === 'failed') {
+          var recovery = change.recovery_error || 'rollback did not pass its health check';
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. Recovery failed on ' + (change.recovery_node || 'an affected machine') + ': ' + recovery +
+            '. The previous value could not be confirmed across the fleet, and affected machines remain paused.';
+        } else {
+          state.error = service ? 'Restart failed on ' + failed.node + ': ' + service + '. Recovery is still pending.' :
+            'Restart failed. Recovery is still pending.';
+        }
+        renderRuntimeSettings();
       }
     }).catch(function () { setTimeout(function () { pollRuntimeSettingChange(changeId); }, 5000); });
 }
@@ -3349,12 +3361,17 @@ function renderRuntimeSettings() {
   var changes = state.changes || [];
   if (changes.length) {
     h += '<section class="panel"><div class="panel-h"><h2>Restart results</h2></div><div class="stack">' + changes.slice(0, 8).map(function (change) {
-      var status = change.status === 'completed' ? '<span class="badge ok">Succeeded</span>' : change.status === 'failed' ? '<span class="badge danger">Failed</span>' : '<span class="badge">Running</span>';
+      var status = change.status === 'completed' ? '<span class="badge ok">Succeeded</span>' : change.status === 'failed' ? '<span class="badge danger">Failed</span>' : change.status === 'rolling_back' ? '<span class="badge">Rolling back</span>' : '<span class="badge">Running</span>';
       var operations = (change.operations || []).map(function (op) {
-        var detail = op.status === 'failed' ? ((op.result && (op.result.failed_service || op.result.error)) || 'Restart failed') : op.status;
+        var detail = op.result && op.result.cancelled ? 'Not applied after a peer failed' :
+          op.status === 'failed' ? ((op.result && (op.result.failed_service || op.result.error)) || 'Restart failed') : op.status;
         return '<div class="small">' + esc(op.node) + ' · ' + esc(detail) + '</div>';
       }).join('');
-      return '<div class="review-card"><div class="panel-h">' + status + '<code>' + esc(change.id) + '</code></div>' + operations + '</div>';
+      var rollbacks = (change.rollbacks || []).map(function (op) {
+        var detail = op.status === 'failed' ? ((op.result && op.result.error) || 'Rollback failed') : op.status;
+        return '<div class="small">' + esc(op.node) + ' · recovery · ' + esc(detail) + '</div>';
+      }).join('');
+      return '<div class="review-card"><div class="panel-h">' + status + '<code>' + esc(change.id) + '</code></div>' + operations + rollbacks + '</div>';
     }).join('') + '</div></section>';
   }
   root.innerHTML = h;

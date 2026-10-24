@@ -55,6 +55,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "dashboardUsageTotals": ("cc",),
     "dashboardUsageShare": ("cc",),
     "dashboardWaitingTickets": ("cc",),
+    "capacityPanel": ("cc",),
+    "drawerTicket": ("cc",),
+    "loadCapacity": ("cc",),
+    "signedPct": ("cc",),
     "dashboardVisibleWaitingTickets": ("cc", "work", "delivery"),
     "loadDashboardWaiting": ("cc", "work", "delivery"),
     "loadDashboardQuota": ("cc",),
@@ -217,11 +221,12 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"']dashboard-tab[\"']"), ("cc",)),
     (re.compile(r"\bact\s*===\s*[\"']dashboard-card[\"']"), ("cc", "work", "review")),
     (re.compile(r"\bact\s*===\s*[\"']flow-step[\"']"), ("cc", "work")),
+    (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
 )
 
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
-    (re.compile(r"dashboardQuota"), "cc"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"

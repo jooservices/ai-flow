@@ -48,7 +48,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
+               role_health, rollout, runtime_settings, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -731,6 +731,8 @@ class HeartbeatBody(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     credential_expiries: dict[str, datetime | None] = Field(default_factory=dict)
+    runtime_settings: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    runtime_settings_public_key: str = Field(default="", max_length=2000)
     environment_items: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -1142,6 +1144,11 @@ class LogReadBody(BaseModel):
 class NodeOperationResultBody(BaseModel):
     status: Literal["completed", "failed"]
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class NodeOperationCheckpointBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    rollback_envelope: dict[str, str]
 
 
 class JoinCommandBody(BaseModel):
@@ -3515,13 +3522,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         if name != node:
             raise HTTPException(403, "token belongs to another node")
         prev = ctx.db.one("SELECT status,accepting_work FROM nodes WHERE name=%s", (node,))
+        inventory = runtime_settings.sanitize_inventory(body.runtime_settings)
         ctx.db.run("UPDATE nodes SET status=CASE WHEN accepting_work THEN 'online' ELSE 'draining' END,"
                    " slots_total=%s, slots_used=%s, release_version=%s, tools=%s,"
-                   " metrics=%s, release_protocol=%s, last_heartbeat=now(),"
+                   " metrics=%s, runtime_settings=%s, runtime_settings_public_key=%s,"
+                   " release_protocol=%s, last_heartbeat=now(),"
                    " idle_since=CASE WHEN %s=0 THEN coalesce(idle_since,now()) ELSE NULL END WHERE name=%s",
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
-                    body.release_protocol, body.slots_used, node))
+                    J(inventory), body.runtime_settings_public_key, body.release_protocol, body.slots_used, node))
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         environment_reports.confirm_node_environment(ctx, node, body.environment_items)
@@ -3607,6 +3616,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         project_stacks = {key: (repo.projects[key].stacks if repo.projects[key].repositories
                                 else repo.projects[key].stack)
                           for key in node_projects if key in repo.projects}
+        runtime_settings_bootstrap = runtime_settings.bootstrap_settings_for_node(
+            ctx, node, node_projects, inventory, body.runtime_settings_public_key, body.workers)
         return {"desired": {"accounts": [a.id for a in assigned], "workers": instances,
                             "sign_ins": [{"account": row["id"], "provider": row["provider"],
                                           "request_id": row["sign_in_request_id"], "status": row["sign_in_status"]}
@@ -3619,6 +3630,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                                                     for key in node_projects if key in repo.projects},
                             "project_services": {key: repo.projects[key].required_services for key in node_projects
                                                  if key in repo.projects and repo.projects[key].required_services},
+                            "runtime_settings_bootstrap": runtime_settings_bootstrap,
                             "tool_repairs": tool_repairs,
                             "check_probes": tooling.pending_probes(ctx, node, node_projects),
                             "tools": repo.tools_for_node(node, node_projects), "versions": repo.versions}}
@@ -4195,6 +4207,39 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"operation": None}
         return {"operation": {"id": str(row["id"]), "action": row["action"], "payload": row["payload"]}}
 
+    @app.post("/v1/nodes/{name}/operations/{operation_id}/checkpoint")
+    def checkpoint_node_operation(name: str, operation_id: str, body: NodeOperationCheckpointBody,
+                                  node: str = Depends(node_auth)) -> dict:
+        """Persist the node's encrypted pre-change snapshot before a runtime setting can be written."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        try:
+            parsed_id = str(uuid.UUID(operation_id))
+        except ValueError as exc:
+            raise HTTPException(404, "unknown node operation") from exc
+        envelope = body.rollback_envelope
+        if (set(envelope) != {"key", "nonce", "ciphertext"}
+                or any(not value or len(value) > 2_000_000 for value in envelope.values())):
+            raise HTTPException(422, "runtime setting snapshot is invalid")
+        with ctx.db.pool.connection() as connection:
+            operation = connection.execute(
+                "SELECT action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
+                (parsed_id, node)).fetchone()
+            if (not operation or operation["action"] not in {"runtime-setting-control", "runtime-setting-project"}
+                    or (operation["payload"] or {}).get("phase", "apply") != "apply"):
+                raise HTTPException(404, "unknown or completed runtime setting operation")
+            payload = operation["payload"] or {}
+            saved = payload.get("rollback_envelope")
+            if saved is None:
+                updated = connection.execute(
+                    "UPDATE node_operations SET payload=payload || %s WHERE id=%s AND node=%s AND status='running'"
+                    " RETURNING payload->'rollback_envelope' AS rollback_envelope",
+                    (J({"rollback_envelope": envelope}), parsed_id, node)).fetchone()
+                saved = updated["rollback_envelope"] if updated else None
+        if not isinstance(saved, dict):
+            raise HTTPException(409, "runtime setting snapshot could not be saved")
+        return {"rollback_envelope": saved}
+
     @app.post("/v1/nodes/{name}/operations/{operation_id}/result")
     def finish_node_operation(name: str, operation_id: str, body: NodeOperationResultBody,
                               node: str = Depends(node_auth)) -> dict:
@@ -4205,16 +4250,39 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(404, "unknown node operation") from exc
         status = body.status
-        current = ctx.db.one("SELECT action FROM node_operations WHERE id=%s AND node=%s AND status='running'",
-                             (parsed_id, node))
-        if not current:
-            raise HTTPException(404, "unknown or completed node operation")
-        result = (log_viewer.safe_node_result(body.result, status) if current["action"] == "read_logs"
-                  else body.result)
-        updated = ctx.db.one(
-            "UPDATE node_operations SET status=%s, result=%s, completed_at=now()"
-            " WHERE id=%s AND node=%s AND status='running' RETURNING id, action",
-            (status, J(result), parsed_id, node))
+        with ctx.db.pool.connection() as connection:
+            candidate = connection.execute(
+                "SELECT action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running'",
+                (parsed_id, node)).fetchone()
+            if not candidate:
+                raise HTTPException(404, "unknown or completed node operation")
+            candidate_payload = candidate["payload"] or {}
+            if candidate["action"].startswith("runtime-setting") and candidate_payload.get("change_id"):
+                # Serialize every node result for a change before locking operation rows. This prevents two
+                # completing nodes from each holding one row and deadlocking while the fleet coordinator locks
+                # the whole change set.
+                connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                                   (str(candidate_payload["change_id"]),))
+            operation = connection.execute(
+                "SELECT id,action,payload FROM node_operations WHERE id=%s AND node=%s AND status='running' FOR UPDATE",
+                (parsed_id, node)).fetchone()
+            if not operation:
+                raise HTTPException(404, "unknown or completed node operation")
+            payload = operation["payload"] or {}
+            result = (log_viewer.safe_node_result(body.result, status) if operation["action"] == "read_logs"
+                      else body.result)
+            # Runtime values are delivered only to the node agent and removed from the durable queue record
+            # as soon as it has applied or rolled them back. A successful project operation remains drained until
+            # every serving node has applied the change, or the coordinator has rolled successful peers back.
+            connection.execute(
+                "UPDATE node_operations SET status=%s,result=%s,completed_at=now(),"
+                " payload=CASE WHEN action LIKE 'runtime-setting%%'"
+                " THEN payload - 'value_envelope' - 'rollback_envelope' ELSE payload END"
+                " WHERE id=%s AND node=%s AND status='running'",
+                (status, J(result), parsed_id, node))
+            if operation["action"].startswith("runtime-setting") and payload.get("change_id"):
+                runtime_settings.reconcile_node_change(connection, str(payload["change_id"]))
+        updated = operation
         if not updated:
             raise HTTPException(404, "unknown or completed node operation")
         ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
@@ -7472,6 +7540,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"queued": True}
 
     jira_connect.mount(app, ctx)
+    runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)
     return app

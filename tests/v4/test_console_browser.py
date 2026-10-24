@@ -60,6 +60,7 @@ VIEW_LABELS = {
     "licensing": "Licence",
     "backup": "Backup & Restore",
     "notifications": "Notifications",
+    "settings": "Settings",
     "support": "Support",
 }
 

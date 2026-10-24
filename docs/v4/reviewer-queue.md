@@ -1,5 +1,7 @@
 # Human review queue
 
+**Console screens:** Human review (`review`)
+
 The console's **Human review** tab lists Jira tickets mirrored in the `Human review` status. Each card shows the
 ticket summary and description, Jira link, GitHub pull request, GitHub diff totals, and the latest verify outcome,
 checks, and findings. GitHub diff totals are left blank when the PR details cannot be read.
@@ -40,3 +42,6 @@ moves the ticket to `Done`. If the merge is refused, the ticket stays in review.
 
 **Send for rework** requires a comment, records it on the Jira ticket, adds the `rework` label, and moves the ticket
 to `To Do`. Reviewer actions are recorded in `write_audit` with their run fence.
+
+The current note is submitted with its action as a reason, comment, answer, or question. A queue refresh does not
+swallow an action click or clear the note before the action succeeds.

@@ -1,10 +1,11 @@
 # Machines, AI accounts and worker counts live in the database
 
-**Console screens:** Machines and AI (`machines`)
+**Console screens:** Command Center (`cc`) and Machines and AI (`machines`)
 
 A machine and the AI accounts on it are runtime facts of an installation, not source code. The owner manages them
 on the **Machines and AI** screen ([machines-and-ai.md](machines-and-ai.md)); screen changes need no file edit,
-commit or restart and do not write to the control repository.
+commit or restart and do not write to the control repository. Command Center shows the machine and account state;
+operators change it on Machines and AI.
 
 ## What is stored where
 
@@ -31,6 +32,7 @@ old file, runtime scheduling ignores it and backups filter it out.
 
 ## API
 
+- The screen's join command uses `GET /v1/install.sh` to download the node bootstrap with its one-use token.
 - `POST /v1/nodes/join-tokens` and `POST /v1/nodes/{name}/join-command` create the one-use token and the join
   command shown on the screen.
 - `POST /v1/machines/{name}/accounts` adds an account (provider, optional name, sessions, jobs) and returns its
@@ -49,7 +51,8 @@ control API after the upgrade they are copied into the database once, and the im
 `control_imports`. The importer removes those legacy files from the active checkout and commits their removal from
 the control repository's current branch, including stripping project-level `nodes` entries. It never imports again
 or overwrites a row, so anything changed or removed on screen stays as it is. If a configured account could not be
-synced because of licence limits, the import waits for a later start.
+synced because of licence limits, the import waits for a later start. Plan capacity is managed separately on the
+Licensing screen through `PUT /v1/licensing/limits`.
 
 Developers and CI can run it directly: `aiflow4 import-inventory` (a repeat prints "already imported" and retries
 checkout cleanup if a refresh restored legacy files; when a GitHub App is configured, it also removes the legacy

@@ -215,7 +215,9 @@ async function exerciseReviews(page, mode) {
   });
   page.on('response', (item) => {
     const url = new URL(item.url());
-    if (url.pathname.startsWith('/v1/reviews/')) reviewResponses.push({ path: url.pathname, status: item.status() });
+    if (url.pathname.startsWith('/v1/reviews/')) reviewResponses.push({
+      path: url.pathname, status: item.status(), body: item.request().postData()
+    });
   });
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(`${error.name}: ${error.message}`));
@@ -232,6 +234,20 @@ async function exerciseReviews(page, mode) {
     if (note) {
       const noteField = card.getByRole('textbox', { name: `Reviewer note for ${key}` });
       await noteField.fill(note);
+      if (action === 'ask-ai') {
+        const questionField = await noteField.elementHandle();
+        const stateRefresh = page.waitForResponse((item) => item.request().method() === 'GET' &&
+          new URL(item.url()).pathname === '/v1/state', { timeout: 12000 });
+        await stateRefresh;
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const questionState = await questionField.evaluate((field) => ({
+          connected: field.isConnected,
+          focused: document.activeElement === field,
+          value: field.value
+        }));
+        assert.deepEqual(questionState, { connected: true, focused: true, value: note },
+          'state polling replaced or blurred the focused review question');
+      }
       if (action === 'reject') {
         const refreshResponse = page.waitForResponse((item) => item.request().method() === 'GET' &&
           new URL(item.url()).pathname === '/v1/reviews');
@@ -242,6 +258,13 @@ async function exerciseReviews(page, mode) {
     }
     const endpoint = action === 'ask-ai' ? 'ask-ai' : action === 'rework' ? 'rework' : action;
     const actionButton = card.getByRole('button', { name: buttonName, exact: true });
+    if (mode === 'phone' && action === 'ask-ai') {
+      assert.equal(await actionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit === button || button.contains(hit);
+      }), true, 'a toast is covering the phone review action');
+    }
     const expectedPath = `/v1/reviews/${key}/${endpoint}`;
     const expectedRequest = `POST ${expectedPath}`;
     await actionButton.waitFor({ state: 'visible' });
@@ -267,7 +290,7 @@ async function exerciseReviews(page, mode) {
       sent = await waitForRequest(4500);
     }
     if (!sent) {
-        const details = page.isClosed() ? { pageClosed: true } : await page.evaluate((reviewKey) => ({
+      const details = page.isClosed() ? { pageClosed: true } : await page.evaluate((reviewKey) => ({
           toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
           button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
             card.getAttribute('data-key') === reviewKey).flatMap((card) =>
@@ -288,6 +311,10 @@ async function exerciseReviews(page, mode) {
     }
     assert.ok(response, `${buttonName} request had no response for ${key}`);
     assert.equal(response.status, 200, `${buttonName} failed for ${key}`);
+    const expectedBody = action === 'reject' ? { reason: note } : action === 'rework' ? { comment: note } :
+      action === 'ask-ai' ? { question: note } : {};
+    assert.deepEqual(JSON.parse(response.body || '{}'), expectedBody,
+      `${buttonName} dropped its review note for ${key}`);
   }
 }
 
@@ -354,7 +381,8 @@ async function exerciseMachineAndUserAdministration(page, mode) {
 async function exerciseMode(browser, mode) {
   const administrator = config.roles.find((person) => person.role === 'administrator');
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
-  const context = await browser.newContext({ viewport: dimensions, colorScheme: mode === 'dark' ? 'dark' : 'light' });
+  const context = await browser.newContext({ viewport: dimensions, colorScheme: mode === 'dark' ? 'dark' : 'light',
+    hasTouch: mode === 'phone' });
   const page = await context.newPage();
   await traceOnFailure(context, `administrator-${mode}`, async () => {
     await signInInPage(page, administrator, mode);

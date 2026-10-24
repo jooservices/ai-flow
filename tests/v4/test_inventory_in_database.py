@@ -162,6 +162,27 @@ def test_roles_of_an_imported_multi_machine_account_change_on_screen(client, ctx
     assert ctx.repo().account("codex-01").extra_machines == ["node2"]
 
 
+def test_production_repo_context_keeps_shared_account_overlay_after_import(ctx):
+    from aiflow.v4.control import shared_accounts
+    from aiflow.v4.control.api import create_app
+
+    base_repo = ctx.repo
+    base_repo().account("codex-01").extra_machines = ["node2"]
+    base_repo().account("codex-01").session_limit = 3
+    # Match build_ctx(): its repo already applies inventory and shared account state before create_app().
+    ctx.repo = lambda: shared_accounts.overlay(inventory.apply(base_repo(), ctx.db), ctx.db)
+    ctx._shared_accounts = True
+
+    app = create_app(ctx)
+    app.state.sync_accounts()
+    assert app.state.import_inventory()["imported"] is True
+
+    account = ctx.repo().account("codex-01")
+    assert account.machines == ["node1", "node2"]
+    assert account.session_limit == 3
+    assert account.sessions == 3
+
+
 def test_joined_machine_serves_its_project_after_the_import_without_the_node_file(client, ctx, control_repo):
     owner_session(client, ctx)
     client.app.state.import_inventory()

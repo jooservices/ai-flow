@@ -20,7 +20,7 @@ SESSION_EXPIRY = 2_000_000_000
 
 ROLE_VIEWS = {
     "administrator": {"cc", "board", "delivery", "sa", "lead", "business", "review", "stakeholder",
-                      "machines", "knowledge", "integrations", "projects", "users", "support"},
+                      "machines", "knowledge", "integrations", "projects", "users", "support", "logs"},
     "product_owner": {"cc", "board", "delivery", "business", "lead", "stakeholder", "review", "knowledge"},
     "delivery": {"cc", "board", "delivery", "review"},
     "sa": {"cc", "board", "sa", "machines", "integrations", "knowledge"},
@@ -33,12 +33,13 @@ ROLE_VIEWS = {
 VIEW_PATHS = {"cc": "/cc", "board": "/board", "delivery": "/delivery", "sa": "/sa", "lead": "/lead",
               "business": "/business", "review": "/review", "stakeholder": "/stakeholder",
               "machines": "/machines", "knowledge": "/knowledge", "integrations": "/integrations", "projects": "/projects",
-              "users": "/users", "support": "/support"}
+              "users": "/users", "support": "/support", "logs": "/logs"}
 VIEW_PERMISSIONS = {"cc": "view.dashboard", "board": "view.work_board", "delivery": "view.delivery",
                     "sa": "view.sa", "lead": "view.team_lead", "business": "view.business",
                     "review": "view.human_review", "stakeholder": "view.stakeholder",
                     "machines": "view.machines_ai", "knowledge": "view.knowledge", "integrations": "view.integrations",
-                    "projects": "projects.manage", "users": "console.manage", "support": "console.manage"}
+                    "projects": "projects.manage", "users": "console.manage", "support": "console.manage",
+                    "logs": "view.logs"}
 ALLOWED_API = {
     "administrator": "/v1/console/users",
     "product_owner": "/v1/business/TESTWP/change-requests",
@@ -59,6 +60,7 @@ API_VIEW_REQUESTS = [
     ("view.stakeholder", "/v1/stakeholder/TESTWP"),
     ("projects.manage", "/v1/projects"),
     ("view.machines_ai", "/v1/nodes/cc/operations"),
+    ("view.logs", "/v1/log-sources"),
 ]
 
 

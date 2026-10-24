@@ -28,6 +28,7 @@ from .intake import run_intake
 from .verify import run_verify
 from .master import run_master
 from .version_release import run_version_release
+from .post_merge import run_post_merge
 from .ba_chat import run_turn as run_ba_chat_turn
 
 log = logging.getLogger("aiflow4.worker")
@@ -224,6 +225,8 @@ class Worker:
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "post_merge":
+                res = run_post_merge(self.api, c, self.srv, self.hb_s, self.run_as)
             elif step == "triage":
                 res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "master":

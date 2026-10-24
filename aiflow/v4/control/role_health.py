@@ -36,7 +36,7 @@ METRICS_DAYS = 30            # cost and rework are shown for the last 30 days
 HISTORY_RUNS = 500           # finished runs read per account
 DEFAULT_ROLES = ("dev", "verify")
 STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "master": "master",
-             "intake": "intake_refiner", "impact": "intake_refiner"}
+             "intake": "intake_refiner", "impact": "intake_refiner", "post_merge": "release"}
 # error kinds that mean the account or its machine could not work, not that the AI did bad work
 UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool", "tools", "missing_tool",
                   "missing-tool", "offline", "toolchain", "services"}

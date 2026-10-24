@@ -25,6 +25,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from .. import VERSION
+from ..core.settings import read_env_file
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
 from ..worker.client import ControlClient
@@ -876,6 +877,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     if relay:
         relay.start()
     tools, tools_at, prev = tool_versions(), time.time(), None
+    project_environment: dict[str, list[str]] = {}
     pending_network_events: list[dict] = []
     operation_thread: threading.Thread | None = None
     toolchain_thread: threading.Thread | None = None
@@ -901,6 +903,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     tools, tools_at = tool_versions(), time.time()
                 ws = worker_states()
                 used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
+                environment_items = {}
+                for project, names in project_environment.items():
+                    local = read_env_file(f"/etc/aiflow/projects/{project}.env")
+                    present = [name for name in names if local.get(name)]
+                    if present:
+                        environment_items[project] = present
                 desired = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
                     "release_protocol": 1,
@@ -908,7 +916,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "services": _services_snapshot(service_state, service_lock),
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
-                    "workers": ws, "credential_expiries": credential_expiries(ws)}, retries=2)["desired"]
+                    "workers": ws, "credential_expiries": credential_expiries(ws),
+                    "environment_items": environment_items}, retries=2)["desired"]
                 if not ready_notified:
                     ready_notified = notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
@@ -925,6 +934,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 forward_operator_audit(api, name)
             except Exception as e:  # noqa: BLE001 - retain the cursor so the next heartbeat retries delivery
                 log.warning("host audit forwarding failed (%s)", type(e).__name__)
+            project_environment = desired.get("project_environment", {})
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),

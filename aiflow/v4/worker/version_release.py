@@ -17,8 +17,11 @@ from .notes import project_env
 log = logging.getLogger("aiflow4.version_release")
 
 
-def _redact(text: str, env: dict[str, str]) -> str:
-    for value in sorted((v for v in env.values() if len(v) >= 4), key=len, reverse=True):
+def _redact(text: str, env: dict[str, str], secret_names: set[str] | None = None) -> str:
+    secret_names = secret_names or set()
+    values = {value for value in env.values() if len(value) >= 4}
+    values.update(env[name] for name in secret_names if env.get(name))
+    for value in sorted(values, key=len, reverse=True):
         text = text.replace(value, "[redacted]")
     return re.sub(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s,;]+", r"\1\2[redacted]", text)
 
@@ -33,6 +36,9 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
     started = time.monotonic()
     report: dict = {"head_sha": "", "source_sha": str(project.get("source_sha") or ""), "checks": [], "error": ""}
     env = project_env(project["key"], project.get("environment"), "post_merge")
+    secret_names = {str(item.get("name") or "") for item in project.get("environment") or []
+                    if item.get("kind") == "secret" and item.get("name")
+                    and "post_merge" in (item.get("runs") or ("dev", "verify"))}
     try:
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                              "repo": project["repo"]})
@@ -82,15 +88,9 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
                     proc.kill()
                     output, _ = proc.communicate()
                     output = (output or "") + f"\nCheck exceeded {timeout_s} seconds."
-            clean_output = _redact(output or "", env)[-12_000:]
+            clean_output = _redact(output or "", env, secret_names)[-12_000:]
             report["checks"].append({"command": command, "passed": proc.returncode == 0,
                                      "exit_code": proc.returncode, "output": clean_output})
-        report["post_merge_results"] = [
-            {"ticket": item["key"], "criteria": item.get("post_merge_criteria") or [],
-             "status": "passed" if report["checks"] and all(x["passed"] for x in report["checks"]) else "failed",
-             "head_sha": head, "checks": [{"command": x["command"], "passed": x["passed"]} for x in report["checks"]]}
-            for item in project.get("post_merge_criteria") or []
-        ]
         if hb.lost.is_set():
             raise LeaseLost()
         result = api.call("POST", f"/v1/version-releases/{version['id']}/complete",
@@ -107,7 +107,7 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
             message = f"project check timed out: {exc}"
         else:
             message = f"{type(exc).__name__}: {exc}"
-        message = _redact(message, env)[:2000]
+        message = _redact(message, env, secret_names)[:2000]
         report["error"] = message
         try:
             result = api.call("POST", f"/v1/version-releases/{version['id']}/complete",

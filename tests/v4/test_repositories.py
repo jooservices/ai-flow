@@ -342,6 +342,9 @@ def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_crit
         def merge_base_in(self, *_args, **_kwargs):
             return []
 
+        def behind(self, *_args, **_kwargs):
+            return False
+
         def scrub(self, _path):
             pass
 

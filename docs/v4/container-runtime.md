@@ -73,6 +73,13 @@ commands, host-root mounts, `/etc/aiflow/secrets`, and paths in another worktree
 The storage and mount checks run again in the node broker, after the control-plane policy hook. That keeps the
 runtime safe for project check scripts as well as direct commands from an AI tool.
 
+## Run services started by the worker
+
+The worker supervisor can start the services a run needs, such as the WordPress site (`wordpress-runs.md`), before
+the AI process exists. It sends a `supervise` request, accepted only from the supervisor (uid 0) with the run token;
+the command goes through the same policy, quota and cleanup path as AI commands. The first request also binds the
+supervisor to the broker, so everything started is removed if the worker dies before the AI process starts.
+
 ## Control API
 
 In **Projects**, the `containers` project or repository setting is checked during preflight, saved with the

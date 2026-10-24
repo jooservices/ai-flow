@@ -310,7 +310,11 @@ class FakeGitHub:
     def bot_identity(self):
         return ("jooservices-aiflow-bot[bot]", "1+jooservices-aiflow-bot[bot]@users.noreply.github.com")
 
-    def merge_pr(self, repo, number, title="", method="squash"):
+    def merge_pr(self, repo, number, title="", method="squash", sha=""):
+        self.merge_pins = getattr(self, "merge_pins", []) + [sha]
+        current = getattr(self, "pr_data", {}).get(number, {}).get("head", {}).get("sha", "")
+        if sha and current and sha != current:  # GitHub refuses a merge whose head is not the pinned commit
+            return {"merged": False, "sha": "", "message": "409: Head branch was modified. Review and try the merge again."}
         self.merged = getattr(self, "merged", []) + [(repo, number, title, method)]
         sha = f"merged-pr-{number:04d}"
         pr = self.pr_by_number.get(number)

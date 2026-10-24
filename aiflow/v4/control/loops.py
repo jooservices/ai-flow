@@ -318,6 +318,8 @@ def watchdog(ctx: Ctx) -> None:
                                  " for 10 minutes.\nWhy: A worker stopped between two updates, so nobody owned the ticket.\n"
                                  "Next: Back to To Do; the next worker continues its branch.")
                 ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (t["key"],))
+                merge_flow.record_move(ctx, t["key"], "In Progress", "To Do", merge_flow.FLOW,
+                                       "watchdog: In Progress without a run for 10 minutes")
                 ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result) VALUES"
                            " ('jira','transition',%s,'control',true,'To Do (orphan)')", (t["key"],))
                 ctx.events.emit("jira.transition", ticket=t["key"], account="control", outcome="To Do",
@@ -368,6 +370,8 @@ def watchdog(ctx: Ctx) -> None:
                                    " VALUES ('jira','transition',%s,%s,%s,'control',true,'To Do (lease lost)')",
                                    (r["ticket_key"], str(r["id"]), r["fence"]))
                         ctx.db.run("UPDATE tickets SET status='To Do' WHERE key=%s", (r["ticket_key"],))
+                        merge_flow.record_move(ctx, r["ticket_key"], "In Progress", "To Do", merge_flow.FLOW,
+                                               f"watchdog: the run on {r['node']} lost its lease")
                         ctx.events.emit("jira.transition", ticket=r["ticket_key"], run_id=str(r["id"]), fence=r["fence"],
                                         account="control", node=r["node"], outcome="To Do", reason="lease lost")
                 except Exception as e:  # noqa: BLE001
@@ -449,7 +453,8 @@ def watchdog(ctx: Ctx) -> None:
     for account_id, awareness in quota_assessments(ctx.db, account_rows).items():
         at_risk = [w for w in awareness["windows"]
                    if w["prediction"]["status"] == "will run out before reset"]
-        ctx.db.run("UPDATE accounts SET quota_at_risk=%s WHERE id=%s", (bool(at_risk), account_id))
+        ctx.db.run("UPDATE accounts SET quota_at_risk=%s,quota_forecast=%s WHERE id=%s",
+                   (bool(at_risk), J(awareness), account_id))
         if at_risk:
             soonest = min((w["prediction"].get("exhaustion_at") or "") for w in at_risk)
             windows = ", ".join(w["label"] for w in at_risk)
@@ -475,15 +480,34 @@ def version_release_scan(ctx: Ctx) -> int:
     return version_release.scan(ctx)
 
 
+def reconcile_loop(ctx: Ctx, stop: threading.Event) -> None:
+    """Compare every ticket that has a pull request with GitHub, a pass every merge_flow.RECONCILE_EVERY_S."""
+    from . import api as control_api
+    while not stop.is_set():
+        started = time.monotonic()
+        try:
+            if ctx.leases.leader("pr_reconcile", OWNER, 60_000):
+                control_api.github_gateway(ctx)  # connect GitHub when the secret store has a connection
+                merge_flow.reconcile(ctx)
+        except Exception as e:  # noqa: BLE001
+            log.exception("reconcile loop error: %s", e)
+            ctx.events.emit("control.error", reason=str(e)[:300])
+        stop.wait(max(1.0, merge_flow.RECONCILE_EVERY_S - (time.monotonic() - started)))
+
+
 def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
     from . import support_bundle
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
     last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
-    last_merge = last_reconcile = 0.0
+    last_merge = 0.0
     from . import api as control_api
     ctx.events.start()
+    # Jira sync, the watchdog and the merge step can be slow: the reconcile loop has its own thread so that they
+    # never delay the one-minute bound of "Jira follows GitHub" (merge_flow.RECONCILE_BOUND_S)
+    reconciler = threading.Thread(target=reconcile_loop, args=(ctx, stop), name="pr-reconcile", daemon=True)
+    reconciler.start()
     while not stop.is_set():
         now = time.time()
         try:
@@ -505,10 +529,6 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 for key in merge_flow.merge_ready(ctx):
                     log.info("merged %s", key)
                 last_merge = now
-            if now - last_reconcile >= merge_flow.RECONCILE_EVERY_S and ctx.leases.leader("pr_reconcile", OWNER, 120_000):
-                control_api.github_gateway(ctx)
-                merge_flow.reconcile(ctx)
-                last_reconcile = now
             if now - last_rollout >= 15 and ctx.leases.leader("fleet_rollout", OWNER, 45_000):
                 fleet_rollout(ctx)
                 last_rollout = now

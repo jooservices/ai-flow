@@ -3,7 +3,9 @@ import hashlib
 import hmac
 import json
 import threading
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from conftest import add_ticket
@@ -217,17 +219,55 @@ def test_reopened_pull_request_returns_the_ticket_to_in_verify(ctx):
     assert [m["to_status"] for m in moves(ctx, "TESTWP-721")] == ["To Do", "In Verify"]
 
 
-def test_history_is_not_rewritten_on_the_first_look(ctx):
+def test_a_closed_pull_request_of_a_done_ticket_is_left_alone_on_the_first_look(ctx):
     add_pr_ticket(ctx, "TESTWP-722", "Done", pr_url="https://github.com/jooservices/test-aiflow-wp/pull/8")
     set_pr(ctx, 8, state="closed")  # a rejected ticket from before this release
-    add_pr_ticket(ctx, "TESTWP-723", "To Do", pr_url="https://github.com/jooservices/test-aiflow-wp/pull/9")
-    ctx.github.pr_data[9] = {"number": 9, "state": "closed", "merged": True, "merged_at": "2026-01-01T00:00:00Z",
-                             "merge_commit_sha": "old"}
 
     merge_flow.reconcile(ctx)
 
-    assert ticket(ctx, "TESTWP-722")["status"] == "Done" and ticket(ctx, "TESTWP-723")["status"] == "To Do"
-    assert not moves(ctx, "TESTWP-722") and not moves(ctx, "TESTWP-723")
+    assert ticket(ctx, "TESTWP-722")["status"] == "Done" and not moves(ctx, "TESTWP-722")
+
+
+def test_a_merged_pull_request_puts_the_ticket_in_done_from_any_state(ctx):
+    for key, status, number in (("TESTWP-723", "To Do", 9), ("TESTWP-725", "Backlog", 10), ("TESTWP-726", "Intake", 11)):
+        add_pr_ticket(ctx, key, status, pr_url=f"https://github.com/jooservices/test-aiflow-wp/pull/{number}")
+        ctx.github.pr_data = {**getattr(ctx.github, "pr_data", {}), number: {
+            "number": number, "state": "closed", "merged": True, "merged_at": "2026-10-23T08:00:00Z",
+            "merge_commit_sha": f"sha{number}"}}
+
+    assert merge_flow.reconcile(ctx)["moved"] == 3
+
+    for key in ("TESTWP-723", "TESTWP-725", "TESTWP-726"):
+        assert ticket(ctx, key)["status"] == "Done" and ctx.jira.status_of[key] == "Done"
+        assert moves(ctx, key)[-1]["cause"] == "reconcile"
+
+
+def test_a_ticket_moved_out_of_done_after_the_merge_is_put_back(ctx):
+    add_pr_ticket(ctx, "TESTWP-727", "In Verify")
+    set_pr(ctx, state="closed", merged=True, merged_at="2026-10-23T10:00:00Z", merge_commit_sha="abc")
+    merge_flow.reconcile(ctx)
+    assert ticket(ctx, "TESTWP-727")["pr_state"] == "merged"
+    ctx.db.run("UPDATE tickets SET status='In Verify' WHERE key='TESTWP-727'")  # synced from Jira after a stray move
+    ctx.jira.status_of["TESTWP-727"] = "In Verify"
+
+    merge_flow.reconcile(ctx)
+
+    assert ticket(ctx, "TESTWP-727")["status"] == "Done" and ctx.jira.status_of["TESTWP-727"] == "Done"
+
+
+def test_a_disagreement_is_cleared_only_after_jira_reaches_the_target(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-728", "In Verify")
+    set_pr(ctx, state="closed", merged=True, merged_at="2026-10-23T10:00:00Z", merge_commit_sha="abc")
+    monkeypatch.setattr(ctx.jira, "transition_to", lambda key, target: "In Verify")  # Jira refuses to move on
+
+    merge_flow.reconcile(ctx)
+
+    assert ticket(ctx, "TESTWP-728")["status"] == "In Verify"
+    assert ctx.db.one("SELECT expected FROM ticket_disagreements WHERE ticket='TESTWP-728'")["expected"] == "Done"
+    monkeypatch.undo()
+    merge_flow.reconcile(ctx)
+    assert ticket(ctx, "TESTWP-728")["status"] == "Done"
+    assert not ctx.db.one("SELECT 1 FROM ticket_disagreements WHERE ticket='TESTWP-728'")
 
 
 def test_a_rejected_ticket_stays_done_when_its_pull_request_is_closed(client, ctx):
@@ -284,6 +324,217 @@ def test_a_move_made_in_jira_is_recorded_as_a_persons(ctx):
 
 def test_every_cause_is_one_of_the_named_ones():
     assert set(merge_flow.CAUSES) == {"flow merge", "person", "reconcile", "flow"}
+
+
+def test_the_watchdog_records_its_requeue_of_an_orphan_as_a_flow_move(ctx):
+    add_ticket(ctx.db, "TESTWP-741", status="In Progress")
+    ctx.db.run("UPDATE tickets SET synced_at=now() WHERE key='TESTWP-741'")
+    ctx.jira.status_of["TESTWP-741"] = "In Progress"
+
+    loops.watchdog(ctx)
+
+    assert ticket(ctx, "TESTWP-741")["status"] == "To Do"
+    assert moves(ctx, "TESTWP-741")[-1]["cause"] == "flow"
+    assert moves(ctx, "TESTWP-741")[-1]["from_status"] == "In Progress" and moves(ctx, "TESTWP-741")[-1]["to_status"] == "To Do"
+    assert "orphan" not in moves(ctx, "TESTWP-741")[-1]["detail"] and "watchdog" in moves(ctx, "TESTWP-741")[-1]["detail"]
+
+
+def test_the_watchdog_records_its_requeue_of_a_lost_lease_as_a_flow_move(ctx):
+    add_ticket(ctx.db, "TESTWP-742", status="In Progress")
+    ctx.jira.status_of["TESTWP-742"] = "In Progress"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status) VALUES"
+               " (%s,'TESTWP-742','TESTWP','dev','codex-01','codex','node1',3,'running')", (str(uuid.uuid4()),))
+
+    loops.watchdog(ctx)  # no lease is held for the running run: it is lost
+
+    assert ticket(ctx, "TESTWP-742")["status"] == "To Do"
+    last = moves(ctx, "TESTWP-742")[-1]
+    assert last["cause"] == "flow" and "lost its lease" in last["detail"]
+    # the later Jira sync sees no status change, so it adds no second, wrong cause
+    assert [m["cause"] for m in moves(ctx, "TESTWP-742")] == ["flow"]
+
+
+# --- review findings: pinned merge, leases, merge time, the one-minute bound --------------------------------------
+def test_the_merge_is_pinned_to_the_commit_whose_checks_were_read(ctx):
+    add_pr_ticket(ctx, "TESTWP-750", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}]}
+
+    assert merge_flow.merge_ready(ctx) == ["TESTWP-750"]
+
+    assert ctx.github.merge_pins == [HEAD]
+
+
+def test_a_branch_that_moved_after_its_checks_were_read_is_not_merged_and_is_checked_again(ctx):
+    add_pr_ticket(ctx, "TESTWP-751", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}],
+                            "newhead": [{"name": "Test", "state": "pending", "url": ""}]}
+    real_checks = ctx.github.checks
+
+    def checks_then_push(repo, sha):
+        result = real_checks(repo, sha)
+        ctx.github.pr_data[7]["head"] = {"sha": "newhead"}  # someone pushes while the flow is about to merge
+        return result
+
+    ctx.github.checks = checks_then_push
+
+    assert merge_flow.merge_ready(ctx) == []
+    assert not hasattr(ctx.github, "merged") and ticket(ctx, "TESTWP-751")["status"] == "Ready to merge"
+    assert "changed after its checks" in ticket(ctx, "TESTWP-751")["merge_note"]
+
+    assert merge_flow.merge_ready(ctx) == []  # the new commit has pending checks
+    assert "checks are still running" in ticket(ctx, "TESTWP-751")["merge_note"]
+    ctx.github.check_data["newhead"] = [{"name": "Test", "state": "success", "url": ""}]
+    assert merge_flow.merge_ready(ctx) == ["TESTWP-751"] and ctx.github.merge_pins[-1] == "newhead"
+
+
+def test_reconcile_does_not_write_jira_while_a_run_holds_the_ticket_and_does_when_it_ends(ctx):
+    add_pr_ticket(ctx, "TESTWP-752", "In Verify")
+    set_pr(ctx, state="closed", merged=True, merged_at="2026-10-23T10:00:00Z", merge_commit_sha="abc")
+    claim = ctx.leases.claim("TESTWP-752", "worker-run", 60_000)
+    assert claim.ok
+
+    merge_flow.reconcile(ctx)
+
+    assert ctx.jira.status_of["TESTWP-752"] == "In Verify" and not ctx.jira.transitions
+    assert "a run holds the ticket" in ctx.db.one("SELECT detail FROM ticket_disagreements WHERE ticket='TESTWP-752'")["detail"]
+    assert ctx.leases.valid("TESTWP-752", "worker-run", claim.fence)  # the worker's fence is untouched
+    ctx.leases.release("TESTWP-752", "worker-run", claim.fence)
+
+    merge_flow.reconcile(ctx)
+
+    assert ticket(ctx, "TESTWP-752")["status"] == "Done"
+    assert ctx.leases.holder("TESTWP-752") is None  # the control plane gave the lease back
+
+
+def test_the_lease_is_renewed_before_every_outside_call_of_the_merge_step(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-753", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}]}
+    order = []
+    real_renew = ctx.leases.renew
+    monkeypatch.setattr(ctx.leases, "renew", lambda *a, **k: (order.append("renew"), real_renew(*a, **k))[1])
+    real_merge, real_transition = ctx.github.merge_pr, ctx.jira.transition_to
+    monkeypatch.setattr(ctx.github, "merge_pr", lambda *a, **k: (order.append("merge"), real_merge(*a, **k))[1])
+    monkeypatch.setattr(ctx.jira, "transition_to", lambda *a: (order.append("jira"), real_transition(*a))[1])
+
+    assert merge_flow.merge_ready(ctx) == ["TESTWP-753"]
+
+    assert order[order.index("merge") - 1] == "renew" and order[order.index("jira") - 1] == "renew"
+
+
+def test_a_lost_lease_stops_the_merge_step_before_it_writes_jira(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-754", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}]}
+    monkeypatch.setattr(ctx.leases, "renew", lambda *a, **k: False)
+
+    assert merge_flow.merge_ready(ctx) == []
+
+    assert not ctx.jira.transitions and "lease" in ticket(ctx, "TESTWP-754")["merge_note"]
+
+
+def test_the_stored_merge_time_is_githubs_even_when_the_jira_move_is_late(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-755", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}]}
+    ctx.db.run("UPDATE tickets SET approved_at=%s WHERE key='TESTWP-755'", (datetime(2026, 10, 23, 9, 0, tzinfo=timezone.utc),))
+    real_merge, real_transition = ctx.github.merge_pr, ctx.jira.transition_to
+
+    def merge(*a, **k):
+        result = real_merge(*a, **k)
+        ctx.github.pr_data[7].update({"merged": True, "state": "closed", "merged_at": "2026-10-23T09:00:30Z"})
+        return result
+
+    def late_transition(*a):
+        time.sleep(0.4)  # Jira answers late
+        return real_transition(*a)
+
+    monkeypatch.setattr(ctx.github, "merge_pr", merge)
+    monkeypatch.setattr(ctx.jira, "transition_to", late_transition)
+
+    assert merge_flow.merge_ready(ctx) == ["TESTWP-755"]
+    merge_flow.reconcile(ctx)  # a later reconcile keeps GitHub's time
+
+    row = ticket(ctx, "TESTWP-755")
+    assert row["merged_at"] == datetime(2026, 10, 23, 9, 0, 30, tzinfo=timezone.utc) and row["done_at"] == row["merged_at"]
+    assert merge_flow.facts(row)["approval_to_merge_s"] == 30
+
+
+def test_without_a_github_merge_time_the_clock_right_after_the_merge_is_kept_not_the_jira_move(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-756", "Ready to merge")
+    set_pr(ctx)
+    ctx.github.check_data = {HEAD: [{"name": "Test", "state": "success", "url": ""}]}
+    real_transition, moved_at = ctx.jira.transition_to, []
+
+    def late_transition(*a):
+        time.sleep(0.4)
+        moved_at.append(datetime.now(timezone.utc))
+        return real_transition(*a)
+
+    monkeypatch.setattr(ctx.jira, "transition_to", late_transition)
+    assert merge_flow.merge_ready(ctx) == ["TESTWP-756"]
+
+    assert (moved_at[0] - ticket(ctx, "TESTWP-756")["merged_at"]).total_seconds() >= 0.35
+
+
+def test_the_bounds_of_the_reconcile_loop_stay_inside_one_minute():
+    assert merge_flow.RECONCILE_EVERY_S + merge_flow.RECONCILE_BUDGET_S < merge_flow.RECONCILE_BOUND_S <= 60
+
+
+def test_a_backlog_does_not_hold_back_a_merge_and_every_pull_request_is_reached_within_the_bound(ctx):
+    """Fake clock: every GitHub read takes 7 s, a pass may start work for 20 s, a pass starts every 20 s."""
+    now = [0.0]
+    numbers = list(range(100, 112))
+    for n in numbers:
+        add_pr_ticket(ctx, f"TESTWP-{n}", "In Verify", pr_url=f"https://github.com/jooservices/test-aiflow-wp/pull/{n}")
+    ctx.github.pr_data = {n: {"number": n, "state": "open", "merged": False, "mergeable_state": "clean",
+                              "head": {"sha": f"h{n}"}} for n in numbers}
+    read_at: dict[int, float] = {}
+    real_pr = ctx.github.pr
+
+    def slow_pr(repo, number):
+        read_at[number] = now[0]
+        now[0] += 7
+        return real_pr(repo, number)
+
+    ctx.github.pr = slow_pr
+    merged_at_pass = None
+    for passes in range(1, 8):
+        now[0] = (passes - 1) * merge_flow.RECONCILE_EVERY_S
+        if passes == 3:  # a person merges the last pull request of the queue
+            ctx.github.pr_data[111].update({"state": "closed", "merged": True, "merged_at": "2026-10-23T10:00:00Z",
+                                            "merge_commit_sha": "x"})
+            merged_at_pass = (now[0], passes)
+        out = merge_flow.reconcile(ctx, workers=1, clock=lambda: now[0], budget_s=merge_flow.RECONCILE_BUDGET_S)
+        assert out["checked"] + out["skipped"] == len(numbers) and out["checked"] >= 3
+        if ticket(ctx, "TESTWP-111")["status"] == "Done":
+            break
+    # merged just before pass 3 starts; Done at the latest by the end of that pass or the next ones, never later
+    assert ticket(ctx, "TESTWP-111")["status"] == "Done"
+    assert now[0] - merged_at_pass[0] <= merge_flow.RECONCILE_BOUND_S
+    assert set(read_at) == set(numbers)  # no pull request starved
+
+
+def test_the_reconcile_loop_is_not_delayed_by_a_slow_jira_sync(ctx, monkeypatch):
+    add_pr_ticket(ctx, "TESTWP-760", "In Verify")
+    set_pr(ctx, state="closed", merged=True, merged_at="2026-10-23T10:00:00Z", merge_commit_sha="abc")
+    ctx.db.run("UPDATE tickets SET pr_state='open' WHERE key='TESTWP-760'")
+    release, stop = threading.Event(), threading.Event()
+    monkeypatch.setattr(loops, "jira_sync", lambda *a, **k: release.wait(30) and 0)  # the main loop is stuck here
+    monkeypatch.setattr(loops, "watchdog", lambda *a, **k: None)
+    thread = threading.Thread(target=loops.run_loops, args=(ctx, stop), daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and ticket(ctx, "TESTWP-760")["status"] != "Done":
+            time.sleep(0.1)
+        assert ticket(ctx, "TESTWP-760")["status"] == "Done"
+    finally:
+        release.set()
+        stop.set()
+        thread.join(10)
 
 
 # --- webhook (optional) ------------------------------------------------------------------------------------------

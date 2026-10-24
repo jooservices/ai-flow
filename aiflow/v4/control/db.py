@@ -62,6 +62,9 @@ class DB:
                         c.execute("INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s)",
                                   (f.stem, migration_checksum(f)))
                     applied.append(f.stem)
+                # the role the control plane logs in with is the product; any other role is an operator (AC6)
+                if c.execute("SELECT to_regclass('audit_product_roles') AS t").fetchone()["t"]:
+                    c.execute("INSERT INTO audit_product_roles (role_name) VALUES (session_user) ON CONFLICT DO NOTHING")
                 # tables added by later migrations get the operator audit trigger too (AC6)
                 if c.execute("SELECT to_regproc('aiflow4_attach_audit_triggers') AS f").fetchone()["f"]:
                     c.execute("SELECT aiflow4_attach_audit_triggers()")

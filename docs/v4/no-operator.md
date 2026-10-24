@@ -23,7 +23,11 @@ Safe repairs use the existing routing and fencing rules:
 - Expired run backoff returns a still-ready ticket to normal routing. A stale run on a live node is fenced, its
   ticket is requeued, and a server-authored worker restart operation is consumed by that node's agent.
 - A failed machine or account route is released to any other ready account and machine that normally qualify for
-  the ticket. Managed account sign-in is restarted through its normal node-agent sign-in link.
+  the ticket, and the failed route is excluded for that ticket for two hours (an account failure excludes the
+  account, a machine, tool or network failure excludes the machine; table `flow_doctor_route_exclusions`). The claim
+  path honours the exclusion, so the failed route cannot pick the ticket up again. "Ready" uses the routing rules:
+  an online machine whose entry for that account is not still pending sign-in. Managed account sign-in is restarted
+  through its normal node-agent sign-in link.
 - A healthy but switched-off role can receive another probation slot immediately. Each required role reports the
   number of ready accounts and provider diversity. Where safe recovery cannot create a second provider, Dashboard
   states the reason and the next practical step.
@@ -39,14 +43,21 @@ Writes through the control API (review approve, rework or reject, owner answers 
 configuration) are product paths: they stay in the write audit and are never operator interventions. Interventions
 come only from out-of-band paths. Jira sync compares changelog authors with AI Flow's Jira identity
 and records non-flow edits by field name only. Migration `018_flow_doctor.sql` installs statement-level audit triggers,
-and every migration pass attaches the trigger to any table that lacks it, so tables added later are audited too; direct SQL changes outside an `aiflow4-*` application connection record the database
+and every migration pass attaches the trigger to any table that lacks it, so tables added later are audited too. The
+triggers cover INSERT, UPDATE, DELETE and TRUNCATE; event triggers cover schema changes (CREATE, ALTER, DROP,
+including a dropped audit trigger). Product connections are told apart by the database role they log in with
+(`audit_product_roles`, filled by `Database.migrate` with the control plane's own role), never by the client-chosen
+`application_name`: people must use their own database role. Event triggers need a superuser; where the migration
+role is not one, schema changes are not audited and the migration says so. Direct changes record the database
 user, table and operation, but never the SQL text or row values. Control and node installs enable Linux `auditd`
 rules for interactive commands, `/etc/aiflow`, `/etc/systemd/system`, and (on the control host) the control repo.
 The node agent forwards only the executable basename and changed filename, actor and time; it never forwards shell
 arguments or file contents. The agent collapses one batch into one intervention per actor and source. Audit records are
 de-duplicated and the doctor creates one Bug per actor and source session (a gap of 30 minutes starts a new session)
 in the configured maintenance Jira project with the `flow-bug` and `operator-intervention` labels, so an SSH session
-or a deploy never floods the project.
+or a deploy never floods the project. Sessions are stored (`operator_intervention_sessions`): an action that the
+doctor sees in a later pass joins its session and is commented on the session's Bug instead of opening a new one.
+Each Bug is moved from Created to Intake (retried every pass until it works), the state intake workers claim from.
 
 Each row records who, what, where and why. For actions where the system cannot recover a human-supplied reason, the
 record says that no reason was supplied. The Dashboard counts all captured interventions over rolling 24-hour and

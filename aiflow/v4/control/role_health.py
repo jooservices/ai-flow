@@ -1,26 +1,31 @@
 """Role health: quality by AI account and role (docs/v4/role-health.md).
 
-Every finished run is scored for the role of its step: dev, verify, master (triage and the master cycle) or
-intake_refiner (intake and impact). A merged run, or a finished run accepted by verification, is a success; a failed,
-no-changes, blocked or system-stopped run is a failure; a run sent back by verification is half a failure. Runs that
-ended because of quota, sign-in or a machine problem say nothing about the AI and are not scored.
-
-When the latest `window` scored runs of one account and role have a failure score above the threshold, only that
-role of that account is switched off (the account keeps its other roles), an incident alerts the owner, and the role
-gets one easy probation ticket a day. Two probation tickets in a row that succeed switch the role back on, and its
-scoring starts again from that moment.
+Completed pull requests and clean no-change results are successes; failures, timeouts and real tool-missing stops
+are scored, while quota, sign-in and machine problems are excluded. A role can be switched off on only a subset of
+its ready accounts: never the last two, and never more than half. When every such account scores
+badly, all remain on and one role-level incident reports the common cause. Disabled roles return as soon as their
+history no longer exceeds the threshold or the recorded missing tool is available; otherwise successful probation
+runs can restore them without a calendar-day delay.
 """
 from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .incidents import close_incident, open_incident
+from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.role_health")
+
+# The API and watchdog can evaluate role health at the same time. This lock avoids same-process
+# evaluations holding pool connections while waiting for PostgreSQL; the advisory lock also covers
+# evaluations from another control process.
+_EVALUATION_LOCK = threading.Lock()
+_EVALUATION_ADVISORY_LOCK = (261, 261)
 
 DEFAULT_WINDOW = 10
 DEFAULT_FAILURE_PERCENT = 60
@@ -40,7 +45,7 @@ STOPPED_OUTCOMES = {"timeout", "lost"}
 
 RUNS_SQL = """
 WITH recent AS (
-  SELECT id, ticket_key, step, account_id, outcome, error_kind, summary, started_at, cost_usd,
+  SELECT id, ticket_key, step, account_id, outcome, error_kind, summary, details, pr_url, node, started_at, cost_usd,
          row_number() OVER (PARTITION BY account_id ORDER BY started_at DESC) AS n
   FROM runs
   WHERE status <> 'running' AND outcome <> '' AND step = ANY(%(steps)s::text[])
@@ -68,11 +73,24 @@ def role_of(step: str) -> str | None:
 def classify(run: dict) -> Scored | None:
     """Score one finished run; None while verification has not yet judged a finished dev run."""
     outcome, kind = run["outcome"], (run.get("error_kind") or "").lower()
-    if outcome == "quota" or kind in UNSCORED_KINDS:
-        return Scored("excluded", None)
+    summary = (run.get("summary") or "").strip().lower()
     if outcome == "merged":
         return Scored("merged", 0.0)
+    if outcome == "no_changes" or (run.get("step") == "dev" and outcome == "failed" and not kind
+                                    and summary.startswith(("no changes", "nothing to change"))):
+        return Scored("no_changes", 0.0)
+    if outcome == "quota" or kind in UNSCORED_KINDS:
+        return Scored("excluded", None)
+    if outcome == "tool_missing":
+        if not _valid_tool_missing_evidence(run):
+            # Old classifier rows often only stored the AI's prose. With no explicit marker or normalized command
+            # result, they cannot safely remain failures in today's score.
+            return Scored("excluded", None)
+        return Scored("tool_missing", 1.0)
     if outcome == "done" and run["step"] == "dev":
+        details = run.get("details") or {}
+        if run.get("pr_url") and details.get("pr_url_source") == "current":
+            return Scored("finished", 0.0)
         decision = run.get("decision")
         if decision in ("merged", "human"):
             return Scored("finished", 0.0)
@@ -85,11 +103,27 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0)
     if outcome in STOPPED_OUTCOMES:
         return Scored("stopped", 1.0)
-    if outcome == "blocked" or (outcome == "failed" and (run.get("summary") or "").lower().startswith("no changes")):
-        return Scored("no_changes", 1.0)
+    if outcome == "blocked":
+        return Scored("blocked", 1.0)
     if outcome == "failed":
         return Scored("failed", 1.0)
     return Scored("excluded", None)
+
+
+def _valid_tool_missing_evidence(run: dict) -> bool:
+    """Accept current and legacy tool-missing rows only when their stored evidence is verifiable."""
+    details = run.get("details") or {}
+    missing = {str(name).casefold() for name in (details.get("missing_tools") or []) if str(name).strip()}
+    if not missing:
+        return False
+    marker_names = {name.casefold() for name in parse_missing_requirements(str(details.get("verdict_reason") or ""))}
+    if missing & marker_names:
+        return True
+    if details.get("tool_missing_evidence") != "command_not_found":
+        return False
+    executed_names = {str(name).casefold() for name in (details.get("command_not_found_tools") or [])
+                      if str(name).strip()}
+    return bool(missing & executed_names)
 
 
 def get_settings(db) -> dict[str, Any]:
@@ -160,7 +194,7 @@ def probation_ticket(ticket: dict) -> bool:
 
 
 def modes(db, account_id: str, roles: list[str]) -> dict[str, str]:
-    """Per role of one account: on, probation (switched off, today's probation ticket is still free) or off."""
+    """Per role of one account: on, probation (switched off, no ticket is running) or off."""
     result = {role: "on" for role in roles}
     for row in db.all("SELECT role FROM role_health WHERE account_id=%s AND NOT enabled", (account_id,)):
         if row["role"] in result:
@@ -168,42 +202,24 @@ def modes(db, account_id: str, roles: list[str]) -> dict[str, str]:
     return result
 
 
-def _day_start() -> datetime:
-    return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-
 def probation_slot_open(db, account_id: str, role: str) -> bool:
-    if db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND result='' LIMIT 1",
-              (account_id, role)):
-        return False
-    state = db.one("SELECT probation_unlimited FROM role_health WHERE account_id=%s AND role=%s", (account_id, role))
-    if state and state.get("probation_unlimited"):
-        return True
-    return not db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND assigned_at >= %s",
-                      (account_id, role, _day_start()))
+    return not db.one("SELECT 1 AS x FROM role_probation WHERE account_id=%s AND role=%s AND result=''",
+                      (account_id, role))
 
 
 def assign_probation(db, account_id: str, role: str, ticket_key: str) -> int | None:
-    """Take today's probation slot; None when another claim already took it."""
-    row = db.one("INSERT INTO role_probation (account_id, role, ticket_key) SELECT %s,%s,%s"
-                 " WHERE NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
-                 " AND (coalesce((SELECT probation_unlimited FROM role_health WHERE account_id=%s AND role=%s),false)"
-                 " OR NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND assigned_at >= %s))"
-                 " RETURNING id", (account_id, role, ticket_key, account_id, role, account_id, role,
-                                   account_id, role, _day_start()))
-    if row:
-        db.run("UPDATE role_health SET probation_unlimited=false WHERE account_id=%s AND role=%s",
-               (account_id, role))
+    """Take the available probation slot; one unresolved ticket per account and role."""
+    row = db.one("INSERT INTO role_probation (account_id, role, ticket_key) SELECT %s,%s,%s WHERE NOT EXISTS ("
+                 " SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
+                 " RETURNING id", (account_id, role, ticket_key, account_id, role))
     return row["id"] if row else None
 
 
 def expedite_probation(db, account_id: str, role: str) -> bool:
-    """Open an additional probation slot after an account or machine fault is repaired."""
-    row = db.one("UPDATE role_health SET probation_unlimited=true,updated_at=now()"
-                 " WHERE account_id=%s AND role=%s AND NOT enabled AND NOT probation_unlimited"
-                 " AND NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')"
-                 " RETURNING account_id", (account_id, role, account_id, role))
-    return bool(row)
+    """True when a switched-off role has a free probation slot now (no day-long wait) after a repair."""
+    return bool(db.one("SELECT 1 AS x FROM role_health WHERE account_id=%s AND role=%s AND NOT enabled"
+                       " AND NOT EXISTS (SELECT 1 FROM role_probation WHERE account_id=%s AND role=%s AND result='')",
+                       (account_id, role, account_id, role)))
 
 
 def attach_probation_run(db, probation_id: int, run_id: str) -> None:
@@ -218,7 +234,7 @@ def _resolve_probation(ctx, account_id: str = "") -> None:
     """Record the result of open probation tickets once their run is scored; a run that ended on quota or a machine
     problem (or never ran) gives the slot back."""
     for p in ctx.db.all("SELECT * FROM role_probation WHERE result='' AND (%s='' OR account_id=%s)", (account_id, account_id)):
-        run = ctx.db.one("SELECT id, ticket_key, step, account_id, outcome, error_kind, summary, status, started_at,"
+        run = ctx.db.one("SELECT id, ticket_key, step, account_id, outcome, error_kind, summary, details, pr_url, status, started_at,"
                          " CASE WHEN step='dev' AND outcome='done' THEN (SELECT v.outcome FROM runs v WHERE"
                          " v.ticket_key=runs.ticket_key AND v.step IN ('verify','qa') AND v.started_at > runs.started_at"
                          " AND v.outcome IN ('merged','human','rework') ORDER BY v.started_at LIMIT 1) END AS decision"
@@ -261,53 +277,227 @@ def _percent(value: float) -> str:
     return f"{round(value * 100):d}%"
 
 
+FAILURE_KINDS = ("failed", "timeout", "tool_missing", "rework")
+
+
+def _failure_kind(run: dict, score: Scored) -> str | None:
+    if score.failure is None or score.failure <= 0:
+        return None
+    if score.rework or score.label == "sent_back":
+        return "rework"
+    if run.get("outcome") == "tool_missing":
+        return "tool_missing"
+    if run.get("outcome") in STOPPED_OUTCOMES or (run.get("error_kind") or "").lower() == "timeout":
+        return "timeout"
+    return "failed"
+
+
+def _scored_window(history, window: int, scoring_from: datetime | None = None) -> list[tuple[dict, Scored]]:
+    return [(run, score) for run, score in history if score is not None and score.failure is not None
+            and (scoring_from is None or run["started_at"] >= scoring_from)][:window]
+
+
+def _failure_breakdown(items: list[tuple[dict, Scored]]) -> tuple[dict[str, int], list[str]]:
+    counts = {kind: 0 for kind in FAILURE_KINDS}
+    tickets = set()
+    for run, score in items:
+        kind = _failure_kind(run, score)
+        if kind:
+            counts[kind] += 1
+            if run.get("ticket_key"):
+                tickets.add(run["ticket_key"])
+    return counts, sorted(tickets)
+
+
+def _diagnostic_detail(items: list[tuple[dict, Scored]], window: int, score: float | None = None) -> str:
+    counts, tickets = _failure_breakdown(items)
+    scored = len(items)
+    prefix = f"Failure score {_percent(score)} over the latest {scored} scored runs (window {window}).\n" if score is not None else ""
+    return (prefix + "Failure kinds: " + ", ".join(f"{kind}={counts[kind]}" for kind in FAILURE_KINDS)
+            + ".\nTickets involved: " + (", ".join(tickets) if tickets else "none"))
+
+
+def _record_role_incident(ctx, subject: str, title: str, detail: str) -> None:
+    if not open_incident(ctx, "role_health", subject, "warning", title, detail):
+        ctx.db.run("UPDATE incidents SET title=%s, detail=%s WHERE kind='role_health' AND subject=%s AND closed_at IS NULL",
+                   (title, detail, subject))
+
+
+def _role_capacity(account_count: int) -> int:
+    """Maximum disabled roles while keeping two enabled and disabling no more than half the pool."""
+    return max(0, min(account_count // 2, account_count - 2))
+
+
+def _ready_role_accounts(ctx, accounts: list) -> list:
+    """Accounts that can take work now: unpaused, usable account status and at least one online assigned machine."""
+    if not accounts:
+        return []
+    by_id = {account.id: account for account in accounts}
+    statuses = {row["id"]: row["status"] for row in ctx.db.all(
+        "SELECT id,status FROM accounts WHERE id = ANY(%s)", (list(by_id),))}
+    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
+    return [account for account in accounts if not account.paused
+            and statuses.get(account.id) in ("idle", "working", "probing")
+            and online.intersection(account.machines)]
+
+
+def _tool_missing_cause_fixed(ctx, account, runs, window: int) -> bool:
+    """True when every tool-missing result in the current scoring window is available to this account now."""
+    missing_runs = [(run, score) for run, score in _scored_window(runs, window)
+                    if run.get("outcome") == "tool_missing" and score.failure and score.failure > 0]
+    if not missing_runs:
+        return False
+    from . import tooling
+    node_rows = {row["name"]: row for row in ctx.db.all(
+        "SELECT name, status, tools, metrics FROM nodes WHERE status='online' AND name = ANY(%s)",
+        (account.machines,))}
+    if not node_rows:
+        return False
+    for run, _ in missing_runs:
+        requirements = list(dict.fromkeys(str(name) for name in ((run.get("details") or {}).get("missing_tools") or [])
+                                          if str(name).strip()))
+        if not requirements:
+            return False
+        if not any(all(tooling.machine_has(node, name) for name in requirements)
+                   for node in node_rows.values()):
+            return False
+    return True
+
+
+def _recover_disabled(ctx, account, role: str, state: dict, runs, window: int, percent: int) -> bool:
+    """Restore a role immediately when its score/cause is corrected, or after its probation streak succeeds."""
+    score, _ = failure_score(runs, window)
+    if score is None or score * 100 <= percent:
+        switch_on(ctx, account.id, role, "the corrected run history is now below the failure threshold")
+        return True
+    if _tool_missing_cause_fixed(ctx, account, runs, window):
+        switch_on(ctx, account.id, role, "the missing tool is available on a machine assigned to this account")
+        return True
+    if _streak(ctx.db, account.id, role, state["disabled_at"]) >= RECOVERY_STREAK:
+        switch_on(ctx, account.id, role, f"{RECOVERY_STREAK} successful probation tickets")
+        return True
+    return False
+
+
 def switch_off(ctx, account_id: str, role: str, score: float, window: int, history, percent: int) -> None:
-    runs = [s for _, s in history if s is not None and s.failure is not None][:window]
-    failed = sum(1 for s in runs if s.failure == 1.0)
-    sent_back = sum(1 for s in runs if s.failure == 0.5)
+    items = _scored_window(history, window)
+    diagnostics = _diagnostic_detail(items, window, score)
     note = (f"Role {role} is switched off for {account_id}: failure score {_percent(score)} over the last {window} "
-            f"scored runs ({failed} failed, {sent_back} sent back) is above {percent}%. Its other roles stay on. "
-            f"One easy probation ticket a day; two in a row that succeed bring the role back.")
+            f"scored runs is above {percent}%. Its other roles stay on. {diagnostics}\n"
+            "One easy probation ticket may run at a time; two in a row that succeed bring the role back.")
     ctx.db.run("INSERT INTO role_health (account_id, role, enabled, note, score, disabled_at) VALUES (%s,%s,false,%s,%s,now())"
-               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false, probation_unlimited=false,"
+               " ON CONFLICT (account_id, role) DO UPDATE SET enabled=false,"
                " note=EXCLUDED.note, score=EXCLUDED.score,"
                " disabled_at=now(), updated_at=now()", (account_id, role, note, round(score, 4)))
     ctx.events.emit("role.disabled", account=account_id, step=role, outcome="disabled", reason=note,
                     score=round(score, 4))
-    open_incident(ctx, "role_health", f"{account_id}:{role}", "warning",
-                  f"{account_id} switched off for role {role} (failure score {_percent(score)})", note)
+    _record_role_incident(ctx, f"{account_id}:{role}",
+                          f"{account_id} switched off for role {role} (failure score {_percent(score)})", note)
 
 
-def switch_on(ctx, account_id: str, role: str) -> None:
-    ctx.db.run("UPDATE role_health SET enabled=true, note='', score=NULL, disabled_at=NULL, probation_unlimited=false, scoring_from=now(),"
+def switch_on(ctx, account_id: str, role: str, reason: str = "recovery checks passed") -> None:
+    ctx.db.run("UPDATE role_health SET enabled=true, note='', score=NULL, disabled_at=NULL, scoring_from=now(),"
                " updated_at=now() WHERE account_id=%s AND role=%s", (account_id, role))
     ctx.events.emit("role.enabled", account=account_id, step=role, outcome="enabled",
-                    reason=f"role {role} is back on for {account_id} after {RECOVERY_STREAK} successful probation tickets")
+                    reason=f"role {role} is back on for {account_id}: {reason}")
     close_incident(ctx, "role_health", f"{account_id}:{role}",
-                   f"{account_id} is back on role {role} after {RECOVERY_STREAK} successful probation tickets")
+                   f"{account_id} is back on role {role}: {reason}")
+
+
+def _open_role_wide_incident(ctx, role: str, accounts: list, window: int, percent: int, histories) -> None:
+    combined = []
+    failures_by_account = []
+    for account in accounts:
+        items = _scored_window(histories.get((account.id, role), []), window)
+        combined.extend(items)
+        score = sum(item.failure for _, item in items) / len(items) if items else 0
+        failures_by_account.append(f"{account.id} {_percent(score)}")
+    counts, _ = _failure_breakdown(combined)
+    cause = max(FAILURE_KINDS, key=lambda kind: counts[kind])
+    detail = (f"Every eligible account for role {role} is above the {percent}% failure threshold; AI Flow kept all "
+              f"{len(accounts)} accounts enabled to preserve work capacity. Most frequent failure kind: {cause}.\n"
+              f"Account scores: {', '.join(failures_by_account)}\n"
+              + _diagnostic_detail(combined, window))
+    _record_role_incident(ctx, role,
+                          f"All eligible {role} accounts score poorly; keeping them on (most frequent cause: {cause})",
+                          detail)
 
 
 def evaluate(ctx, account_id: str = "") -> None:
-    """Re-score every account and role (or one account): switch roles off and back on, settle probation tickets."""
-    _resolve_probation(ctx, account_id)
+    """Re-score whole role pools so one result cannot disable too many peers; settle probation tickets."""
+    with _EVALUATION_LOCK:
+        with ctx.db.pool.connection() as connection:
+            connection.execute("SELECT pg_advisory_lock(%s, %s)", _EVALUATION_ADVISORY_LOCK)
+            try:
+                _evaluate(ctx)
+            finally:
+                connection.execute("SELECT pg_advisory_unlock(%s, %s)", _EVALUATION_ADVISORY_LOCK)
+
+
+def _evaluate(ctx) -> None:
+    """Run one serialized role health sweep after acquiring the process and database locks."""
+    # Pool capacity and the all-accounts incident require every peer's history, even when called after one account's run.
+    _resolve_probation(ctx)
     settings = get_settings(ctx.db)
     window, percent = settings["window_runs"], settings["failure_percent"]
-    history = _history(ctx.db, account_id)
+    history = _history(ctx.db)
     states = _states(ctx.db)
-    for account in ctx.repo().accounts:
-        if account_id and account.id != account_id:
+    repo_accounts = ctx.repo().accounts
+    role_names = sorted({role for account in repo_accounts for role in account_roles(account)})
+    for role in role_names:
+        # Only accounts that can take work now count against the role's switch-off capacity.
+        holders = [account for account in repo_accounts if role in account_roles(account)]
+        accounts = _ready_role_accounts(ctx, holders)
+        if not accounts:
+            close_incident(ctx, "role_health", role, "no unpaused account is currently assigned to this role")
             continue
-        for role in account_roles(account):
+
+        full_scores = {account.id: failure_score(history.get((account.id, role), []), window)[0]
+                       for account in accounts}
+        all_bad = all(score is not None and score * 100 > percent for score in full_scores.values())
+        if all_bad:
+            # There is no healthier account to move work to. Recover any prior switches and report one pooled cause.
+            for account in accounts:
+                state = states.get((account.id, role))
+                if state and not state["enabled"]:
+                    switch_on(ctx, account.id, role, "all eligible accounts are failing, so the role pool stays enabled")
+            _open_role_wide_incident(ctx, role, accounts, window, percent, history)
+            continue
+        close_incident(ctx, "role_health", role, "not every eligible account is above the failure threshold")
+
+        for account in accounts:
             state = states.get((account.id, role))
             if state and not state["enabled"]:
-                if _streak(ctx.db, account.id, role, state["disabled_at"]) >= RECOVERY_STREAK:
-                    switch_on(ctx, account.id, role)
+                _recover_disabled(ctx, account, role, state, history.get((account.id, role), []), window, percent)
+
+        states = _states(ctx.db)
+        limit = _role_capacity(len(accounts))
+        disabled = [account for account in accounts
+                    if (state := states.get((account.id, role))) and not state["enabled"]]
+        # Heal legacy state that violates today's capacity rule before evaluating new switches.
+        if len(disabled) > limit:
+            for account in sorted(disabled, key=lambda item: (float(states[(item.id, role)].get("score") or 0), item.id))[:len(disabled) - limit]:
+                switch_on(ctx, account.id, role, "restored to keep at least two accounts ready and within the half-pool limit")
+            states = _states(ctx.db)
+            disabled = [account for account in accounts
+                        if (state := states.get((account.id, role))) and not state["enabled"]]
+
+        candidates = []
+        for account in accounts:
+            state = states.get((account.id, role))
+            if state and not state["enabled"]:
                 continue
             runs = history.get((account.id, role), [])
             score, _ = failure_score(runs, window, state["scoring_from"] if state else None)
             if score is not None and score * 100 > percent:
-                switch_off(ctx, account.id, role, score, window, [(r, s) for r, s in runs
-                           if not state or r["started_at"] >= state["scoring_from"]], percent)
+                scored = [(run, result) for run, result in runs
+                          if result is not None and result.failure is not None
+                          and (not state or state["scoring_from"] is None or run["started_at"] >= state["scoring_from"])]
+                candidates.append((score, account, scored))
+        slots = max(0, limit - len(disabled))
+        for score, account, scored in sorted(candidates, key=lambda item: (-item[0], item[1].id))[:slots]:
+            switch_off(ctx, account.id, role, score, window, scored, percent)
+            states[(account.id, role)] = {"enabled": False, "score": score}
 
 
 # --- what the Command Center shows -----------------------------------------------------------------------------

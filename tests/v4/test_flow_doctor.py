@@ -156,6 +156,49 @@ def test_doctor_routes_around_an_account_or_machine_failure(ctx):
                       "outcome": "released"}
 
 
+def test_the_failed_route_is_excluded_from_candidates_after_the_doctor_moves_the_ticket(client, ctx):
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+    node1 = {"Authorization": "Bearer " + join_node(client, "node1").json()["node_token"]}
+    ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now()")
+    add_ticket(ctx.db, "TESTWP-272")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+
+    def offered(account: str, headers: dict) -> bool:
+        tickets = client.get("/v1/work/candidates", params={"account": account}, headers=headers).json()["tickets"]
+        return any(t["key"] == "TESTWP-272" for t in tickets)
+
+    assert offered("claude-01", cc) and offered("codex-01", node1)
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-272','TESTWP','dev','claude-01','claude','cc',1,"
+               "'failed','failed','machine',%s,%s,%s)", (str(uuid.uuid4()), old, old, old))
+    flow_doctor._route_around_failed_assignment(ctx)
+    assert ctx.db.one("SELECT node FROM flow_doctor_route_exclusions WHERE ticket_key='TESTWP-272'") == {"node": "cc"}
+    assert not offered("claude-01", cc)  # the failed machine is not offered the ticket again
+    assert offered("codex-01", node1)
+    ctx.db.run("UPDATE flow_doctor_route_exclusions SET expires_at=now()-interval '1 minute'")
+    assert offered("claude-01", cc)  # an expired exclusion no longer applies
+
+
+def test_an_account_failure_excludes_the_account_not_its_machine(client, ctx):
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+    join_node(client, "node1")
+    ctx.db.run("UPDATE nodes SET status='online',last_heartbeat=now()")
+    add_ticket(ctx.db, "TESTWP-273")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,error_kind,"
+               "started_at,heartbeat_at,ended_at) VALUES (%s,'TESTWP-273','TESTWP','dev','claude-01','claude','cc',1,"
+               "'failed','failed','auth',%s,%s,%s)", (str(uuid.uuid4()), old, old, old))
+    flow_doctor._route_around_failed_assignment(ctx)
+    assert ctx.db.one("SELECT account_id,node FROM flow_doctor_route_exclusions") == {"account_id": "claude-01",
+                                                                                      "node": ""}
+    assert not [t for t in client.get("/v1/work/candidates", params={"account": "claude-01"},
+                                      headers=cc).json()["tickets"] if t["key"] == "TESTWP-273"]
+
+
 def test_doctor_retries_a_failed_managed_account_signin(ctx):
     ctx.db.run("INSERT INTO managed_ai_accounts (id,provider,node,roles,sign_in_status)"
                " VALUES ('managed-opencode','opencode','cc',%s,'failed')", (["dev"],))
@@ -177,6 +220,21 @@ def test_role_coverage_requires_two_ready_providers_and_returns_reason_and_next_
     assert coverage["ready_count"] == 1 and coverage["provider_count"] == 1 and not coverage["healthy"]
     assert "different providers" in coverage["reason"] and "sign" in coverage["next_step"]
     assert ctx.db.one("SELECT cause FROM flow_doctor_findings WHERE subject='role:dev'")["cause"] == "no_ready_account"
+
+
+def test_role_coverage_uses_routing_readiness_for_shared_accounts_pending_sign_in(ctx):
+    online_node(ctx, "cc")
+    online_node(ctx, "node1")
+    account_state(ctx, "claude-01", "idle")
+    account_state(ctx, "codex-01", "idle")
+
+    def dev():
+        return next(row for row in flow_doctor.role_coverage(ctx, persist=False) if row["role"] == "dev")
+
+    ctx.db.run("INSERT INTO account_machines (account_id,node,status) VALUES ('codex-01','node1','pending')")
+    assert dev()["ready_accounts"] == ["claude-01"] and not dev()["healthy"]  # online machine, but not signed in
+    ctx.db.run("UPDATE account_machines SET status='signed_in' WHERE account_id='codex-01'")
+    assert sorted(dev()["ready_accounts"]) == ["claude-01", "codex-01"] and dev()["healthy"]
 
 
 def test_doctor_expedites_a_healthy_disabled_role_through_probation(ctx):
@@ -232,6 +290,68 @@ def test_one_session_of_many_commands_creates_one_bug_and_a_new_session_another(
     assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions WHERE bug_ticket_key=''")["n"] == 0
 
 
+def test_events_of_one_session_across_doctor_passes_share_one_bug(ctx):
+    start = datetime.now(timezone.utc) - timedelta(minutes=50)
+
+    def record(n: int, minutes: int, actor: str = "ops") -> None:
+        flow_doctor.record_operator_intervention(ctx, source_key=f"p{n}", source="shell", actor=actor,
+                                                 action="execute", target=f"cmd{n}",
+                                                 happened_at=start + timedelta(minutes=minutes))
+
+    record(0, 0)
+    record(1, 10)
+    assert flow_doctor.create_intervention_bugs(ctx) == 1
+    record(2, 25)  # a later pass: within 30 minutes of the last action of the same session
+    record(3, 45)  # and again, 20 minutes after the previous one
+    record(4, 30, actor="other")  # another actor is another session
+    assert flow_doctor.create_intervention_bugs(ctx) == 1
+    assert len(ctx.jira.created) == 2
+    sessions = ctx.db.all("SELECT actor,event_count,bug_ticket_key FROM operator_intervention_sessions ORDER BY actor")
+    assert [(s["actor"], s["event_count"]) for s in sessions] == [("ops", 4), ("other", 1)]
+    assert len({r["bug_ticket_key"] for r in ctx.db.all("SELECT bug_ticket_key FROM operator_interventions"
+                                                         " WHERE actor='ops'")}) == 1
+    bug = sessions[0]["bug_ticket_key"]
+    assert sum(1 for key, body in ctx.jira.comments if key == bug and "more actions" in body) == 1
+    assert flow_doctor.create_intervention_bugs(ctx) == 0  # nothing new: no duplicate Bug and no repeated comment
+    assert sum(1 for key, body in ctx.jira.comments if key == bug and "more actions" in body) == 1
+    assert flow_doctor.operator_intervention_summary(ctx)["last_24h"] == 5
+    flow_doctor.record_operator_intervention(ctx, source_key="late", source="shell", actor="ops", action="execute",
+                                             target="late", happened_at=start + timedelta(hours=2, minutes=45))
+    assert flow_doctor.create_intervention_bugs(ctx) == 1  # a real gap of more than 30 minutes opens a new session
+
+
+def test_intervention_bugs_reach_intake_with_a_retry_and_workers_can_claim_them(ctx, control_repo):
+    from fastapi.testclient import TestClient
+    from aiflow.v4.control.api import create_app
+    from aiflow.v4.core.controlrepo import ControlRepo
+    with (control_repo / "accounts.yaml").open("a") as f:
+        f.write("  - {id: grok-01, provider: grok, node: cc, tier: middle, roles: [intake_refiner]}\n")
+    snap = ControlRepo.load(control_repo)
+    ctx.repo = lambda: snap
+    ctx.settings.maintenance_project = "TESTWP"
+    app = create_app(ctx)
+    app.state.sync_accounts()
+    api = TestClient(app)
+    api.headers.update({"Authorization": "Bearer " + join_node(api, "cc").json()["node_token"]})
+    flow_doctor.record_operator_intervention(ctx, source_key="b1", source="shell", actor="ops", action="execute",
+                                             target="systemctl restart", reason="stuck")
+    original = ctx.jira.transition_to
+    ctx.jira.transition_to = lambda key, target: (_ for _ in ()).throw(RuntimeError("jira down"))
+    assert flow_doctor.create_intervention_bugs(ctx) == 1
+    key = ctx.db.one("SELECT bug_ticket_key FROM operator_intervention_sessions")["bug_ticket_key"]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Created"
+    assert not [t for t in api.get("/v1/work/candidates", params={"account": "grok-01"}).json()["tickets"]
+                if t["key"] == key]
+    ctx.jira.transition_to = original
+    assert flow_doctor.create_intervention_bugs(ctx) == 0  # the retry only moves the Bug; no second Bug
+    assert len(ctx.jira.created) == 1
+    assert ctx.db.one("SELECT status FROM tickets WHERE key=%s", (key,))["status"] == "Intake"
+    assert [t["step"] for t in api.get("/v1/work/candidates", params={"account": "grok-01"}).json()["tickets"]
+            if t["key"] == key] == ["intake"]
+    claimed = api.post("/v1/work/claim", json={"ticket": key, "account": "grok-01", "step": "intake"})
+    assert claimed.status_code == 200 and claimed.json()["claimed"]
+
+
 def test_node_agent_collapses_a_session_of_commands_into_one_intervention():
     from aiflow.v4.node import agent
     events = [{"source": "shell", "actor": "ops", "action": "execute", "target": f"c{n}",
@@ -241,10 +361,16 @@ def test_node_agent_collapses_a_session_of_commands_into_one_intervention():
     assert len(grouped) == 1 and grouped[0]["details"]["events"] == 4 and grouped[0]["source_key"] == "k0"
 
 
+def as_operator(ctx) -> None:
+    """The test server has one login role, so make it a person's role: the registered role is the product."""
+    ctx.db.run("DELETE FROM audit_product_roles")
+
+
 def test_tables_created_by_later_migrations_get_the_audit_trigger(ctx):
     ctx.db.run("CREATE TABLE later_table (id int)")
     try:
         ctx.db.migrate()
+        as_operator(ctx)
         with psycopg.connect(ctx.db.url, application_name="psql") as connection:
             connection.execute("INSERT INTO later_table VALUES (1)")
         row = ctx.db.one("SELECT target FROM operator_interventions WHERE source='database' AND target='later_table'")
@@ -255,6 +381,7 @@ def test_tables_created_by_later_migrations_get_the_audit_trigger(ctx):
 
 def test_direct_database_writes_and_jira_changes_enter_the_intervention_ledger(ctx):
     add_ticket(ctx.db, "TESTWP-269")
+    as_operator(ctx)
     with psycopg.connect(ctx.db.url, application_name="psql") as connection:
         connection.execute("UPDATE tickets SET summary=summary WHERE key='TESTWP-269'")
     row = ctx.db.one("SELECT source,action,target,details->>'application_name' AS app"
@@ -265,6 +392,36 @@ def test_direct_database_writes_and_jira_changes_enter_the_intervention_ledger(c
              "items": [{"field": "status", "fromString": "To Do", "toString": "In Progress"}]}]}}
     changes = ctx.jira.operator_changes(issue, datetime(2026, 10, 23, 9, tzinfo=timezone.utc), "flow")
     assert changes[0]["source_key"] == "jira:TESTWP-269:history-1" and changes[0]["fields"] == ["status"]
+
+
+def test_the_product_role_is_not_audited_and_application_name_cannot_pose_as_the_product(ctx):
+    add_ticket(ctx.db, "TESTWP-270")
+    with psycopg.connect(ctx.db.url, application_name="psql") as connection:  # the product's own login role
+        connection.execute("UPDATE tickets SET summary=summary WHERE key='TESTWP-270'")
+    assert ctx.db.one("SELECT count(*) AS n FROM operator_interventions WHERE source='database'")["n"] == 0
+    as_operator(ctx)  # a person logs in with another role and copies the product's application_name
+    with psycopg.connect(ctx.db.url, application_name="aiflow4-control") as connection:
+        connection.execute("UPDATE tickets SET summary=summary WHERE key='TESTWP-270'")
+    row = ctx.db.one("SELECT action,target FROM operator_interventions WHERE source='database'")
+    assert row == {"action": "update", "target": "tickets"}
+
+
+def test_truncate_and_schema_changes_by_a_person_are_recorded(ctx):
+    add_ticket(ctx.db, "TESTWP-271")
+    as_operator(ctx)
+    with psycopg.connect(ctx.db.url, application_name="aiflow4-control", autocommit=True) as connection:
+        connection.execute("TRUNCATE tool_waits")
+        connection.execute("ALTER TABLE tool_waits ADD COLUMN scratch int")
+        connection.execute("DROP TRIGGER aiflow4_operator_audit ON tool_waits")
+        connection.execute("CREATE TABLE hand_made (id int)")
+        connection.execute("DROP TABLE hand_made")
+    rows = {(r["action"], r["target"]) for r in ctx.db.all(
+        "SELECT action,target FROM operator_interventions WHERE source='database'")}
+    assert ("truncate", "tool_waits") in rows
+    assert any(a == "alter table" and "tool_waits" in t for a, t in rows)
+    assert any(a == "create table" and "hand_made" in t for a, t in rows)
+    assert any(a.startswith("drop") and "hand_made" in t for a, t in rows)
+    assert any(a.startswith("drop") and "aiflow4_operator_audit" in t for a, t in rows)
 
 
 def test_dashboard_exposes_findings_actions_role_reason_and_intervention_totals(client, ctx):

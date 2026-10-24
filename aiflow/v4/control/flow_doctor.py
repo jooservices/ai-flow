@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import role_health, tooling
+from . import role_health, shared_accounts, tooling
 from .db import J
 from .incidents import idle_reasons
 
@@ -284,33 +284,56 @@ def _release_backoff(ctx) -> None:
                  "Why: The retry window has ended.\nNext: Normal account and machine routing will offer it again.")
 
 
+ROUTE_EXCLUSION_TTL = timedelta(hours=2)
+
+
+def routable_machines(ctx, account, online: set[str]) -> list[str]:
+    """Machines routing would accept for the account: online, and not still pending a sign-in of this account."""
+    pending = shared_accounts.pending_nodes(ctx.db, account.id)
+    return [name for name in account.machines if name in online and name not in pending]
+
+
 def _route_around_failed_assignment(ctx) -> None:
     """Release tickets from failed account/machine assignments when another ready route exists."""
     repo = ctx.repo()
-    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
+    online = shared_accounts.online_nodes(ctx.db)
     queue = ctx.db.all("SELECT key,status FROM tickets WHERE status='To Do' AND 'aiflow-ready'=ANY(labels)"
                        " AND NOT ('aiflow-hold'=ANY(labels))")
     roles = {"dev": "dev", "verify": "verify", "intake": "intake_refiner", "impact": "intake_refiner"}
     for ticket in queue:
-        last = ctx.db.one("SELECT id,step,account_id,node,error_kind,outcome FROM runs WHERE ticket_key=%s"
+        last = ctx.db.one("SELECT id,step,account_id,node,provider,error_kind,outcome FROM runs WHERE ticket_key=%s"
                           " AND status<>'running' ORDER BY started_at DESC LIMIT 1", (ticket["key"],))
         if not last or last["error_kind"] not in {"machine", "node", "offline", "tool", "tools", "auth", "network"}:
             continue
         role = roles.get(last["step"], "dev")
-        alternatives = [a for a in repo.accounts if role in (a.roles or []) and not a.paused
-                        and a.id != last["account_id"] and online.intersection(a.machines)
-                        and not ctx.leases.cooling(a.id)
-                        and (state := ctx.db.one("SELECT status FROM accounts WHERE id=%s", (a.id,)))
-                        and state["status"] in ("idle", "working", "probing")]
-        if not alternatives:
+        # An account failure leaves the account; a machine, tool or network failure leaves the machine. The failed
+        # route is then excluded for this ticket, and the claim path honours the exclusion.
+        bad_account = last["account_id"] if last["error_kind"] == "auth" else ""
+        bad_node = "" if last["error_kind"] == "auth" else last["node"]
+        routes = []
+        for a in repo.accounts:
+            if role not in (a.roles or []) or a.paused or a.id == bad_account or ctx.leases.cooling(a.id):
+                continue
+            state = ctx.db.one("SELECT status FROM accounts WHERE id=%s", (a.id,))
+            if not state or state["status"] not in ("idle", "working", "probing"):
+                continue
+            node = next((name for name in routable_machines(ctx, a, online) if name != bad_node), "")
+            if node:
+                routes.append((a, node))
+        if not routes:
             continue
-        target = sorted(alternatives, key=lambda a: (a.provider == last.get("provider"), a.id))[0]
-        node = next((name for name in target.machines if name in online), "")
+        target, node = sorted(routes, key=lambda r: (r[0].provider == last.get("provider"), r[0].id == last["account_id"],
+                                                     r[0].id))[0]
         action_key = f"route-alternate:{last['id']}:{target.id}:{node}"
         if record_action(ctx, action_key, "move_ticket_to_ready_account", ticket=ticket["key"],
                          account=target.id, node=node, outcome="released",
                          detail=f"last route {last['account_id']} on {last['node']} had {last['error_kind']} failure; "
                                 f"ticket is released to normal routing with {target.id} on {node}"):
+            ctx.db.run("INSERT INTO flow_doctor_route_exclusions (ticket_key,step,account_id,node,reason,expires_at)"
+                       " VALUES (%s,%s,%s,%s,%s,now()+%s) ON CONFLICT (ticket_key,step,account_id,node)"
+                       " DO UPDATE SET expires_at=EXCLUDED.expires_at,reason=EXCLUDED.reason",
+                       (ticket["key"], last["step"], bad_account, bad_node,
+                        f"{last['error_kind']} failure of run {last['id']}", ROUTE_EXCLUSION_TTL))
             _comment(ctx, ticket["key"], "AI Flow · Flow doctor · alternate route selected\n"
                      f"What: Released this ticket to routing on {node} for account {target.id}.\n"
                      f"Why: Its previous machine/account route ended with {last['error_kind']}.\n"
@@ -343,7 +366,7 @@ def _retry_signins(ctx) -> None:
 def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
     """Current ready-account count by role, requiring two separate providers."""
     repo = ctx.repo()
-    online = {row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE status='online'")}
+    online = shared_accounts.online_nodes(ctx.db)
     disabled = role_health.disabled_roles(ctx.db)
     accounts = {row["id"]: row for row in ctx.db.all("SELECT id,status,provider FROM accounts")}
     results = []
@@ -354,7 +377,7 @@ def role_coverage(ctx, *, persist: bool = True) -> list[dict[str, Any]]:
         for account in holders:
             state = accounts.get(account.id, {})
             healthy = (state.get("status") in ("idle", "working", "probing")
-                       and not ctx.leases.cooling(account.id) and online.intersection(account.machines))
+                       and not ctx.leases.cooling(account.id) and routable_machines(ctx, account, online))
             if not healthy:
                 continue
             if (account.id, role) in disabled:
@@ -455,54 +478,112 @@ def record_operator_intervention(ctx, *, source_key: str, source: str, actor: st
 INTERVENTION_WINDOW = timedelta(minutes=30)
 
 
-def _intervention_groups(rows: list[dict]) -> list[list[dict]]:
-    """Group pending interventions by actor and source; a gap of 30 minutes starts a new session."""
-    groups: list[list[dict]] = []
-    open_group: dict[tuple[str, str], list[dict]] = {}
-    for row in sorted(rows, key=lambda r: r["happened_at"]):
-        key = (row["actor"], row["source"])
-        group = open_group.get(key)
-        if group is None or row["happened_at"] - group[-1]["happened_at"] > INTERVENTION_WINDOW:
-            group = open_group[key] = []
-            groups.append(group)
-        group.append(row)
-    return groups
+def _assign_sessions(ctx, limit: int) -> None:
+    """Put each new intervention into the session of its actor and source (gaps under 30 minutes), also when the
+    session already has a Bug from an earlier doctor pass, so a later event never opens a second session."""
+    rows = ctx.db.all("SELECT id,happened_at,actor,source FROM operator_interventions WHERE session_id IS NULL"
+                      " ORDER BY happened_at,id LIMIT %s", (limit,))
+    for row in rows:
+        at = row["happened_at"]
+        session = ctx.db.one("SELECT id,bug_ticket_key FROM operator_intervention_sessions WHERE actor=%s AND source=%s"
+                             " AND started_at - %s <= %s AND last_event_at + %s >= %s"
+                             " ORDER BY last_event_at DESC LIMIT 1",
+                             (row["actor"], row["source"], INTERVENTION_WINDOW, at, INTERVENTION_WINDOW, at))
+        if session:
+            ctx.db.run("UPDATE operator_intervention_sessions SET started_at=least(started_at,%s),"
+                       " last_event_at=greatest(last_event_at,%s),event_count=event_count+1 WHERE id=%s",
+                       (at, at, session["id"]))
+        else:
+            session = ctx.db.one("INSERT INTO operator_intervention_sessions (actor,source,started_at,last_event_at,"
+                                 "event_count) VALUES (%s,%s,%s,%s,1) RETURNING id,bug_ticket_key",
+                                 (row["actor"], row["source"], at, at))
+        ctx.db.run("UPDATE operator_interventions SET session_id=%s,bug_ticket_key=%s WHERE id=%s",
+                   (session["id"], session["bug_ticket_key"], row["id"]))
+
+
+def _session_evidence(ctx, session_id: int, offset: int = 0) -> tuple[list[dict], str]:
+    rows = ctx.db.all("SELECT happened_at,action,target,reason FROM operator_interventions WHERE session_id=%s"
+                      " ORDER BY happened_at,id OFFSET %s LIMIT 20", (session_id, offset))
+    return rows, "\n".join(f"- {r['happened_at'].isoformat()} {r['action']} {r['target']}" for r in rows)
 
 
 def create_intervention_bugs(ctx, limit: int = 200) -> int:
-    """One Bug per actor session, not per command or file write, so an SSH session or deploy cannot flood Jira."""
+    """One Bug per actor session, not per command or file write, so an SSH session or deploy cannot flood Jira.
+
+    Every step is retry safe: the Bug key is stored on the session as soon as Jira returns it, later events of the
+    session are commented on that Bug, and a failed move to Intake is retried each pass until the Bug is claimable.
+    Returns how many Bugs were created."""
     if not ctx.jira:
         return 0
+    _assign_sessions(ctx, limit)
+    project = getattr(ctx.settings, "maintenance_project", "JAIF")
+    labels = ["flow-bug", "operator-intervention"]
     made = 0
-    rows = ctx.db.all("SELECT id,happened_at,source,actor,action,target,reason,details FROM operator_interventions"
-                      " WHERE bug_ticket_key='' ORDER BY id LIMIT %s", (limit,))
-    for group in _intervention_groups(rows):
-        row = group[0]
-        ids = [r["id"] for r in group]
-        summary = f"[Operator intervention] {row['source']} {row['action']} by {row['actor']}"[:240]
-        evidence = "\n".join(f"- {r['happened_at'].isoformat()} {r['action']} {r['target']}" for r in group[:20])
+    for session in ctx.db.all("SELECT * FROM operator_intervention_sessions WHERE bug_ticket_key='' ORDER BY id LIMIT %s",
+                              (limit,)):
+        rows, evidence = _session_evidence(ctx, session["id"])
+        first = rows[0]
+        summary = f"[Operator intervention] {session['source']} by {session['actor']}: {first['action']}"[:240]
         description = ("AI Flow detected a manual intervention. Fix the product path so this action is no longer "
                        "needed.\n\n"
-                       f"When: {row['happened_at'].isoformat()} ({len(group)} recorded action(s))\n"
-                       f"Who: {row['actor']}\nWhat: {row['action']}\n"
-                       f"Where: {row['source']} {row['target']}\nWhy: {row['reason'] or 'Reason not supplied'}\n"
+                       f"When: {session['started_at'].isoformat()} ({session['event_count']} recorded action(s))\n"
+                       f"Who: {session['actor']}\nWhat: {first['action']}\n"
+                       f"Where: {session['source']} {first['target']}\nWhy: {first['reason'] or 'Reason not supplied'}\n"
                        f"Evidence:\n{evidence}\n\nAcceptance: reproduce the manual step, then make the flow "
                        "detect and recover from the underlying cause automatically.")
         try:
-            key = ctx.jira.create_issue(getattr(ctx.settings, "maintenance_project", "JAIF"), summary, description,
-                                        issuetype="Bug", labels=["flow-bug", "operator-intervention"])
-            ctx.db.run("UPDATE operator_interventions SET bug_ticket_key=%s WHERE id = ANY(%s) AND bug_ticket_key=''",
-                       (key, ids))
-            ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
-                       " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                       (key, key.split("-", 1)[0], ["flow-bug", "operator-intervention"], summary, description))
-            ctx.events.emit("operator.intervention_bug", ticket=key, outcome="created",
-                            reason=f"{len(ids)} intervention(s) require a product fix",
-                            data={"intervention_ids": ids})
-            made += 1
-        except Exception as exc:  # noqa: BLE001 - persisted rows retry automatically on the next pass
-            log.warning("could not create intervention Bug %s (%s)", row["id"], type(exc).__name__)
+            key = ctx.jira.create_issue(project, summary, description, issuetype="Bug", labels=labels)
+        except Exception as exc:  # noqa: BLE001 - the session stays without a Bug and retries on the next pass
+            log.warning("could not create intervention Bug for session %s (%s)", session["id"], type(exc).__name__)
+            continue
+        ctx.db.run("UPDATE operator_intervention_sessions SET bug_ticket_key=%s,reported_count=%s WHERE id=%s",
+                   (key, len(rows), session["id"]))
+        ctx.db.run("UPDATE operator_interventions SET bug_ticket_key=%s WHERE session_id=%s",
+                   (key, session["id"]))
+        ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
+                   " VALUES (%s,%s,'Created','Bug',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
+                   (key, key.split("-", 1)[0], labels, summary, description))
+        ctx.events.emit("operator.intervention_bug", ticket=key, outcome="created",
+                        reason=f"{session['event_count']} intervention(s) require a product fix",
+                        data={"session_id": session["id"]})
+        made += 1
+    _attach_later_events(ctx, limit)
+    _move_bugs_to_intake(ctx, limit)
     return made
+
+
+def _attach_later_events(ctx, limit: int) -> None:
+    """Comment the actions that arrived after the Bug was created on that Bug, once."""
+    for session in ctx.db.all("SELECT * FROM operator_intervention_sessions WHERE bug_ticket_key<>''"
+                              " AND event_count>reported_count ORDER BY id LIMIT %s", (limit,)):
+        rows, evidence = _session_evidence(ctx, session["id"], int(session["reported_count"]))
+        if not rows:
+            continue
+        try:
+            ctx.jira.comment(session["bug_ticket_key"],
+                             f"AI Flow · Flow doctor · more actions in the same session by {session['actor']}\n"
+                             f"{evidence}")
+        except Exception as exc:  # noqa: BLE001 - reported_count is unchanged, so the next pass retries
+            log.warning("could not update intervention Bug %s (%s)", session["bug_ticket_key"], type(exc).__name__)
+            continue
+        ctx.db.run("UPDATE operator_intervention_sessions SET reported_count=reported_count+%s WHERE id=%s",
+                   (len(rows), session["id"]))
+
+
+def _move_bugs_to_intake(ctx, limit: int) -> None:
+    """A Bug starts as Created; Intake is the state workers claim from (the normal flow-bug path)."""
+    for session in ctx.db.all("SELECT id,bug_ticket_key FROM operator_intervention_sessions"
+                              " WHERE bug_ticket_key<>'' AND NOT in_intake ORDER BY id LIMIT %s", (limit,)):
+        key = session["bug_ticket_key"]
+        try:
+            status = ctx.jira.transition_to(key, "Intake")
+            if status != "Intake":
+                raise RuntimeError("Bug did not reach Intake")
+        except Exception as exc:  # noqa: BLE001 - in_intake stays false, so the next pass retries only the move
+            log.warning("could not move intervention Bug %s to Intake (%s)", key, type(exc).__name__)
+            continue
+        ctx.db.run("UPDATE operator_intervention_sessions SET in_intake=true WHERE id=%s", (session["id"],))
+        ctx.db.run("UPDATE tickets SET status='Intake',synced_at=now() WHERE key=%s", (key,))
 
 
 def operator_intervention_summary(ctx) -> dict[str, Any]:
@@ -528,6 +609,7 @@ def dashboard(ctx) -> dict[str, Any]:
 def tick(ctx) -> dict[str, int]:
     """Run a complete doctor pass. The caller holds the minute leader lease."""
     _clear_stale_findings(ctx)
+    ctx.db.run("DELETE FROM flow_doctor_route_exclusions WHERE expires_at < now()")
     _fix_tool_waits(ctx)
     _fix_impossible_dependencies(ctx)
     _restart_stale_runs(ctx)

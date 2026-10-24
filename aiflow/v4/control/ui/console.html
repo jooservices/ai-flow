@@ -671,7 +671,8 @@ var ICON = {
 /* ---------- state ---------- */
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
-  dashboardUsage: [], dashboardUsageError: '', dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
+  dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
+  dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
   dashboardTab: 'work', workStatusFilter: 'all',
   themePreference: { user: '', loadedUser: '', chain: Promise.resolve() },
@@ -1599,6 +1600,23 @@ function pollDashboardUsage() {
   }).catch(function (e) { S.dashboardUsageError = String(e.message || e); })
     .then(function () { setTimeout(pollDashboardUsage, ANALYTICS_MS); });
 }
+function loadCapacity(force) {
+  var capacity = S.capacity;
+  if (capacity.loading || (S.consoleUser && !consoleCan('view.machines_ai')) ||
+      (!force && capacity.data && Date.now() - capacity.loadedAt < ANALYTICS_MS)) return;
+  capacity.loading = true;
+  fetch('/v1/capacity', { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    capacity.data = data; capacity.error = ''; capacity.loadedAt = Date.now();
+  }).catch(function (e) {
+    capacity.error = String(e.message || e); capacity.loadedAt = Date.now();
+  }).then(function () {
+    capacity.loading = false;
+    if (S.view === 'cc' && S.data) renderDashboard();
+  });
+}
 function loadDashboardWaiting(force) {
   var waiting = S.dashboardWaiting;
   if (waiting.loading || (S.consoleUser && !consoleCan('view.dashboard'))) return;
@@ -1831,6 +1849,51 @@ function dashboardUsageShare(rows) {
   providers.forEach(function (key) { h += '<span><i class="provider-' + esc(key) + '" style="background:var(--provider-' + esc(key) + ')"></i>' + esc(PROVIDER[key] || key) + ' · ' + Math.round(100 * totals.byProvider[key] / grand) + '% · ' + tok(totals.byProvider[key]) + ' tokens</span>'; });
   return h + '</div></div>';
 }
+function capacityPanel() {
+  var state = S.capacity, data = state.data;
+  var h = '<section class="panel" id="d-capacity" aria-labelledby="h-capacity"><div class="panel-h"><h2 id="h-capacity">Capacity plan</h2><span class="hint">Next seven days · quota and completed ticket history</span><span class="spacer"></span><button class="btn sm" data-act="capacity-refresh">' + (data ? 'Refresh' : 'Load plan') + '</button></div>';
+  if (state.error) h += '<div class="dashboard-empty">Capacity plan unavailable: ' + esc(state.error) + '</div>';
+  if (!data) return h + '<div class="dashboard-empty">' + (state.loading ? 'Loading estimates and quota…' : 'Capacity data is not available yet.') + '</div></section>';
+  var limit = data.limiting_ai;
+  h += '<div class="facts"><div class="fact"><span class="fl">Ready tickets</span><span class="fv mono">' + Number(data.ready_tickets || 0) + '</span></div>';
+  h += '<div class="fact"><span class="fl">Finishable with current quota</span><span class="fv mono">' + Number(data.tickets_finishable || 0) + '</span></div>';
+  h += '<div class="fact"><span class="fl">Quota capacity</span><span class="fv mono">' + Number(data.quota_capacity_tickets || 0) + ' tickets</span></div>';
+  h += '<div class="fact"><span class="fl">Limiting AI</span><span class="fv mono">' + (limit ? esc(limit.account) + ' · ' + Number(limit.tickets) + ' tickets' : 'No quota forecast') + '</span></div></div>';
+  if (data.accounts && data.accounts.length) {
+    h += '<div class="tablebox"><table style="min-width:560px"><thead><tr><th>AI account</th><th>Tokens for seven days</th><th>Estimated tickets</th><th>Limit</th><th>Forecast</th></tr></thead><tbody>';
+    data.accounts.forEach(function (account) {
+      h += '<tr style="cursor:default"><td class="mono">' + esc(account.account) + ' <span class="small">' + esc(PROVIDER[account.provider] || account.provider) + '</span></td>';
+      h += '<td class="mono">' + tok(account.tokens_available) + '</td><td class="mono">' + Number(account.tickets || 0) + '</td>';
+      h += '<td>' + esc(account.limiting_window || '—') + '</td><td>' + esc(account.quota_source) + ' · ' + esc(account.confidence) + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '<div class="dsec"><h4>Why tickets were assigned</h4>';
+  if (!data.decisions || !data.decisions.length) h += '<div class="empty">Assignment explanations will appear after a development run starts.</div>';
+  else {
+    h += '<ul class="feed">';
+    data.decisions.slice(0, 8).forEach(function (decision) {
+      h += '<li><span class="f-time">' + esc(when(decision.assigned_at)) + '</span><span class="f-type">' + esc(decision.account) + '</span>';
+      h += '<span class="f-text"><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(decision.ticket) + '">' + esc(decision.ticket) + '</button> ' + esc(decision.reason) + '</span></li>';
+    });
+    h += '</ul>';
+  }
+  h += '</div><div class="dsec"><h4>Estimate error</h4>';
+  if (!data.errors || !data.errors.length) h += '<div class="empty">Completed ticket estimates will be compared with recorded tokens, time and rework here.</div>';
+  else {
+    h += '<div class="tablebox"><table style="min-width:600px"><thead><tr><th>Ticket</th><th>Tokens</th><th>AI time</th><th>Rework</th></tr></thead><tbody>';
+    data.errors.slice(0, 8).forEach(function (row) {
+      var tokens = row.actual.tokens, minutes = row.actual.time_minutes, risk = row.actual.rework;
+      h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(row.ticket) + '">' + esc(row.ticket) + '</button></td>';
+      h += '<td class="mono">' + tok(tokens.actual) + ' · ' + (tokens.within_range ? 'in range' : signedPct(tokens.error_pct)) + '</td>';
+      h += '<td class="mono">' + mmss(minutes.actual * 60) + ' · ' + (minutes.within_range ? 'in range' : signedPct(minutes.error_pct)) + '</td>';
+      h += '<td>' + (risk.actual ? 'rework' : 'no rework') + ' · predicted ' + Number(risk.predicted_pct.low).toFixed(0) + '–' + Number(risk.predicted_pct.high).toFixed(0) + '%</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  return h + '</div></section>';
+}
+function signedPct(value) { return (Number(value) > 0 ? '+' : '') + Number(value || 0).toFixed(0) + '%'; }
 function dashboardWaitingTickets(tickets, queueKeys) {
   var allTickets = tickets || [], byKey = {};
   if (Array.isArray(queueKeys)) {
@@ -1963,6 +2026,7 @@ function renderDashboard() {
   h += providerUsageChart(S.dashboardUsage);
   h += '<div class="provider-legend" aria-label="AI provider colours">' + providers.map(function (key) { return '<span><i class="provider-swatch provider-' + esc(key) + '"></i><span class="provider-name">' + esc(PROVIDER[key] || key) + '</span></span>'; }).join('') + '</div>' + dashboardUsageShare(S.dashboardUsage) + '</section>';
   h += '<section class="panel" data-block="tokens"><div class="panel-h"><h2>Tokens and cost</h2><span class="hint">Recorded run usage · UTC</span></div><div class="facts"><div class="fact"><span class="fl">Tokens today</span><span class="fv mono">' + tok(usage.tokensToday) + '</span></div><div class="fact"><span class="fl">Approximate cost today</span><span class="fv mono">$' + usage.costToday.toFixed(4) + '</span></div><div class="fact"><span class="fl">Tokens · last 14 days</span><span class="fv mono">' + tok(tokenTotal) + '</span></div><div class="fact"><span class="fl">Cost · last 14 days</span><span class="fv mono">' + usd(costTotal) + '</span></div></div></section>';
+  h += capacityPanel();
   h += '<section class="panel" data-block="quota"><div class="panel-h"><h2>Quota by AI</h2><span class="hint">Per account · current quota and next reset time</span></div>';
   if (!canSeeMachines && S.dashboardQuota.error) h += '<div class="dashboard-empty">Quota summary unavailable: ' + esc(S.dashboardQuota.error) + '</div>';
   else if (!canSeeMachines && S.dashboardQuota.rows === null) h += '<div class="dashboard-empty">' + (S.dashboardQuota.loading ? 'Loading project-scoped quota…' : 'Project-scoped quota is unavailable.') + '</div>';
@@ -3681,6 +3745,18 @@ function drawerTicket(key) {
     b += '<div class="dsec"><h4>Acceptance criteria</h4><ul class="checklist">' + acs.map(function (a) { return '<li><span class="' + (passed ? 'ico-ok' : 'ico-pend') + '">' + (passed ? ICON.ok : ICON.pend) + '</span><span>' + esc(a) + '</span></li>'; }).join('') + '</ul></div>';
   }
   if (det.timeline) b += timeSec(det.timeline);
+  if (det.capacity_decision) {
+    var decision = det.capacity_decision, estimate = decision.estimate || {};
+    var tokens = estimate.tokens || {}, minutes = estimate.time_minutes || {};
+    b += '<div class="dsec"><h4>Why this AI was assigned</h4>';
+    b += '<div class="small">' + esc(decision.account) + ' · ' + esc(PROVIDER[decision.provider] || decision.provider || '') +
+      ' · ' + esc(when(decision.assigned_at)) + '</div><p>' + esc(decision.reason || 'No assignment explanation was saved.') + '</p>';
+    if (tokens.low != null && tokens.high != null && minutes.low != null && minutes.high != null) {
+      b += '<div class="small">Saved estimate: ' + tok(tokens.low) + '–' + tok(tokens.high) + ' tokens · ' +
+        Number(minutes.low).toFixed(1) + '–' + Number(minutes.high).toFixed(1) + ' minutes</div>';
+    }
+    b += '</div>';
+  }
   if (full.description) b += '<div class="dsec"><h4>Description</h4><div class="prose">' + esc(full.description) + '</div></div>';
   b += '<div class="dsec"><h4>Runs</h4>';
   if (!det.runs.length) b += '<div class="empty">No run yet.</div>';
@@ -4975,6 +5051,7 @@ document.addEventListener('click', function (e) {
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
+  else if (act === 'capacity-refresh') { S.capacity.loadedAt = 0; loadCapacity(true); }
   else if (act === 'dashboard-card') openDashboardCard(el.getAttribute('data-card'));
   else if (act === 'flow-step') openDashboardWorkFilter(el.getAttribute('data-status'));
   else if (act.indexOf('layout-') === 0) layoutAction(act, el);

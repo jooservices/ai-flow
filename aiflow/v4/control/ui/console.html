@@ -707,6 +707,7 @@ var S = {
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '', reviewNoteDrafts: {},
   rh: { window: null, percent: null, busy: false, error: '', sig: '' },
+  routing: { data: null, order: null, ceilings: null, busy: false, error: '', loadedAt: 0, loading: false, sig: '', log: { ticket: '', items: null, total: 0, error: '' } },
   reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
@@ -4403,8 +4404,99 @@ function renderMachines() {
     if (j.command) h += '<label class="wide">Command expires in <span class="mono" data-countdown="' + esc(j.expires_at) + '"></span><textarea rows="2" readonly onclick="this.select()">' + esc(j.command) + '</textarea></label><div><button class="btn" data-act="machine-copy-join">Copy command</button></div>';
     h += '<div class="small wide">This screen checks for the machine through live heartbeats. It will appear in the machine list after its agent joins.</div></form></section>';
   }
+  h += '<section class="panel" data-block="routing" id="p-routing" aria-labelledby="h-routing"><div class="panel-h"><h2 id="h-routing">AI provider routing</h2><span class="hint">Tickets go first to the provider with the most quota left; a provider above its ceiling is held back</span></div><div id="routing-host"></div></section>';
+  var oldRouting = $('#routing-host');
   root.innerHTML = h;
+  if (oldRouting && $('#routing-host')) $('#routing-host').replaceWith(oldRouting);
   applyLayout('machines', root);
+  renderRouting();
+  if (!S.routing.loading && Date.now() - S.routing.loadedAt > 15000) loadRouting();
+}
+/* ---------- provider routing: spend preference, order, ceilings and the reason for each assignment ---------- */
+function loadRouting() {
+  S.routing.loading = true;
+  var request = fetch('/v1/provider-routing');
+  if (!request || !request.then) { S.routing.loading = false; return; }
+  request.then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (d) { applyRouting(d, false); S.routing.error = ''; })
+    .catch(function (e) { S.routing.error = String(e.message || e); })
+    .then(function () { S.routing.loading = false; S.routing.loadedAt = Date.now(); renderRouting(); });
+}
+function applyRouting(d, resetDraft) {
+  S.routing.data = d;
+  if (resetDraft || !S.routing.order) {
+    S.routing.order = d.order.slice();
+    S.routing.ceilings = {};
+    d.providers.forEach(function (p) { S.routing.ceilings[p.provider] = String(p.ceiling_pct); });
+  }
+}
+/* every routing decision is kept: search one ticket, or page back through older assignments */
+function loadRoutingDecisions(more) {
+  var L = S.routing.log, base = more ? (L.items || S.routing.data.decisions) : [], offset = base.length;
+  fetch('/v1/provider-routing/decisions?limit=30&offset=' + offset + '&ticket=' + encodeURIComponent(L.ticket))
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (d) { L.items = base.concat(d.decisions); L.total = d.total; L.error = ''; })
+    .catch(function (e) { L.error = String(e.message || e); })
+    .then(function () { renderRouting(); });
+}
+function moveRoutingProvider(provider, dir) {
+  var o = S.routing.order || [], i = o.indexOf(provider), j = i + dir;
+  if (i < 0 || j < 0 || j >= o.length) return;
+  o.splice(i, 1); o.splice(j, 0, provider); renderRouting();
+}
+function saveRouting() {
+  if (S.routing.busy) return;
+  S.routing.busy = true; S.routing.error = ''; renderRouting();
+  var ceilings = {};
+  Object.keys(S.routing.ceilings).forEach(function (k) { ceilings[k] = Number(S.routing.ceilings[k]); });
+  fetch('/v1/provider-routing/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: S.routing.order, ceilings: ceilings }) })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'HTTP ' + r.status); return d; }); })
+    .then(function (d) { applyRouting(d, true); toast('Provider routing saved', 'The new order and ceilings apply to the next offers.', 'ok'); })
+    .catch(function (e) { S.routing.error = String(e.message || e); })
+    .then(function () { S.routing.busy = false; renderRouting(); });
+}
+function renderRouting() {
+  var host = $('#routing-host'); if (!host) return;
+  var d = S.routing.data, canEdit = consoleCan('console.manage');
+  var sig = JSON.stringify([d, S.routing.order, S.routing.ceilings, S.routing.busy, S.routing.error, canEdit, S.routing.log]);
+  if (sig === S.routing.sig && host.firstChild) return;
+  S.routing.sig = sig;
+  if (!d) { host.innerHTML = '<div class="empty">' + (S.routing.error ? esc(S.routing.error) : 'Loading…') + '</div>'; return; }
+  var byProvider = {};
+  d.providers.forEach(function (p) { byProvider[p.provider] = p; });
+  var h = '<div class="tablebox"><table><thead><tr><th scope="col">Preferred order</th><th scope="col">Provider</th><th scope="col">Spend preference</th><th scope="col">Quota left</th><th scope="col">Windows</th><th scope="col">Ceiling (% of window)</th><th scope="col">Status</th></tr></thead><tbody>';
+  S.routing.order.forEach(function (name, i) {
+    var p = byProvider[name]; if (!p) return;
+    var tone = p.held_back ? 'crit' : p.preference === 'spend first' ? 'ok' : p.preference === 'keep for need' ? 'warn' : 'info';
+    h += '<tr data-provider="' + esc(name) + '"><td><span class="mono">' + (i + 1) + '</span>';
+    if (canEdit) h += ' <button class="btn sm" data-act="routing-move" data-provider="' + esc(name) + '" data-dir="-1" aria-label="Move ' + esc(name) + ' earlier"' + (i === 0 ? ' disabled' : '') + '>↑</button><button class="btn sm" data-act="routing-move" data-provider="' + esc(name) + '" data-dir="1" aria-label="Move ' + esc(name) + ' later"' + (i === S.routing.order.length - 1 ? ' disabled' : '') + '>↓</button>';
+    h += '</td><td>' + esc(PROVIDER[name] || name) + ' <span class="muted">· ' + p.accounts + ' account' + (p.accounts === 1 ? '' : 's') + '</span></td>';
+    h += '<td data-routing="preference">' + pill(tone, p.preference) + '</td>';
+    h += '<td class="mono" data-routing="headroom">' + (p.unknown ? '—' : esc(p.headroom_pct) + '%') + '</td>';
+    h += '<td class="small">' + (p.windows.length ? p.windows.map(function (w) { return esc(w.name.replace(/_/g, ' ')) + ' ' + (w.reset ? 'reset' : esc(w.used_pct) + '% used' + (w.reset_at ? ' · resets ' + esc(when(w.reset_at)) : '')); }).join('<br>') : '—') + '</td>';
+    h += '<td><input type="number" min="1" max="100" step="1" style="width:5em" aria-label="Ceiling for ' + esc(name) + '" data-routing-ceiling="' + esc(name) + '" value="' + esc(S.routing.ceilings[name]) + '"' + (canEdit ? '' : ' disabled') + '></td>';
+    h += '<td class="small" data-routing="status">' + (p.held_back ? '<span style="color:var(--crit)">Held back: ' + esc(p.held_reason) + '</span>' : 'In normal use') + (p.unknown ? '<div data-routing="unknown">Quota unknown: this provider reports no quota, so it is treated as having headroom.</div>' : '') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  h += '<div class="small" style="padding:8px 12px">Default order when providers are otherwise equal: Codex, Grok, Claude. The ceiling applies to every window a provider reports, each with its own reset time. A held-back provider keeps master, triage, tickets labelled for it and work no other provider can do; it returns after its window resets or when usage is below 60%.</div>';
+  if (canEdit) h += '<div style="padding:0 12px 8px"><button class="btn primary" data-act="routing-save"' + (S.routing.busy ? ' disabled' : '') + '>' + (S.routing.busy ? 'Saving…' : 'Save order and ceilings') + '</button></div>';
+  else h += '<div class="small" style="padding:0 12px 8px">Only an owner can change the order and ceilings.</div>';
+  if (d.settings && d.settings.updated_by) h += '<div class="small" style="padding:0 12px 8px">Last changed by ' + esc(d.settings.updated_by) + ' at ' + esc(when(d.settings.updated_at)) + '.</div>';
+  if (S.routing.error) h += '<div class="err" role="alert" style="padding:0 12px 8px">' + esc(S.routing.error) + '</div>';
+  h += '<div class="panel-h" style="padding:6px 12px 0"><h2 style="font-size:14px">Why each ticket went to its account</h2><span class="hint">Latest assignments</span></div>';
+  var L = S.routing.log, rows = L.items || d.decisions, total = L.items ? L.total : d.decisions.length;
+  h += '<div style="padding:4px 12px"><input type="search" id="routing-ticket" aria-label="Find the assignments of a ticket" placeholder="Ticket key, e.g. JAIF-264" value="' + esc(L.ticket) + '"> <button class="btn sm" data-act="routing-find">Find</button></div>';
+  if (L.error) h += '<div class="err" role="alert" style="padding:0 12px">' + esc(L.error) + '</div>';
+  if (!rows.length) h += '<div class="empty">' + (L.ticket ? 'No assignment recorded for ' + esc(L.ticket) + '.' : 'No ticket has been assigned yet.') + '</div>';
+  else {
+    h += '<div class="tablebox"><table data-routing="decisions"><thead><tr><th scope="col">When</th><th scope="col">Ticket</th><th scope="col">Step</th><th scope="col">Account</th><th scope="col">Reason</th></tr></thead><tbody>';
+    rows.forEach(function (x) { h += '<tr><td>' + esc(when(x.at)) + '</td><td class="mono">' + esc(x.ticket) + '</td><td>' + esc(x.step) + '</td><td class="mono">' + esc(x.account) + '</td><td class="small">' + esc(x.reason) + '</td></tr>'; });
+    h += '</tbody></table></div>';
+    if (!L.items && total >= 30) h += '<div style="padding:4px 12px"><button class="btn sm" data-act="routing-more">Show older assignments</button></div>';
+    else if (L.items && L.items.length < total) h += '<div style="padding:4px 12px"><button class="btn sm" data-act="routing-more">Show older assignments (' + (total - L.items.length) + ' more)</button></div>';
+  }
+  host.innerHTML = h;
 }
 /* Result of the project's check commands run once on a clean checkout of each machine (docs/v4/missing-tools.md). */
 function projectChecksCell(c) {
@@ -5281,6 +5373,10 @@ document.addEventListener('click', function (e) {
       .then(function (r) { return projectResponseError(r); }).then(function () { loadNotifications(); })
       .catch(function (err) { S.notifications.error = String(err.message || err); renderNotifications(); });
   }
+  else if (act === 'routing-move') moveRoutingProvider(el.getAttribute('data-provider'), Number(el.getAttribute('data-dir')));
+  else if (act === 'routing-save') saveRouting();
+  else if (act === 'routing-find') { var rt = $('#routing-ticket'); S.routing.log.ticket = rt ? rt.value.trim() : ''; S.routing.log.items = null; loadRoutingDecisions(false); }
+  else if (act === 'routing-more') loadRoutingDecisions(true);
   else if (act === 'machine-add-toggle') openMachineForm();
   else if (act === 'machine-join-create') submitMachineJoin();
   else if (act === 'machine-copy-join') copyMachineCommand();
@@ -5666,6 +5762,7 @@ document.addEventListener('input', function (e) {
   if (e.target.id === 'q') { S.search = e.target.value; renderDBody(); tick(); }
   if (e.target.id === 'rh-window') S.rh.window = e.target.value;
   if (e.target.id === 'rh-percent') S.rh.percent = e.target.value;
+  if (e.target.getAttribute && e.target.getAttribute('data-routing-ceiling') && S.routing.ceilings) S.routing.ceilings[e.target.getAttribute('data-routing-ceiling')] = e.target.value;
   if (CR_FIELDS[e.target.id]) S.cr.v[CR_FIELDS[e.target.id]] = e.target.value;
   if (JOIN_FIELDS[e.target.id]) S.join[JOIN_FIELDS[e.target.id]] = e.target.value;
   if (e.target.id === 'machine-name') S.machines.join.name = e.target.value;

@@ -12,6 +12,7 @@ holding that single line (see [Fewer merge conflicts](../../docs/v4/merge-confli
 by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topics.
 
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
+- [Provider routing by quota](../../docs/v4/provider-routing.md): tickets go first to the provider with the most quota left (default Codex, Grok, Claude), a provider above its owner-set ceiling is held back and returns after its window resets or below 60%, with the reason for each assignment shown on Machines and AI
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
 - [Product documentation site](../../docs/v4/documentation-site.md): user guide per role, administrator guide, generated API reference and one runbook per incident kind, built into a static site that ships in every release, opened by the console Help links, with a CI check that screen and API changes carry a documentation change

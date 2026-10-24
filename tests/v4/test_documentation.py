@@ -355,6 +355,51 @@ def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatc
     assert docsite.documentation_gaps(pages, views=views) == []
 
 
+def test_provider_routing_ui_changes_map_to_machines_and_ai(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if "routing: { data:" in line),
+        next(i for i, line in enumerate(source_lines, 1) if 'data-block="routing"' in line),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("/* ---------- provider routing:")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function loadRouting(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function applyRouting(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function moveRoutingProvider(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function saveRouting(")),
+        next(i for i, line in enumerate(source_lines, 1) if line.startswith("function renderRouting(")),
+        next(i for i, line in enumerate(source_lines, 1) if "act === 'routing-move'" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "S.routing.ceilings[e.target.getAttribute" in line),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"machines"}
+
+
+def test_provider_routing_topic_names_its_screen_and_claim_route():
+    topic = (ROOT / "docs/v4/provider-routing.md").read_text()
+    assert "**Console screens:** `machines`." in topic
+    assert "`POST /v1/work/claim`" in topic
+
+    api = "aiflow/v4/control/api.py"
+    routing = "aiflow/v4/control/provider_routing.py"
+    changed_routes = {api: {"POST /v1/work/claim"}, routing: {"POST /v1/work/claim"}}
+    assert docsite.documentation_gaps(
+        ["aiflow/v4/control/ui/console.html", api, routing, "docs/v4/provider-routing.md"],
+        routes=changed_routes, views={"machines"}, changed_routes=changed_routes,
+    ) == []
+
+
 def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()

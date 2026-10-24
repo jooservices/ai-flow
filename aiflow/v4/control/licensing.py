@@ -216,6 +216,12 @@ def _iso(value: datetime | None) -> str | None:
     return _now(value).isoformat() if value else None
 
 
+def status_fields(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the public status subset used by the console status endpoint."""
+    fields = ("status", "reason", "plan", "expires_at", "grace_until", "read_only", "licence_required")
+    return {key: state[key] for key in fields}
+
+
 def save_limits(db, plan: str, limits: dict[str, Any], public_key: str) -> dict[str, Any]:
     plan = plan.lower().strip()
     if plan not in PLAN_DEFAULTS:

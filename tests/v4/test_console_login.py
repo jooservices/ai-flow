@@ -75,6 +75,7 @@ def test_users_screen_creates_accounts_and_shows_the_licence_limit_refusal(ctx, 
     assert sign_in(client, seeded).status_code == 200
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
     limits["free"]["users"] = 2
+    ctx.settings.license_public_key = "test-issuer-public-key"
     ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
 
     listed = client.get("/v1/auth/users")

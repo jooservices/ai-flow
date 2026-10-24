@@ -14,7 +14,8 @@ The incident detail ends with "Cause:" and names one or more of:
 - no node is online;
 - no online node serves the project;
 - every node that serves the project is gated by missing tools, a missing pin in `versions.lock`, or unhealthy test services;
-- no AI account is ready (all in cooldown, signed out or failing).
+- no AI account is ready (all in cooldown, signed out or failing);
+- "licence limit stops new work": a plan limit refuses the machines, AI accounts or projects; see [licence_limit](licence_limit.md).
 
 ## Fix
 

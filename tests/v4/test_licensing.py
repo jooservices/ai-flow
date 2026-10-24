@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from aiflow.v4.control import licensing, login
+from aiflow.v4.control import incidents, licensing, login
 from aiflow.v4.control.console_auth import issue_session
 from aiflow.v4.control.db import J
 from aiflow.v4.control.ui import mount_ui
@@ -22,11 +22,19 @@ from conftest import add_ticket, join_node
 
 PAGE = Path(__file__).resolve().parents[2] / "aiflow" / "v4" / "control" / "ui" / "console.html"
 COMPOSE = Path(__file__).resolve().parents[2] / "deploy" / "v4" / "control" / "compose.yaml"
+LICENSE_PUBLIC_KEY = Ed25519PrivateKey.generate().public_key().public_bytes(
+    serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 SESSION_SECRET = "licensing-console-session-secret-has-32-bytes"
+
+
+def expire_grace(ctx):
+    """Pretend usage above the limits was first detected longer than the grace period ago."""
+    ctx.db.run("UPDATE licensing_state SET over_limit_since=now() - interval '15 days' WHERE id=1")
 
 
 def sign_in(client, ctx, role="owner"):
     licensing.initialize(ctx.db)
+    ctx.settings.license_public_key = LICENSE_PUBLIC_KEY
     ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(licensing.PLAN_DEFAULTS),))
     ctx.settings.console_session_secret = SESSION_SECRET
     client.cookies.set("aiflow4_session", issue_session("owner@example.test", role, 2_000_000_000,
@@ -73,7 +81,7 @@ def test_plan_defaults_and_console_licence_usage_export_path(client, ctx):
     data = response.json()
     assert data["status"] == "active" and data["plan"] == "free"
     assert data["plans"] == {
-        "free": {"machines": 1, "ai_accounts": 2, "projects": 3, "users": 3},
+        "free": {"machines": 3, "ai_accounts": 6, "projects": 3, "users": 3},
         "team": {"machines": 5, "ai_accounts": 12, "projects": 25, "users": 25},
         "business": {"machines": 50, "ai_accounts": 100, "projects": 250, "users": 250},
     }
@@ -101,7 +109,7 @@ def test_console_readers_get_the_installation_warning_status_without_licence_man
     response = client.get("/v1/licensing/status")
     assert response.status_code == 200
     assert response.json() == {"status": "active", "reason": "", "plan": "free", "expires_at": None,
-                               "grace_until": None, "read_only": False}
+                               "grace_until": None, "read_only": False, "licence_required": True}
     assert client.get("/v1/licensing").status_code == 403
 
 
@@ -191,14 +199,15 @@ def test_limits_are_editable_and_project_machine_account_and_user_caps_are_enfor
 
     join = join_node(client, "cc")
     assert join.status_code == 200
+    expire_grace(ctx)
     account = client.get("/v1/work/candidates", params={"account": "opencode-01"},
                          headers={"Authorization": f"Bearer {join.json()['node_token']}"})
     assert account.status_code == 200 and "AI accounts limit of 2" in account.json()["reason"]
 
-    first = login.seed_user(ctx.db, "first@example.test", "lead")
+    first = login.seed_user(ctx.db, "first@example.test", "lead", public_key=LICENSE_PUBLIC_KEY)
     assert first
     with pytest.raises(ValueError, match="Users limit of 1"):
-        login.seed_user(ctx.db, "second@example.test", "lead")
+        login.seed_user(ctx.db, "second@example.test", "lead", public_key=LICENSE_PUBLIC_KEY)
 
 
 def test_managed_ai_account_creation_is_refused_at_the_plan_cap(client, ctx):
@@ -244,6 +253,7 @@ def test_startup_sync_skips_configured_accounts_and_machines_over_their_limits(c
     assert client.get("/v1/licensing").json()["usage"]["ai_accounts"] == 3
 
     # A configured account omitted from the registry still cannot claim new work by name.
+    expire_grace(ctx)
     with pytest.raises(licensing.LicenseError, match="AI accounts limit of 2 reached"):
         licensing.enforce_account_entitlement(ctx, "opencode-01", public_key=ctx.settings.license_public_key)
     ctx.settings.join_token = "join-secret"
@@ -259,10 +269,97 @@ def test_running_work_survives_account_limit_refusal(client, ctx):
     run_id = str(uuid.uuid4())
     ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome)"
                " VALUES (%s,'TESTWP-90','TESTWP','dev','opencode-01','opencode','cc',1,'running','')", (run_id,))
+    limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    limits["free"]["ai_accounts"] = 2
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+    expire_grace(ctx)
     response = client.get("/v1/work/candidates", params={"account": "opencode-01"},
                           headers={"Authorization": f"Bearer {joined.json()['node_token']}"})
     assert "AI accounts limit" in response.json()["reason"]
     assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "running"
+
+
+def licensed_over_limit(client, ctx, **limits):
+    """A licensed installation (issuer key set) on the Free plan with the given limits."""
+    sign_in(client, ctx)
+    plans = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
+    plans["free"].update(limits)
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s, over_limit_since=NULL WHERE id=1", (J(plans),))
+
+
+def incident(ctx, resource):
+    return ctx.db.one("SELECT * FROM incidents WHERE kind='licence_limit' AND subject=%s ORDER BY opened_at DESC",
+                      (resource,))
+
+
+def test_no_licence_configured_means_no_limits_and_no_incident(client, ctx):
+    sign_in(client, ctx, role="lead")
+    ctx.settings.license_public_key = ""
+    ctx.settings.license_service_url = ""
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1",
+               (J({plan: {key: 1 for key in v} for plan, v in licensing.PLAN_DEFAULTS.items()}),))
+    node = join_node(client, "cc").json()["node_token"]
+    join_node(client, "node1")
+    state = licensing.snapshot(ctx.db, "")
+    assert state["licence_required"] is False and state["limits_enforced"] is False and state["status"] == "active"
+    assert client.get("/v1/licensing/status").json()["licence_required"] is False
+    assert "No licence required" in PAGE.read_text()
+    offer = client.get("/v1/work/candidates", params={"account": "opencode-01"},
+                       headers={"Authorization": f"Bearer {node}"})
+    assert "reason" not in offer.json()
+    licensing.require_capacity(ctx, "machines", public_key="")
+    licensing.require_count_capacity(ctx.db, "users", 99, public_key="")
+    assert ctx.db.one("SELECT over_limit_since FROM licensing_state WHERE id=1")["over_limit_since"] is None
+    assert incident(ctx, "machines") is None
+
+
+def test_free_plan_over_limit_keeps_working_for_the_grace_period_then_raises_an_incident(client, ctx):
+    licensed_over_limit(client, ctx, machines=1)
+    cc = join_node(client, "cc").json()["node_token"]
+    node1 = join_node(client, "node1").json()["node_token"]
+    add_ticket(ctx.db, "TESTWP-301")
+
+    # First detection starts the grace period; the excess machine still gets work and nothing is raised.
+    offer = client.get("/v1/work/candidates", params={"account": "codex-01"},
+                       headers={"Authorization": f"Bearer {node1}"})
+    assert "reason" not in offer.json()
+    first = ctx.db.one("SELECT over_limit_since FROM licensing_state WHERE id=1")["over_limit_since"]
+    assert first is not None
+    again = client.get("/v1/work/candidates", params={"account": "codex-01"},
+                       headers={"Authorization": f"Bearer {node1}"})
+    assert "reason" not in again.json()
+    assert ctx.db.one("SELECT over_limit_since FROM licensing_state WHERE id=1")["over_limit_since"] == first
+    assert incident(ctx, "machines") is None
+    # Creating a new machine is refused during the grace period (AC4).
+    ctx.settings.join_token = "join-secret"
+    refused = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": "node-new",
+                                                         "role": "worker", "project": "TESTWP"})
+    assert refused.status_code == 409 and "Machines limit of 1" in refused.json()["detail"]
+
+    # The 14-day grace period runs out while usage is still over: the limit stops new work and raises the alarm.
+    expire_grace(ctx)
+    stopped = client.get("/v1/work/candidates", params={"account": "codex-01"},
+                         headers={"Authorization": f"Bearer {node1}"})
+    assert "Machines limit of 1 reached" in stopped.json()["reason"]
+    opened = incident(ctx, "machines")
+    assert opened["severity"] == "critical" and opened["closed_at"] is None
+    assert "machines" in opened["title"] and "2/1" in opened["title"]
+    assert "Licence screen" in opened["detail"]
+    assert client.get("/v1/work/candidates", params={"account": "claude-01"},
+                      headers={"Authorization": f"Bearer {cc}"}).status_code == 200
+
+    # The idle-flow alert names the licence limit as the cause (AC3).
+    reasons = " ".join(incidents.idle_reasons(ctx, {"TESTWP"}, {"TESTWP-301"}))
+    assert "licence limit stops new work" in reasons and "Machines limit of 1" in reasons
+
+    # Raising the limit lets work resume and closes the incident.
+    ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1",
+               (J({plan: dict(v) for plan, v in licensing.PLAN_DEFAULTS.items()}),))
+    resumed = client.get("/v1/work/candidates", params={"account": "codex-01"},
+                         headers={"Authorization": f"Bearer {node1}"})
+    assert "reason" not in resumed.json()
+    assert incident(ctx, "machines")["closed_at"] is not None
+    assert ctx.db.one("SELECT over_limit_since FROM licensing_state WHERE id=1")["over_limit_since"] is None
 
 
 def test_expired_and_first_detected_invalid_licences_use_their_correct_grace_clock_and_read_only_preserves_data(
@@ -378,6 +475,7 @@ def test_excess_machines_and_projects_cannot_start_work_but_existing_runs_can_fi
     limits = {plan: dict(values) for plan, values in licensing.PLAN_DEFAULTS.items()}
     limits["free"].update(machines=1, projects=1)
     ctx.db.run("UPDATE licensing_state SET plan_limits=%s WHERE id=1", (J(limits),))
+    expire_grace(ctx)
 
     machine_offer = client.get("/v1/work/candidates", params={"account": "codex-01"},
                                headers={"Authorization": f"Bearer {node1}"})

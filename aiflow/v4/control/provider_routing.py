@@ -210,7 +210,14 @@ def record(db, ticket: str, step: str, account: str, provider: str, kind: str, r
            " VALUES (%s,%s,%s,%s,%s,%s)", (ticket, step, account, provider, kind, reason[:500]))
 
 
-def recent_decisions(db, limit: int = 30) -> list[dict]:
+def recent_decisions(db, limit: int = 30, offset: int = 0, ticket: str = "") -> list[dict]:
+    where, args = ("WHERE ticket_key=%s", (ticket,)) if ticket else ("", ())
     return [{"ticket": r["ticket_key"], "step": r["step"], "account": r["account_id"], "provider": r["provider"],
              "kind": r["kind"], "reason": r["reason"], "at": r["at"].isoformat()}
-            for r in db.all("SELECT * FROM routing_decisions ORDER BY at DESC, id DESC LIMIT %s", (limit,))]
+            for r in db.all(f"SELECT * FROM routing_decisions {where} ORDER BY at DESC, id DESC LIMIT %s OFFSET %s",
+                            args + (limit, offset))]
+
+
+def count_decisions(db, ticket: str = "") -> int:
+    where, args = ("WHERE ticket_key=%s", (ticket,)) if ticket else ("", ())
+    return int(db.one(f"SELECT count(*) AS n FROM routing_decisions {where}", args)["n"])

@@ -707,7 +707,7 @@ var S = {
   leadEpic: null, leadReport: null,
   biz: null, bizError: '', bizLoading: null, reviews: null, reviewsError: '', reviewerToken: '', reviewNoteDrafts: {},
   rh: { window: null, percent: null, busy: false, error: '', sig: '' },
-  routing: { data: null, order: null, ceilings: null, busy: false, error: '', loadedAt: 0, loading: false, sig: '' },
+  routing: { data: null, order: null, ceilings: null, busy: false, error: '', loadedAt: 0, loading: false, sig: '', log: { ticket: '', items: null, total: 0, error: '' } },
   reviewProject: '', reviewMetrics: null, reviewProjects: [], reviewThreads: [],
   join: { name: '', role: 'worker', project: '', provision_key: '', error: '', busy: false, command: '', expires_at: '', copied: false, sig: '' },
   cr: { project: null, v: { title: '', description: '', epic: '' }, errors: [], sending: false, created: null, sig: '' },
@@ -4384,6 +4384,15 @@ function applyRouting(d, resetDraft) {
     d.providers.forEach(function (p) { S.routing.ceilings[p.provider] = String(p.ceiling_pct); });
   }
 }
+/* every routing decision is kept: search one ticket, or page back through older assignments */
+function loadRoutingDecisions(more) {
+  var L = S.routing.log, base = more ? (L.items || S.routing.data.decisions) : [], offset = base.length;
+  fetch('/v1/provider-routing/decisions?limit=30&offset=' + offset + '&ticket=' + encodeURIComponent(L.ticket))
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (d) { L.items = base.concat(d.decisions); L.total = d.total; L.error = ''; })
+    .catch(function (e) { L.error = String(e.message || e); })
+    .then(function () { renderRouting(); });
+}
 function moveRoutingProvider(provider, dir) {
   var o = S.routing.order || [], i = o.indexOf(provider), j = i + dir;
   if (i < 0 || j < 0 || j >= o.length) return;
@@ -4404,7 +4413,7 @@ function saveRouting() {
 function renderRouting() {
   var host = $('#routing-host'); if (!host) return;
   var d = S.routing.data, canEdit = consoleCan('console.manage');
-  var sig = JSON.stringify([d, S.routing.order, S.routing.ceilings, S.routing.busy, S.routing.error, canEdit]);
+  var sig = JSON.stringify([d, S.routing.order, S.routing.ceilings, S.routing.busy, S.routing.error, canEdit, S.routing.log]);
   if (sig === S.routing.sig && host.firstChild) return;
   S.routing.sig = sig;
   if (!d) { host.innerHTML = '<div class="empty">' + (S.routing.error ? esc(S.routing.error) : 'Loading…') + '</div>'; return; }
@@ -4430,11 +4439,16 @@ function renderRouting() {
   if (d.settings && d.settings.updated_by) h += '<div class="small" style="padding:0 12px 8px">Last changed by ' + esc(d.settings.updated_by) + ' at ' + esc(when(d.settings.updated_at)) + '.</div>';
   if (S.routing.error) h += '<div class="err" role="alert" style="padding:0 12px 8px">' + esc(S.routing.error) + '</div>';
   h += '<div class="panel-h" style="padding:6px 12px 0"><h2 style="font-size:14px">Why each ticket went to its account</h2><span class="hint">Latest assignments</span></div>';
-  if (!d.decisions.length) h += '<div class="empty">No ticket has been assigned yet.</div>';
+  var L = S.routing.log, rows = L.items || d.decisions, total = L.items ? L.total : d.decisions.length;
+  h += '<div style="padding:4px 12px"><input type="search" id="routing-ticket" aria-label="Find the assignments of a ticket" placeholder="Ticket key, e.g. JAIF-264" value="' + esc(L.ticket) + '"> <button class="btn sm" data-act="routing-find">Find</button></div>';
+  if (L.error) h += '<div class="err" role="alert" style="padding:0 12px">' + esc(L.error) + '</div>';
+  if (!rows.length) h += '<div class="empty">' + (L.ticket ? 'No assignment recorded for ' + esc(L.ticket) + '.' : 'No ticket has been assigned yet.') + '</div>';
   else {
     h += '<div class="tablebox"><table data-routing="decisions"><thead><tr><th scope="col">When</th><th scope="col">Ticket</th><th scope="col">Step</th><th scope="col">Account</th><th scope="col">Reason</th></tr></thead><tbody>';
-    d.decisions.forEach(function (x) { h += '<tr><td>' + esc(when(x.at)) + '</td><td class="mono">' + esc(x.ticket) + '</td><td>' + esc(x.step) + '</td><td class="mono">' + esc(x.account) + '</td><td class="small">' + esc(x.reason) + '</td></tr>'; });
+    rows.forEach(function (x) { h += '<tr><td>' + esc(when(x.at)) + '</td><td class="mono">' + esc(x.ticket) + '</td><td>' + esc(x.step) + '</td><td class="mono">' + esc(x.account) + '</td><td class="small">' + esc(x.reason) + '</td></tr>'; });
     h += '</tbody></table></div>';
+    if (!L.items && total >= 30) h += '<div style="padding:4px 12px"><button class="btn sm" data-act="routing-more">Show older assignments</button></div>';
+    else if (L.items && L.items.length < total) h += '<div style="padding:4px 12px"><button class="btn sm" data-act="routing-more">Show older assignments (' + (total - L.items.length) + ' more)</button></div>';
   }
   host.innerHTML = h;
 }
@@ -5315,6 +5329,8 @@ document.addEventListener('click', function (e) {
   }
   else if (act === 'routing-move') moveRoutingProvider(el.getAttribute('data-provider'), Number(el.getAttribute('data-dir')));
   else if (act === 'routing-save') saveRouting();
+  else if (act === 'routing-find') { var rt = $('#routing-ticket'); S.routing.log.ticket = rt ? rt.value.trim() : ''; S.routing.log.items = null; loadRoutingDecisions(false); }
+  else if (act === 'routing-more') loadRoutingDecisions(true);
   else if (act === 'machine-add-toggle') openMachineForm();
   else if (act === 'machine-join-create') submitMachineJoin();
   else if (act === 'machine-copy-join') copyMachineCommand();

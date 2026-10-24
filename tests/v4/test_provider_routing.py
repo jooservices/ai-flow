@@ -233,6 +233,44 @@ def test_held_back_provider_does_not_break_role_coverage(client, ctx):
     assert ctx.db.one("SELECT status FROM accounts WHERE id='claude-01'")["status"] in ("idle", "working", "probing")
 
 
+def test_all_providers_held_back_still_defer_to_the_better_one_and_fall_back_when_it_cannot_take_it(client, ctx):
+    heads = fleet(client, ctx)
+    add_ticket(ctx.db, "TESTWP-20")
+    set_quota(ctx, "claude-01", five_hour=(97, hours(2)))
+    set_quota(ctx, "codex-01", five_hour=(90, hours(2)))
+    held = state(ctx)
+    assert held["claude"]["held_back"] and held["codex"]["held_back"]
+    # held-back claude yields to held-back codex (ranked ahead) while codex can take the work
+    assert offered(client, heads, "codex-01", "node1") == ["TESTWP-20"]
+    assert offered(client, heads, "claude-01", "cc") == []
+    ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
+    assert offered(client, heads, "claude-01", "cc") == ["TESTWP-20"]  # fallback keeps the work moving
+
+
+def test_held_back_provider_yields_to_a_provider_that_is_not_held_back_whatever_the_order(client, ctx):
+    heads = fleet(client, ctx)
+    add_ticket(ctx.db, "TESTWP-21")
+    set_quota(ctx, "codex-01", five_hour=(95, hours(2)))
+    set_quota(ctx, "claude-01", five_hour=(10, hours(2)))
+    assert state(ctx)["claude"]["rank"] == 0
+    assert offered(client, heads, "codex-01", "node1") == []
+    assert offered(client, heads, "claude-01", "cc") == ["TESTWP-21"]
+
+
+def test_routing_explanations_stay_available_per_ticket_beyond_thirty_claims(client, ctx):
+    fleet(client, ctx)
+    sign_in(client, ctx)
+    for n in range(40):
+        ctx.db.run("INSERT INTO routing_decisions (ticket_key, step, account_id, provider, kind, reason)"
+                   " VALUES (%s,'dev','codex-01','codex','headroom',%s)", (f"TESTWP-{100 + n}", f"reason {n}"))
+    assert len(client.get("/v1/provider-routing").json()["decisions"]) == 30
+    one = client.get("/v1/provider-routing/decisions", params={"ticket": "testwp-100"}).json()
+    assert one["total"] == 1 and one["decisions"][0]["reason"] == "reason 0"
+    page = client.get("/v1/provider-routing/decisions", params={"limit": 30, "offset": 30}).json()
+    assert page["total"] == 40 and len(page["decisions"]) == 10
+    assert "TESTWP-100" in {d["ticket"] for d in page["decisions"]}
+
+
 def test_machines_screen_has_the_routing_panel():
     from pathlib import Path
     html = (Path(__file__).parents[2] / "aiflow/v4/control/ui/console.html").read_text()

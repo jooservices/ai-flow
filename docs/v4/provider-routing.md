@@ -54,6 +54,9 @@ provider is held back) or `only` (a single provider).
 ## API
 
 * `GET /v1/provider-routing`: ranking, headroom, windows, hold-back state, settings, recent decisions.
+* `GET /v1/provider-routing/decisions?ticket=KEY&limit=30&offset=0`: every recorded decision, newest first, with
+  `total`; `ticket` finds one ticket's explanations however old. The screen has a ticket search and "Show older
+  assignments". Both reads need the Machines and AI permission, like the rest of the panel.
 * `PUT /v1/provider-routing/settings` (owner): `{"order": ["codex", "grok", "claude"], "ceilings": {"claude": 80}}`.
   Each change is audited.
 * `POST /v1/work/claim`: records the account and routing reason when an offered ticket is claimed.

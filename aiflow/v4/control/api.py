@@ -4311,9 +4311,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         """
         state = routing_state()
         mine = state["providers"].get(acc.provider)
-        if not mine or len(state["ranking"]) < 2 or mine["rank"] == 0:
+        if not mine or len(state["ranking"]) < 2:
             return tickets
-        ahead = {p for p, s in state["providers"].items() if s["rank"] < mine["rank"]}
+        # a held-back provider also yields to every provider that is not held back, whatever its rank; among held-back
+        # providers the ranking decides, so two of them never wait for each other
+        ahead = {p for p, s in state["providers"].items() if p != acc.provider
+                 and (s["rank"] < mine["rank"] or (mine["held_back"] and not s["held_back"]))}
+        if not ahead:
+            return tickets
         online = shared_accounts.online_nodes(ctx.db)
         ready = {r["id"] for r in ctx.db.all("SELECT id FROM accounts WHERE status IN ('idle','working','probing')")}
         offers: dict[tuple[str, str], set[tuple[str, str]]] = {}
@@ -7061,6 +7066,14 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/provider-routing")
     def provider_routing_state() -> dict:
         return provider_routing_view()
+
+    @app.get("/v1/provider-routing/decisions")
+    def provider_routing_decisions(ticket: str = "", limit: int = 30, offset: int = 0) -> dict:
+        """Why tickets went to their accounts: every decision is kept, pageable and findable per ticket."""
+        limit, offset, ticket = max(1, min(limit, 200)), max(0, offset), ticket.strip().upper()
+        return {"decisions": provider_routing.recent_decisions(ctx.db, limit, offset, ticket),
+                "total": provider_routing.count_decisions(ctx.db, ticket),
+                "limit": limit, "offset": offset, "ticket": ticket}
 
     @app.put("/v1/provider-routing/settings")
     def provider_routing_settings(body: ProviderRoutingBody, request: Request) -> dict:

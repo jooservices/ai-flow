@@ -237,23 +237,30 @@ async function exerciseReviews(page, mode) {
     }
     const endpoint = action === 'ask-ai' ? 'ask-ai' : action === 'rework' ? 'rework' : action;
     const actionButton = card.getByRole('button', { name: buttonName, exact: true });
-    const response = page.waitForResponse((item) => item.request().method() === 'POST' &&
-      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 5000 }).catch(async (error) => {
-        const details = await page.evaluate((reviewKey) => ({
-          toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
-          button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
-            card.getAttribute('data-key') === reviewKey).flatMap((card) =>
-            Array.from(card.querySelectorAll('button')).map((button) => ({
-              action: button.getAttribute('data-act'), disabled: button.disabled
-            }))),
-          noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
-            card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
-        }), key);
-        throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
-          `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${error.message}`);
-      });
+    // The request is sent on the click; the answer can take a while on a busy machine (the control API works on the
+    // ticket under its lease), so wait for the answer instead of re-clicking.
+    let response = null, lastError = null;
+    const pending = page.waitForResponse((item) => item.request().method() === 'POST' &&
+      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 30000 });
+    pending.catch(() => null);
     await actionButton.click();
-    assert.equal((await response).status(), 200, `${buttonName} failed for ${key}`);
+    try { response = await pending; } catch (error) { lastError = error; }
+    if (!response) {
+      const details = await page.evaluate((reviewKey) => ({
+        toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
+        button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
+          card.getAttribute('data-key') === reviewKey).flatMap((card) =>
+          Array.from(card.querySelectorAll('button')).map((button) => ({
+            action: button.getAttribute('data-act'), disabled: button.disabled
+          }))),
+        noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
+          card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
+      }), key);
+      throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
+        `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${lastError.message}`);
+    }
+    assert.equal(response.status(), 200, `${buttonName} failed for ${key}`);
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 100))));
   }
 }
 

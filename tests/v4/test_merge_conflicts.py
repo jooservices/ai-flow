@@ -323,7 +323,7 @@ def test_github_update_endpoint_updates_a_verify_branch(client, ctx):
     ctx.github.pr_data = {1: {"number": 1, "base": {"ref": "develop"}, "head": {"ref": "TESTWP-20-x", "sha": "s1"}}}
     ctx.github.compare_results[("test-aiflow-wp", "develop", "TESTWP-20-x")] = {"behind_by": 2}
     first = client.post("/v1/github/merge", json={"run_id": v["run_id"], "fence": v["fence"], "number": 1}, headers=n1).json()
-    assert first["updated"] and not first["merged"] and ctx.github.updated_branches == [("test-aiflow-wp", 1)]
+    assert first["updated"] and not first["merged"] and ctx.github.branch_updates == [("test-aiflow-wp", 1)]
     ctx.github.compare_results[("test-aiflow-wp", "develop", "TESTWP-20-x")] = {"behind_by": 0}
     second = client.post("/v1/github/merge", json={"run_id": v["run_id"], "fence": v["fence"], "number": 1}, headers=n1).json()
     assert second["merged"]

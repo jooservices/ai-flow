@@ -12,7 +12,8 @@ Command Center (`/cc`) is the first screen. It shows the state of the whole flow
 - **Live events** from the registry.
 - **AI accounts**: quota, state and the filter for accounts that need attention. Quota belongs to an account.
 - **Capacity plan**: seven-day quota capacity, the limiting AI, recent assignment explanations and estimate errors. Open any ticket to see its saved estimate and assignment reason in the ticket drawer, including assignments outside the short Dashboard list.
-- **Work lost to conflicts**: the share of verifications sent back only because the branch conflicts with the base, the time spent on them and a per-day trend, for the last 14 days against the 14 before.- **Runs**: running now and the last 30 finished.
+- **Jira and GitHub disagree**: tickets whose Jira status and pull request have differed for more than five minutes, with the status the flow will set and why it is not fixed yet. The flow fixes them itself; see `docs/v4/merged-means-done.md`. An approved ticket waiting to be merged (**Ready to merge**) counts as in flight.
+- **Runs**: running now and the last 30 finished.
 - **Incidents**: opened and closed by the watchdog. Critical ones are emailed. Each kind has a [runbook](../runbooks/index.md).
 - **Versions**: the tool versions pinned in `aiflow-control/versions.lock` and what each node reports.
 

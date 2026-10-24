@@ -227,6 +227,20 @@ async function exerciseReviews(page, mode) {
     if (note) {
       const noteField = card.getByRole('textbox', { name: `Reviewer note for ${key}` });
       await noteField.fill(note);
+      if (action === 'ask-ai') {
+        const questionField = await noteField.elementHandle();
+        const stateRefresh = page.waitForResponse((item) => item.request().method() === 'GET' &&
+          new URL(item.url()).pathname === '/v1/state', { timeout: 12000 });
+        await stateRefresh;
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const questionState = await questionField.evaluate((field) => ({
+          connected: field.isConnected,
+          focused: document.activeElement === field,
+          value: field.value
+        }));
+        assert.deepEqual(questionState, { connected: true, focused: true, value: note },
+          'state polling replaced or blurred the focused review question');
+      }
       if (action === 'reject') {
         const refreshResponse = page.waitForResponse((item) => item.request().method() === 'GET' &&
           new URL(item.url()).pathname === '/v1/reviews');

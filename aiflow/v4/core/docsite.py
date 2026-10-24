@@ -75,6 +75,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjectPickerOptions": ("work", "delivery"),
     "renderDBody": ("work", "delivery"),
     "renderReviews": ("review",),
+    "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
@@ -94,6 +95,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
+    "notificationConfigFromForm": ("notifications",),
+    "notificationFormSubmit": ("notifications",),
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
@@ -168,6 +171,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),

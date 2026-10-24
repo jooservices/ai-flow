@@ -1644,14 +1644,14 @@ function pollDashboardWaiting() {
   if (S.consoleSessionLoaded && (S.view === 'cc' || S.view === 'work' || S.view === 'delivery')) loadDashboardWaiting();
   setTimeout(pollDashboardWaiting, 15000);
 }
-function loadReviews() {
+function loadReviews(forceRender) {
   fetch('/v1/reviews' + (S.reviewProject ? '?project=' + encodeURIComponent(S.reviewProject) : ''), { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function (d) { S.reviews = d.tickets || []; S.reviewMetrics = d.metrics || null; S.reviewProjects = d.projects || [];
     S.reviewThreads = d.threads || [];
-    S.reviewsError = ''; if (S.view === 'review') renderReviews(); })
-    .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(); });
+    S.reviewsError = ''; if (S.view === 'review') renderReviews(forceRender); })
+    .catch(function (e) { S.reviewsError = String(e.message || e); if (S.view === 'review') renderReviews(forceRender); });
 }
 function pollReviews() {
   if (S.view === 'review') loadReviews();
@@ -2626,9 +2626,19 @@ function renderDBody() {
 }
 
 /* ---------- Human review ---------- */
-function renderReviews() {
+function renderReviews(forceRender) {
   var root = $('#view-review'); if (!root) return;
   var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
+  var active = document.activeElement;
+  var activeInsideReview = typeof root.contains === 'function' && root.contains(active);
+  if (activeInsideReview && active.matches && active.matches('[data-review-note]')) {
+    var activeCard = active.closest('[data-review-card]');
+    if (activeCard) noteDrafts[activeCard.getAttribute('data-key')] = active.value;
+    return;
+  }
+  if (!forceRender && activeInsideReview && active.matches && active.matches('button[data-act^="review-"]')) {
+    return;
+  }
   if (typeof root.querySelectorAll === 'function') {
     root.querySelectorAll('[data-review-note]').forEach(function (field) {
       var card = field.closest('[data-review-card]');
@@ -2749,7 +2759,9 @@ function submitReview(key, action, comment) {
     if (noteField) noteField.value = '';
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
-    loadReviews();
+    var focusedAction = document.activeElement;
+    if (focusedAction && focusedAction.matches && focusedAction.matches('button[data-act^="review-"]')) focusedAction.blur();
+    loadReviews(true);
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
 

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..core.environment import is_server_question
 from ..core.text import slug
 from . import tooling
 from .db import J
@@ -184,6 +185,9 @@ def classify(db, text: str, project: str = "") -> Classification:
         return Classification(AMBIGUITY, "the repository (ticket, spec or code) can answer this")
     if IRREVERSIBLE_RE.search(text):
         return Classification(IRREVERSIBLE, "an irreversible or production action")
+    if is_server_question(text):  # where and how something runs is never a question for the owner
+        return Classification(MISSING, "a server, host, network or access question: the project configuration and the "
+                                       "run environment answer it", environment="server")
     return Classification(BUSINESS, "a business decision no source answers")
 
 
@@ -540,6 +544,11 @@ def settle(db, ticket: str, project: str, source: str, run_id: str, cls: str, qu
 
 
 ENVIRONMENT_ANSWERS = {
+    "server": "Servers, hosts, networks and accounts are never part of a ticket or asked of the owner. AI Flow gives the run "
+              "its environment as environment variables (see 'Environment of this run' in the prompt); read them by "
+              "name. If an item you need is not listed or not provided, report `RESULT: BLOCKED: MISSING-ENV: <NAME>` "
+              "with a name from that list. A criterion that can only be proven on one particular machine is verified by "
+              "AI Flow after the merge (canary, release checks); implement and test what runs here.",
     "ci_log": "The tail of the failing CI job log of the pull request is read through the control API "
               "(GET /v1/github/ci-log) and is part of the run prompt when the branch has a pull request; do not ask for it.",
 }
@@ -581,7 +590,13 @@ def dev_question(ctx, run: dict, question: str) -> dict:
             text = ENVIRONMENT_ANSWERS[c.environment]
             settle(db, ticket, project, "dev", str(run["id"]), c.cls, question, c.reason, "machine", None, text)
             return {**base, "resolved": True, "outcome": "auto_answered", "answer": text}
-        requirement = {"browser": "playwright-browser"}.get(c.environment, c.environment.replace("_", "-"))
+        if c.environment == "browser":
+            from ..core.toolchains import parse_missing_requirements
+            browser_tools = {"chromium", "firefox", "webkit"}
+            requirement = next((name for name in parse_missing_requirements(question) if name in browser_tools),
+                               "chromium")
+        else:
+            requirement = c.environment.replace("_", "-")
         if not tooling.requirement_is_accepted(ctx, project, requirement):
             text = (f"AI Flow cannot report {requirement} from a node heartbeat yet, so the requirement was not parked. "
                     f"The run failed with the original report: {question[:1200]}")

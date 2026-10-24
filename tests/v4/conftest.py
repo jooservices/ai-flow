@@ -341,7 +341,11 @@ class FakeGitHub:
     def bot_identity(self):
         return ("jooservices-aiflow-bot[bot]", "1+jooservices-aiflow-bot[bot]@users.noreply.github.com")
 
-    def merge_pr(self, repo, number, title="", method="squash"):
+    def merge_pr(self, repo, number, title="", method="squash", sha=""):
+        self.merge_pins = getattr(self, "merge_pins", []) + [sha]
+        current = getattr(self, "pr_data", {}).get(number, {}).get("head", {}).get("sha", "")
+        if sha and current and sha != current:  # GitHub refuses a merge whose head is not the pinned commit
+            return {"merged": False, "sha": "", "message": "409: Head branch was modified. Review and try the merge again."}
         self.merged = getattr(self, "merged", []) + [(repo, number, title, method)]
         sha = f"merged-pr-{number:04d}"
         pr = self.pr_by_number.get(number)
@@ -349,6 +353,13 @@ class FakeGitHub:
             pr.update({"merged": True, "state": "closed", "merge_commit_sha": sha})
             self.branch_heads[(repo, pr["base"])] = sha
         return {"merged": True, "sha": sha if pr else "abc123", "message": "Pull Request successfully merged"}
+
+    def update_branch(self, repo, number):
+        self.branch_updates = getattr(self, "branch_updates", []) + [(repo, number)]
+        return getattr(self, "update_branch_result", {"ok": True, "message": "202: Updating pull request branch."})
+
+    def checks(self, repo, sha):
+        return list(getattr(self, "check_data", {}).get(sha, []))
 
     def release_pr(self, repo, head, base):
         return next((pr for pr in self.prs if pr["repo"] == repo and pr["head"] == head

@@ -150,6 +150,11 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewThreadsPanel": ("review",),
     "reviewMetricsPanel": ("review",),
     "toolWaitsPanel": ("cc",),
+    "loadDashboardDisagreements": ("cc",),
+    "disagreementsPanel": ("cc",),
+    "mergeSec": ("cc",),
+    "inColumn": ("cc", "work", "delivery"),
+    "stTone": ("cc", "work", "delivery"),
     "setView": None,
     "viewOf": None,
     "viewAllowed": None,
@@ -229,7 +234,7 @@ SCREEN_VIEW_PATTERNS = (
 
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
-    (re.compile(r"dashboardQuota|dashboardWaiting|capacity: \{ data:"), "cc"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"

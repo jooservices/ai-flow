@@ -2857,23 +2857,15 @@ function renderDBody() {
   h += '<section class="panel" data-block="attention" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
   var att = [];
   work.forEach(function (t) {
-    var lr = t.last_run;
-    if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The master role triages the developer question; owner-escalated tickets need an owner decision']);
+    var lr = t.last_run; if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The master role triages the developer question; owner-escalated tickets need an owner decision']);
     else if (t.status === 'Human review') att.push([t, 'info', 'Human review', 'Require human = Yes; checks passed']);
     else if (t.run && (t.run.elapsed_s || 0) >= wm.target * 60) att.push([t, (t.run.elapsed_s >= wm.warn * 60 ? 'crit' : 'warn'), 'Over ' + wm.target + ' min', t.run.account + ' · ' + mmss(t.run.elapsed_s)]);
+    else if (t.slow_verify) att.push([t, 'warn', 'Waiting for verification', t.slow_verify]);
     else if (!t.run && lr && t.status === 'To Do' && ['failed', 'lost', 'timeout', 'quota'].indexOf(lr.outcome) >= 0) att.push([t, 'warn', 'Retry', lr.account + ': ' + lr.outcome + (lr.error_kind ? ' (' + lr.error_kind + ')' : '')]);
   });
   if (!att.length) h += '<div class="col-empty">Nothing needs attention</div>';
   att.slice(0, 20).forEach(function (x) {
     h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(x[0].key) + '"><span class="flag" data-tone="' + x[1] + '">' + esc(x[2]) + '</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(x[0].key) + '</span> ' + esc(x[0].summary) + '</div><div class="d">' + esc(x[3]) + '</div></span><span class="muted">Open</span></button>';
-  });
-  h += '</div>';
-  var slow = (D().slow_verifications || []).filter(function (v) { return byKey[v.key]; });
-  h += '<div class="slow-verifications" id="d-slow-verify"><h3>Waiting for verification over 30 minutes</h3>';
-  if (!slow.length) h += '<div class="col-empty">No ticket waits for verification</div>';
-  slow.forEach(function (v) {
-    var tried = (v.accounts || []).map(function (a) { return a.account + (a.no_verdict ? ' (no verdict ×' + a.no_verdict + (a.barred ? ', not offered again' : '') + ')' : ''); }).join(', ') || 'no account has tried yet';
-    h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(v.key) + '"><span class="flag" data-tone="warn">' + esc(v.waiting_minutes) + ' min</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(v.key) + '</span> ' + esc(v.summary) + '</div><div class="d">Tried: ' + esc(tried) + '</div></span><span class="muted">Open</span></button>';
   });
   h += '</div></section>';
   h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';

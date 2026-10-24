@@ -148,3 +148,14 @@ def test_dashboard_lists_only_tickets_waiting_longer_than_30_minutes(ctx):
     add_ticket(ctx.db, "TESTWP-81", "In Verify")
     insert_run(ctx, "TESTWP-81", "dev", "opencode-01", "done", pr_url=PR, minutes_ago=5)
     assert [v["key"] for v in verify_retry.slow_verifications(ctx.db)] == ["TESTWP-80"]
+
+
+def test_untried_account_that_cannot_receive_the_ticket_does_not_hold_the_retry_back(client, ctx):
+    cc = join(client, "cc")
+    join(client, "node1")
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "claude-01")
+    assert ("TESTWP-50", "verify") not in offered(client, cc, "claude-01")  # codex-01 is online and untried
+    # node1 stays online but stops accepting work: codex-01 cannot take the ticket, so claude-01 gets the retry
+    ctx.db.run("UPDATE nodes SET accepting_work=false WHERE name='node1'")
+    assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")

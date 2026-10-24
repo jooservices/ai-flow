@@ -189,7 +189,9 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
                     " WHERE step='dev' AND outcome='done' ORDER BY ticket_key, started_at DESC"):
         if (r["details"] or {}).get("already_done"):
             already_done[r["ticket_key"]] = {"pr_url": r["pr_url"] or "", "run_id": str(r["id"])}
+    slow = {v["key"]: v for v in verify_retry.slow_verifications(db)}
     for t in tickets:
+        t["slow_verify"] = verify_retry.describe(slow[t["key"]]) if t["key"] in slow else None
         t["already_done"] = already_done.get(t["key"]) if t["status"] == "In Verify" else None
         t["run"] = run_by_ticket.get(t["key"])
         t["last_run"] = last_by_ticket.get(t["key"])
@@ -228,7 +230,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
-        "slow_verifications": verify_retry.slow_verifications(db),
+        "slow_verifications": list(slow.values()),
         "release_readiness": release_readiness.all_versions(db, repo.projects),
         "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),

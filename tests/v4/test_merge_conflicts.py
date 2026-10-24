@@ -707,3 +707,14 @@ def test_conflicts_endpoint_reads_the_runs_and_the_console_shows_it(client, ctx)
     assert client.get("/v1/analytics/conflicts", params={"project": "NOPE"}).json()["current"]["verifications"] == 0
     page = (ROOT / "aiflow/v4/control/ui/console.html").read_text()
     assert "/v1/analytics/conflicts" in page and "Lost to merge conflicts" in page and "c.definition" in page
+
+
+def test_verify_answer_without_a_verdict_line_is_marked_no_verdict(monkeypatch, tmp_path):
+    """control retries on another account only because the worker sets this marker (JAIF-271)."""
+    monkeypatch.setattr(verify, "Git", FakeGit(behind_before=0))
+    monkeypatch.setattr(verify, "get_adapter", lambda _p: _adapter("I looked at the change.\nCHECKS: pytest passed"))
+    api = _API({"/v1/github/token": {"token": "t"}})
+    result = verify.run_verify(api, _claim(project()), pr_info(), str(tmp_path), "https://control", 3600, [])
+    assert result["outcome"] == "failed" and result["details"]["no_verdict"] is True
+    assert result["summary"].startswith("no verdict")
+    assert not any(p.startswith("/v1/github/merge") for _, p, _, _ in api.calls)

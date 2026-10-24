@@ -14,6 +14,8 @@ All of it is scoped to the current development round: a newer finished dev run s
 """
 from __future__ import annotations
 
+from fastapi import HTTPException
+
 from . import role_health, shared_accounts
 from .incidents import close_incident, open_incident
 
@@ -82,8 +84,13 @@ def pool(ctx, ticket: dict, dev_account: str) -> list[str]:
     return out
 
 
-def may_take(ctx, ticket: dict, account_id: str, dev_account: str) -> bool:
-    """Whether `account_id` may be offered the ticket's verification now."""
+def may_take(ctx, ticket: dict, account_id: str, dev_account: str, offers) -> bool:
+    """Whether `account_id` may be offered the ticket's verification now.
+
+    `offers(account, node, capacity_routing=False)` is the normal candidate path of the control API: an untried
+    account holds the ticket back only when that path really offers it this ticket (node online and accepting
+    work, project, capacity and readiness gates).
+    """
     runs = history(ctx.db, ticket["key"])
     if barred(runs.get(account_id, [])):
         return False
@@ -94,9 +101,17 @@ def may_take(ctx, ticket: dict, account_id: str, dev_account: str) -> bool:
     for other in pool(ctx, ticket, dev_account):
         if other == account_id or barred(runs.get(other, [])) or any(runs.get(other, [])):
             continue
-        if any(machine in online for machine in accounts[other].machines):
-            return False  # an eligible account has not tried yet: it goes first
+        for machine in dict.fromkeys(accounts[other].machines):
+            if machine in online and _offered(offers, other, machine, ticket["key"]):
+                return False  # an eligible account has not tried yet: it goes first
     return True
+
+
+def _offered(offers, account_id: str, node: str, key: str) -> bool:
+    try:
+        return any(t["key"] == key and t.get("step") == "verify" for t in offers(account_id, node, capacity_routing=False))
+    except HTTPException:
+        return False
 
 
 def exhausted(ctx, ticket: dict) -> list[str]:
@@ -148,6 +163,13 @@ def slow_verifications(db, minutes: int = SLOW_MINUTES) -> list[dict]:
                     "waiting_minutes": int((_now(db) - ticket["since"]).total_seconds() // 60),
                     "accounts": sorted(tried, key=lambda item: item["account"])})
     return out
+
+
+def describe(slow: dict) -> str:
+    """One line for the Dashboard: how long the ticket waits and which accounts tried."""
+    tried = ", ".join(a["account"] + (f" (no verdict x{a['no_verdict']}" + (", not offered again)" if a["barred"] else ")")
+                                       if a["no_verdict"] else "") for a in slow["accounts"])
+    return f"{slow['waiting_minutes']} min · tried: {tried or 'no account has tried yet'}"
 
 
 def _now(db):

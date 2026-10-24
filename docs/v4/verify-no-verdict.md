@@ -23,7 +23,9 @@ development round: a newer finished dev run starts them again.
 
 - **Retried at once.** A no-verdict run does not start the usual retry backoff. The ticket is offered immediately to an
   account that has not ended it without a verdict. The account that failed is not asked again while another eligible
-  account (verify role on, not paused, not the author, label rules respected, on an online machine) has not tried.
+  account (verify role on, not paused, not the author, label rules respected, on an online machine) has not tried and can actually be offered this ticket by the normal candidate path (machine
+  accepting work, project, capacity and readiness gates). An untried account on an online but ineligible machine does
+  not hold the retry back.
   When every eligible account has tried once, they may try again.
 - **Role health.** The first no-verdict result of an account on a ticket is not scored. The second one in a row on the
   same ticket counts as a failed verify run. A real verdict in between breaks the streak.

@@ -54,7 +54,6 @@ from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABEL
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
 from . import capacity, conflict_loss, hotfiles, merge_queue, review_metrics, verify_retry
-from .verify_retry import VERIFY_BACKOFF_SQL
 from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
@@ -4530,11 +4529,9 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
-            # a run that ended without a verdict is retried at once on another account (verify_retry.py)
-            verify_cooling = {r["ticket_key"] for r in ctx.db.all(VERIFY_BACKOFF_SQL, {"step": "verify"})}
+            verify_cooling = {r["ticket_key"] for r in ctx.db.all(verify_retry.VERIFY_BACKOFF_SQL, {"step": "verify"})}
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                                " AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'",
-                                (projects,)):
+                                " AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "verify"):
                     continue
                 if t["key"] in held or t["key"] in verify_cooling:
@@ -4542,10 +4539,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                 dev = last_dev(t["key"], done=True)
                 if not dev or not dev["pr_url"]:
                     continue
-                if dev["account_id"] == acc.id:  # never grade your own work
-                    continue
-                if not verify_retry.may_take(ctx, t, acc.id, dev["account_id"]):
-                    continue  # no verdict twice in a row, or another account has not tried yet
+                if dev["account_id"] == acc.id or not verify_retry.may_take(ctx, t, acc.id, dev["account_id"], eligible):
+                    continue  # never grade your own work; no-verdict rules: verify_retry.py
                 if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
                     continue
                 if not allowed("verify", t):
@@ -4569,8 +4564,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             # Triage decides a raised escalation; a ticket in Needs owner without an open one has nothing to decide
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
                                 " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
-                                " AND lower(coalesce(type,'')) <> 'epic'"
-                                " AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
+                                " AND lower(coalesce(type,'')) <> 'epic' AND EXISTS (SELECT 1 FROM escalations e WHERE e.ticket_key = tickets.key"
                                 " AND e.resolution = 'open')",
                                 (projects,)):
                 if ticket_needs_missing_container_runtime(t, "triage"):
@@ -4607,8 +4601,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             waiting = backoff("impact")
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
                                 " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-                                " AND lower(coalesce(type,'')) <> 'epic'"
-                                " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
+                                " AND lower(coalesce(type,'')) <> 'epic' AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
                                 " AND r.step = 'impact' AND r.outcome = 'assessed')"
                                 " ORDER BY jira_created NULLS LAST, key", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "impact"):
@@ -4636,8 +4629,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
             flying: dict[str, list[str]] | None = None
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
-                                " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-                                " AND lower(coalesce(type,'')) <> 'epic'", (projects,)):
+                                " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))" " AND lower(coalesce(type,'')) <> 'epic'", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "dev"):
                     continue
                 if (t["key"] in held or t["key"] in cooling or t["key"] in parked

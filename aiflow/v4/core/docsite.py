@@ -55,6 +55,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "dashboardUsageTotals": ("cc",),
     "dashboardUsageShare": ("cc",),
     "dashboardWaitingTickets": ("cc",),
+    "capacityPanel": ("cc",),
+    "drawerTicket": ("cc",),
+    "loadCapacity": ("cc",),
+    "signedPct": ("cc",),
     "dashboardVisibleWaitingTickets": ("cc", "work", "delivery"),
     "loadDashboardWaiting": ("cc", "work", "delivery"),
     "loadDashboardQuota": ("cc",),
@@ -144,6 +148,11 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewThreadsPanel": ("review",),
     "reviewMetricsPanel": ("review",),
     "toolWaitsPanel": ("cc",),
+    "loadDashboardDisagreements": ("cc",),
+    "disagreementsPanel": ("cc",),
+    "mergeSec": ("cc",),
+    "inColumn": ("cc", "work", "delivery"),
+    "stTone": ("cc", "work", "delivery"),
     "setView": None,
     "viewOf": None,
     "viewAllowed": None,
@@ -162,6 +171,12 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "reviewByRole": ("review",),
     "submitReview": ("review",),
     "projectRequestBody": ("projects",),
+    "loadProjectList": ("projects",),
+    "loadEnvironmentOverview": ("projects",),
+    "loadProjectEnvironment": ("projects",),
+    "saveProjectEnvironment": ("projects",),
+    "runEnvironmentScan": ("projects",),
+    "projectEnvironmentPanels": ("projects",),
 }
 
 # These Help elements are shared by every screen and live outside the screen sections/renderers. A change to one
@@ -170,7 +185,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
-    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|containers:\s*false|"
+    (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
+                r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
                 r"config\[fieldName\]|fieldName === 'containers'"), "projects"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "cc"),
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
@@ -217,11 +233,16 @@ SCREEN_VIEW_PATTERNS = (
     (re.compile(r"\bact\s*===\s*[\"']dashboard-tab[\"']"), ("cc",)),
     (re.compile(r"\bact\s*===\s*[\"']dashboard-card[\"']"), ("cc", "work", "review")),
     (re.compile(r"\bact\s*===\s*[\"']flow-step[\"']"), ("cc", "work")),
+    (re.compile(r"\bact\s*===\s*[\"'](?:project-(?:environment|repository)|environment-scan)[\w-]*[\"']"),
+     ("projects",)),
+    (re.compile(r"\bact\s*===\s*[\"']capacity-refresh[\"']"), ("cc",)),
 )
 
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
-    (re.compile(r"dashboardQuota"), "cc"),
+    # The Projects environment editor can remain interactive when its save/scan toast is visible.
+    (re.compile(r"^\s*\.toasts\{"), "projects"),
+    (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
     (re.compile(r"^\s*\.(?:dashboard-tabs|dashboard-tab|dash-section|dash-section-title|dashboard-layout-headings|dash-kpis|dash-kpi|"
                 r"dash-grid|dash-flow|flow-step|dash-tools|sort-btn|dash-table|roadmap-list|roadmap-row|provider-legend|"
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"

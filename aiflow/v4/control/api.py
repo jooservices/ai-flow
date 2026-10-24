@@ -45,13 +45,16 @@ from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
+from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, provider_routing, role_health,
                rollout,
                shared_accounts, support_bundle, tooling, version_release)
+from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
-from . import review_metrics
+from . import capacity, review_metrics
+from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -776,6 +779,17 @@ class ProjectRepositoryConfigBody(BaseModel):
 class ProjectRepositoriesBody(BaseModel):
     repositories: list[ProjectRepositoryConfigBody] = Field(default_factory=list, max_length=100)
     epic_repositories: dict[str, str] = Field(default_factory=dict, max_length=500)
+
+
+class ProjectEnvironmentBody(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class EnvironmentRemovalBody(BaseModel):
+    run_id: str
+    fence: int
+    removed: list[str] = Field(default_factory=list, max_length=50)
+    needs: list[str] = Field(default_factory=list, max_length=20)
 
 
 class SupportBundleBody(BaseModel):
@@ -1541,9 +1555,11 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def reviewer_transition(ticket: str, run_id: str, fence: int, target: str, reason: str) -> str:
         transition_run = fenced(run_id, fence, "jira", "transition", {"to": target})
+        before = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,))
         status = ctx.jira.transition_to(ticket, target)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(done_at,now())"
                    " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, ticket))
+        merge_flow.record_move(ctx, ticket, (before or {}).get("status", ""), status, merge_flow.PERSON, reason)
         audit("jira", "transition", ticket, run_id, fence, transition_run["account_id"], True, status,
               {"to": target, "source": "human-review"})
         ctx.events.emit("jira.transition", ticket=ticket, project=transition_run["project"], run_id=run_id,
@@ -3106,6 +3122,94 @@ def create_app(ctx: Ctx) -> FastAPI:
         return {"saved": True, "project": key, "commit": commit,
                 "epic_repositories": mappings, "repositories": normalized}
 
+    # --- environment of the runs: configuration, missing items, scan (docs/v4/environment.md) ----------------------
+    @app.get("/v1/projects/{key}/environment")
+    def project_environment(key: str, request: Request) -> dict:
+        console_user(request, {"projects.manage"}, target="aiflow-control", action="read", node=key)
+        project = ctx.repo().projects.get(key)
+        if not project:
+            raise HTTPException(404, "project is not configured")
+        items, problems = parse_env_items(project.environment)
+        return {"project": key, "items": [item.public() for item in items], "problems": problems,
+                "kinds": list(ENV_KINDS), "runs": list(ENV_RUN_STEPS),
+                "missing": [r for r in environment_reports.reports(ctx) if r["project"] == key],
+                "post_merge": environment_reports.post_merge_report(ctx, key)}
+
+    @app.put("/v1/projects/{key}/environment")
+    def save_project_environment(key: str, body: ProjectEnvironmentBody, request: Request) -> dict:
+        user = console_user(request, {"projects.manage"}, target="aiflow-control",
+                            action="save_project_environment", node=key)
+        project = ctx.repo().projects.get(key)
+        if not project:
+            project_audit("save_project_environment", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        items, problems = parse_env_items(body.items)
+        if problems or len(items) != len(body.items):
+            project_audit("save_project_environment", key, user.subject, False, "; ".join(problems)[:300],
+                          {"project": key, "names": [str(i.get("name", ""))[:64] for i in body.items]})
+            raise HTTPException(422, "; ".join(problems) or "every environment item needs a name and a kind")
+        config_path = ctx.repo().root / "projects" / f"{key}.yaml"
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            config["environment"] = [{k: v for k, v in (
+                ("name", i.name), ("kind", i.kind), ("value", i.value), ("runs", list(i.runs)),
+                ("description", i.description)) if v not in ("", None)} for i in items]
+            if not items:
+                config.pop("environment")
+            content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+            control_name = Path(ctx.settings.control_repo).name
+            github = github_control_gateway(ctx)
+            branch = github.default_branch(control_name)
+            commit = github.commit_file(control_name, branch, f"projects/{key}.yaml", content,
+                                       f"projects: update the environment of {key} via AI Flow console")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("project environment update failed (%s)", type(exc).__name__)
+            project_audit("save_project_environment", key, user.subject, False, "control repo commit failed")
+            raise HTTPException(502, "could not save the environment to aiflow-control") from exc
+        refresh_projects()
+        # names only in the audit: the values are configuration, the secrets are never in the file
+        project_audit("save_project_environment", key, user.subject, True, commit or "bot commit created",
+                      {"project": key, "names": [i.name for i in items]})
+        ctx.events.emit("project.environment_changed", project=key, account=user.subject, outcome="saved",
+                        reason=f"control repo commit {commit or 'created'}", data={"items": len(items)})
+        return {"saved": True, "project": key, "commit": commit, "items": [i.public() for i in items]}
+
+    @app.get("/v1/environment/missing")
+    def environment_missing_items(request: Request) -> dict:
+        user = (console_user(request, "projects.manage") if ctx.settings.console_login
+                else optional_console_user(request))
+        rows = environment_reports.reports(ctx)
+        if user and user.project_keys is not None:
+            rows = [r for r in rows if r["project"] in user.project_keys]
+        return {"missing": rows}
+
+    @app.get("/v1/environment/scan")
+    def environment_scan_report(request: Request) -> dict:
+        console_user(request, {"projects.manage"}, target="aiflow-control", action="read")
+        return {"scan": environment_reports.last_scan(ctx)}
+
+    @app.post("/v1/environment/scan")
+    def environment_scan_run(request: Request) -> dict:
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="environment_scan")
+        report = environment_reports.scan(ctx, actor=user.subject)
+        project_audit("environment_scan", "", user.subject, True,
+                      f"{len(report['offenders'])} of {report['scanned']} open tickets", {"scan": report["id"]})
+        return {"scan": report}
+
+    @app.post("/v1/environment/removals")
+    def environment_removals(body: EnvironmentRemovalBody, node: str = Depends(node_auth)) -> dict:
+        """The intake AI's record of the wording it removed and the environment needs behind it (fenced)."""
+        run = fenced(body.run_id, body.fence, "environment", "removals", {"removed": len(body.removed)})
+        if run["step"] != "intake":
+            raise HTTPException(403, "only an intake run records removed wording")
+        environment_reports.record_removal(ctx, run, body.removed, body.needs)
+        tickets = environment_reports.open_need_tickets(ctx, run, body.needs)
+        audit("environment", "removals", run["ticket_key"], body.run_id, body.fence, run["account_id"], True,
+              f"{len(body.removed)} removed, {len(tickets)} environment ticket(s)", {"needs": len(body.needs)})
+        return {"ok": True, "environment_tickets": tickets}
+
     @app.post("/v1/projects/preflight")
     def project_preflight_endpoint(body: ProjectPreflightBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_preflight")
@@ -4160,7 +4264,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 kept.append(ticket)
         return kept
 
-    def eligible(account_id: str, node: str, routing: bool = True) -> list[dict]:
+    def eligible(account_id: str, node: str, *, routing: bool = True, capacity_routing: bool = True) -> list[dict]:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4306,6 +4410,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
             dev_rows = []
             parked = tooling.parked_tickets(ctx, node_row)  # waiting for a tool this machine lacks
+            parked |= environment_reports.parked_tickets(ctx)  # waiting for an environment item
             for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
                                 " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))", (projects,)):
                 if ticket_needs_missing_container_runtime(t, "dev"):
@@ -4335,11 +4440,60 @@ def create_app(ctx: Ctx) -> FastAPI:
                     if not rollout.node_compatible(ctx, peer_node, RELEASES)["compatible"]:
                         continue
                     available_elsewhere.update((ticket["key"], ticket["step"])
-                                               for ticket in eligible(peer["id"], peer_node, routing=False))
+                                               for ticket in eligible(peer["id"], peer_node, routing=False,
+                                                                      capacity_routing=False))
             out = [ticket for ticket in out if (ticket["key"], ticket["step"]) not in available_elsewhere]
         if routing and out:
             out = apply_provider_routing(acc, out)
+        if capacity_routing and out:
+            out = route_capacity(account_id, node, out)
         return out
+
+    def route_capacity(account_id: str, node: str, offered: list[dict]) -> list[dict]:
+        """Prefer an eligible account whose quota can cover the ticket's estimated upper bound.
+
+        Candidate polling keeps its legacy behavior when no reliable quota forecast exists. If at least one eligible
+        peer has a quota-safe forecast, only the best safe account sees that development ticket.
+        """
+        development = [ticket for ticket in offered if ticket.get("step") == "dev"]
+        if not development:
+            return offered
+        account_rows = ctx.db.all("SELECT id,provider,tier,roles,quota_forecast FROM accounts ORDER BY id")
+        accounts_by_id = {str(row["id"]): row for row in account_rows}
+        forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in account_rows}
+        samples = capacity.history(ctx.db)
+        eligible_by_key: dict[tuple[str, str], dict[str, dict]] = {}
+        for account in ctx.repo().accounts:
+            if account.id not in accounts_by_id:
+                continue
+            machines = [node] if account.id == account_id else account.machines
+            for machine in dict.fromkeys(machines):
+                if account.id != account_id and machine not in shared_accounts.online_nodes(ctx.db):
+                    continue
+                try:
+                    peer_offers = offered if account.id == account_id and machine == node else eligible(
+                        account.id, machine, capacity_routing=False)
+                except HTTPException:
+                    continue
+                for item in peer_offers:
+                    if item.get("step") == "dev":
+                        eligible_by_key.setdefault((item["key"], item["step"]), {})[account.id] = {
+                            **accounts_by_id[account.id], "tier": account.tier}
+        if not eligible_by_key:
+            return offered
+        selected: dict[tuple[str, str], str] = {}
+        for ticket in development:
+            key = (ticket["key"], ticket["step"])
+            candidates = list(eligible_by_key.get(key, {}).values())
+            if len(candidates) < 2:
+                continue
+            prediction = capacity.estimate(ticket, samples)
+            account, _fits = capacity.choose_account(candidates, ticket, prediction, forecasts)
+            if account:
+                selected[key] = account
+        return [ticket for ticket in offered
+                if ticket.get("step") != "dev" or (ticket["key"], ticket["step"]) not in selected
+                or selected[(ticket["key"], ticket["step"])] == account_id]
 
     def master_ready(account_id: str, node: str) -> bool:
         if ctx.leases.cooling(account_id) or account_master_paused(account_id):
@@ -4534,6 +4688,36 @@ def create_app(ctx: Ctx) -> FastAPI:
             selected_repo = dict(prior_settings) if isinstance(prior_settings, dict) else p.settings_for_repo(prior_repository)
         run_details = ({"repository": selected_repo.get("repo", ""),
                         "repository_settings": selected_repo} if selected_repo else {})
+        if body.step == "dev":
+            capacity_samples = capacity.history(ctx.db)
+            ticket_estimate = capacity.estimate(t, capacity_samples)
+            quota_accounts = ctx.db.all("SELECT id,quota_forecast FROM accounts ORDER BY id")
+            account_forecasts = {str(row["id"]): row.get("quota_forecast") or {} for row in quota_accounts}
+            fit = capacity.account_fit(acc.id, account_forecasts.get(acc.id, {}), ticket_estimate)
+            expected_tokens = ticket_estimate["tokens"]
+            expected_minutes = ticket_estimate["time_minutes"]
+            if fit["known"] and fit["fits"]:
+                senior_work = ("tier-senior" in (t.get("labels") or [])
+                               or ticket_estimate["size"] in {"L", "XL"} or t.get("priority") == "Highest")
+                tier_order = ("senior, then middle, then junior" if senior_work
+                              else "middle, then senior, then junior")
+                strength = f"tier preference for this ticket is {tier_order}"
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}): estimated work is "
+                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
+                          f"{fit['reason']}; {strength}.")
+            elif fit["known"]:
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) because it remains eligible and no "
+                          f"quota-safe eligible account was identified. The estimate is "
+                          f"{expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; {fit['reason']}.")
+            else:
+                reason = (f"Assigned to {acc.id} ({acc.provider}, {acc.tier}) by the existing eligibility rules. "
+                          f"The estimate is {expected_tokens['low']:,.0f}–{expected_tokens['high']:,.0f} tokens and "
+                          f"{expected_minutes['low']:,.0f}–{expected_minutes['high']:,.0f} minutes; "
+                          "quota history is not reliable enough to compare eligible accounts.")
+            run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
+                                       "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
         if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
                                                        model, node, c.fence, h(run_token))):
             ctx.leases.release(t["key"], run_id, c.fence)
@@ -4624,6 +4808,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                         if body.step == "master" else
                         {"key": p.key, **selected_repo, "hotfix_base": p.hotfix_base,
                          "work_minutes": p.work_minutes(),
+                         "environment": ([item.public() for item in p.environment_items]
+                                         if body.step in ("dev", "verify") else []),
                          "merge": {"method": (p.merge or {}).get("method", "squash"),
                                    "auto": bool((p.merge or {}).get("auto", True)),
                                    "require_human": bool((p.merge or {}).get("require_human", False))}}
@@ -4779,7 +4965,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
                        (J({"repository": project.repo, "repository_settings": selected_settings,
-                          "github_connection": connection_id}), run_id))
+                          "github_connection": connection_id,
+                          "post_merge_criteria": [{"ticket": item["key"],
+                                                   "criteria": item.get("post_merge_criteria") or []}
+                                                  for item in snapshot["tickets"]
+                                                  if item.get("post_merge_criteria")]}), run_id))
             ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
                        " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
                        " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
@@ -4804,6 +4994,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                         "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
                         "target_branch": version_release.target_branch(project),
                         "release_branch": release_branch, "source_sha": source_sha,
+                        "environment": ([item.public() for item in project.environment_items
+                                         if "post_merge" in item.runs]),
+                        "post_merge_criteria": [{"key": item["key"],
+                                                 "post_merge_criteria": item.get("post_merge_criteria") or []}
+                                                for item in snapshot["tickets"]
+                                                if item.get("post_merge_criteria")],
                         "containers": bool(project.settings_for_repo(project.repo).get("containers")),
                         "work_minutes": project.work_minutes()}
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
@@ -4867,10 +5063,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             result = version_release.complete(release_ctx, project, version, run, report)
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
+            post_merge_results = environment_reports.record_post_merge_results(
+                ctx, run, version["name"], report,
+                (run.get("details") or {}).get("post_merge_criteria") or [])
+            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
+                       (J({"post_merge_results": post_merge_results}), body.run_id))
             return version_release.publish_failed(release_ctx, project, version, run, exc)
+        check_report = dict(report)
+        if result.get("status") in ("stale", "blocked"):
+            check_report["error"] = check_report.get("error") or str(result.get("reason") or result["status"])
+        post_merge_results = environment_reports.record_post_merge_results(
+            ctx, run, version["name"], check_report,
+            (run.get("details") or {}).get("post_merge_criteria") or [])
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
-                                                                              "checks": body.checks}), body.run_id))
+                                                                              "checks": body.checks,
+                                                                              "post_merge_results": post_merge_results}),
+                    body.run_id))
         return result
 
     # --- runs -----------------------------------------------------------------------------------------------
@@ -4898,6 +5107,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
         if body.pr_url:
             details["pr_url_source"] = "current"
+        if run["step"] == "verify" and body.outcome == "merged":
+            details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
+                ctx, run, details.get("post_merge_criteria") or [])
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:
@@ -4945,6 +5157,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                             run_id))
             else:
                 ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s", (J({"missing_tools": recorded}), run_id))
+        if body.outcome == "environment_missing" and run["step"] == "dev":
+            recorded = environment_reports.record_missing(
+                ctx, run, [str(x) for x in body.details.get("missing_environment") or []], body.summary)
+            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
+                       (J({"missing_environment": recorded}), run_id))
+            if not recorded:  # a name that is not in the project configuration is not an environment item
+                outcome = "failed"
+                ctx.db.run("UPDATE runs SET outcome='failed', error_kind=coalesce(nullif(error_kind,''),"
+                           "'missing_environment_unaccepted') WHERE id=%s", (run_id,))
         try:
             knowledge.capture_run(ctx.db, run_id, ctx.settings.jira_site)
             knowledge.capture_closed_tickets(ctx.db, ctx.settings.jira_site)
@@ -5350,6 +5571,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
+        if previous and previous["status"] != status:
+            merged_by_verify = run["step"] == "verify" and status == "Done"
+            merge_flow.record_move(ctx, key, previous["status"], status,
+                                   merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
+                                   f"{run['step']} run by {run['account_id']}")
         if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
             try:
                 project_lifecycle.report_done_epic(ctx, previous["project"], key)
@@ -5693,7 +5919,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "github", "merge", {"number": body.number})
         if run["step"] != "verify":
             raise HTTPException(403, "only a verify run can merge")
-        return merge_command(run, body.number, body.title, body.method, node)
+        res = merge_command(run, body.number, body.title, body.method, node)
+        if res.get("merged"):  # the verify step's merge: the commit and the time are kept on the ticket
+            merge_flow.record_merge(ctx, run["ticket_key"], merge_flow.latest_pr(ctx.db, run["ticket_key"]),
+                                    str(res.get("sha") or ""), "flow", settled=False)
+        return res
 
     def review_data(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> dict:
         repo = ctx.repo()
@@ -5756,6 +5986,38 @@ def create_app(ctx: Ctx) -> FastAPI:
                 else optional_console_user(request))
         scope = user.project_keys if user and user.project_keys is not None else None
         return {"ticket_keys": review_queue_keys(project_scope=scope)}
+
+    @app.get("/v1/dashboard/disagreements")
+    def dashboard_disagreements(request: Request) -> dict:
+        """Tickets whose Jira state and pull request disagreed for more than five minutes (the flow keeps fixing them)."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = list(user.project_keys) if user and user.project_keys is not None else None
+        rows = merge_flow.disagreements(ctx.db, scope)
+        return {"after_s": merge_flow.DISAGREEMENT_AFTER_S, "tickets": rows}
+
+    @app.post("/v1/github/webhook", include_in_schema=False)
+    async def github_webhook(request: Request) -> dict:
+        """Optional: a pull request event makes the reconcile loop look at that pull request at once. Without a
+        configured secret the route does not exist for callers; the one-minute loop works alone."""
+        secret = ctx.settings.github_webhook_secret
+        if not secret:
+            raise HTTPException(404, "GitHub webhooks are not configured")
+        body = await request.body()
+        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, request.headers.get("X-Hub-Signature-256", "")):
+            raise HTTPException(401, "invalid webhook signature")
+        if request.headers.get("X-GitHub-Event") != "pull_request":
+            return {"reconciled": 0}
+        try:
+            payload = json.loads(body)
+            target = (str(payload["repository"]["full_name"]), int(payload["pull_request"]["number"]))
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(400, "not a pull request event") from None
+        from starlette.concurrency import run_in_threadpool
+        result = await run_in_threadpool(merge_flow.reconcile, ctx, target)
+        await run_in_threadpool(merge_flow.merge_ready, ctx)
+        return {"reconciled": result["checked"]}
 
     @app.get("/v1/dashboard/quota")
     def dashboard_quota(request: Request) -> dict:
@@ -5971,17 +6233,28 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, "ticket has no pull request to approve")
             run = fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
+            ctx.db.run("UPDATE tickets SET approved_at=coalesce(approved_at, now()) WHERE key=%s", (key,))
             result = merge_command(run, number, f"{key}: {ticket['summary']}",
                                    (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
-                note = f"Human review approval could not merge PR #{number}: {result.get('message', 'merge refused')}"
+                # approved: the merge step of the flow takes over, so nobody has to press merge later
+                note = (f"Human review approval could not merge PR #{number} yet: {result.get('message', 'merge refused')}."
+                        " The flow keeps the ticket as Ready to merge and merges it as soon as the pull request can merge.")
                 reviewer_comment(key, run_id, fence, number, note)
                 audit("human-review", "approve", key, run_id, fence, "reviewer-console", False,
                       result.get("message", "merge refused"), {"kind": "review_before_merge"})
+                queued = ""
+                try:
+                    queued = reviewer_transition(key, run_id, fence, merge_flow.READY_TO_MERGE, "approved, merge pending")
+                except Exception as e:  # noqa: BLE001 - the Jira workflow may lack the status; approval still queues it
+                    log.info("%s stays in Human review until it merges: %s", key, e)
                 finish_reviewer_run(key, run_id, fence, "failed", result.get("message", "merge refused"))
-                return {"merged": False, "message": result.get("message", "GitHub refused the merge")}
+                return {"merged": False, "queued": True, "status": queued or ticket["status"],
+                        "message": result.get("message", "GitHub refused the merge")}
             note = f"Human review approved in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
             reviewer_comment(key, run_id, fence, number, note)
+            merge_flow.record_merge(ctx, key, merge_flow.latest_pr(ctx.db, key), result.get("sha", ""), "flow",
+                                    settled=False)
             status = reviewer_transition(key, run_id, fence, "Done", "human review approved")
             record_reviewer_action(ticket, run_id, fence, "approve")
             finish_reviewer_run(key, run_id, fence, "merged", note)
@@ -6039,6 +6312,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             project = ctx.repo().projects[ticket["project"]]
             repository = repository_for_run(run, project)
             gateway = github_gateway(ctx, repository)
+            # a rejection is final: reconcile must not send the rejected ticket back because its PR is closed
+            ctx.db.run("UPDATE tickets SET pr_state='closed', pr_url=coalesce(nullif(%s,''),pr_url),"
+                       " merge_note=%s, pr_checked_at=now() WHERE key=%s",
+                       ((merge_flow.latest_pr(ctx.db, key) or {}).get("url", ""), f"rejected in human review: {reason}"[:500], key))
             closed = gateway.close_pr(repository.split("/", 1)[-1], number)
             audit("github", "close", key, run_id, fence, run["account_id"], True,
                   "pull request closed", {"number": number, "repo": repository})
@@ -6136,6 +6413,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             note = f"Human review gate skipped in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
             reviewer_comment(key, run_id, fence, number, note)
             reviewer_labels(key, run_id, fence, remove=("require-human",))
+            merge_flow.record_merge(ctx, key, merge_flow.latest_pr(ctx.db, key), result.get("sha", ""), "flow",
+                                    settled=False)
             status = reviewer_transition(key, run_id, fence, "Done", "human review gate skipped")
             record_reviewer_action(ticket, run_id, fence, "skip-gate")
             finish_reviewer_run(key, run_id, fence, "skipped_gate", note)
@@ -6631,6 +6910,18 @@ def create_app(ctx: Ctx) -> FastAPI:
         if tl is None:
             raise HTTPException(404, "unknown ticket")
         return tl
+
+    @app.get("/v1/capacity")
+    def capacity_plan(request: Request) -> dict:
+        """Next-week quota capacity, recorded assignment reasons and completed estimate errors."""
+        user = (console_user(request, "view.machines_ai") if ctx.settings.console_login
+                else optional_console_user(request))
+        if user and not has_permission(user.effective_roles, "view.machines_ai"):
+            raise HTTPException(403, "not available for your role")
+        accounts = ctx.db.all("SELECT id,provider,tier,roles,quota FROM accounts ORDER BY id")
+        forecasts = quota_reporting.assessments(ctx.db, accounts)
+        project_keys = user.project_keys if user and user.project_keys is not None else None
+        return capacity.dashboard(ctx.db, accounts, forecasts, project_keys)
 
     @app.get("/v1/role-health")
     def role_health_state() -> dict:

@@ -72,6 +72,7 @@ class Settings:
     trusted_proxies: list[str] = field(default_factory=list)  # CIDRs allowed to supply forwarding headers
     reviewer_token: str = ""
     owner_token: str = ""
+    github_webhook_secret: str = ""  # optional: GitHub pull request events trigger the reconcile loop at once
     o2_url: str = ""
     o2_basic: str = ""
     o2_source: str = "control"
@@ -151,5 +152,7 @@ class Settings:
         s.join_token = os.environ.get("AIFLOW4_JOIN_TOKEN") or secrets.get("AIFLOW4_JOIN_TOKEN", "")
         s.reviewer_token = os.environ.get("AIFLOW4_REVIEWER_TOKEN") or secrets.get("AIFLOW4_REVIEWER_TOKEN", "")
         s.owner_token = os.environ.get("AIFLOW4_OWNER_TOKEN") or secrets.get("AIFLOW4_OWNER_TOKEN", "")
+        s.github_webhook_secret = (os.environ.get("AIFLOW4_GITHUB_WEBHOOK_SECRET")
+                                   or secrets.get("AIFLOW4_GITHUB_WEBHOOK_SECRET", ""))
         s.o2_basic = os.environ.get("O2_BASIC") or secrets.get("O2_BASIC", "")
         return s

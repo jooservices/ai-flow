@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Provider routing by quota](../../docs/v4/provider-routing.md): tickets go first to the provider with the most quota left (default Codex, Grok, Claude), a provider above its owner-set ceiling is held back and returns after its window resets or below 60%, with the reason for each assignment shown on Machines and AI
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure
@@ -18,6 +19,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
+- [Environment of the runs](../../docs/v4/environment.md): tickets carry requirements only; test services, base URLs, databases, browsers and secrets by name live in the project configuration and reach runs as environment variables; server wording is rejected at intake, removed with a record, and found by a scan of open tickets; missing environment items are reported by name
 - [Validated parked requirements](../../docs/v4/parked-requirements.md): validate missing-tool reports, install supported tools from heartbeat requests, show parked-ticket status, and name idle and stalled-wait causes
 - [Playwright browser](../../docs/v4/playwright-browser.md): machines serving a `playwright` project install pinned Node, Playwright, Chromium, Firefox and WebKit, and report an unavailable browser by name
 - [Playwright toolchain](../../docs/v4/playwright-toolchain.md): the `playwright` command is linked onto PATH, browser binaries go into the shared `playwright-browser` folder, and each browser is launched as the AI user
@@ -72,9 +74,11 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
+- [Codex sandbox and Git commits](../../docs/v4/codex-sandbox.md): Codex edits with `workspace-write`; the worker commits outside the sandbox to keep shared mirror metadata protected
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
 - [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
 - [Account quota awareness](../../docs/v4/quota-awareness.md): record account usage, forecast burn and reset risk, route around accounts likely to run out, and show estimates and seven-day history
+- [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error
 - [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 
 ## Tools on a node

@@ -58,14 +58,49 @@ class CleanupStateTests(unittest.TestCase):
 
         redis, repo = MemoryRedis(), SweepRepo()
         messages = []
-        cleanup_done_worktree(redis, repo, "JAIF-9", "JAIF-9-fix", False, None, messages.append)
-        cleanup_done_worktree(redis, repo, "JAIF-9", "JAIF-9-fix", False, None, messages.append)
-        cleanup_done_worktree(redis, repo, "JAIF-9", "JAIF-9-fix", True, None, messages.append)
+        cleanup_done_worktree(redis, repo, "machine-a", "JAIF-9", "JAIF-9-fix", False, None, messages.append)
+        cleanup_done_worktree(redis, repo, "machine-a", "JAIF-9", "JAIF-9-fix", False, None, messages.append)
+        cleanup_done_worktree(redis, repo, "machine-a", "JAIF-9", "JAIF-9-fix", True, None, messages.append)
 
         self.assertEqual(repo.calls, [("JAIF-9", False), ("JAIF-9", True)])
         self.assertEqual(sum("keeping the worktree and branch" in message for message in messages), 1)
         self.assertIn("not fully merged into develop; refusing cleanup", messages[0])
-        self.assertNotIn("sweep-cleanup:JAIF-9:JAIF-9-fix", redis.values)
+        self.assertNotIn("sweep-cleanup:machine-a:JAIF-9:JAIF-9-fix", redis.values)
+
+    def test_cleanup_state_is_independent_for_two_machines(self):
+        class SharedRedis:
+            def __init__(self):
+                self.values = {}
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def set(self, key, value, ttl):
+                self.values[key] = value
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        class SweepRepo:
+            def __init__(self, fail):
+                self.fail = fail
+                self.calls = []
+
+            def cleanup(self, key, merged_pr=False):
+                self.calls.append((key, merged_pr))
+                if self.fail:
+                    raise OSError("permission denied")
+
+        redis = SharedRedis()
+        failed_repo, healthy_repo = SweepRepo(True), SweepRepo(False)
+        messages = []
+        cleanup_done_worktree(redis, failed_repo, "machine-a", "JAIF-9", "JAIF-9-fix", False, None, messages.append)
+        cleanup_done_worktree(redis, healthy_repo, "machine-b", "JAIF-9", "JAIF-9-fix", False, None, messages.append)
+
+        self.assertEqual(failed_repo.calls, [("JAIF-9", False)])
+        self.assertEqual(healthy_repo.calls, [("JAIF-9", False)])
+        self.assertEqual(redis.values, {"sweep-cleanup:machine-a:JAIF-9:JAIF-9-fix": "stopped"})
+        self.assertEqual(len(messages), 2)
 
     def test_other_cleanup_failures_stop_until_operator_intervention(self):
         class MemoryRedis:
@@ -85,7 +120,7 @@ class CleanupStateTests(unittest.TestCase):
         repo.cleanup.side_effect = OSError("permission denied")
         messages = []
         for _ in range(2):
-            cleanup_done_worktree(redis, repo, "JAIF-9", "JAIF-9-fix", False, None, messages.append)
+            cleanup_done_worktree(redis, repo, "machine-a", "JAIF-9", "JAIF-9-fix", False, None, messages.append)
 
         repo.cleanup.assert_called_once_with("JAIF-9", merged_pr=False)
         self.assertEqual(len(messages), 1)

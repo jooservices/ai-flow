@@ -965,10 +965,10 @@ class Supervisor:
                     path, branch = trees[issue["key"]]
                     if issue["status"] == "Done":
                         merged_pr, lookup_error = resolve_merged_pull_request(repo, issue["key"], branch, self.gate_pr)
-                        cleanup_done_worktree(self.redis, repo, issue["key"], branch, merged_pr, lookup_error, log)
+                        cleanup_done_worktree(self.redis, repo, self.cfg.machine, issue["key"], branch, merged_pr, lookup_error, log)
                     elif issue["status"] == "Declined":
                         repo.remove_worktree(path)
-                        self.redis.delete(f"sweep-cleanup:{issue['key']}:{branch}")
+                        self.redis.delete(f"sweep-cleanup:{self.cfg.machine}:{issue['key']}:{branch}")
                         log(f"{issue['key']}: removed the worktree of a declined ticket (branch {branch} kept)")
             except (GitError, JiraError, OSError) as error:
                 log(f"sweep {project.repo}: {error}")

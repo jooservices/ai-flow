@@ -39,10 +39,10 @@ def resolve_merged_pull_request(
     return bool(pr and pr.get("state") == "MERGED"), lookup_error
 
 
-def cleanup_done_worktree(redis: Any, repo: Any, key: str, branch: str, merged_pr: bool,
+def cleanup_done_worktree(redis: Any, repo: Any, machine: str, key: str, branch: str, merged_pr: bool,
                           lookup_error: Exception | None, logger: Callable[[str], None]) -> None:
     """Clean a finished ticket once, remembering failures until a confirmed merge makes retry safe."""
-    marker = f"sweep-cleanup:{key}:{branch}"
+    marker = f"sweep-cleanup:{machine}:{key}:{branch}"
     state = redis.get(marker)
     if state == "stopped" or (state == "awaiting-merge" and not merged_pr):
         return

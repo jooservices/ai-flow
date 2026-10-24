@@ -932,6 +932,35 @@ class MergedPullRequestGateTests(unittest.TestCase):
 
         self.assertEqual(repo.cleaned, ("JAIF-9", True))
 
+    def test_declined_ticket_sweep_deletes_only_this_machines_cleanup_marker(self):
+        redis = FakeRedis()
+        local_marker = "sweep-cleanup:test:JAIF-9:JAIF-9-fix"
+        other_marker = "sweep-cleanup:other:JAIF-9:JAIF-9-fix"
+        redis.set(local_marker, "stopped", 100)
+        redis.set(other_marker, "stopped", 100)
+        sup = make(redis=redis)
+
+        class SweepRepo:
+            name = "ai-flow"
+
+            def exists(self):
+                return True
+
+            def worktrees(self):
+                return [(Path("/worktrees/JAIF-9"), "JAIF-9-fix")]
+
+            def remove_worktree(self, path):
+                self.removed = path
+
+        repo = SweepRepo()
+        sup.jira.search = lambda *args, **kwargs: [{"key": "JAIF-9", "status": "Declined"}]
+        with mock.patch("aiflow.supervisor.Repo", return_value=repo):
+            sup.sweep_worktrees()
+
+        self.assertEqual(repo.removed, Path("/worktrees/JAIF-9"))
+        self.assertNotIn(local_marker, redis.data)
+        self.assertEqual(redis.get(other_marker), "stopped")
+
 
 class PullRequestBodyTests(unittest.TestCase):
     values = {"summary": "Adds the thing.", "why": "Because it is needed.", "tests": "- [x] Reviewed by Grok\n- [ ] CI green\n- [ ] QA",

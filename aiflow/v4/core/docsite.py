@@ -78,6 +78,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjectPicker": ("work", "delivery"),
     "renderProjectPickerOptions": ("work", "delivery"),
     "renderDBody": ("work", "delivery"),
+    "card": ("work", "delivery"),
     "renderReviews": ("review",),
     "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
@@ -261,6 +262,8 @@ SCREEN_LINE_VIEWS += (
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"
                 r"quota-ai|dashboard-empty)\b"), "cc"),
     (re.compile(r"^\s*\.work-status-filter\b"), "work"),
+    (re.compile(r"^\s*\.card-(?:wrap|pr-link)\b"), "work"),
+    (re.compile(r"^\s*\.card-(?:wrap|pr-link)\b"), "delivery"),
     (re.compile(r"^\s*--provider-(?:claude|codex|grok|opencode):"), "cc"),
     (re.compile(r"dashboardUsage|dashboardTab|dashboard-card|dashboard-tab|flow-step"), "cc"),
     (re.compile(r"workStatusFilter|work-status-filter|S\.view === 'work' && S\.project === 'all'|"

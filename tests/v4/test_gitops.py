@@ -40,6 +40,7 @@ def test_merge_base_reports_conflicts_and_detached_verify(tmp_path):
     wt = tmp_path / "srv" / "work" / "dev"
     start = g.worktree(mirror, wt, "TESTWP-1-x", "develop")
     assert start == "origin/TESTWP-1-x"
+    assert g.commits_ahead(wt, "develop") == 1
     conflicts = g.merge_base_in(wt, "develop", ID)
     assert conflicts == ["a.txt"] and "<<<<<<<" in (wt / "a.txt").read_text()
     g.abort_merge(wt)

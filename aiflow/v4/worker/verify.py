@@ -184,6 +184,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         if verdict == "FAIL":
             return _rework(c, api, jira, pr_comment, result, findings or text.strip()[-1500:], "verify failed", checks, t0=t0)
         if verdict != "PASS":
+            # control retries at once on another account and bars this one after two in a row (verify_retry.py)
+            result["details"]["no_verdict"] = True
             result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
                                                     f"{(res.error_message or text.strip())[-400:]}")
             return result

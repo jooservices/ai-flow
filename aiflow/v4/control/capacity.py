@@ -309,7 +309,7 @@ def dashboard(db, account_rows: list[dict[str, Any]], forecasts: dict[str, dict[
     ready = db.all(
         "SELECT key,project,type,priority,labels,summary,description,fields FROM tickets "
         "WHERE status='To Do' AND 'aiflow-ready'=ANY(labels) AND NOT ('aiflow-hold'=ANY(labels)) "
-        "AND (%s OR project=ANY(%s)) ORDER BY priority,key", project_filter)
+        "AND lower(coalesce(type,'')) <> 'epic' AND (%s OR project=ANY(%s)) ORDER BY priority,key", project_filter)
     ready_estimates = [estimate(ticket, samples) for ticket in ready]
     if ready_estimates:
         average_tokens = sum(item["tokens"]["high"] for item in ready_estimates) / len(ready_estimates)

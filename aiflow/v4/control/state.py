@@ -8,7 +8,7 @@ from .. import VERSION
 from ..core.controlrepo import epic_for_ticket
 from ..core.services import SERVICES, endpoint, service_gaps
 from ..core.toolchains import missing_tools, toolchain_gaps
-from . import role_health
+from . import role_health, verify_retry
 from . import tooling
 from .sa import dashboard_data, thresholds
 from .shared_accounts import machines_view
@@ -228,6 +228,7 @@ def snapshot(ctx, *, include_signin: bool = False) -> dict[str, Any]:
         "tool_waits": tooling.waiting_summary(ctx),
         "nodes": nodes, "accounts": accounts, "active_runs": active, "recent_runs": recent,
         "projects": projects, "tickets": tickets,
+        "slow_verifications": verify_retry.slow_verifications(db),
         "release_readiness": release_readiness.all_versions(db, repo.projects),
         "release_progress": release_progress.all_versions(db, repo.projects), "incidents": incidents, "incidents_recent": incidents_recent,
         "events": events, "sa": sa, "role_health": role_health.summary(ctx), "rollout": rollout.summary(db),

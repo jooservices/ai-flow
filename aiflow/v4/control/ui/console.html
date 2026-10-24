@@ -2867,6 +2867,14 @@ function renderDBody() {
   att.slice(0, 20).forEach(function (x) {
     h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(x[0].key) + '"><span class="flag" data-tone="' + x[1] + '">' + esc(x[2]) + '</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(x[0].key) + '</span> ' + esc(x[0].summary) + '</div><div class="d">' + esc(x[3]) + '</div></span><span class="muted">Open</span></button>';
   });
+  h += '</div>';
+  var slow = (D().slow_verifications || []).filter(function (v) { return byKey[v.key]; });
+  h += '<div class="slow-verifications" id="d-slow-verify"><h3>Waiting for verification over 30 minutes</h3>';
+  if (!slow.length) h += '<div class="col-empty">No ticket waits for verification</div>';
+  slow.forEach(function (v) {
+    var tried = (v.accounts || []).map(function (a) { return a.account + (a.no_verdict ? ' (no verdict ×' + a.no_verdict + (a.barred ? ', not offered again' : '') + ')' : ''); }).join(', ') || 'no account has tried yet';
+    h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(v.key) + '"><span class="flag" data-tone="warn">' + esc(v.waiting_minutes) + ' min</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(v.key) + '</span> ' + esc(v.summary) + '</div><div class="d">Tried: ' + esc(tried) + '</div></span><span class="muted">Open</span></button>';
+  });
   h += '</div></section>';
   h += '<section class="panel" data-block="runs" id="d-runs" aria-labelledby="h-druns"><div class="panel-h"><h2 id="h-druns">Recent runs</h2></div>' + runsTable(D().active_runs.filter(function (r) { return byKey[r.ticket]; }).map(function (r) { return Object.assign({ outcome: 'running', live: true }, r); }).concat(runs), 10) + '</section>';
   h += analyticsPanel();

@@ -236,6 +236,7 @@ def idle_tickets(ctx, older_than_min: float = 0.0) -> list[dict]:
     out = []
     for ticket in ctx.db.all(
             "SELECT key,project,status,blocked_by FROM tickets WHERE NOT ('aiflow-hold'=ANY(labels))"
+            " AND lower(coalesce(type,'')) <> 'epic'"
             " AND ((status='To Do' AND 'aiflow-ready'=ANY(labels)) OR status='In Verify')"
             " AND coalesce(jira_updated,synced_at) <= now() - %s * interval '1 minute'", (older_than_min,)):
         if ticket["key"] in held:

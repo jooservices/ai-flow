@@ -8,6 +8,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 ## Topics
 
 - [v4 control plane architecture](../../docs/v4/architecture.md): layers, dependency direction, registration points, patterns and architectural checks
+- [Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md): epics are never offered as work and follow their children; a verify run without a verdict is retried at once on another account, a repeat offender is barred from the ticket, one flow-doctor incident names a ticket no account can verify, and the Dashboard lists tickets waiting over 30 minutes
 
 One line per feature document in `docs/v4/`. Normally add one file `deploy/v4/topics/<topic>.md` holding that single
 line (see [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); tickets that explicitly require a README link

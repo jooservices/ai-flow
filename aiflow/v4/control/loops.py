@@ -29,6 +29,7 @@ from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import projects as project_lifecycle
 from . import rollout
+from . import verify_retry
 from . import version_release
 from ..core.services import service_gaps
 from ..core.toolchains import toolchain_gaps
@@ -55,9 +56,14 @@ def _is_under_epic(ticket: dict, epic_key: str, by_key: dict[str, dict]) -> bool
     return False
 
 
+EPIC_FINISHED = ("Done", "Declined")
+EPIC_NOT_STARTED = ("Backlog", "Intake", "To Do")
+
+
 def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str],
                      first_seen_ticket_keys: set[str], preexisting_ticket_keys: set[str]) -> None:
-    """Close epics whose mirrored children are all Done, and reopen on newly active child work."""
+    """Epics follow their children: In Progress when the first child starts, Done when every child is Done or
+    Declined, back to To Do when a finished epic gets newly active child work."""
     for project in projects:
         rows = ctx.db.all("SELECT key, project, status, type, parent_key, labels FROM tickets WHERE project=%s ORDER BY key",
                           (project,))
@@ -67,11 +73,15 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
             children = [row for row in rows if row["type"] != "Epic" and _is_under_epic(row, epic["key"], by_key)]
             if not children:
                 continue
-            all_done = all(child["status"] == "Done" for child in children)
+            all_done = all(child["status"] in EPIC_FINISHED for child in children)
             if all_done:
                 target = "Done"
+            elif epic["status"] in EPIC_NOT_STARTED and any(
+                    child["status"] not in EPIC_NOT_STARTED and child["status"] not in EPIC_FINISHED
+                    for child in children):
+                target = "In Progress"  # the first child started
             elif epic["status"] == "Done" and any(
-                    child["key"] in changed_ticket_keys and child["status"] != "Done" and
+                    child["key"] in changed_ticket_keys and child["status"] not in EPIC_FINISHED and
                     (child["key"] not in first_seen_ticket_keys or epic["key"] in preexisting_ticket_keys)
                     for child in children):
                 target = "To Do"
@@ -102,7 +112,8 @@ def _reconcile_epics(ctx: Ctx, projects: list[str], changed_ticket_keys: set[str
                         log.warning("could not generate completion report for epic %s: %s", epic["key"], e)
                 if not moved_by_flow:
                     continue
-                reason = (f"all {len(children)} child tickets are Done" if target == "Done"
+                reason = (f"all {len(children)} child tickets are Done or Declined" if target == "Done"
+                          else "the first child ticket started" if target == "In Progress"
                           else f"{len(children)} child tickets are not all Done")
                 ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
                            " VALUES ('jira','transition',%s,'control',true,%s,%s)",
@@ -354,6 +365,7 @@ def watchdog(ctx: Ctx) -> None:
     try:
         check_stack_pins(ctx)
         check_idle_flow(ctx)
+        verify_retry.check_incidents(ctx)
     except Exception as e:  # noqa: BLE001 - a failing check must not stop the rest of the watchdog
         log.warning("idle and pin checks failed: %s", e)
     # runs whose lease disappeared (worker died, node down, network split)

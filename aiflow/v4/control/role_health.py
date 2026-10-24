@@ -55,7 +55,11 @@ WITH recent AS (
 SELECT r.*, CASE WHEN r.step = 'dev' AND r.outcome = 'done' THEN
   (SELECT v.outcome FROM runs v WHERE v.ticket_key = r.ticket_key AND v.step IN ('verify', 'qa')
      AND v.started_at > r.started_at AND v.outcome IN ('merged', 'human', 'rework')
-   ORDER BY v.started_at LIMIT 1) END AS decision
+   ORDER BY v.started_at LIMIT 1) END AS decision,
+  CASE WHEN r.step = 'verify' THEN
+  (SELECT coalesce(p.details->>'no_verdict' = 'true', false) FROM runs p WHERE p.ticket_key = r.ticket_key
+     AND p.account_id = r.account_id AND p.step = 'verify' AND p.status <> 'running' AND p.started_at < r.started_at
+   ORDER BY p.started_at DESC LIMIT 1) END AS prev_no_verdict
 FROM recent r WHERE r.n <= %(limit)s ORDER BY r.started_at DESC
 """
 
@@ -78,6 +82,10 @@ def classify(run: dict) -> Scored | None:
     details = run.get("details") or {}
     if outcome == "merged":
         return Scored("merged", 0.0)
+    if details.get("no_verdict") is True and run.get("step") == "verify":
+        # Counts against the verify role only as the second no-verdict result in a row of this account on this
+        # ticket (docs/v4/verify-no-verdict.md); the first is retried on another account and not scored.
+        return Scored("failed", 1.0) if run.get("prev_no_verdict") else Scored("excluded", None)
     no_work_failure = outcome == "failed" and kind == "no_work" and details.get("no_changes") is True
     legacy_no_changes = (run.get("step") == "dev" and outcome == "failed" and not kind
                          and summary.startswith(("no changes", "nothing to change")))

@@ -272,8 +272,8 @@ def test_missing_runtime_gates_only_tickets_mapped_to_container_repository(clien
     tools["safe-container-runtime"] = "rootless Podman 5.4; podman-compose 1.2; project quota"
     client.post("/v1/nodes/cc/heartbeat", json={"tools": tools}, headers=headers)
     candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers)
-    assert {ticket["key"] for ticket in candidates.json()["tickets"]} == {
-        "TESTWP-932", "TESTWP-933", "TESTWP-934"}
+    # the epic only maps its children to the repository; an epic is never offered as work
+    assert {ticket["key"] for ticket in candidates.json()["tickets"]} == {"TESTWP-933", "TESTWP-934"}
 
 
 def test_missing_runtime_gates_resumed_work_using_the_previous_dev_repository_settings(client, ctx):

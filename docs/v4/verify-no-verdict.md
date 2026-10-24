@@ -1,0 +1,44 @@
+# Epics and verification runs without a verdict
+
+Two faults stopped merging on 2026-10-24: epics with the ready label were offered as work, and verification runs
+that ended without a `VERDICT:` line were retried on the same weak accounts. Both are handled by rule, without AI.
+
+## Epics are never work
+
+A ticket of type Epic is never offered as development, verification, triage, post-merge or intake work, and never
+counts as waiting work for the idle-flow check or the capacity plan, whatever its labels (including `aiflow-ready`).
+A claim for an epic answers "not eligible".
+
+The control loop moves an epic with its children (`jira_sync`, `_reconcile_epics`):
+
+- **In Progress** when its first child leaves Backlog, Intake and To Do.
+- **Done** when every child is Done or Declined.
+- Back to **To Do** when a Done epic gets new, active child work (unchanged).
+
+## A verify run without a verdict
+
+The verify worker marks such a run with `details.no_verdict = true` (outcome `failed`, summary `no verdict ...`).
+Quota and sign-in problems are not no-verdict results. `control/verify_retry.py` decides the rest. All counts are per
+development round: a newer finished dev run starts them again.
+
+- **Retried at once.** A no-verdict run does not start the usual retry backoff. The ticket is offered immediately to an
+  account that has not ended it without a verdict. The account that failed is not asked again while another eligible
+  account (verify role on, not paused, not the author, label rules respected, on an online machine) has not tried.
+  When every eligible account has tried once, they may try again.
+- **Role health.** The first no-verdict result of an account on a ticket is not scored. The second one in a row on the
+  same ticket counts as a failed verify run. A real verdict in between breaks the streak.
+- **Barred.** An account with two consecutive no-verdict results on a ticket is not offered that ticket again in this
+  round.
+
+## Incident
+
+When every eligible account is barred from a ticket in verification, the watchdog opens one `verify_no_verdict`
+incident (subject: the ticket) that names the ticket and the reason and lists the accounts. Repeated checks do not open a
+second one. It closes when the ticket leaves verification or a new development round starts. Incidents are shown in the
+control UI like all others.
+
+## Dashboard
+
+The Delivery Dashboard section "Needs attention" lists tickets that have waited more than 30 minutes for verification
+(since the dev run finished), with the accounts that tried, their no-verdict counts and which are not offered the
+ticket again. The data is `slow_verifications` in `/v1/state`.

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
@@ -777,10 +777,13 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
     cc = join(client, "cc")
     n1 = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-63", status="Needs owner", labels=("aiflow-ready",))
+    add_open_escalation(ctx.db, "TESTWP-63")
     add_ticket(ctx.db, "TESTWP-64", status="Needs owner", labels=("owner-escalated",))
+    add_open_escalation(ctx.db, "TESTWP-64")
     add_ticket(ctx.db, "TESTWP-65", status="In Verify")
     add_ticket(ctx.db, "TESTWP-66", status="To Do")
     add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-67")
 
     def add_run(key, step, account, outcome, summary, pr_url="", details=None):
         run_id = str(uuid.uuid4())
@@ -832,9 +835,22 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
             "hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_ticket_in_needs_owner_without_an_open_escalation_is_not_offered_to_triage(client, ctx):
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-80", status="Needs owner")
+    add_ticket(ctx.db, "TESTWP-81", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-81")
+
+    keys = [t["key"] for t in client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1)
+            .json()["tickets"] if t["step"] == "triage"]
+
+    assert keys == ["TESTWP-81"]
+
+
 def test_failed_triage_backs_off_before_the_ticket_is_offered_again(client, ctx):
     n1 = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-67")
 
     def triage_keys():
         return [t["key"] for t in client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1)
@@ -865,6 +881,7 @@ def test_triage_answer_reaches_the_next_dev_prompt(client, ctx):
         "summary": "Which Redis database should the cache use?"}, headers=cc)
     client.post(f"/v1/runs/{d['run_id']}/release", json={"fence": d["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='Needs owner' WHERE key='TESTWP-68'")
+    add_open_escalation(ctx.db, "TESTWP-68", "Which Redis database should the cache use?")
     t = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "codex-01", "step": "triage"},
                     headers=n1).json()
     assert t["claimed"]

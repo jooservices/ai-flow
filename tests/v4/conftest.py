@@ -437,6 +437,12 @@ def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), pr
             priority, list(blocked_by)))
 
 
+def add_open_escalation(db, key: str, question: str = "Which option should be used?") -> None:
+    """A ticket in Needs owner is offered to triage only while an escalation is open for it."""
+    from aiflow.v4.control import escalations
+    escalations.record(db, key, key.split("-")[0], "dev", "", escalations.AMBIGUITY, question)
+
+
 def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})

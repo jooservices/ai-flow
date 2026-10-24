@@ -245,6 +245,21 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
     assert app["AIFLOW4_TRUSTED_PROXIES"] == "172.28.0.0/16"
 
 
+def test_ownership_capability_with_dollar_is_literal_in_compose_env_file(tmp_path):
+    secret_dir = tmp_path / "secrets" / "control"
+    secret_dir.mkdir(parents=True)
+    capability = "chosen$ownership-capability-with-at-least-32-characters"
+    app_env = secret_dir / "aiflow4.env"
+    app_env.write_text(f"AIFLOW4_SETUP_OWNERSHIP_CAPABILITY={capability}\n", encoding="utf-8")
+
+    sec.ensure_internal(secret_dir, "https://console.example.test", "http://console.example.test:8081/")
+
+    lines = app_env.read_text(encoding="utf-8").splitlines()
+    capability_line = next(line for line in lines if line.startswith("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY="))
+    assert capability_line == f"AIFLOW4_SETUP_OWNERSHIP_CAPABILITY='{capability}'"
+    assert sec.read_env(app_env)["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"] == capability
+
+
 def test_trusted_proxy_cidrs_are_canonical_private_and_narrow():
     assert ci.sanitize_proxy_cidrs(
         "172.28.9.15/16\nfd00:abcd::5/64\n172.28.0.0/16\n0.0.0.0/0\n"

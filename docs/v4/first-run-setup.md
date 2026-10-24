@@ -44,10 +44,13 @@ step has been ready, completion is permanent. A second send is refused with 409 
 
 - `GET /login` serves the wizard while there is no console user, then serves the regular sign-in form.
 - `GET /setup` serves the bootstrap screen only while there is no Administrator, then redirects to the Dashboard.
-- `GET /v1/setup/status` checks each step and returns its plain-language missing action.
+- `GET /v1/setup/status` returns only the bootstrap token and lock state before an Administrator exists; after sign-in,
+  it checks each step and returns its plain-language missing action.
 - `POST /v1/setup/bootstrap` accepts the public address, Administrator email and password once. A short-lived
   same-site nonce protects against CSRF; the installation ownership capability authenticates the first owner and
-  is atomically consumed in the transaction that creates the Administrator.
+  is atomically consumed in the transaction that creates the Administrator. Remote setup submissions require HTTPS;
+  direct loopback access is allowed for local development, and a TLS-terminating proxy must be listed in the trusted
+  proxy settings.
 - `POST /v1/setup/steps/{step}` records a skip or resume for an optional step.
 - `POST /v1/setup/sample-ticket` creates the sample and confirms Intake in Jira; requests serialize across API
   replicas and re-read setup state before creating an issue. `completed` is true only when all steps are ready.

@@ -21,7 +21,7 @@ PASSWORD = "a-new-browser-password-for-ai-flow"
 OWNERSHIP_CAPABILITY = "first-run-ownership-capability-with-over-32-characters"
 
 
-def make_client(ctx):
+def make_client(ctx, *, client_address=("127.0.0.1", 50000), base_url="http://testserver"):
     ctx.settings.console_login = True
     ctx.settings.console_session_secret = SECRET
     ctx.settings.setup_ownership_capability = OWNERSHIP_CAPABILITY
@@ -31,7 +31,7 @@ def make_client(ctx):
     app = create_app(ctx)
     mount_ui(app, ctx)
     app.state.sync_accounts()
-    return TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
+    return TestClient(app, follow_redirects=False, base_url=base_url, client=client_address)
 
 
 def status(client):
@@ -96,9 +96,9 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
 
     before = status(client)
     assert before["admin_exists"] is False
-    assert "ownership_capability" not in before
-    assert by_id(before, "public_address")["missing"] == "Choose the address people use to open AI Flow."
-    assert by_id(before, "jira")["missing"] == "Connect a Jira account in Integrations."
+    assert set(before) == {"admin_exists", "locked", "bootstrap_token"}
+    assert "ownership_capability" not in before and "projects" not in before and "steps" not in before
+    assert "TESTWP" not in str(before)
     no_nonce = client.post("/v1/setup/bootstrap", json={"public_url": "http://console.example.test",
                             "email": EMAIL, "password": PASSWORD})
     assert no_nonce.status_code == 403
@@ -134,6 +134,22 @@ def test_first_start_serves_setup_and_bootstraps_public_address_and_administrato
     locked = client.get("/setup")
     assert locked.status_code == 303 and locked.headers["location"] == "/dashboard"
     assert status(client)["locked"] is True and status(client)["completed"] is False
+
+
+def test_remote_bootstrap_requires_https_but_local_development_can_use_http(ctx):
+    remote_http = make_client(ctx, client_address=("198.51.100.25", 50000))
+    challenge = status(remote_http)
+    response = remote_http.post("/v1/setup/bootstrap", json={"public_url": "https://console.example.test",
+                                     "email": EMAIL, "password": PASSWORD},
+                               headers={"X-AIFLOW4-Setup": challenge["bootstrap_token"],
+                                        "X-AIFLOW4-Ownership": OWNERSHIP_CAPABILITY})
+    assert response.status_code == 400
+    assert "HTTPS" in response.json()["detail"]
+    assert setup_wizard.user_count(ctx) == 0
+
+    remote_https = make_client(ctx, client_address=("198.51.100.25", 50001), base_url="https://testserver")
+    _, created = bootstrap(remote_https, url="https://console.example.test")
+    assert created.status_code == 200, created.text
 
 
 def test_each_external_step_reports_missing_action_and_skip_can_be_resumed(ctx):

@@ -25,23 +25,15 @@ or standard input with `aiflow4 node join --join-token-file /path/to/token` or
 
 ## Accounts and sign-in
 
-Enrollment does not carry an AI provider credential, API key, OAuth token, or AI account home. AI Flow returns
-only the account IDs already assigned to that node in `aiflow-control/accounts.yaml`, then creates their
-separate directories under `/srv/aiflow/accounts/` owned by `aiflow-worker`.
+Enrollment does not carry an AI provider credential, API key, OAuth token, or AI account home. After the machine
+joins, add its AI accounts in **Machines and AI**. AI Flow creates each private account home on the machine and
+starts the provider sign-in handoff there; owners do not map accounts in `accounts.yaml` or run provider login
+commands in a terminal.
 
-Map an account to the node name in `aiflow-control/accounts.yaml` before installing if the node should start
-work immediately. After installation, the owner completes that provider's sign-in as `aiflow-worker`. For a
-Codex account, for example:
-
-```sh
-sudo -u aiflow-worker env HOME=/srv/aiflow/accounts/codex-01 codex login --device-auth
-```
-
-Other installed CLIs use their own interactive sign-in command, such as `claude auth login` or
-`opencode auth login`, with `HOME` set to the matching account directory. Authentication files stay in that
-directory and are never sent to the control plane. Once an assigned account is signed in, its worker probes
-the CLI, the node reports online with its required tools, and the worker can claim ready tickets in the
-enrolled project.
+For each pending account, **Machines and AI** shows the provider's sign-in link and code. Open the link in a
+browser, enter the code when asked, then finish sign-in from the screen after the machine confirms the account is
+ready. Provider credentials stay in that account's home on the machine and are never sent to the control plane.
+The one-time machine join command above is the only setup action that uses a terminal.
 
 ## server-installer profile proposal
 

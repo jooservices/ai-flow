@@ -6,6 +6,7 @@ resume and sample-ticket confirmation visible on the Dashboard until every step 
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import secrets
 import time
@@ -17,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from . import licensing
+from . import licensing, setup_service
 from .console_auth import COOKIE_NAME, has_permission, issue_session, resolve_session_user, verify_session
 from .db import J
 from .login import SESSION_TTL_S, hash_password, normalize_email
@@ -178,11 +179,6 @@ def status(ctx) -> dict:
                        "action": STEP_ACTIONS.get(step_id)} for step_id in STEP_IDS]}
 
 
-def _audit(ctx, action: str, actor: str, accepted: bool, result: str, payload: dict | None = None) -> None:
-    ctx.db.run("INSERT INTO write_audit (target,action,ticket,actor,accepted,result,payload)"
-               " VALUES ('setup',%s,'',%s,%s,%s,%s)", (action, actor, accepted, result[:300], J(payload or {})))
-
-
 def _nonce_key(ctx, nonce: str) -> str:
     import hashlib
     return ctx.leases.p + "setup_bootstrap:" + hashlib.sha256(nonce.encode()).hexdigest()
@@ -198,6 +194,8 @@ def _bootstrap_nonce(ctx, request: Request) -> tuple[str, bool]:
 
 
 def _validate_bootstrap_request(request: Request, ctx) -> tuple[str, str]:
+    if not _secure_setup_transport(request, ctx):
+        raise HTTPException(400, "Use HTTPS to create the first Administrator from a remote browser.")
     nonce = request.cookies.get(SETUP_COOKIE, "")
     supplied_nonce = request.headers.get("x-aiflow4-setup", "")
     if (not nonce or not supplied_nonce or not secrets.compare_digest(nonce, supplied_nonce)
@@ -210,6 +208,36 @@ def _validate_bootstrap_request(request: Request, ctx) -> tuple[str, str]:
     if not capability or not secrets.compare_digest(capability, expected):
         raise HTTPException(403, "Enter the installation ownership capability to create the first Administrator.")
     return nonce, capability
+
+
+def _secure_setup_transport(request: Request, ctx) -> bool:
+    """Require TLS remotely; allow direct loopback development and trusted TLS-terminating proxies."""
+    return _request_is_https(request, ctx) or _loopback_client(request)
+
+
+def _request_is_https(request: Request, ctx) -> bool:
+    if request.url.scheme.lower() == "https":
+        return True
+    peer = request.client.host if request.client else ""
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for value in getattr(ctx.settings, "trusted_proxies", ()) or ():
+        try:
+            if peer_address in ipaddress.ip_network(value, strict=False):
+                forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+                return forwarded_proto.lower() == "https"
+        except ValueError:
+            continue
+    return False
+
+
+def _loopback_client(request: Request) -> bool:
+    try:
+        return bool(request.client and ipaddress.ip_address(request.client.host).is_loopback)
+    except ValueError:
+        return False
 
 
 async def _bootstrap_payload(request: Request) -> BootstrapBody:
@@ -278,19 +306,17 @@ def _register_setup_pages(app: FastAPI, ctx) -> None:
 def _register_status_route(app: FastAPI, ctx) -> None:
     @app.get("/v1/setup/status")
     def setup_status(request: Request):
-        if user_count(ctx):
+        admin_exists = user_count(ctx) > 0
+        if admin_exists:
             _administrator(request, ctx)
-        data = status(ctx)
-        if not user_count(ctx):
-            nonce, created = _bootstrap_nonce(ctx, request)
-            data["bootstrap_token"] = nonce
-            response = JSONResponse(data, headers={"Cache-Control": "no-store"})
-            if created:
-                response.set_cookie(SETUP_COOKIE, nonce, max_age=SETUP_TTL_S, httponly=True,
-                                    secure=request.url.scheme == "https",
-                                    samesite="strict", path="/v1/setup")
-            return response
+            return JSONResponse(status(ctx), headers={"Cache-Control": "no-store"})
+        nonce, created = _bootstrap_nonce(ctx, request)
+        data = {"admin_exists": False, "locked": False, "bootstrap_token": nonce}
         response = JSONResponse(data, headers={"Cache-Control": "no-store"})
+        if created:
+            response.set_cookie(SETUP_COOKIE, nonce, max_age=SETUP_TTL_S, httponly=True,
+                                secure=_request_is_https(request, ctx),
+                                samesite="strict", path="/v1/setup")
         return response
 
 
@@ -328,14 +354,7 @@ def _register_step_route(app: FastAPI, ctx) -> None:
         user = _administrator(request, ctx)
         if step_id not in STEP_IDS or step_id in NON_SKIPPABLE:
             raise HTTPException(404, "that setup step cannot be skipped")
-        if body.skipped:
-            ctx.db.run("UPDATE setup_wizard_state SET skipped_steps=array_append(array_remove(skipped_steps,%s),%s),"
-                       "updated_at=now() WHERE id=true", (step_id, step_id))
-        else:
-            ctx.db.run("UPDATE setup_wizard_state SET skipped_steps=array_remove(skipped_steps,%s),updated_at=now()"
-                       " WHERE id=true", (step_id,))
-        _audit(ctx, "skip_step" if body.skipped else "resume_step", user.subject, True,
-               "setup step skipped" if body.skipped else "setup step resumed", {"step": step_id})
+        setup_service.set_step_skipped(ctx, step_id, body.skipped, user.subject)
         return status(ctx)
 
 

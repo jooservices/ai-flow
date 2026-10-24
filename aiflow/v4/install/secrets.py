@@ -42,13 +42,30 @@ def _compose_single_quoted(value: str) -> str:
     return "'" + value.replace("'", "\\'") + "'"
 
 
+def _decode_compose_single_quoted(value: str) -> str:
+    """Read a Compose single-quoted literal written by `_compose_single_quoted`."""
+    if len(value) < 2 or value[0] != "'" or value[-1] != "'":
+        return value
+    value = value[1:-1]
+    decoded = []
+    index = 0
+    while index < len(value):
+        if value[index:index + 2] == "\\'":
+            decoded.append("'")
+            index += 2
+        else:
+            decoded.append(value[index])
+            index += 1
+    return "".join(decoded)
+
+
 def read_env(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
-                out[key.strip()] = value
+                out[key.strip()] = _decode_compose_single_quoted(value)
     return out
 
 
@@ -96,13 +113,17 @@ def _setup_ownership_capability(existing: str, first_install: bool) -> str:
 
 def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[str, str] | None = None,
                header: str = "", mode: int = 0o600, track_timestamps: bool = False,
-               compose_literal: bool = False, timestamps: dict[str, str] | None = None) -> bool:
+               compose_literal: bool = False, compose_literal_keys: set[str] | None = None,
+               timestamps: dict[str, str] | None = None) -> bool:
     """Add `keep` keys that are missing and set `force` keys; other lines stay. Written atomically, `mode` from the
     first byte; returns whether the content changed (an unchanged file is not rewritten). Runtime setting callers
     can keep per-key timestamps and quote control values for Compose env-file parsing."""
     lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else ([f"# {header}"] if header else [])
     current = read_env(path)
     wanted = dict(force or {})
+    literal_keys = set(compose_literal_keys or ())
+    for key in literal_keys & current.keys():
+        wanted.setdefault(key, current[key])
     for key, value in (keep or {}).items():
         if not current.get(key):
             wanted[key] = value
@@ -126,7 +147,8 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
             if key in seen:
                 continue
             value = wanted[key]
-            line = f"{key}={_compose_single_quoted(value)}" if compose_literal else f"{key}={value}"
+            rendered = _compose_single_quoted(value) if compose_literal or key in literal_keys else value
+            line = f"{key}={rendered}"
             seen.add(key)
         elif compose_literal and key:
             # runtime.env is also a Compose env_file. Normalize legacy values before any restart so unquoted
@@ -140,7 +162,7 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
         out.append(line)
     for key, value in wanted.items():
         if key not in seen:
-            rendered = _compose_single_quoted(value) if compose_literal else value
+            rendered = _compose_single_quoted(value) if compose_literal or key in literal_keys else value
             out.append(f"{key}={rendered}")
     if track_timestamps:
         out += [f"# AIFLOW4-SETTING-TIME {key} {stamp}" for key, stamp in sorted(changed_at.items())]
@@ -193,7 +215,8 @@ def ensure_internal(secret_dir: Path, public_url: str, gatus_url: str) -> list[s
                         "AIFLOW4_CONSOLE_SESSION_SECRET": secrets.token_urlsafe(48),
                         "O2_BASIC": o2_basic,
                         "AIFLOW4_CONSOLE_LOGIN": "1"},  # sign-in required; the install seeds the Super Administrator
-                  force={"AIFLOW4_PUBLIC_URL": public_url, "AIFLOW4_GATUS_URL": gatus_url}):
+                  force={"AIFLOW4_PUBLIC_URL": public_url, "AIFLOW4_GATUS_URL": gatus_url},
+                  compose_literal_keys={"AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"}):
         changed.append(APP_ENV)
     for name in (POSTGRES_ENV, OPENOBSERVE_ENV, APP_ENV):
         os.chmod(secret_dir / name, 0o600)

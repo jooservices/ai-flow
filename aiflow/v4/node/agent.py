@@ -758,7 +758,18 @@ def process_node_operation(api: ControlClient, node: str) -> None:
             result = read_source(str(payload.get("kind") or ""), str(payload.get("target") or ""),
                                  payload.get("lines", 100))
         else:
-            result = execute(operation)
+            payload = operation.get("payload") or {}
+            if payload.get("action") in {"runtime_setting_project", "runtime_setting_control"}:
+                def checkpoint(envelope):
+                    response = api.call("POST", f"/v1/nodes/{node}/operations/{operation_id}/checkpoint",
+                                        {"rollback_envelope": envelope}, retries=2)
+                    saved = response.get("rollback_envelope")
+                    if not isinstance(saved, dict):
+                        raise OperationError("runtime setting snapshot could not be checkpointed")
+                    return saved
+                result = execute(operation, checkpoint=checkpoint)
+            else:
+                result = execute(operation)
         body = {"status": "completed", "result": result}
     except OperationError as exc:
         log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])

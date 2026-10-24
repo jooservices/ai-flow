@@ -315,6 +315,11 @@ class FakeGitHub:
         self.pr_by_number[number] = pr
         return pr
 
+    def find_pr(self, repo, head):
+        return next((pr for pr in self.prs if pr.get("repo") == repo
+                     and (pr.get("head", {}).get("ref") if isinstance(pr.get("head"), dict) else pr.get("head")) == head
+                     and pr.get("state") == "open"), None)
+
     def create_control_pr(self, repo, head, base, title, body):
         return self.create_pr(repo, head, base, title, body, draft=True)
 

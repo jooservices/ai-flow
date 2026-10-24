@@ -55,6 +55,14 @@ def finish_operation(client, node, token, operation, result, status="completed")
     return response
 
 
+def checkpoint_operation(client, node, token, operation, envelope):
+    response = client.post(f"/v1/nodes/{node}/operations/{operation['id']}/checkpoint",
+                           headers={"Authorization": f"Bearer {token}"},
+                           json={"rollback_envelope": envelope})
+    assert response.status_code == 200, response.text
+    return response.json()["rollback_envelope"]
+
+
 def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_values(
         client, ctx, tmp_path, monkeypatch, caplog):
     mount_ui(client.app, ctx)
@@ -63,7 +71,7 @@ def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_valu
     (settings_dir / "TESTWP.env").write_text("FEATURE_FLAG=enabled\n")
     secret_file = tmp_path / "secrets" / "runtime.env"
     secret_file.parent.mkdir()
-    secret_file.write_text("EXISTING_API_TOKEN=prior-secret-value\n")
+    secret_file.write_text("EXISTING_API_TOKEN=$EXISTING_NAME\n")
     ctx.settings.runtime_secret_file = str(secret_file)
     ctx.settings.project_env_dir = str(settings_dir)
     control_token = join_and_heartbeat(client, "control", role="control", settings_dir=settings_dir)
@@ -78,7 +86,7 @@ def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_valu
     assert {"EXISTING_API_TOKEN", "FEATURE_FLAG"} <= set(listed)
     assert listed["EXISTING_API_TOKEN"]["is_set"] is True
     assert listed["FEATURE_FLAG"]["is_set"] is True
-    assert "prior-secret-value" not in listing.text and "enabled" not in listing.text
+    assert "$EXISTING_NAME" not in listing.text and "enabled" not in listing.text
 
     invalid_secret = secrets.token_urlsafe(24)
     invalid = client.post("/v1/runtime-settings", json={"scope": "secret", "key": "REJECTED_TOKEN",
@@ -104,8 +112,10 @@ def test_owner_lists_and_sets_control_secrets_without_returning_or_auditing_valu
     assert secret_value not in json.dumps(operation)
     result = operations.execute(operation)
     finish_operation(client, "control", control_token, operation, result)
+    assert "EXISTING_API_TOKEN='$EXISTING_NAME'" in secret_file.read_text()
     assert "EXTERNAL_API_TOKEN='$NAME'" in secret_file.read_text()
     assert read_env_file(secret_file)["EXTERNAL_API_TOKEN"] == secret_value
+    assert read_env_file(secret_file)["EXISTING_API_TOKEN"] == "$EXISTING_NAME"
     assert restarted == ["control-api-a", "control-api-b"]
 
     change = client.get(f"/v1/runtime-settings/changes/{saved.json()['change_id']}")
@@ -136,6 +146,11 @@ def test_project_setting_drains_node_restarts_worker_and_restores_acceptance(
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", project_dir)
     monkeypatch.setattr(operations, "_wait_for_worker_idle", lambda units: True)
     monkeypatch.setattr(operations, "_restart_worker", lambda unit: services.append(unit) is None or True)
+
+    quoted = client.post("/v1/runtime-settings", json={"scope": "project", "project": "TESTWP",
+                                                        "key": "FEATURE_MODE", "value": '"wrapped-mode"'})
+    assert quoted.status_code == 422
+    assert read_env_file(project_file)["FEATURE_MODE"] == "old-mode"
 
     value = "new-mode"
     response = client.post("/v1/runtime-settings", json={"scope": "project", "project": "TESTWP",
@@ -311,11 +326,26 @@ def test_project_failure_rolls_back_successful_peer_before_resuming_work(client,
     active_node["name"] = "node1"
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", first_dir)
     first_operation = next_operation(client, "node1", first_token)
-    first_result = operations.execute(first_operation)
+    # The first agent applies the value and dies before reporting success. Its encrypted original snapshot must
+    # already be durable in the operation so a reclaimed retry cannot snapshot the newly written file.
+    first_result = operations.execute(
+        first_operation,
+        checkpoint=lambda envelope: checkpoint_operation(client, "node1", first_token, first_operation, envelope))
     assert saved_value not in json.dumps(first_result)
-    finish_operation(client, "node1", first_token, first_operation, first_result)
+    persisted = ctx.db.one("SELECT payload FROM node_operations WHERE id=%s", (first_operation["id"],))["payload"]
+    assert persisted["rollback_envelope"] == first_result["rollback_envelope"]
     assert read_env_file(first_file)["SERVICE_TOKEN"] == saved_value
     assert ctx.db.one("SELECT accepting_work FROM nodes WHERE name='node1'")["accepting_work"] is False
+
+    with ctx.db.pool.connection() as connection:
+        connection.execute("UPDATE node_operations SET started_at=now()-interval '31 minutes' WHERE id=%s",
+                           (first_operation["id"],))
+    retried_operation = next_operation(client, "node1", first_token)
+    assert retried_operation["id"] == first_operation["id"]
+    assert retried_operation["payload"]["rollback_envelope"] == first_result["rollback_envelope"]
+    retry_result = operations.execute(retried_operation)
+    assert retry_result["rollback_envelope"] == first_result["rollback_envelope"]
+    finish_operation(client, "node1", first_token, retried_operation, retry_result)
 
     active_node["name"] = "node2"
     monkeypatch.setattr(operations, "PROJECT_ENV_DIR", second_dir)

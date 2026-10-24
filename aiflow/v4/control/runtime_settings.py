@@ -421,6 +421,8 @@ def install(app: FastAPI, ctx, console_user, audit) -> None:
             targets, services = _targets(ctx, "secret")
             action = "runtime-setting-control"
         else:
+            if len(body.value) >= 2 and body.value[0] == body.value[-1] and body.value[0] in "\"'":
+                raise HTTPException(422, "project setting values cannot be wrapped in quotes")
             if not PROJECT.fullmatch(body.project) or body.project not in ctx.repo().projects:
                 raise HTTPException(422, "choose a configured project")
             targets, services = _targets(ctx, "project", body.project)

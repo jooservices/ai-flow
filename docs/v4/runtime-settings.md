@@ -10,9 +10,11 @@ tokens are not editable here.
 The console API is `GET /v1/runtime-settings` to list key metadata, `POST /v1/runtime-settings` to set a value and
 queue its restart, and `GET /v1/runtime-settings/changes/{change_id}` to read the result. The request body contains
 `scope`, `project`, `key`, and `value`; responses contain metadata and service results only. The control-node
-protocol uses `POST /v1/nodes/{name}/heartbeat` to advertise a public encryption key and key-name inventory, and
-`POST /v1/nodes/{name}/operations/{operation_id}/result` to report an operation outcome. The heartbeat and result
-never carry a value in plaintext; the result's encrypted recovery snapshot is omitted from owner responses.
+protocol uses `POST /v1/nodes/{name}/heartbeat` to advertise a public encryption key and key-name inventory,
+`POST /v1/nodes/{name}/operations/{operation_id}/checkpoint` to persist an encrypted pre-change file snapshot before
+writing, and `POST /v1/nodes/{name}/operations/{operation_id}/result` to report an operation outcome. A reclaimed
+operation reuses its checkpoint, so a later fleet rollback can restore the original file. The heartbeat and result
+never carry a value in plaintext; the encrypted recovery snapshot is omitted from owner responses.
 
 ## Files and key inventory
 
@@ -40,9 +42,10 @@ backup contains this canonical copy; when a replacement worker first heartbeats 
 control API sends its missing project settings encrypted to that node, and the node writes them before starting
 assigned workers. The node response never contains these values in plaintext. Changes written to the control
 runtime file use single-quoted Compose env-file values, so `$NAME` and `${NAME}` remain literal through a restart.
-Control runtime values containing quotes or backslashes are refused because the shared env-file readers do not
-interpret those escape sequences. The Jira, GitHub, console-login and generated control secret stores keep their
-existing flows and are not included in this screen. The first console-less installation still uses
+Control runtime values containing single quotes or backslashes are refused. Project values wrapped in matching
+quotes are refused because the shared env-file reader removes those wrappers. Jira, GitHub, console-login and
+generated control secret stores keep their existing flows and are not included in this screen. The first
+console-less installation still uses
 `aiflow4 secret set NAME`.
 
 Key names use uppercase environment-variable syntax. Values are non-empty printable ASCII without spaces or line

@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -980,7 +980,8 @@ def _control_api_healthy(service: str, compose: Path, env: dict[str, str]) -> bo
     return False
 
 
-def _execute_runtime_setting(payload: dict[str, Any]) -> dict[str, Any]:
+def _execute_runtime_setting(payload: dict[str, Any],
+                             checkpoint: Callable[[dict[str, str]], dict[str, str]] | None = None) -> dict[str, Any]:
     """Write one validated env entry, restart fixed services, and restore the prior file on failure."""
     from ..install.secrets import update_env
 
@@ -1001,18 +1002,28 @@ def _execute_runtime_setting(payload: dict[str, Any]) -> dict[str, Any]:
     if path.is_symlink():
         raise OperationError("runtime env file is not a regular file")
     try:
-        previous = path.read_bytes() if path.is_file() else None
-        from ..core.runtime_settings_crypto import encrypt_value, node_public_key
-        snapshot = json.dumps({"exists": previous is not None,
-                               "content": base64.b64encode(previous or b"").decode("ascii")},
-                              separators=(",", ":"))
         rollback_context = f"{payload.get('change_id')}:rollback:{payload.get('operation_id')}"
-        rollback_envelope = encrypt_value(node_public_key(), snapshot, f"runtime-setting-rollback:{rollback_context}")
+        from ..core.runtime_settings_crypto import decrypt_value, encrypt_value, node_public_key
+        rollback_envelope = payload.get("rollback_envelope")
+        if not isinstance(rollback_envelope, dict):
+            previous = path.read_bytes() if path.is_file() else None
+            snapshot = json.dumps({"exists": previous is not None,
+                                  "content": base64.b64encode(previous or b"").decode("ascii")},
+                                 separators=(",", ":"))
+            rollback_envelope = encrypt_value(node_public_key(), snapshot,
+                                              f"runtime-setting-rollback:{rollback_context}")
+            if checkpoint is not None:
+                rollback_envelope = checkpoint(rollback_envelope)
+        snapshot = json.loads(decrypt_value(rollback_envelope, f"runtime-setting-rollback:{rollback_context}"))
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("exists"), bool):
+            raise ValueError("invalid rollback snapshot")
+        previous_content = base64.b64decode(str(snapshot.get("content") or ""), validate=True)
+        previous = previous_content if snapshot["exists"] else None
         update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
                    track_timestamps=True, compose_literal=scope == "secret")
     except OSError:
         raise OperationError("runtime env file could not be written") from None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         raise OperationError("runtime setting rollback snapshot could not be secured") from None
 
     completed: list[str] = []
@@ -1115,7 +1126,8 @@ def _execute_runtime_setting_rollback(payload: dict[str, Any]) -> dict[str, Any]
             "services": services, "restored": True}
 
 
-def execute(operation: dict[str, Any]) -> dict[str, Any]:
+def execute(operation: dict[str, Any],
+            checkpoint: Callable[[dict[str, str]], dict[str, str]] | None = None) -> dict[str, Any]:
     """Install missing components or reconcile all tools and services in a server-created operation payload."""
     payload = operation.get("payload") or {}
     from .agent import tool_versions
@@ -1134,7 +1146,7 @@ def execute(operation: dict[str, Any]) -> dict[str, Any]:
                          "value": decrypt_value(envelope, str(payload.get("change_id") or ""))}
         except Exception:
             raise OperationError("runtime setting value could not be decrypted on this machine") from None
-        return _execute_runtime_setting(decrypted)
+        return _execute_runtime_setting(decrypted, checkpoint=checkpoint)
     if action == "runtime_setting_rollback":
         try:
             from ..core.runtime_settings_crypto import decrypt_value

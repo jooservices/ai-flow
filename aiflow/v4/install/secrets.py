@@ -36,6 +36,11 @@ _SECRET_KEY = re.compile(r"PASSWORD|TOKEN|SECRET|BASIC|JIRA_EMAIL")
 _SETTING_TIMESTAMP = re.compile(r"# AIFLOW4-SETTING-TIME ([A-Z][A-Z0-9_]{0,127}) (\S+)\Z")
 
 
+def _compose_single_quoted(value: str) -> str:
+    """Render a literal value for Compose's env-file parser, where single quotes disable interpolation."""
+    return "'" + value.replace("'", "\\'") + "'"
+
+
 def read_env(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if path.is_file():
@@ -102,12 +107,21 @@ def update_env(path: Path, *, keep: dict[str, str] | None = None, force: dict[st
             if key in seen:
                 continue
             value = wanted[key]
-            line = f"{key}='{value}'" if compose_literal else f"{key}={value}"
+            line = f"{key}={_compose_single_quoted(value)}" if compose_literal else f"{key}={value}"
             seen.add(key)
+        elif compose_literal and key:
+            # runtime.env is also a Compose env_file. Normalize legacy values before any restart so unquoted
+            # references such as FOO=$NAME remain literal when an unrelated key is saved.
+            value = line.split("=", 1)[1]
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            else:
+                value = value.strip()
+            line = f"{key}={_compose_single_quoted(value)}"
         out.append(line)
     for key, value in wanted.items():
         if key not in seen:
-            rendered = f"'{value}'" if compose_literal else value
+            rendered = _compose_single_quoted(value) if compose_literal else value
             out.append(f"{key}={rendered}")
     if track_timestamps:
         out += [f"# AIFLOW4-SETTING-TIME {key} {stamp}" for key, stamp in sorted(changed_at.items())]

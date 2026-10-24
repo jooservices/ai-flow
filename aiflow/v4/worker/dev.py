@@ -248,6 +248,8 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                                       next_=f"A new worktree is created from {repo} {project['base']}", node=api_node(api)))
             git.drop_foreign_worktree(wt, branch, Path(moved["old_mirror"]))
         start = git.worktree(mirror, wt, branch, project["base"])
+        branch_commit_count = (git.commits_ahead(wt, project["base"])
+                               if start == f"origin/{branch}" else 0)
         conflicts: list[str] = []
         if start != f"origin/{project['base']}":  # continuing the branch: bring in the latest base first
             conflicts = git.merge_base_in(wt, project["base"], c.identity)
@@ -438,14 +440,69 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             reason = res.error_kind
             if not reason:
                 reason = (res.verdict_reason or "AI reported RESULT: FAIL") if failure_verdict else "no changes"
-            result["outcome"] = "no_changes" if clean_no_changes else "failed"
+            if clean_no_changes:
+                found = api.call("GET", "/v1/github/pr", params={"run_id": c.run_id, "fence": c.fence,
+                                                                    "repo": repo, "head": branch})
+                existing_pr = found if found and found.get("found") else None
+                if existing_pr or branch_commit_count:
+                    pushed = False
+                    if branch_commit_count:
+                        # The latest base may have been merged into the existing branch above; publish that
+                        # integration commit before asking GitHub to create or return its pull request. The
+                        # relay only accepts pushes with a credential scoped to the branch.
+                        credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
+                                                                              "repo": repo, "branch": branch})
+                        git.push(wt, branch, credential["token"])
+                        pushed = True
+                    # after a push the head to verify is the pushed commit, not the PR head fetched before it
+                    sha = (git.run("rev-parse", "HEAD", cwd=wt).strip() if pushed or not existing_pr
+                           else existing_pr.get("head_sha") or git.run("rev-parse", "HEAD", cwd=wt).strip())
+                    if existing_pr:
+                        pr = existing_pr
+                    else:
+                        pr_body = (f"Jira: {key}\n\n## Summary\nThe existing ticket branch already contains the work; "
+                                   "this developer run made no additional changes.\n\n"
+                                   f"## Tests\n{tests or 'see the existing branch history'}\n\n"
+                                   "## Run\n"
+                                   f"- account: {c.account} ({c.provider}{'/' + c.model if c.model else ''})\n"
+                                   f"- run: {c.run_id}, fence {c.fence}\n"
+                                   f"- existing branch commits: {branch_commit_count}\n\n"
+                                   "Opened as a draft by AI Flow v4; verification runs next (In Verify).")
+                        pr = api.call("POST", "/v1/github/pr", {
+                            "run_id": c.run_id, "fence": c.fence, "repo": repo, "head": branch,
+                            "base": project["base"], "title": pr_title(c.ticket), "body": pr_body, "draft": True,
+                        })
+                    note_text = (f"The existing pull request already contains the ticket work: {pr['url']}"
+                                 if existing_pr else
+                                 f"The ticket branch already contains {branch_commit_count} committed change(s); "
+                                 f"AI Flow opened a draft pull request: {pr['url']}")
+                    summary_done = f"Already done: no new changes were needed; {note_text}."
+                    result.setdefault("details", {}).update(already_done=True, no_changes=True,
+                                                             branch_commits=branch_commit_count)
+                    result.update(outcome="done", summary=summary_done[:1000], pr_url=pr["url"], head_sha=sha)
+                    jira("comment", body=note(
+                        c, "already done; sent to verification", what="The developer found the work already on the ticket branch",
+                        result=note_text, next_="Another account verifies the pull request against the acceptance criteria",
+                        t0=t0, node=api_node(api)))
+                    jira("transition", to="In Verify")
+                    return result
+
+                reason = (f"no changes to verify: branch {branch} has no committed work for this ticket and no open pull request")
+                result.update(outcome="failed", error_kind="no_work", summary=reason[:1000])
+                result.setdefault("details", {}).update(no_changes=True, no_work_reason=reason)
+                jira("comment", body=note(
+                    c, "no work to verify", what="The developer found no changes and the ticket branch has no committed work",
+                    why=reason, result=summary[:600] if summary else "The developer reported no changes needed",
+                    next_="The flow doctor records the cause and decides whether to retry after the normal backoff",
+                    t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
+
+            result["outcome"] = "failed"
             result["summary"] = f"{reason}: {summary}"[:1000]
             jira("comment", body=note(c, "no usable change", what="The run ended without a change AI Flow can push",
                                       why=reason, result=(summary[:600] if summary else "no output"),
-                                      next_=("Back to To Do; a clean no-change result does not count against the account's "
-                                             "role score, but the ticket waits a short backoff before the next run"
-                                             if clean_no_changes else
-                                             "Back to To Do; the next run retries after a short wait"),
+                                      next_="Back to To Do; the next run retries after a short wait",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result

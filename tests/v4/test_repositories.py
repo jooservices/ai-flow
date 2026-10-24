@@ -287,6 +287,9 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
             calls["bases"].append((base, commit))
             return []
 
+        def behind(self, *_args, **_kwargs):
+            return 0
+
         def scrub(self, path):
             calls["scrubs"].append(str(path))
 

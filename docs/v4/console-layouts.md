@@ -43,6 +43,10 @@ The Dashboard block `disagreements` ("Jira and GitHub disagree", full width by d
 status and pull request have differed for more than five minutes; it is described in
 [Merged means Done](merged-means-done.md).
 
+The Dashboard block `conflict-loss` ("Lost to merge conflicts", full width by default) shows the share of
+verifications lost to conflicts, the time spent on them and the trend. It is described in
+[Fewer merge conflicts](merge-conflicts.md), which also covers the Delivery Analytics panel.
+
 ## Role defaults
 
 Without a saved layout a person gets the default of their role. `ROLE_PROFILE` maps the current role names in

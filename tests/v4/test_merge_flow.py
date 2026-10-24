@@ -99,7 +99,8 @@ def test_conflicting_branch_goes_to_development_with_the_conflict_recorded(ctx):
 def test_conflict_found_while_updating_the_branch_goes_to_development(ctx):
     add_pr_ticket(ctx, "TESTWP-704", "Ready to merge")
     set_pr(ctx, mergeable_state="behind")
-    ctx.github.update_branch_result = {"ok": False, "message": "422: merge conflict between base and head"}
+    ctx.github.update_branch_result = {"ok": False, "conflict": True,
+                                       "message": "422: merge conflict between base and head"}
 
     merge_flow.merge_ready(ctx)
 

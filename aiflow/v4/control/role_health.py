@@ -74,10 +74,13 @@ def classify(run: dict) -> Scored | None:
     """Score one finished run; None while verification has not yet judged a finished dev run."""
     outcome, kind = run["outcome"], (run.get("error_kind") or "").lower()
     summary = (run.get("summary") or "").strip().lower()
+    details = run.get("details") or {}
     if outcome == "merged":
         return Scored("merged", 0.0)
-    if outcome == "no_changes" or (run.get("step") == "dev" and outcome == "failed" and not kind
-                                    and summary.startswith(("no changes", "nothing to change"))):
+    no_work_failure = outcome == "failed" and kind == "no_work" and details.get("no_changes") is True
+    legacy_no_changes = (run.get("step") == "dev" and outcome == "failed" and not kind
+                         and summary.startswith(("no changes", "nothing to change")))
+    if outcome == "no_changes" or no_work_failure or legacy_no_changes:
         return Scored("no_changes", 0.0)
     if outcome == "quota" or kind in UNSCORED_KINDS:
         return Scored("excluded", None)

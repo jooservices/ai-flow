@@ -591,7 +591,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-backup" role="tabpanel" aria-labelledby="tab-backup" hidden></section>
   <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-integrations" hidden></section>
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
-  <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
+  <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden><script src="/console-assets/licensing-notice.js"></script></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
   <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
@@ -4776,9 +4776,7 @@ function renderLicensing() {
     h += '<section class="panel"><div class="muted">' + (S.licensing.busy ? 'Loading licence…' : 'Licence status is unavailable.') + '</div></section>';
     root.innerHTML = h; return;
   }
-  var statusLabel = state.licence_required === false ? 'No licence required' : (state.status === 'active' ? 'Active' : (state.status === 'grace' ? 'Grace period' : 'Read-only'));
-  if (state.licence_required === false) h += '<div class="alert" data-tone="ok"><span class="a-detail">No licence required: no issuer public key or licence service is configured, so this installation runs without licence limits. The limits below only apply once a licence is configured.</span></div>';
-  else if (state.over_limit_since) h += '<div class="alert" data-tone="warn"><span class="a-detail">Usage is above a plan limit since ' + esc(new Date(state.over_limit_since).toLocaleString()) + '. Existing machines, accounts and projects keep working for 14 days; creating new ones is refused. After that, new work for the extra ones stops and a critical incident is raised. Raise the limit below or remove the extra ones.</span></div>';
+  var statusLabel = state.licence_required === false ? 'No licence required' : (state.status === 'active' ? 'Active' : (state.status === 'grace' ? 'Grace period' : 'Read-only')); h += licensingNotice(state, esc);
   var reasonLabel = state.reason === 'expired' ? 'Expired' : (state.reason === 'invalid' ? 'Invalid signature or claims' : '');
   h += '<section class="panel"><div class="panel-h"><h2>' + esc(state.plan.charAt(0).toUpperCase() + state.plan.slice(1)) + ' plan</h2><span class="pill" data-tone="' + (state.status === 'active' ? 'ok' : (state.read_only ? 'crit' : 'warn')) + '">' + esc(statusLabel) + '</span><span class="spacer"></span><span class="muted">' + esc(reasonLabel) + '</span></div>';
   h += '<p class="muted">Expiry: <strong>' + esc(state.expires_at ? new Date(state.expires_at).toLocaleString() : 'No expiry · Free plan') + '</strong>';

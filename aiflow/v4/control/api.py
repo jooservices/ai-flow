@@ -5179,8 +5179,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.pr_url:
             details["pr_url_source"] = "current"
         if run["step"] == "verify" and body.outcome in ("merged", "human"):
-            details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
-                ctx, run, details.get("post_merge_criteria") or [])
+            try:
+                details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
+                    ctx, run, details.get("post_merge_criteria") or [])
+            except environment_reports.UnmappedPostMergeCriteria as exc:
+                raise HTTPException(422, str(exc)) from exc
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:

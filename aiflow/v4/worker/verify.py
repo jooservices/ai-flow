@@ -140,8 +140,8 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
                 hb.progress = {"phase": "wordpress-site"}
                 start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
-                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
-                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
@@ -174,6 +174,15 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
             result.update(outcome="failed", summary=f"no verdict ({res.error_kind or 'missing VERDICT line'}): "
                                                     f"{(res.error_message or text.strip())[-400:]}")
             return result
+        configured_checks = set(project.get("checks") or [])
+        unmapped = [criterion for criterion in post_merge
+                    if str(criterion.get("check") or "") not in configured_checks]
+        if unmapped:
+            ids = ", ".join(str(criterion.get("id") or "deferred criterion") for criterion in unmapped[:8])
+            findings = (f"- post-merge verification: {ids} has no valid check from the project's configured checks. "
+                        "Map each deferred criterion to a configured check, or verify it before merge.")
+            return _rework(c, api, jira, pr_comment, result, findings,
+                           "deferred criterion has no configured check", checks, t0=t0)
         # PASS from the reviewer; CI on the PR head must agree before anything is merged
         ci = wait_for_ci(api, c, pr.get("head_sha") or head, hb)
         failed = [x for x in ci if x["state"] == "failure"]

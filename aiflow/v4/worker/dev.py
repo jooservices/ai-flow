@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
-from ..core.environment import items_of, parse_missing_environment
+from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
@@ -396,10 +396,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             result["details"]["tool_missing_evidence"] = (
                 "explicit_marker" if parse_missing_requirements(res.verdict_reason or "") else "command_not_found")
             result["details"]["escalation_class"] = raised.get("class", "")
-            jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
-                                      why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
-                                      result="No question goes to the owner; the machine and the tool are recorded",
-                                      next_="Back to To Do; AI Flow offers it again when a machine with the tool is available",
+            jira("comment", body=note(c, "waiting for a check tool", what="A configured check could not run",
+                                      why=f"Missing tool(s): {', '.join(missing)}. {redact(res.verdict_reason)[:300]}",
+                                      result="No question goes to the owner; the missing tool is recorded by name",
+                                      next_="Back to To Do; AI Flow offers it again when a worker with the tool is available",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result

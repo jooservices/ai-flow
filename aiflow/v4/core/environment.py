@@ -172,6 +172,12 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     ("machine", r"\bshared\s+(?:docker|database|db|redis|postgres(?:ql)?|mysql|mariadb|wordpress|environment|"
                r"integration environment|site)\b"),
     ("machine", r"\bWSL2?\b|\b(?:my|your|the owner'?s)\s+(?:laptop|pc|computer|machine)\b"),
+    # A generic instruction to use a machine is still a run-location requirement, even with no machine name.
+    ("machine", r"\b(?:use|run|test|execute|deploy|install|build|start|connect(?:\s+to)?|access)\s+"
+                r"(?:(?:the|a|an)\s+)?(?:server|machine|vm|box|computer|node)\b"),
+    # Local names such as node4 often have no DNS suffix. Match them when they are used as a run destination.
+    ("host", r"\b(?:on|at|to|against|via|from)\s+(?:the\s+)?"
+             r"(?:node|host|server|vm|machine|box|worker|runner|agent)[-_]?\d+\b"),
     # Generic machine references still leave a run-location question, even when no hostname follows.
     ("machine", r"\b(?:run|test|execute|deploy|install|build|start)\b.{0,80}\b(?:on|at|against|to)\s+(?:the\s+)?(?:server|machine)\b"),
     ("host", r"\b(?:use|connect(?:\s+to)?|access|run|test|deploy)\s+(?:the\s+)?host"

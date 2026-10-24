@@ -28,6 +28,10 @@ CLOSED_STATUSES = ("Done", "Closed", "Declined", "Cancelled", "Canceled", "Resol
 CORRECTABLE_STATUSES = ("Created", "Backlog", "To Do", "Needs owner")
 
 
+class UnmappedPostMergeCriteria(ValueError):
+    """A verify PASS cannot defer a criterion without an exact configured check."""
+
+
 def _item(ctx, project: str, name: str):
     p = ctx.repo().projects.get(project)
     return next((i for i in (p.environment_items if p else []) if i.name == name), None)
@@ -195,14 +199,18 @@ def record_post_merge_criteria(ctx, run: dict, criteria: list[Any]) -> list[dict
         ctx.db.run("DELETE FROM environment_post_merge_checks WHERE ticket_key=%s AND status='pending'",
                    (run["ticket_key"],))
         return []
-    state = "pending" if all(item["check"] for item in clean) else "unmapped"
+    unmapped = [item for item in clean if not item["check"]]
+    if unmapped:
+        ids = ", ".join(item["id"] or "deferred criterion" for item in unmapped[:8])
+        raise UnmappedPostMergeCriteria(
+            f"{ids} must map to a valid configured post-merge check before verify can pass")
     ctx.db.run("INSERT INTO environment_post_merge_checks (ticket_key, project, criteria, status, result, release_ticket, run_id, checked_at)"
-               " VALUES (%s,%s,%s,%s,'{}','',%s,NULL) ON CONFLICT (ticket_key) DO UPDATE SET"
-               " project=EXCLUDED.project, criteria=EXCLUDED.criteria, status=EXCLUDED.status, result='{}',"
+               " VALUES (%s,%s,%s,'pending','{}','',%s,NULL) ON CONFLICT (ticket_key) DO UPDATE SET"
+               " project=EXCLUDED.project, criteria=EXCLUDED.criteria, status='pending', result='{}',"
                " release_ticket='', run_id=EXCLUDED.run_id, updated_at=now(), checked_at=NULL",
-               (run["ticket_key"], run["project"], J(clean), state, str(run["id"])))
+               (run["ticket_key"], run["project"], J(clean), str(run["id"])))
     ctx.events.emit("environment.post_merge_queued", ticket=run["ticket_key"], project=run["project"],
-                    step="verify", run_id=str(run["id"]), outcome=state,
+                    step="verify", run_id=str(run["id"]), outcome="pending",
                     reason=f"{len(clean)} criterion/criteria queued for post-merge verification")
     return clean
 

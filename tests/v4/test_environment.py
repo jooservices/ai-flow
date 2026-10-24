@@ -58,7 +58,8 @@ def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
         "use the shared Docker": "machine", "connect to 192.168.1.20": "ip address",
         "open https://wp.example.com for the smoke test": "host", "connect to 2001:db8::1": "ip address",
         "browse http://wp.office.local:8080/": "host", "through the VPN": "network", "ssh into the box": "access instruction",
-        "Run tests on the server": "machine", "Use host node4": "host",
+        "Run tests on the server": "machine", "Use the server": "machine", "Use host node4": "host",
+        "Run tests on node4": "host",
         "password: hunter22": "access instruction", "write a Jira comment when done": "jira action",
     }
     for text, kind in cases.items():
@@ -85,7 +86,8 @@ def test_public_hostname_and_compressed_ipv6_are_rejected_at_intake(host):
     assert intake.parse(f"DESCRIPTION:\n<<<\n{text}\n>>>\nINTAKE: REWRITE")[0] == "invalid"
 
 
-@pytest.mark.parametrize("wording", ["Run tests on the server", "Use host node4"])
+@pytest.mark.parametrize("wording", ["Run tests on the server", "Use the server", "Use host node4",
+                                      "Run tests on node4"])
 def test_generic_server_and_host_wording_is_rejected_at_intake(wording):
     text = REWRITE + f"\nTechnical notes: {wording}."
     assert intake.parse(f"DESCRIPTION:\n<<<\n{text}\n>>>\nINTAKE: REWRITE")[0] == "invalid"
@@ -219,6 +221,7 @@ def test_the_console_has_the_environment_screens():
     html = (control_api.Path(control_api.__file__).parent / "ui" / "console.html").read_text(encoding="utf-8")
     for needle in ("project-environment", "Missing environment items", "Tickets that name servers", "/v1/environment/scan"):
         assert needle in html
+    assert "criterion.text || ''" in html and "result.criteria || []" in html and "c.check_result || {}" in html
 
 
 # --- AC6: the run receives the items as environment variables, the notes list their names ---------------------------
@@ -371,6 +374,16 @@ def test_free_text_is_not_an_environment_item(monkeypatch, tmp_path):
     assert [c[2]["to"] for c in api.calls if c[1].endswith("/transition")][-1] == "To Do"
 
 
+def test_missing_tool_jira_note_records_the_tool_without_naming_the_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(dev, "parse_missing_requirements", lambda _text: ["php"])
+    result, api, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "MISSING-TOOL: php - the check could not run")
+
+    comments = [call[2]["body"] for call in api.calls if call[1].endswith("/comment")]
+    waiting_note = next(comment for comment in comments if "waiting for a check tool" in comment)
+    assert result["outcome"] == "tool_missing"
+    assert "php" in waiting_note and "cc" not in waiting_note
+
+
 def _report(client, headers, ticket, names, summary="the database is not there"):
     r = client.post("/v1/work/claim", json={"ticket": ticket, "account": "claude-01"}, headers=headers).json()
     assert r["claimed"], r
@@ -460,6 +473,31 @@ def test_successful_human_review_queues_per_ticket_post_merge_checks(client, ctx
         "ticket": "TESTWP-59",
         "criteria": [{"id": "AC4", "text": "verify after merge", "check": "canary-check"}],
     }]
+
+
+def test_control_refuses_a_verify_pass_with_a_missing_or_invalid_deferred_check(client, ctx):
+    from uuid import uuid4
+
+    ctx.repo().projects["TESTWP"].checks = ["canary-check"]
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+    for index, check in enumerate(("", "not-configured"), start=1):
+        key = f"TESTWP-59{index}"
+        add_ticket(ctx.db, key, status="Human review")
+        run_id = str(uuid4())
+        lease = ctx.leases.claim(key, run_id, ctx.settings.lease_ms)
+        assert lease.ok
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash,details)"
+                   " VALUES (%s,%s,'TESTWP','verify','claude-01','claude','cc',%s,'','{}')",
+                   (run_id, key, lease.fence))
+
+        response = client.post(f"/v1/runs/{run_id}/result", headers=cc, json={
+            "fence": lease.fence, "outcome": "human", "summary": "passed",
+            "details": {"post_merge_criteria": [{"id": "AC4", "text": "verify after merge", "check": check}]},
+        })
+
+        assert response.status_code == 422 and "AC4" in response.json()["detail"]
+        assert ctx.db.one("SELECT count(*) AS n FROM environment_post_merge_checks WHERE ticket_key=%s", (key,))["n"] == 0
+        assert ctx.db.one("SELECT status FROM runs WHERE id=%s", (run_id,))["status"] == "running"
 
 
 def test_an_unknown_name_alone_fails_the_run(client, ctx, envrepo):
@@ -572,7 +610,8 @@ def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the
              "TESTWP-62": ("In Progress", "Use the shared Docker"), "TESTWP-63": ("Done", "Use the shared Docker"),
              "TESTWP-64": ("Intake", "ssh into the lab machines"), "TESTWP-65": ("Backlog", "Write a Jira comment when done"),
              "TESTWP-66": ("To Do", "Release on https://wp.example.com"),
-             "TESTWP-68": ("To Do", "Run tests on the server"), "TESTWP-69": ("To Do", "Use host node4")}
+             "TESTWP-68": ("To Do", "Run tests on the server"), "TESTWP-69": ("To Do", "Use host node4"),
+             "TESTWP-70": ("To Do", "Use the server"), "TESTWP-71": ("To Do", "Run tests on node4")}
     for key, (status, description) in texts.items():
         add_ticket(ctx.db, key, status=status)
         ctx.db.run("UPDATE tickets SET description=%s WHERE key=%s", (description, key))
@@ -583,8 +622,8 @@ def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the
     report = environment_reports.scan(ctx)
     by_ticket = {o["ticket"]: o for o in report["offenders"]}
     assert set(by_ticket) == {"TESTWP-60", "TESTWP-62", "TESTWP-64", "TESTWP-65", "TESTWP-66", "TESTWP-67",
-                              "TESTWP-68", "TESTWP-69"}
-    assert report["scanned"] == 9
+                              "TESTWP-68", "TESTWP-69", "TESTWP-70", "TESTWP-71"}
+    assert report["scanned"] == 11
     assert set(by_ticket["TESTWP-60"]["kinds"]) == {"machine", "ip address"}
     assert by_ticket["TESTWP-60"]["action"] == "sent back to intake" and by_ticket["TESTWP-65"]["action"] == "sent back to intake"
     assert by_ticket["TESTWP-62"]["action"] == "work in flight; left as it is"
@@ -593,6 +632,8 @@ def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the
     assert by_ticket["TESTWP-67"]["kinds"] == ["ip address"] and by_ticket["TESTWP-67"]["action"] == "sent back to intake"
     assert by_ticket["TESTWP-68"]["kinds"] == ["machine"]
     assert by_ticket["TESTWP-69"]["kinds"] == ["host"]
+    assert by_ticket["TESTWP-70"]["kinds"] == ["machine"]
+    assert by_ticket["TESTWP-71"]["kinds"] == ["host"]
     row = ctx.db.one("SELECT status, labels FROM tickets WHERE key='TESTWP-60'")
     assert row["status"] == "Intake" and "aiflow-ready" not in row["labels"]
     assert ctx.jira.status_of["TESTWP-60"] == "Intake" and ctx.jira.status_of["TESTWP-62"] == "In Progress"

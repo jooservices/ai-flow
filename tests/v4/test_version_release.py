@@ -243,21 +243,23 @@ def test_post_merge_worker_runs_only_the_check_mapped_to_its_criterion(tmp_path,
             raise AssertionError(path)
 
     monkeypatch.setattr(post_merge_worker, "Git", FakeGit)
-    monkeypatch.setattr(post_merge_worker, "project_env", lambda *_args: {"POST_MERGE_URL": "http://site.test"})
+    monkeypatch.setattr(post_merge_worker, "project_env", lambda *_args: {
+        "POST_MERGE_URL": "http://site.test", "SHORT_SECRET": "x"})
     api = FakeApi()
     claimed = Claimed(run_id="post-merge-1", fence=4, run_token="", account="claude-01", provider="claude",
                       model="", effort="", ticket={"key": "TESTWP-245"},
                       project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "base": "develop",
-                               "checks": ["true", "false"], "work_minutes": {"hard": 1},
-                               "environment": [], "post_merge_criteria": [{"id": "AC4", "text": "works",
-                                                                               "check": "true"}]},
+                               "checks": ["true", "false", "printf x"], "work_minutes": {"hard": 1},
+                               "environment": [{"name": "SHORT_SECRET", "kind": "secret", "runs": ["post_merge"]}],
+                               "post_merge_criteria": [{"id": "AC4", "text": "works", "check": "printf x"}]},
                       identity=("bot", "bot@example.test"), step="post_merge")
 
     result = post_merge_worker.run_post_merge(api, claimed, str(tmp_path), 1, [])
 
     assert result["outcome"] == "done" and refs == ["origin/develop"]
     complete = next(call for call in api.calls if call[1] == "/v1/environment/post-merge/complete")
-    assert [item["command"] for item in complete[2]["checks"]] == ["true"]
+    assert [item["command"] for item in complete[2]["checks"]] == ["printf x"]
+    assert complete[2]["checks"][0]["output"] == "[redacted]"
 
 
 def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):

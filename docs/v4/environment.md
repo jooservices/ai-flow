@@ -115,9 +115,10 @@ criteria on that ticket, whether or not it belongs to a Jira version. A fenced `
 only the project's environment items whose `runs` include `post_merge`, and the checks mapped to that ticket's
 criteria. The worker runs each mapped command against the merged project checkout and reports each result through
 `POST /v1/environment/post-merge/complete`. Control records a criterion as passed only when its own mapped command
-passes; missing or failed commands are recorded failed. *Projects → Environment* shows pending, passed or failed
-criteria and when they ran. The `post_merge` permission is opt-in for each item; it is not implied by `dev` or
-`verify`.
+passes; missing or failed commands are recorded failed. A deferred criterion without an exact configured check is
+sent back for rework, and the control API refuses to accept a verify PASS carrying an unmapped criterion. *Projects →
+Environment* shows pending, passed or failed criteria and when they ran. The `post_merge` permission is opt-in for each
+item; it is not implied by `dev` or `verify`.
 
 ## Scan of the open tickets (AC11)
 
@@ -138,6 +139,9 @@ The watchdog runs it once a day; *Projects → Tickets that name servers* shows 
 - Authenticated node heartbeats confirm configured secret names by assigned project, node and item fingerprint; a confirmation resolves matching waits and reoffers tickets.
 - `POST /v1/work/claim` offers pending post-merge criteria as fenced `post_merge` work with only permitted environment items and per-ticket mapped checks.
 - `POST /v1/environment/post-merge/complete` records each criterion only from its mapped command; results are stored in `environment_post_merge_checks` against the original ticket.
+- `POST /v1/github/token` returns the repository credential used to fetch the project checkout for dev, verify and post-merge work.
+- `POST /v1/nodes/{name}/heartbeat` carries the authenticated node's names-only confirmation of configured environment secrets.
+- `POST /v1/version-releases/claim` and `POST /v1/version-releases/{version_id}/complete` claim and complete configured version release work.
 - `GET /v1/capacity` reports quota capacity for the Machines and AI dashboard; it is separate from project run
   environment configuration, which uses `GET /v1/projects/{key}/environment` and the work claim.
 

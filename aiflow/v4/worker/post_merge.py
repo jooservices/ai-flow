@@ -14,8 +14,11 @@ from .gitops import Git
 from .notes import project_env
 
 
-def _redact(text: str, env: dict[str, str]) -> str:
-    for value in sorted((value for value in env.values() if len(value) >= 4), key=len, reverse=True):
+def _redact(text: str, env: dict[str, str], secret_names: set[str] | None = None) -> str:
+    secret_names = secret_names or set()
+    values = {value for value in env.values() if len(value) >= 4}
+    values.update(env[name] for name in secret_names if env.get(name))
+    for value in sorted(values, key=len, reverse=True):
         text = text.replace(value, "[redacted]")
     return re.sub(r"(?i)(token|password|secret|api[_-]?key)(\s*[=:]\s*)[^\s,;]+", r"\1\2[redacted]", text)
 
@@ -27,6 +30,8 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
     git = Git(srv_root, run_as=run_as)
     hb = Heartbeat(api, c, heartbeat_s)
     env = project_env(project["key"], project.get("environment"), "post_merge")
+    secret_names = {str(item.get("name") or "") for item in project.get("environment") or []
+                    if item.get("kind") == "secret" and item.get("name")}
     report: dict = {"head_sha": "", "checks": [], "error": ""}
     try:
         criteria = c.project.get("post_merge_criteria") or []
@@ -67,7 +72,7 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
                                         start_new_session=True)
                 output, exit_code = _communicate(proc, timeout_s)
             report["checks"].append({"command": command, "passed": exit_code == 0, "exit_code": exit_code,
-                                     "output": _redact(output[-12_000:], env)})
+                                     "output": _redact(output[-12_000:], env, secret_names)})
         if hb.lost.is_set():
             raise LeaseLost()
         outcome = api.call("POST", "/v1/environment/post-merge/complete",
@@ -80,7 +85,7 @@ def run_post_merge(api: ControlClient, c: Claimed, srv_root: str, heartbeat_s: i
     except LeaseLost:
         return {"fence": c.fence, "outcome": "lost", "summary": "post-merge lease lost; stopped without recording"}
     except Exception as exc:  # noqa: BLE001
-        report["error"] = _redact(f"{type(exc).__name__}: {exc}", env)[:1000]
+        report["error"] = _redact(f"{type(exc).__name__}: {exc}", env, secret_names)[:1000]
         try:
             api.call("POST", "/v1/environment/post-merge/complete",
                      {"run_id": c.run_id, "fence": c.fence, **report})

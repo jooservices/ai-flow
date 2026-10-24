@@ -68,7 +68,8 @@ project file, the claim, the notes or the audit. Today the configuration lives i
 moves to the control database and the Machines and AI screen without changing these fields.
 
 **Screen**: *Projects → Environment* edits the items (variable, kind, value, runs) and commits
-`projects/<KEY>.yaml` to the control repository (permission `projects.manage`, audited by names only).
+`projects/<KEY>.yaml` to the control repository (permission `projects.manage`, audited by names only). Save and scan
+notifications do not block the Projects screen controls while they are visible.
 
 ## What the run receives (AC6)
 

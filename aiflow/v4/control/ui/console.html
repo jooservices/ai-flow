@@ -1791,7 +1791,7 @@ function disagreementsPanel() {
   if (!rows.length) return h + '<div class="empty">Every ticket matches its pull request.</div></section>';
   h += '<div class="tablebox"><table><thead><tr><th>Ticket</th><th>Jira</th><th>Pull request</th><th>The flow will set</th><th>For</th><th>Why it is not fixed yet</th></tr></thead><tbody>';
   rows.forEach(function (r) {
-    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(r.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
+    h += '<tr><td><button class="linkbtn mono" data-act="open-ticket" data-key="' + esc(r.key) + '">' + esc(r.key) + '</button><div class="small">' + esc(r.summary) + '</div></td><td>' + esc(r.jira_status) + '</td><td>' + (r.pr_url ? '<a href="' + esc(safeHref(r.pr_url)) + '" target="_blank" rel="noopener">PR #' + esc(String(r.pr_url).split('/').pop()) + '</a> · ' : '') + esc(r.github_state) + '</td><td>' + esc(r.expected) + '</td><td class="mono">' + mmss(r.age_s) + '</td><td class="small" style="white-space:normal">' + esc(r.detail) + '</td></tr>';
   });
   return h + '</tbody></table></div></section>';
 }
@@ -1970,7 +1970,7 @@ function providerUsageChart(rows) {
       var tokens = byDay[day][provider] || 0;
       if (!tokens) return;
       var h = height * tokens / max; y -= h;
-      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + day + ' · ' + esc(PROVIDER[provider] || provider) + ': ' + tok(tokens) + ' tokens</title></rect>';
+      svg += '<rect class="provider-' + esc(provider) + '" x="' + x + '" y="' + y.toFixed(1) + '" width="' + width + '" height="' + h.toFixed(1) + '"><title>' + esc(day) + ' · ' + esc(PROVIDER[provider] || provider) + ': ' + tok(tokens) + ' tokens</title></rect>';
     });
     svg += '<text x="' + (x + width / 2) + '" y="' + (height + labelHeight - 2) + '" text-anchor="middle">' + esc(day.slice(8)) + '</text>';
   });
@@ -3886,7 +3886,7 @@ function timeSec(tl) {
 }
 function mergeSec(det) {
   var m = det.merge || {}, moves = det.moves || [];
-  var link = m.pr_url ? '<a href="' + esc(m.pr_url) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
+  var link = m.pr_url ? '<a href="' + esc(safeHref(m.pr_url)) + '" target="_blank" rel="noopener">PR #' + esc(String(m.pr_url).split('/').pop()) + ' ' + ICON.ext + '</a>' : '—';
   var h = '<div class="dsec" data-merge-facts><h4>Pull request and merge</h4><div class="facts">' + fact('Pull request', link) + fact('State on GitHub', esc(m.pr_state || '—')) +
     fact('Approved', m.approved_at ? when(m.approved_at) : '—') + fact('Merged', m.merged_at ? when(m.merged_at) + (m.merged_by ? ' · ' + esc(m.merged_by) : '') : '—') +
     fact('Merge commit', m.merge_sha ? '<span class="mono">' + esc(String(m.merge_sha).slice(0, 10)) + '</span>' : '—') +
@@ -5001,7 +5001,11 @@ function applyLayout(view, root) {
       var tab = tabById[id];
       cell.className = 'block-cell'; cell.setAttribute('data-block-id', id); cell.setAttribute('data-dashboard-tab', tab);
       cell.setAttribute('data-size', b.size); cell.hidden = !!b.hidden || (!editing && tab !== S.dashboardTab);
-      if (editing) cell.insertAdjacentHTML('beforeend', layoutTools(b, dashboardShown.indexOf(id) + 1, dashboardShown.length));
+      if (editing) {
+        var tools = document.createElement('template');
+        tools.innerHTML = layoutTools(b, dashboardShown.indexOf(id) + 1, dashboardShown.length);
+        cell.appendChild(tools.content);
+      }
       cell.appendChild(el); grid.appendChild(cell);
     });
     Array.prototype.slice.call(dashboardPanel.querySelectorAll('[data-dashboard-panel]')).forEach(function (section) { section.remove(); });

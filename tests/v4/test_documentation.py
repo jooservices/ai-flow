@@ -456,7 +456,8 @@ def test_ci_check_maps_global_theme_changes_to_all_documented_console_screens(mo
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
     views = set(docsite.console_views())
     assert docsite.changed_views("origin/develop") == views
-    assert docsite.documentation_gaps([ui, topic], views=views) == []
+    # the Security screen's page ships from the v4 feature docs
+    assert docsite.documentation_gaps([ui, topic, "docs/v4/security.md"], views=views) == []
 
 
 def test_ci_check_maps_removed_global_theme_initializer_from_the_base_file(monkeypatch):

@@ -38,7 +38,7 @@ from urllib.parse import quote
 
 import redis
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.routing import Match
@@ -62,7 +62,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 EMAIL = re.compile(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}")
 REFUSED = "invalid email or password"
 
-PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS)
+PAGES = frozenset(CONSOLE_PAGE_PATHS) | frozenset(PAGE_VIEWS) | {"/setup"}
 OPEN_PATHS = {"/login", "/logout", "/healthz", "/v1/install.sh", "/v1/nodes/join", "/v1/nodes/join-tokens",
               "/v1/nodes/join-tokens/inspect",
               # provider redirects arrive from another site without the Strict cookie; a one-use state protects them
@@ -270,6 +270,8 @@ else{m.textContent=x[1].detail||"Sign-in failed";b.disabled=false}})
 
 
 def install_login(app: FastAPI, ctx) -> None:
+    from . import setup_wizard
+
     settings = ctx.settings
     token_routes: dict[int, bool] = {}
 
@@ -365,6 +367,9 @@ def install_login(app: FastAPI, ctx) -> None:
 
     @app.get("/login", include_in_schema=False)
     def login_page() -> HTMLResponse:
+        if setup_wizard.user_count(ctx) == 0:
+            return FileResponse(setup_wizard.PAGE, media_type="text/html",
+                                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         return HTMLResponse(LOGIN_PAGE, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     @app.post("/v1/auth/login")
@@ -553,7 +558,9 @@ def install_login(app: FastAPI, ctx) -> None:
     @app.middleware("http")
     async def gate(request: Request, call_next):
         path = request.url.path
-        if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES):
+        setup_path = path == "/setup" or path.startswith("/v1/setup/")
+        setup_open = setup_path and setup_wizard.user_count(ctx) == 0
+        if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES) or setup_open:
             return await call_next(request)
         bearer_route = bool(request.headers.get("authorization") and checks_token(request))
         user = active_user(request)

@@ -10,10 +10,12 @@ first command to a merged ticket.
 `tests/v4/test_clean_install_acceptance.py` builds a clean control machine and two clean machines with console
 sign-in on, and takes only the documented steps:
 
-1. Install the control plane with `aiflow4-control-install --version vX.Y.Z --domain D --admin-email E`
-   ([Install the control plane](control-install.md)). The install turns sign-in on and writes the first Super
-   Administrator's password to `super-admin-password`.
-2. Open `/login` and sign in as the Super Administrator. Anonymous callers get a redirect or `401`.
+1. Install the control plane with `aiflow4-control-install --version vX.Y.Z --domain D`
+   ([Install the control plane](control-install.md)). The installer turns sign-in on but does not create a user or
+   write a password file.
+2. Open `/login`, create the first Administrator in browser setup, and continue with the signed-in session. Resume
+   optional steps at `/setup` from the Dashboard. Anonymous
+   callers get a redirect or `401`.
 3. In Command Center, open **Projects**, load the connected Jira and GitHub catalogs, run preflight, and add the
    project (Jira key, repository, base branch).
 4. For each machine, copy the one-use join command from Command Center ([Join a node](node-join.md)). Machines
@@ -56,7 +58,7 @@ release workflow supplies its signed candidate tarball, Sigstore bundle and chec
   `deploy/v4/ci/clean-install-containers.sh vX.Y.Z TAR SIGSTORE_BUNDLE SHA256SUMS`. It builds a clean control machine
   and two clean machines (Ubuntu systemd containers on a private network), extracts the installer from that candidate
   tarball, and installs the control plane with the
-  documented command and `--admin-email`, and connects disposable Jira and GitHub App fakes as test accounts. After
+  documented command and browser setup, and connects disposable Jira and GitHub App fakes as test accounts. After
   signing in with the password file, it loads the catalogs, runs project preflight, and adds the project through the
   same authenticated Command Center API calls used by the Projects screen. It then requests each one-use join
   command through the authenticated Command Center action and runs the returned install URL and token on the two

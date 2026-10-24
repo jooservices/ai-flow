@@ -7,10 +7,10 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
-One line per feature document in `docs/v4/`. **Do not add your line here:** add one file `deploy/v4/topics/<topic>.md`
-holding that single line (see [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); the full index is generated
-by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topics.
+One line per feature document in `docs/v4/`. Add each feature link here under Topics. The full index, including
+topic files under `deploy/v4/topics/`, can be printed by `uv run python -m aiflow.v4.core.topics`.
 
+- [First-run setup](../../docs/v4/first-run-setup.md): create the public address and Administrator in the browser, connect providers, add a machine and AI accounts, configure the first project, and confirm a sample ticket in Intake
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure

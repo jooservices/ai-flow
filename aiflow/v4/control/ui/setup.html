@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Set up AI Flow</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--fg:#17212b;--muted:#586775;--line:#d8e0e6;--accent:#315bd6;--ok:#137547;--warn:#8a5b00;--bad:#a12828}
+@media(prefers-color-scheme:dark){:root{--bg:#10161d;--card:#19232d;--fg:#e7edf3;--muted:#a9b5c0;--line:#34424e;--accent:#8da8ff;--ok:#68d39a;--warn:#f0c46d;--bad:#ff9696}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:24px}
+main{max-width:880px;margin:5vh auto}.brand{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:12px}
+h1{font-size:clamp(28px,5vw,40px);line-height:1.15;margin:0 0 10px}h2{font-size:19px;margin:0}p{margin:0 0 14px;color:var(--muted)}
+.intro{max-width:680px;margin-bottom:24px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin:12px 0;box-shadow:0 5px 18px #0000000a}
+.setup-form{display:grid;grid-template-columns:1fr 1fr;gap:14px}.setup-form label{display:grid;gap:5px;font-size:13px;font-weight:650}.setup-form label:first-child,.setup-form button,.setup-form .msg{grid-column:1/-1}
+input,select{min-width:0;width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--fg);font:inherit}
+button,.button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:9px 14px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--fg);font:inherit;font-weight:650;text-decoration:none;cursor:pointer}
+button.primary,.button.primary{background:var(--accent);border-color:var(--accent);color:white}button:disabled{opacity:.55;cursor:wait}
+.msg{min-height:22px;color:var(--bad);font-size:13px}.note{font-size:13px}.subtle{color:var(--muted)}.progress{font-size:13px;color:var(--muted);margin-top:3px}
+.steps{display:grid;gap:10px}.step{border:1px solid var(--line);border-radius:12px;padding:15px;background:var(--card);display:grid;grid-template-columns:32px minmax(0,1fr);gap:10px}.num{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted);font-weight:700}.step[data-ready="true"] .num{background:var(--ok);border-color:var(--ok);color:#fff}.step[data-skipped="true"] .num{background:var(--warn);border-color:var(--warn);color:#fff}
+.step h2{font-size:16px;margin:1px 0 3px}.step p{font-size:13px;margin:0}.step .missing{color:var(--warn);margin-top:6px}.step .actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}.step a{font-size:13px}
+.sample{display:flex;align-items:end;gap:9px;flex-wrap:wrap;margin-top:12px}.sample label{display:grid;gap:5px;min-width:190px;flex:1;font-size:13px;font-weight:650}.complete{border-color:var(--ok)}.complete h2{color:var(--ok)}.topline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+@media(max-width:620px){body{padding:16px}.card{padding:16px}.setup-form{grid-template-columns:1fr}.setup-form label,.setup-form button,.setup-form .msg{grid-column:1}.step{padding:12px}}
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">AI Flow · Command Center</div>
+  <section id="welcome" class="intro">
+    <h1>Set up AI Flow</h1>
+    <p>Choose the address people will use and create your Administrator. Then connect your tools and add the first machine and project from these screens.</p>
+  </section>
+  <section id="bootstrap" class="card" hidden>
+    <h2>Start with your public address and Administrator</h2>
+    <p class="note">Use the same address you opened in your browser. HTTPS is recommended for secure sign-in cookies and provider callbacks.</p>
+    <form id="bootstrap-form" class="setup-form">
+      <label for="public-url">Public address<input id="public-url" type="url" required autocomplete="url"></label>
+      <label for="admin-email">Administrator email<input id="admin-email" type="email" required autocomplete="username"></label>
+      <label for="admin-password">Password<input id="admin-password" type="password" required minlength="12" autocomplete="new-password"><span class="subtle">Use at least 12 characters.</span></label>
+      <button id="bootstrap-submit" class="primary" type="submit">Create Administrator and continue</button>
+      <div id="bootstrap-message" class="msg" role="alert"></div>
+    </form>
+  </section>
+  <section id="wizard" hidden>
+    <div class="card topline"><div><h2>Your setup</h2><div id="progress" class="progress"></div></div><a class="button" href="/dashboard">Go to Dashboard</a></div>
+    <div id="steps" class="steps" aria-live="polite"></div>
+    <div id="wizard-message" class="msg" role="alert"></div>
+  </section>
+</main>
+<script>
+(function(){
+  'use strict';
+  var state=null, bootstrapToken='', busy=false;
+  var titles={public_address:'Public address',administrator:'Administrator',jira:'Connect Jira',github:'Connect GitHub',machine:'Add the first machine',ai_accounts:'Add AI accounts',project:'Add the first project and repositories',sample_ticket:'Send a sample ticket to Intake'};
+  var actions={jira:['/integrations','Open Integrations'],github:['/integrations','Open Integrations'],machine:['/machines','Open Machines and AI'],ai_accounts:['/machines','Add AI accounts'],project:['/projects','Open Projects']};
+  function $(id){return document.getElementById(id)}
+  function esc(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+  function setMessage(id,text){$(id).textContent=text||''}
+  function api(path,options){options=options||{};options.credentials='same-origin';options.headers=Object.assign({'Content-Type':'application/json'},options.headers||{});return fetch(path,options).then(function(r){return r.json().catch(function(){return {detail:'The server returned an unreadable response.'}}).then(function(d){if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:'The request could not be completed.');return d})})}
+  function render(){
+    if(!state)return;
+    if(!state.admin_exists){$('bootstrap').hidden=false;$('wizard').hidden=true;return}
+    $('bootstrap').hidden=true;$('wizard').hidden=false;
+    var steps=state.steps||[],done=steps.filter(function(s){return s.ready}).length;
+    $('progress').textContent=done+' of '+steps.length+' checks ready. You can skip a step and resume it later from this Dashboard panel.';
+    $('steps').innerHTML=steps.slice(2).map(function(s,index){
+      var title=titles[s.id]||s.title, ready=s.ready, skipped=s.skipped, action=actions[s.id], body=ready?'Ready.':(skipped?'Skipped for now.':(s.missing||'This step is not complete yet.'));
+      var html='<article class="step" data-ready="'+ready+'" data-skipped="'+skipped+'"><div class="num">'+(index+1)+'</div><div><h2>'+esc(title)+'</h2><p class="'+(!ready&&!skipped?'missing':'')+'">'+esc(body)+'</p>';
+      if(action&&!ready){html+='<div class="actions"><a class="button primary" href="'+action[0]+'">'+esc(action[1])+'</a></div>'}
+      if(s.id==='machine'&&!ready){html+='<p class="note" style="margin-top:8px">Machines and AI creates a one-time command that you run on the new machine. This is the only setup step that uses a terminal.</p>'}
+      if(s.id==='sample_ticket'){
+        if(state.sample_ticket){html+='<p class="note" style="margin-top:8px">Sample ticket: <a href="/v1/tickets/'+encodeURIComponent(state.sample_ticket)+'">'+esc(state.sample_ticket)+'</a>'+ (state.sample_status==='unavailable'?' · Jira could not confirm its status yet.':' · '+esc(state.sample_status||'not confirmed'))+'</p>'}
+        if(!ready){html+='<div class="sample"><label for="sample-project">Project<select id="sample-project">'+(state.projects||[]).map(function(p){return '<option value="'+esc(p)+'">'+esc(p)+'</option>'}).join('')+'</select></label><button type="button" class="primary" data-send-sample'+(!(state.projects||[]).length?' disabled':'')+'>Send sample ticket to Intake</button></div>'}
+      }
+      if(s.id==='project'&&!ready){html+='<p class="note" style="margin-top:8px">The first machine needs a project assignment. If you reached the machine step first, add a project here, then return to Machines and AI.</p>'}
+      if(!ready){
+        html+='<div class="actions"><button type="button" data-step="'+s.id+'" data-skipped="'+(!skipped)+'">'+(skipped?'Resume this step':'Skip for now')+'</button>';
+        if(skipped&&action)html+='<a class="button" href="'+action[0]+'">'+esc(action[1])+'</a>';
+        html+='</div>';
+      }
+      html+='</div></article>';return html;
+    }).join('');
+    if(state.completed){$('steps').innerHTML='<article class="card complete"><h2>Setup is complete</h2><p>The sample ticket was confirmed in Jira Intake. Follow its progress on the ticket and Dashboard screens.</p><a class="button primary" href="/dashboard">Open Dashboard</a></article>';}
+  }
+  function load(){
+    fetch('/v1/setup/status',{cache:'no-store',credentials:'same-origin'}).then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:'Setup status could not be loaded.');return d})})
+      .then(function(d){state=d;bootstrapToken=d.bootstrap_token||bootstrapToken;render();setMessage('wizard-message','');if(d.completed){setTimeout(function(){location.replace('/dashboard')},2500)}})
+      .catch(function(e){if(e.message==='sign in as the Administrator to continue setup'){location.replace('/login?next=%2Fsetup');return}setMessage('wizard-message',e.message)})
+  }
+  $('public-url').value=location.origin;
+  $('bootstrap-form').addEventListener('submit',function(event){event.preventDefault();if(busy)return;busy=true;$('bootstrap-submit').disabled=true;setMessage('bootstrap-message','');
+    api('/v1/setup/bootstrap',{method:'POST',headers:{'X-AIFLOW4-Setup':bootstrapToken},body:JSON.stringify({public_url:$('public-url').value,email:$('admin-email').value,password:$('admin-password').value})})
+      .then(function(){location.replace('/setup')}).catch(function(e){setMessage('bootstrap-message',e.message)}).then(function(){busy=false;$('bootstrap-submit').disabled=false})
+  });
+  document.addEventListener('click',function(event){
+    var skip=event.target.closest('[data-step]');
+    if(skip){var id=skip.getAttribute('data-step'),value=skip.getAttribute('data-skipped')==='true';skip.disabled=true;api('/v1/setup/steps/'+encodeURIComponent(id),{method:'POST',body:JSON.stringify({skipped:value})}).then(function(d){state=d;render()}).catch(function(e){setMessage('wizard-message',e.message)});return}
+    var sample=event.target.closest('[data-send-sample]');
+    if(sample){if(busy)return;busy=true;sample.disabled=true;setMessage('wizard-message','');api('/v1/setup/sample-ticket',{method:'POST',body:JSON.stringify({project:$('sample-project').value})}).then(function(d){setMessage('wizard-message',d.message||'Sample ticket was confirmed in Intake.');load()}).catch(function(e){setMessage('wizard-message',e.message);sample.disabled=false}).then(function(){busy=false})}
+  });
+  load();setInterval(function(){if(!document.hidden)load()},10000);
+})();
+</script>
+</body>
+</html>

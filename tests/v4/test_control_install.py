@@ -341,11 +341,13 @@ def test_rerun_remembers_the_admin_email_and_keeps_an_owner_choice_for_login(mac
     assert sec.read_env(app_env)["AIFLOW4_CONSOLE_LOGIN"] == "0"
 
 
-def test_first_install_without_an_admin_email_stops_before_any_change(machine):
+def test_first_install_without_an_admin_email_leaves_administrator_creation_to_browser_setup(machine):
     out: list[str] = []
-    assert installer(machine, out, admin_email="").run() == ci.EXIT_USAGE
-    assert "--admin-email is required" in "\n".join(out) and machine.calls == []
-    assert installer(machine, out, admin_email="not an email").run() == ci.EXIT_USAGE
+    assert installer(machine, out, admin_email="").run() == 0, out
+    assert not console_seeds(machine)
+    assert sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))["AIFLOW4_CONSOLE_LOGIN"] == "1"
+    assert any("/setup" in line and "No Administrator was seeded" in line for line in out)
+    assert installer(machine, [], admin_email="not an email").run() == ci.EXIT_USAGE
 
 
 def test_a_failed_admin_seed_stops_before_the_deploy(machine, monkeypatch):

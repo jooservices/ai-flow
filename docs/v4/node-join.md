@@ -4,10 +4,9 @@ Command Center issues a one-use enrollment token for a node name, node role, and
 minutes after creation. The control plane stores only its SHA-256 hash; redemption atomically consumes it and
 creates the node credential. A copied token cannot be used for a second join, and an expired token is rejected.
 
-The owner enters the configured `AIFLOW4_JOIN_TOKEN` as the provisioning key in the **Join a node** panel. This
-is the existing control-plane secret, used only to authorize token creation. Command Center then shows the
-copyable command:
-
+An Administrator with machine management permission names the machine and chooses its role and project in **Machines
+and AI**. Command Center creates a five-minute one-use enrollment grant and shows the copyable command. The browser
+session authorizes token creation; the owner never has to retrieve or type the control plane's provisioning secret.
 ```sh
 curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T
 ```

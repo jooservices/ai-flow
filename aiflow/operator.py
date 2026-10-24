@@ -122,7 +122,7 @@ class Operator:
                 or (status == "In QA" and not is_leased and
                     (minutes_waiting_for_ci >= self.policy.ci_wait_minutes or minutes_in_status >= self.policy.stuck_minutes))
                 or (status in WORKED and status != "In QA" and not is_leased and minutes_in_status >= self.policy.stuck_minutes)
-                or rework_rounds > self.policy.rework_limit
+                or rework_rounds > self.cfg.loop_limit_for(key)
             )
             last_comments = []
             if potential:
@@ -147,6 +147,7 @@ class Operator:
             tickets.append(dict(key=key, status=status, status_since=status_since, updated=updated, labels=labels,
                                 leased=is_leased, blocked_kind=blocked_kind, reason=issue.get("summary", ""),
                                 cycles=rework_rounds, rework_rounds=rework_rounds, last_comments=last_comments,
+                                loop_limit=self.cfg.loop_limit_for(key),
                                 pull_request=pull_request, ci_state=ci_state, ci_since=gate_since,
                                 minutes_waiting_for_ci=int(minutes_waiting_for_ci)))
         beats = {slot: (int(v) if (v := self.redis.get(f"hb:{slot}")) else None) for slot in self.cfg.expected_slots}

@@ -37,6 +37,7 @@ it here. The full index, including topic files under `deploy/v4/topics/`, is gen
 - [Needs owner triage](../../docs/v4/triage.md): master accounts answer developer questions or escalate them
 - [Human review metrics and actions](../../docs/v4/human-review-metrics.md): project level metrics, reason trends, and fenced reviewer actions
 - [Master autonomy](../../docs/v4/master.md): budgeted fenced monitoring, safe actions, owner escalations, invalid-plan recovery and a weekly Command Center report
+- [Rework loop limit](../../docs/v4/rework-loop-limit.md): allow three rework returns by default, block the fourth with per-round reasons, and honor project overrides
 - [Versioned releases](../../docs/v4/release.md): tagged tarballs and GHCR images are checksummed, cosign-signed and verified before node installation
 - [Automatic Jira version releases](../../docs/v4/version-release.md): check, document, PR, merge, tag and publish configured Jira versions without owner approval
 - [Release installation smoke test](../../docs/v4/install.md): tagged releases install control and two nodes in Ubuntu systemd CI before publication

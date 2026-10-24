@@ -41,7 +41,7 @@ When the minimum time and run count are met, the deployer promotes the release t
 `CURRENT`; other nodes then receive it in a rolling upgrade ([Fleet upgrade](fleet-upgrade.md)), after the
 pre-upgrade check allowed the control plane to move. At the maximum time, a candidate with fewer than the
 required runs is treated as stable, and an informational incident records the low sample count before promotion.
-The bug project defaults to `TESTFLOW`; set `AIFLOW4_CANARY_BUG_PROJECT` in the control service environment to
+The bug project defaults to `JAIF`, the AI Flow project; set `AIFLOW4_CANARY_BUG_PROJECT` in the control service environment to
 use another Jira project.
 
 The first tagged deploy from a legacy commit id keeps the existing control-plane health-check path because that

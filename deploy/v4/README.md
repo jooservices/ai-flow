@@ -66,6 +66,7 @@ by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topic
 - [OpenObserve event delivery](../../docs/v4/openobserve-delivery.md): lab memtable sizing, bounded event retries and sustained rejection incidents
 - [Fleet upgrade](../../docs/v4/fleet-upgrade.md): rolling node upgrades (canary, waves, automatic rollback), the control/node version skew policy, forward-only migrations and the pre-upgrade check
 - [Connect Jira from the UI](../../docs/v4/jira-connect.md): `integrations.manage` OAuth 2.0 (3LO) or API-token connection for `owner` and `super_admin` on `/integrations`, secret store, automatic refresh, Disconnect and the owner.env migration
+- [Runtime secrets and environment settings](../../docs/v4/runtime-settings.md): owner-only `/settings` management, encrypted node delivery, fleet-coordinated worker rollback and rolling control API restarts; scheduled-backup AWS credentials are refused because control-loops does not load runtime.env
 - [Console roles and permissions](../../docs/v4/console-roles.md): UI controls and protected API actions follow the shared role permission map
 - [Role-based console views](../../docs/v4/role-based-views.md): role menus and API access, project scoping, people management, view-as and administrator safeguards
 - [No CLI for end users](../../docs/v4/no-cli.md): inventory of owner and user operations that still need commands, their replacement tickets, and proposed backlog gaps

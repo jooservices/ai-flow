@@ -1,0 +1,1 @@
+- [Worker and control release skew](../../../docs/v4/control-worker-skew.md): optional worker endpoints tolerate an older control release during canaries and rollouts

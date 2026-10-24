@@ -652,8 +652,8 @@ def test_missing_key_weekly_restore_test_records_failure_and_opens_incident(ctx,
     (config_path / name).write_bytes(b"fake encrypted backup")
     db.run("UPDATE control_backup_config SET destination_kind='local',destination_path=%s,retention_days=30,last_test_at=NULL WHERE id=true",
            (str(config_path),))
-    from aiflow.v4.worker import backups as backup_worker
-    result = backup_worker.weekly_restore_test(ctx, datetime(2026, 10, 22, tzinfo=timezone.utc))
+    from aiflow.v4.control import backups as backup_jobs
+    result = backup_jobs.weekly_restore_test(ctx, datetime(2026, 10, 22, tzinfo=timezone.utc))
     assert result["ok"] is False
     assert result["components"]["database"]["status"] == "failed"
     saved = db.one("SELECT last_test_status,last_test_components FROM control_backup_config WHERE id=true")

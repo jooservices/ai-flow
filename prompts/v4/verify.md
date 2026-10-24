@@ -12,6 +12,8 @@ Do this:
    Map each criterion to the one configured command that proves it. Do not reuse an unrelated passing check, invent
    a command, fail review for a deferred criterion, or ask about its environment. List nothing when all criteria can be
    checked in this review run.
+   Use `docs/v4/architecture.md` as the architecture checklist: verify layer ownership and dependency direction,
+   registration points, the named patterns, and the principle checks for the changed code.
 3. Run the project's checks and the tests of this change:
 {checks}
    A check that cannot run here (Docker, network) is not a failure; say so. A check that runs and fails is.

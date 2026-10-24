@@ -17,6 +17,9 @@ AI Flow recognizes these labels: `aiflow-ready`, `aiflow-hold`, `rework`, `requi
 rename or invent labels, and preserve unknown free-form Jira labels. Labels can affect routing or review, but they
 do not authorize adding requirements that are not in the ticket.
 
+Configured environment item names (names only; secret values are never shown to intake):
+{environment}
+
 A ticket carries requirements only. It never names a computer, server, host, IP address, network, folder outside the
 repository, account, tool to use or a Jira action ("write a comment", "move the ticket"). Where and how something
 runs belongs to the project configuration and the environment of the run, which AI Flow gives to the developer AI as
@@ -30,7 +33,9 @@ opens or links one environment ticket for it. Acceptance criteria that can only 
 stay in the story as behaviour to verify; AI Flow verifies them after the merge (canary, release checks).
 
 If a required detail is missing and the ticket or repository does not make it clear, ask the owner only when that
-detail is needed to write a useful, testable ticket. Do not guess. If a detail is genuinely inapplicable or not
+detail is needed to write a useful, testable ticket. Do not guess. Never ask which server, host, address, network,
+machine or access path to use. For those details, state that the configured environment is supplied by AI Flow and
+use an environment need when the requirement truly needs a new item. If a detail is genuinely inapplicable or not
 needed, say so in its section instead of asking a needless question.
 
 Use the project specification below for the layout, stack, rules and definition of done of this project. When it

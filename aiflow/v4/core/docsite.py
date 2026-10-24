@@ -78,7 +78,9 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderProjectPicker": ("work", "delivery"),
     "renderProjectPickerOptions": ("work", "delivery"),
     "renderDBody": ("work", "delivery"),
+    "card": ("work", "delivery"),
     "renderReviews": ("review",),
+    "loadReviews": ("review",),
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
@@ -98,6 +100,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderFooter": None,
     "renderBackup": ("backup",),
     "renderNotifications": ("notifications",),
+    "notificationConfigFromForm": ("notifications",),
+    "notificationFormSubmit": ("notifications",),
     "renderSupport": ("support",),
     "buildSupportBundle": ("support",),
     "renderProjects": ("projects",),
@@ -142,6 +146,8 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderHelp": None,
     "showView": None,
     "analyticsPanel": ("delivery",),
+    "conflictLossBlock": ("delivery",),
+    "pollConflicts": ("delivery",),
     "epicsPanel": ("delivery",),
     "masterAutonomyPanel": ("cc",),
     "reviewThreadsPanel": ("review",),
@@ -183,6 +189,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),
     (re.compile(r"data-repository-config|connection_picked|S\.projectAdmin|projectAdmin:\s*\{|repositoryEditor|"
                 r"envEditor|envMissing|envScan|data-env-(?:field|run)|envItems|envItem|envField|containers:\s*false|"
@@ -191,6 +198,9 @@ SCREEN_LINE_VIEWS = (
     (re.compile(r"^\.flexrow\{|accountAssignedTo\(|accountMachinesSection\(|act === 'acc"), "machines"),
     (re.compile(r"addForm|data-user-(?:email|name|all|projects)|\.new-role"), "users"),
     (re.compile(r"reviewNoteDrafts|data-review-note|Reviewer note for"), "review"),
+    # The click handler resolves the clicked element from a text node first; the phone review buttons need it.
+    (re.compile(r"var target = e\.target && e\.target\.nodeType|!target \|\| !target\.closest|"
+                r"\btarget\.closest\(|\btarget\.id === 'overlay'|submitReview\(reviewKey"), "review"),
     (re.compile(r"S\.machines\.join\.(?:name|role|project)|machine-(?:name|role|project)"), "machines"),
 )
 
@@ -239,6 +249,7 @@ SCREEN_VIEW_PATTERNS = (
 
 # Styles for the V2 dashboard and its Work board destination are outside the static view sections.
 SCREEN_LINE_VIEWS += (
+    (re.compile(r"conflictsError"), "delivery"),
     # The Projects environment editor can remain interactive when its save/scan toast is visible.
     (re.compile(r"^\s*\.toasts\{"), "projects"),
     (re.compile(r"dashboardQuota|dashboardWaiting|dashboardDisagreements|capacity: \{ data:"), "cc"),
@@ -247,12 +258,19 @@ SCREEN_LINE_VIEWS += (
                 r"provider-swatch|provider-(?:claude|codex|grok|opencode)|provider-chart|usage-share|quota-ai-list|"
                 r"quota-ai|dashboard-empty)\b"), "cc"),
     (re.compile(r"^\s*\.work-status-filter\b"), "work"),
+    (re.compile(r"^\s*\.card-(?:wrap|pr-link)\b"), "work"),
+    (re.compile(r"^\s*\.card-(?:wrap|pr-link)\b"), "delivery"),
     (re.compile(r"^\s*--provider-(?:claude|codex|grok|opencode):"), "cc"),
     (re.compile(r"dashboardUsage|dashboardTab|dashboard-card|dashboard-tab|flow-step"), "cc"),
     (re.compile(r"workStatusFilter|work-status-filter|S\.view === 'work' && S\.project === 'all'|"
                 r"get\('status'\)"), "work"),
     (re.compile(r"history\.replaceState|boardPath|renderDBody\(\); tick\(\)"), "work"),
     (re.compile(r"pollDashboardUsage"), "cc"),
+)
+
+# Lines that belong to one screen even inside a shared renderer: they narrow that renderer to this screen.
+SCREEN_LOCAL_LINE_VIEWS = (
+    (re.compile(r"logs-nav"), "cc"),
 )
 
 # A change to one of these needs a documentation change in the same pull request.
@@ -1115,6 +1133,7 @@ def changed_views(base: str) -> set[str]:
             changed_line = lines[line_no - 1] if line_no <= len(lines) else ""
             specific_views = {match.group(1) for pattern in SCREEN_VIEW_UI_PATTERNS
                               if (match := pattern.search(changed_line)) and match.group(1) in all_views}
+            specific_views |= {view for pattern, view in SCREEN_LOCAL_LINE_VIEWS if pattern.search(changed_line)}
             # Navigation objects are kept on one line. Compare the base and current lines so one
             # added or edited view entry does not make all existing screens require doc changes.
             if old_count == count and 1 <= old_first <= len(base_lines):

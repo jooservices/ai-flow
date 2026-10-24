@@ -67,6 +67,8 @@ def run_prepared_bootstrap(tmp_path, php_version):
     """Run the bootstrap up to the token redeem with stub curl/id/php and only the needed real tools on PATH."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
     for tool in ("python3", "mktemp", "chmod", "cat", "rm"):
         (bin_dir / tool).symlink_to(shutil.which(tool))
     stubs = {
@@ -86,7 +88,8 @@ def run_prepared_bootstrap(tmp_path, php_version):
     grant = {"name": "aiflow-node-01", "role": "worker", "project": "TESTWP", "stack": "php-8.3",
              "release": "v4.1.0"}
     env = {"PATH": str(bin_dir), "CURL_LOG": str(log), "GRANT": json.dumps(grant),
-           "PHP_STUB_VERSION": php_version or "", "AIFLOW4_SERVER_INSTALLER_PREPARED": "1"}
+           "PHP_STUB_VERSION": php_version or "", "AIFLOW4_SERVER_INSTALLER_PREPARED": "1",
+           "TMPDIR": str(temp_dir)}
     result = subprocess.run(["/bin/sh", str(BOOTSTRAP), "--token", "tok"], capture_output=True, text=True,
                             env=env, timeout=60)
     return result, log.read_text().splitlines() if log.exists() else []

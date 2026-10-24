@@ -10,6 +10,7 @@ from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
 from aiflow.v4.control.console_auth import (CANONICAL_ROLES, ROLE_LABELS, ROLE_PERMISSIONS,
                                              has_permission, issue_session, landing_page, normalize_roles)
+from aiflow.v4.control.db import J
 from aiflow.v4.core.controlrepo import Project
 from conftest import add_ticket
 
@@ -19,7 +20,7 @@ SESSION_EXPIRY = 2_000_000_000
 
 ROLE_VIEWS = {
     "administrator": {"cc", "board", "delivery", "sa", "lead", "business", "review", "stakeholder",
-                      "machines", "knowledge", "integrations", "projects", "users", "support"},
+                      "machines", "knowledge", "integrations", "projects", "users", "support", "logs"},
     "product_owner": {"cc", "board", "delivery", "business", "lead", "stakeholder", "review", "knowledge"},
     "delivery": {"cc", "board", "delivery", "review"},
     "sa": {"cc", "board", "sa", "machines", "integrations", "knowledge"},
@@ -32,12 +33,13 @@ ROLE_VIEWS = {
 VIEW_PATHS = {"cc": "/cc", "board": "/board", "delivery": "/delivery", "sa": "/sa", "lead": "/lead",
               "business": "/business", "review": "/review", "stakeholder": "/stakeholder",
               "machines": "/machines", "knowledge": "/knowledge", "integrations": "/integrations", "projects": "/projects",
-              "users": "/users", "support": "/support"}
+              "users": "/users", "support": "/support", "logs": "/logs"}
 VIEW_PERMISSIONS = {"cc": "view.dashboard", "board": "view.work_board", "delivery": "view.delivery",
                     "sa": "view.sa", "lead": "view.team_lead", "business": "view.business",
                     "review": "view.human_review", "stakeholder": "view.stakeholder",
                     "machines": "view.machines_ai", "knowledge": "view.knowledge", "integrations": "view.integrations",
-                    "projects": "projects.manage", "users": "console.manage", "support": "console.manage"}
+                    "projects": "projects.manage", "users": "console.manage", "support": "console.manage",
+                    "logs": "view.logs"}
 ALLOWED_API = {
     "administrator": "/v1/console/users",
     "product_owner": "/v1/business/TESTWP/change-requests",
@@ -58,6 +60,7 @@ API_VIEW_REQUESTS = [
     ("view.stakeholder", "/v1/stakeholder/TESTWP"),
     ("projects.manage", "/v1/projects"),
     ("view.machines_ai", "/v1/nodes/cc/operations"),
+    ("view.logs", "/v1/log-sources"),
 ]
 
 
@@ -164,6 +167,21 @@ def test_project_restriction_filters_dashboard_and_refuses_other_project_apis(ct
                         ("limited@example.test",))
     assert {row["payload"]["path"] for row in denied} >= {
         "/v1/business/OTHER/release-readiness", "/v1/tickets/OTHER-1/timeline", "/v1/analytics/daily"}
+
+
+def test_board_reader_roles_keep_already_done_reason_and_pull_request_in_state(ctx):
+    add_ticket(ctx.db, "TESTWP-2", status="In Verify")
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,pr_url,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-2','TESTWP','dev','claude-01','claude','cc',1,'finished','done',%s,%s,%s,now()-interval '1 minute',now())",
+               (str(uuid.uuid4()), "Already done: no new changes were needed", J({"already_done": True, "no_changes": True}), url))
+
+    for role in ("delivery", "product_owner"):
+        client = role_client(ctx, role, f"{role}@example.test")
+        ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-2")
+
+        assert ticket["already_done"]["pr_url"] == url, role
+        assert ticket["last_run"]["already_done"] is True, role
 
 
 def test_usage_analytics_respects_project_scope_for_projects_tickets_and_accounts(ctx):

@@ -150,8 +150,9 @@ class Worker:
             self.probe()
         if not self.probe_ok:
             return False
-        for release in self.api.call("GET", "/v1/version-releases/candidates",
-                                     params={"account": self.account}).get("versions", []):
+        release_candidates = self.api.call("GET", "/v1/version-releases/candidates",
+                                            params={"account": self.account}, allow_not_found=True) or {}
+        for release in release_candidates.get("versions", []):
             try:
                 claimed = self.api.call("POST", "/v1/version-releases/claim",
                                         {"project": release["project"], "version_id": release["version_id"],

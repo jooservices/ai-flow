@@ -22,7 +22,9 @@ if [ -n "$TOKEN_FILE" ]; then
 fi
 [ -n "$TOKEN" ] || { echo "a short-lived --token from Command Center is required" >&2; exit 2; }
 
-WORK=$(mktemp -d /tmp/aiflow4-node-join.XXXXXX)
+TMP_BASE=/tmp
+[ -w "$TMP_BASE" ] || TMP_BASE=${TMPDIR:-$TMP_BASE}
+WORK=$(mktemp -d "$TMP_BASE/aiflow4-node-join.XXXXXX")
 chmod 700 "$WORK"
 trap 'rm -rf "$WORK"' 0
 trap 'exit 129' HUP

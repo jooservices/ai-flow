@@ -51,6 +51,7 @@ from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABEL
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
                            verify_session)
 from . import capacity, review_metrics
+from . import merge_flow
 from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
@@ -1537,9 +1538,11 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def reviewer_transition(ticket: str, run_id: str, fence: int, target: str, reason: str) -> str:
         transition_run = fenced(run_id, fence, "jira", "transition", {"to": target})
+        before = ctx.db.one("SELECT status FROM tickets WHERE key=%s", (ticket,))
         status = ctx.jira.transition_to(ticket, target)
         ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN %s='Done' THEN coalesce(done_at,now())"
                    " ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, ticket))
+        merge_flow.record_move(ctx, ticket, (before or {}).get("status", ""), status, merge_flow.PERSON, reason)
         audit("jira", "transition", ticket, run_id, fence, transition_run["account_id"], True, status,
               {"to": target, "source": "human-review"})
         ctx.events.emit("jira.transition", ticket=ticket, project=transition_run["project"], run_id=run_id,
@@ -5386,6 +5389,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("jira", "transition", key, body.run_id, body.fence, run["account_id"], True, status, {"to": body.to})
         ctx.events.emit("jira.transition", ticket=key, run_id=body.run_id, fence=body.fence, account=run["account_id"],
                         node=node, outcome=status)
+        if previous and previous["status"] != status:
+            merged_by_verify = run["step"] == "verify" and status == "Done"
+            merge_flow.record_move(ctx, key, previous["status"], status,
+                                   merge_flow.FLOW_MERGE if merged_by_verify else merge_flow.FLOW,
+                                   f"{run['step']} run by {run['account_id']}")
         if previous and previous["type"] == "Epic" and previous["status"] != "Done" and status == "Done":
             try:
                 project_lifecycle.report_done_epic(ctx, previous["project"], key)
@@ -5729,7 +5737,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         run = fenced(body.run_id, body.fence, "github", "merge", {"number": body.number})
         if run["step"] != "verify":
             raise HTTPException(403, "only a verify run can merge")
-        return merge_command(run, body.number, body.title, body.method, node)
+        res = merge_command(run, body.number, body.title, body.method, node)
+        if res.get("merged"):  # the verify step's merge: the commit and the time are kept on the ticket
+            merge_flow.record_merge(ctx, run["ticket_key"], merge_flow.latest_pr(ctx.db, run["ticket_key"]),
+                                    str(res.get("sha") or ""), "flow", settled=False)
+        return res
 
     def review_data(project_filter: str = "", project_scope: tuple[str, ...] | None = None) -> dict:
         repo = ctx.repo()
@@ -5792,6 +5804,38 @@ def create_app(ctx: Ctx) -> FastAPI:
                 else optional_console_user(request))
         scope = user.project_keys if user and user.project_keys is not None else None
         return {"ticket_keys": review_queue_keys(project_scope=scope)}
+
+    @app.get("/v1/dashboard/disagreements")
+    def dashboard_disagreements(request: Request) -> dict:
+        """Tickets whose Jira state and pull request disagreed for more than five minutes (the flow keeps fixing them)."""
+        user = (console_user(request, "view.dashboard") if ctx.settings.console_login
+                else optional_console_user(request))
+        scope = list(user.project_keys) if user and user.project_keys is not None else None
+        rows = merge_flow.disagreements(ctx.db, scope)
+        return {"after_s": merge_flow.DISAGREEMENT_AFTER_S, "tickets": rows}
+
+    @app.post("/v1/github/webhook", include_in_schema=False)
+    async def github_webhook(request: Request) -> dict:
+        """Optional: a pull request event makes the reconcile loop look at that pull request at once. Without a
+        configured secret the route does not exist for callers; the one-minute loop works alone."""
+        secret = ctx.settings.github_webhook_secret
+        if not secret:
+            raise HTTPException(404, "GitHub webhooks are not configured")
+        body = await request.body()
+        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, request.headers.get("X-Hub-Signature-256", "")):
+            raise HTTPException(401, "invalid webhook signature")
+        if request.headers.get("X-GitHub-Event") != "pull_request":
+            return {"reconciled": 0}
+        try:
+            payload = json.loads(body)
+            target = (str(payload["repository"]["full_name"]), int(payload["pull_request"]["number"]))
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(400, "not a pull request event") from None
+        from starlette.concurrency import run_in_threadpool
+        result = await run_in_threadpool(merge_flow.reconcile, ctx, target)
+        await run_in_threadpool(merge_flow.merge_ready, ctx)
+        return {"reconciled": result["checked"]}
 
     @app.get("/v1/dashboard/quota")
     def dashboard_quota(request: Request) -> dict:
@@ -6007,17 +6051,28 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, "ticket has no pull request to approve")
             run = fenced(run_id, fence, "github", "merge", {"number": number})
             project = ctx.repo().projects[ticket["project"]]
+            ctx.db.run("UPDATE tickets SET approved_at=coalesce(approved_at, now()) WHERE key=%s", (key,))
             result = merge_command(run, number, f"{key}: {ticket['summary']}",
                                    (project.merge or {}).get("method", "squash"), "control")
             if not result.get("merged"):
-                note = f"Human review approval could not merge PR #{number}: {result.get('message', 'merge refused')}"
+                # approved: the merge step of the flow takes over, so nobody has to press merge later
+                note = (f"Human review approval could not merge PR #{number} yet: {result.get('message', 'merge refused')}."
+                        " The flow keeps the ticket as Ready to merge and merges it as soon as the pull request can merge.")
                 reviewer_comment(key, run_id, fence, number, note)
                 audit("human-review", "approve", key, run_id, fence, "reviewer-console", False,
                       result.get("message", "merge refused"), {"kind": "review_before_merge"})
+                queued = ""
+                try:
+                    queued = reviewer_transition(key, run_id, fence, merge_flow.READY_TO_MERGE, "approved, merge pending")
+                except Exception as e:  # noqa: BLE001 - the Jira workflow may lack the status; approval still queues it
+                    log.info("%s stays in Human review until it merges: %s", key, e)
                 finish_reviewer_run(key, run_id, fence, "failed", result.get("message", "merge refused"))
-                return {"merged": False, "message": result.get("message", "GitHub refused the merge")}
+                return {"merged": False, "queued": True, "status": queued or ticket["status"],
+                        "message": result.get("message", "GitHub refused the merge")}
             note = f"Human review approved in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
             reviewer_comment(key, run_id, fence, number, note)
+            merge_flow.record_merge(ctx, key, merge_flow.latest_pr(ctx.db, key), result.get("sha", ""), "flow",
+                                    settled=False)
             status = reviewer_transition(key, run_id, fence, "Done", "human review approved")
             record_reviewer_action(ticket, run_id, fence, "approve")
             finish_reviewer_run(key, run_id, fence, "merged", note)
@@ -6075,6 +6130,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             project = ctx.repo().projects[ticket["project"]]
             repository = repository_for_run(run, project)
             gateway = github_gateway(ctx, repository)
+            # a rejection is final: reconcile must not send the rejected ticket back because its PR is closed
+            ctx.db.run("UPDATE tickets SET pr_state='closed', pr_url=coalesce(nullif(%s,''),pr_url),"
+                       " merge_note=%s, pr_checked_at=now() WHERE key=%s",
+                       ((merge_flow.latest_pr(ctx.db, key) or {}).get("url", ""), f"rejected in human review: {reason}"[:500], key))
             closed = gateway.close_pr(repository.split("/", 1)[-1], number)
             audit("github", "close", key, run_id, fence, run["account_id"], True,
                   "pull request closed", {"number": number, "repo": repository})
@@ -6172,6 +6231,8 @@ def create_app(ctx: Ctx) -> FastAPI:
             note = f"Human review gate skipped in AI Flow Console. PR #{number} merged as {result.get('sha', '')[:10]}."
             reviewer_comment(key, run_id, fence, number, note)
             reviewer_labels(key, run_id, fence, remove=("require-human",))
+            merge_flow.record_merge(ctx, key, merge_flow.latest_pr(ctx.db, key), result.get("sha", ""), "flow",
+                                    settled=False)
             status = reviewer_transition(key, run_id, fence, "Done", "human review gate skipped")
             record_reviewer_action(ticket, run_id, fence, "skip-gate")
             finish_reviewer_run(key, run_id, fence, "skipped_gate", note)

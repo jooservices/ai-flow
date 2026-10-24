@@ -2395,6 +2395,7 @@ function renderCC() {
   h += roleHealthPanel(d.role_health || { roles: [], settings: {} });
 
   h += progressPanel(d.release_progress || [], 'en', 'p-ready', true);
+  h += scaleProofPanel(d.scale_proof);
 
   h += '<section class="panel" id="p-runs" aria-labelledby="h-runs"><div class="panel-h"><h2 id="h-runs">Runs</h2><span class="hint">Running now and the last 30 finished</span></div>' + runsTable(d.active_runs.map(function (r) { return Object.assign({ outcome: 'running', duration_s: r.elapsed_s, live: true }, r); }).concat(d.recent_runs), 12) + '</section>';
 
@@ -3540,7 +3541,8 @@ var READY_TEXT = {
         not_verified: function (r) { return r.ticket + ': Done but not verified'; },
         blocked_by_bug: function (r) { return r.ticket + ': blocked by release-qa Bug ' + r.bug; },
         release_running: function () { return 'The release check is running'; },
-        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); } },
+        release_failed: function (r) { return 'The release check failed' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_failed: function (r) { return 'Scale proof regression blocks the release' + (r.detail ? ': ' + r.detail : ''); } },
   vi: { title: 'Sẵn sàng release', hint: 'Mọi ticket đang ở trong Jira version phải Done, đã qua verify, không rework và không bị Bug release-qa còn mở chặn',
         none: 'Không có Jira version nào chưa release.', ready: 'Sẵn sàng', notReady: 'Chưa sẵn sàng', done: 'Done',
         empty: function () { return 'Version rỗng: chưa có ticket nào'; },
@@ -3549,8 +3551,31 @@ var READY_TEXT = {
         not_verified: function (r) { return r.ticket + ': đã Done nhưng chưa qua verify'; },
         blocked_by_bug: function (r) { return r.ticket + ': bị Bug release-qa ' + r.bug + ' chặn'; },
         release_running: function () { return 'Kiểm tra release đang chạy'; },
-        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); } }
+        release_failed: function (r) { return 'Kiểm tra release bị lỗi' + (r.detail ? ': ' + r.detail : ''); },
+        scale_proof_failed: function (r) { return 'Scale proof bị thụt lùi, chặn release' + (r.detail ? ': ' + r.detail : ''); } }
 };
+/* Scale proof (/v1/state scale_proof): the budgets, each recorded run with the release it is attached to, the measured
+   value against every budget, and the tickets created from its findings. Read-only; runs are submitted by CI. */
+function scaleProofPanel(sp) {
+  sp = sp || { runs: [], budgets: [], findings: [] };
+  var h = '<section class="panel" id="p-scale" aria-labelledby="h-p-scale"><div class="panel-h"><h2 id="h-p-scale">Scale proof</h2><span class="hint">100 projects, 50 machines, 200 AI sessions: measured against the performance budgets on every release; a regression blocks the release</span></div>';
+  if (!sp.runs.length) return h + '<div class="empty">No scale proof run is attached to a release yet.</div></section>';
+  sp.runs.forEach(function (r) {
+    var sc = r.scenario || {};
+    h += '<div class="att-item" data-scale-run="' + esc(r.id) + '" data-passed="' + (r.passed ? 'yes' : 'no') + '"><span class="flag" data-tone="' + (r.passed ? 'ok' : 'crit') + '">' + (r.passed ? 'Within budget' : 'Regression') + '</span>';
+    h += '<span style="min-width:0"><div class="t">Release <span class="mono">' + esc(r.release || '(none)') + '</span> · run #' + esc(r.id) + ' · ' + esc(when(r.created_at)) + ' · ' + esc(sc.projects || '?') + ' projects, ' + esc(sc.machines || '?') + ' machines, ' + esc(sc.sessions || '?') + ' sessions</div>';
+    h += '<table class="runs" style="min-width:0"><thead><tr><th>Budget</th><th>Statistic</th><th>Limit</th><th>Measured</th><th></th></tr></thead><tbody>';
+    (r.budgets || []).forEach(function (b) {
+      h += '<tr data-budget="' + esc(b.key) + '" data-state="' + (b.passed ? 'ok' : 'exceeded') + '"><td>' + esc(b.title) + '</td><td class="muted">' + esc(b.statistic) + '</td><td class="mono">' + esc(b.limit) + ' ' + esc(b.unit) + '</td><td class="mono">' + (b.measured == null ? '—' : esc(b.measured) + ' ' + esc(b.unit)) + '</td><td>' + pill(b.passed ? 'ok' : 'crit', b.passed ? 'ok' : 'exceeded') + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    if ((r.failures || []).length) h += '<ul class="d reasons">' + r.failures.map(function (f) { return '<li>' + esc(f) + '</li>'; }).join('') + '</ul>';
+    var made = (r.tickets || []).filter(function (t) { return t.ticket; });
+    if (made.length) h += '<div class="d scale-tickets">Tickets: ' + made.map(function (t) { return '<a class="mono" data-ticket="' + esc(t.ticket) + '" href="' + esc(jiraUrl(t.ticket)) + '" target="_blank" rel="noopener">' + esc(t.ticket) + '</a>'; }).join(', ') + '</div>';
+    h += '</span></div>';
+  });
+  return h + '</section>';
+}
 /* Release progress per Jira version (/v1/state release_progress): x/y Done, open tickets, tickets added late with
    the date, why the version is not ready, and the release outcome. Command Center (detail) also lists the release
    steps with run ID and node; Business (compact) keeps x/y, late tickets, reasons, tag and GitHub Release link. */

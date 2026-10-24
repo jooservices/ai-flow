@@ -199,6 +199,20 @@ jobs:
           done <<< "$PUBLISHED_RELEASES"
           echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
 
+      - name: Scale proof (100 projects, 50 machines, 200 sessions) against the performance budgets
+        # A budget over its limit (or incorrect behaviour at this size) fails this step: nothing below is
+        # published. The report is attached to the GitHub Release and submitted to Command Center, where findings become tickets.
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          AIFLOW4_TEST_REDIS_URL: redis://localhost:6379/5
+          AIFLOW4_TEST_DATABASE_URL: postgresql://aiflow:test@localhost:5432/aiflow4
+          AIFLOW4_CONTROL_URL: ${{ secrets.AIFLOW4_CONTROL_URL }}
+          AIFLOW4_OWNER_TOKEN: ${{ secrets.AIFLOW4_OWNER_TOKEN }}
+        run: |
+          pip install uv==0.13.4 && uv sync --frozen
+          mkdir -p dist
+          uv run --frozen aiflow4 scale-proof --release "$VERSION" --out "dist/scale-proof-$VERSION.json" --submit "$AIFLOW4_CONTROL_URL"
+
       - name: Download previous published release for upgrade and rollback
         if: steps.release.outputs.previous != ''
         env:
@@ -330,6 +344,7 @@ jobs:
           gh release upload "$VERSION" \
             "dist/aiflow4-$VERSION.tar.gz" \
             "dist/aiflow4-$VERSION.tar.gz.sigstore.json" \
+            "dist/scale-proof-$VERSION.json" \
             dist/SHA256SUMS --clobber
 
   release-bug:

@@ -48,7 +48,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
+               role_health, rollout, scale_proof, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -738,6 +738,12 @@ class ClaimBody(BaseModel):
     ticket: str
     account: str
     step: str = "dev"
+
+
+class ScaleProofBody(BaseModel):
+    release: str = Field("", max_length=200)
+    source: str = Field("ci", max_length=60)
+    report: dict[str, Any]
 
 
 class VersionReleaseClaimBody(BaseModel):
@@ -7053,6 +7059,26 @@ def create_app(ctx: Ctx) -> FastAPI:
                                           ("id", "ticket", "summary", "step", "outcome", "error_kind",
                                            "duration_s", "pr_url", "already_done", "ended_age_s")}
         return data
+
+    # --- scale proof: budgets, runs attached to releases, tickets for findings (docs/v4/scale-proof.md) ---------
+    @app.get("/v1/scale-proof")
+    def scale_proof_summary() -> dict:
+        return scale_proof.summary(ctx.db)
+
+    @app.post("/v1/scale-proof/results")
+    def scale_proof_results(body: ScaleProofBody, actor: str = Depends(owner_auth)) -> dict:
+        """CI submits a run: it is attached to the release, judged against the budgets here (the submitted verdict
+        is ignored) and every finding becomes a ticket."""
+        report = body.report
+        if not isinstance(report.get("measurements"), dict) or not report["measurements"]:
+            raise HTTPException(422, "the report has no measurements")
+        run_id = scale_proof.record(ctx, report, body.release, body.source)
+        tickets = scale_proof.file_tickets(ctx, run_id)
+        run = ctx.db.one("SELECT release, passed, report FROM scale_proof_runs WHERE id=%s", (run_id,))
+        audit("aiflow-control", "scale-proof-result", "", "", None, actor, True,
+              "passed" if run["passed"] else "failed", {"run_id": run_id, "release": run["release"]})
+        return {"run_id": run_id, "release": run["release"], "passed": run["passed"], "blocked": not run["passed"],
+                "failures": run["report"]["failures"], "tickets": tickets}
 
     @app.get("/v1/deploy/state")
     def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:

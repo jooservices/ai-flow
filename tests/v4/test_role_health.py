@@ -97,6 +97,8 @@ def ready_enabled_count(ctx, role):
     ({"step": "dev", "outcome": "done", "pr_url": "https://example.test/pr/3", "details": {
         "pr_url_source": "current"}}, "finished", 0.0),
     ({"step": "dev", "outcome": "no_changes"}, "no_changes", 0.0),
+    ({"step": "dev", "outcome": "failed", "error_kind": "no_work", "details": {"no_changes": True}},
+     "no_changes", 0.0),
     ({"step": "dev", "outcome": "failed", "summary": "no changes: nothing to commit"}, "no_changes", 0.0),
     ({"step": "dev", "outcome": "failed", "error_kind": "tests", "summary": "no changes: test command failed"},
      "failed", 1.0),
@@ -134,6 +136,20 @@ def test_a_failing_follow_up_run_with_inherited_pr_is_still_a_failure():
                                    "summary": "follow-up failed", "pr_url": "https://example.test/pr/1",
                                    "details": {"pr_url_source": "inherited"}})
     assert (scored.label, scored.failure) == ("failed", 1.0)
+
+
+def test_no_work_failures_from_no_change_runs_do_not_lower_role_score(ctx, alerts):
+    for index in range(10):
+        run(ctx.db, outcome="failed", kind="no_work", ago=100 - index,
+            summary="no changes to verify: branch has no committed work and no open pull request",
+            details={"no_changes": True, "no_work_reason": "no committed work and no open pull request"})
+
+    role_health.evaluate(ctx)
+
+    history = role_health._history(ctx.db, "claude-01")[("claude-01", "dev")]
+    assert len(history) == 10
+    assert all(scored and scored.label == "no_changes" and scored.failure == 0.0 for _, scored in history)
+    assert states(ctx.db) == {}
 
 
 def test_steps_map_to_the_roles_of_the_account():

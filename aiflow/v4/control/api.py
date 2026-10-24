@@ -3256,6 +3256,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
+        unknown = [service for service in body.services if service.strip() and not normalize_services(service)]
+        if unknown:
+            raise HTTPException(422, "unknown test services: " + ", ".join(unknown) + ". Use postgres or redis.")
         with ctx.db.pool.connection() as connection:
             with connection.transaction():
                 # Keep the shared admission lock through preflight, the external commit, and repo refresh. A

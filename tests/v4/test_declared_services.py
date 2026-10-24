@@ -70,6 +70,18 @@ def test_projects_screen_saves_one_services_field_and_the_listing_shows_it(clien
     assert yaml.safe_load(ctx.github.commits[-1]["content"])["services"] == ["redis", "postgres"]
 
 
+def test_project_creation_rejects_unknown_test_service_names(client, ctx, control_repo):
+    prepare_project_control(ctx, control_repo)
+    owner_sign_in(client, ctx)
+
+    rejected = client.post("/v1/projects", json=project_body("TYPO", services=["postgress"]))
+
+    assert rejected.status_code == 422
+    assert "unknown test services: postgress" in rejected.json()["detail"]
+    assert not ctx.github.commits
+    assert "TYPO" not in ctx.repo().projects
+
+
 def test_park_on_an_undeclared_service_is_declared_by_the_flow_doctor(client, ctx, control_repo):
     write_project(control_repo, "")
     prepare_project_control(ctx, control_repo)

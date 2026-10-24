@@ -674,7 +674,7 @@ var ICON = {
 
 /* ---------- state ---------- */
 var S = {
-  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
+  data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '', conflicts: null, conflictsError: '',
   dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
@@ -1189,8 +1189,19 @@ function projectEnvironmentPanels(state) {
     else {
       h += '<div class="project-table"><table><thead><tr><th>Ticket</th><th>Deferred criteria</th><th>Result</th><th>Release checks</th><th>Checked</th></tr></thead><tbody>';
       postMerge.forEach(function (item) {
-        var result = item.result || {}, checks = (result.checks || []).map(function (c) { return c.command + ': ' + (c.passed ? 'passed' : 'failed'); });
-        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + (item.criteria || []).map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('') + '</td>';
+        var result = item.result || {}, outcomes = result.criteria || [];
+        var criteria = (item.criteria || []).map(function (c) {
+          var criterion = typeof c === 'string' ? { text: c } : c;
+          return '<div><strong>' + esc(criterion.id || '') + '</strong> ' + esc(criterion.text || '') +
+            '<div class="hint">Configured check: ' + esc(criterion.check || 'unmapped') + '</div></div>';
+        });
+        var checks = outcomes.map(function (c) {
+          var check = c.check_result || {}, command = check.command || c.check || 'unmapped';
+          var status = check.passed === true ? 'passed' : check.passed === false ? 'failed' : (c.status || 'pending');
+          var exit = Number.isInteger(check.exit_code) ? ' (exit ' + check.exit_code + ')' : '';
+          return (c.id ? c.id + ': ' : '') + command + ': ' + status + exit;
+        });
+        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + criteria.join('') + '</td>';
         h += '<td><span class="pill" data-tone="' + (item.status === 'passed' ? 'ok' : item.status === 'failed' ? 'crit' : 'warn') + '">' + esc(item.status) + '</span></td>';
         h += '<td>' + esc(checks.join(', ') || result.error || '—') + (item.release_ticket ? ' · ' + esc(item.release_ticket) : '') + '</td><td>' + esc(item.checked_at ? when(item.checked_at) : 'waiting') + '</td></tr>';
       });
@@ -1701,6 +1712,17 @@ function pollAnalytics() {
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
 }
+function pollConflicts() {
+  fetch('/v1/analytics/conflicts?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.conflicts = d; S.conflictsError = '';
+    if ((S.view === 'delivery' || S.view === 'work') && S.data) renderDBody();
+    if (S.view === 'cc' && S.data) renderDashboard();
+  }).catch(function (e) { S.conflictsError = String(e.message || e); })
+    .then(function () { setTimeout(pollConflicts, ANALYTICS_MS); });
+}
 function pollDashboardUsage() {
   fetch('/v1/analytics/usage/daily?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2125,6 +2147,7 @@ function renderDashboard() {
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="in-flight"><span class="label">In flight</span><span class="kpi-main"><span class="value">' + inFlight + '</span>' + dashboardSpark(inFlightTrend, 'var(--provider-codex)') + '</span><span class="kpi-delta">' + Number(d.active_runs.length || 0) + ' live runs</span><span class="detail">In progress, verify or human review</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
+  h += '<section class="panel" data-block="conflict-loss">' + conflictLossBlock() + '</section>';
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';
@@ -3831,10 +3854,33 @@ function analyticsChart(rows) {
   });
   return svg + '</svg>';
 }
+function conflictLossBlock() {
+  /* Work lost to merge conflicts (/v1/analytics/conflicts): share of verifications, time spent, trend */
+  var c = S.conflicts;
+  var h = '<div id="d-conflicts" class="conflict-loss" aria-label="Work lost to merge conflicts"><h3>Lost to merge conflicts</h3>';
+  if (S.conflictsError) return h + '<div class="empty">Conflict numbers unavailable: ' + esc(S.conflictsError) + '</div></div>';
+  if (!c) return h + '<div class="empty">Loading…</div></div>';
+  var cur = c.current, prev = c.previous, ch = c.change;
+  var dir = function (v, unit) { return v === 0 ? 'no change' : (v > 0 ? '+' : '') + v + unit; };
+  h += '<div class="legend"><span>Share lost: <b class="mono">' + cur.share_percent + '%</b> (' + cur.conflicts + ' of ' + cur.verifications + ' verifications)</span>';
+  h += '<span>Time spent: <b class="mono">' + mmss(cur.seconds) + '</b>, average <span class="mono">' + mmss(cur.average_seconds) + '</span> per conflict</span>';
+  h += '<span>Previous ' + c.days + ' days: <span class="mono">' + prev.share_percent + '%</span>, <span class="mono">' + mmss(prev.seconds) + '</span></span>';
+  h += '<span>Change: <span class="mono">' + dir(ch.share_points, ' points') + '</span></span>';
+  h += '<span>Updated automatically, not counted: <span class="mono">' + cur.clean_updates + '</span></span></div>';
+  var max = 1; c.trend.forEach(function (t) { max = Math.max(max, t.share_percent); });
+  var W = 28, G = 8, H = 60, LB = 16, svg = '<svg class="an-chart" viewBox="0 0 ' + (c.trend.length * (W + G)) + ' ' + (H + LB) + '" role="img" aria-label="Share of verifications lost to conflicts per day">';
+  c.trend.forEach(function (t, i) {
+    var x = i * (W + G) + G / 2, hh = H * t.share_percent / max;
+    svg += '<rect class="an-rework" x="' + x + '" y="' + (H - hh).toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + esc(t.period) + ' · ' + t.share_percent + '% (' + t.conflicts + ' of ' + t.verifications + ') · ' + mmss(t.seconds) + '</title></rect>';
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + esc(t.period.slice(8)) + '</text>';
+  });
+  return h + svg + '</svg><p class="hint">' + esc(c.definition) + '</p></div>';
+}
 function analyticsPanel() {
   var rows = S.analytics.filter(function (r) { return r.project === S.project; });
   var h = '<section class="panel" data-block="analytics" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
   if (S.anError) h += '<div class="empty">Analytics unavailable: ' + esc(S.anError) + '</div>';
+  h += conflictLossBlock();
   h += analyticsChart(rows);
   if (!rows.length) return h + '<div class="empty">No runs for this project in the last ' + ANALYTICS_DAYS + ' days.</div></section>';
   h += '<div class="tablebox"><table class="an-table" style="min-width:880px"><thead><tr><th>Day</th><th>Account</th><th>Runs</th><th>Done</th><th>Merged</th><th>Rework</th><th>Failed</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th><th>Median run</th></tr></thead><tbody>';
@@ -5703,7 +5749,7 @@ if (S.view === 'integrations') {
   loadIntegrations();
 }
 if (S.view === 'notifications') loadNotifications();
-poll(); pollServices(); pollAnalytics(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
+poll(); pollServices(); pollAnalytics(); pollConflicts(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
 setInterval(tick, 1000);
 })();
 </script>

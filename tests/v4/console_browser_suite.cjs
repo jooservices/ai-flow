@@ -265,56 +265,37 @@ async function exerciseReviews(page, mode) {
         return hit === button || button.contains(hit);
       }), true, 'a toast is covering the phone review action');
     }
-    const expectedPath = `/v1/reviews/${key}/${endpoint}`;
-    const expectedRequest = `POST ${expectedPath}`;
-    await actionButton.waitFor({ state: 'visible' });
-    try {
-      await actionButton.click();
-    } catch (error) {
-      if (!String(error.message || error).includes('not attached to the DOM')) throw error;
-      // The 1-second console refresh replaces the review card while Playwright scrolls on small viewports.
-      await card.getByRole('button', { name: buttonName, exact: true }).click();
-    }
-    const waitForRequest = async (duration) => {
-      const deadline = Date.now() + duration;
-      while (!reviewTraffic.includes(expectedRequest) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      return reviewTraffic.includes(expectedRequest);
-    };
-    let sent = await waitForRequest(500);
-    if (!sent && !page.isClosed()) {
-      // A phone viewport can scroll the last action beneath the browser's bottom control bar. Dispatch the click on
-      // the live DOM button once if the pointer event missed; the request listener below verifies the API dispatch.
-      await card.getByRole('button', { name: buttonName, exact: true }).evaluate((button) => button.click());
-      sent = await waitForRequest(4500);
-    }
-    if (!sent) {
-      const details = page.isClosed() ? { pageClosed: true } : await page.evaluate((reviewKey) => ({
-          toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
-          button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
-            card.getAttribute('data-key') === reviewKey).flatMap((card) =>
-            Array.from(card.querySelectorAll('button')).map((button) => ({
-              action: button.getAttribute('data-act'), disabled: button.disabled
-            }))),
-          noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
-            card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
-        }), key);
+    // The request is sent on the click; the answer can take a while on a busy machine (the control API works on the
+    // ticket under its lease), so wait for the answer instead of re-clicking.
+    let response = null, lastError = null;
+    const pending = page.waitForResponse((item) => item.request().method() === 'POST' &&
+      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 30000 });
+    pending.catch(() => null);
+    await actionButton.click();
+    try { response = await pending; } catch (error) { lastError = error; }
+    if (!response) {
+      const details = await page.evaluate((reviewKey) => ({
+        toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
+        button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
+          card.getAttribute('data-key') === reviewKey).flatMap((card) =>
+          Array.from(card.querySelectorAll('button')).map((button) => ({
+            action: button.getAttribute('data-act'), disabled: button.disabled
+          }))),
+        noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
+          card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
+      }), key);
       throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
-        `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}.`);
+        `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${lastError.message}`);
     }
-    const responseDeadline = Date.now() + 5000;
-    let response = reviewResponses.find((item) => item.path === expectedPath);
-    while (!response && Date.now() < responseDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      response = reviewResponses.find((item) => item.path === expectedPath);
+    assert.equal(response.status(), 200, `${buttonName} failed for ${key}`);
+    const submittedRequest = response.request();
+    if (note) {
+      const expectedBody = action === 'reject' ? { reason: note } : action === 'rework' ? { comment: note } :
+        action === 'ask-ai' ? { question: note } : {};
+      assert.deepEqual(JSON.parse(submittedRequest.postData()), expectedBody,
+        `${buttonName} dropped its review note for ${key}`);
     }
-    assert.ok(response, `${buttonName} request had no response for ${key}`);
-    assert.equal(response.status, 200, `${buttonName} failed for ${key}`);
-    const expectedBody = action === 'reject' ? { reason: note } : action === 'rework' ? { comment: note } :
-      action === 'ask-ai' ? { question: note } : {};
-    assert.deepEqual(JSON.parse(response.body || '{}'), expectedBody,
-      `${buttonName} dropped its review note for ${key}`);
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 100))));
   }
 }
 
@@ -378,6 +359,17 @@ async function exerciseMachineAndUserAdministration(page, mode) {
     .waitFor({ state: 'visible' });
 }
 
+async function exerciseConflictLossDashboard(page) {
+  await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
+  const block = page.locator('#view-cc [data-block="conflict-loss"]');
+  await block.waitFor({ state: 'visible' });
+  await block.getByRole('heading', { name: 'Lost to merge conflicts', exact: true }).waitFor({ state: 'visible' });
+  await block.getByText(/Share lost:/).waitFor({ state: 'visible', timeout: 15000 });
+  await block.locator('.legend').getByText(/Time spent:/).waitFor({ state: 'visible' });
+  assert.equal(await block.locator('svg[aria-label="Share of verifications lost to conflicts per day"]').count(), 1,
+    'Command Center dashboard is missing the conflict loss trend');
+}
+
 async function exerciseMode(browser, mode) {
   const administrator = config.roles.find((person) => person.role === 'administrator');
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
@@ -387,6 +379,7 @@ async function exerciseMode(browser, mode) {
   await traceOnFailure(context, `administrator-${mode}`, async () => {
     await signInInPage(page, administrator, mode);
     await visitScreens(page, administrator.views);
+    await exerciseConflictLossDashboard(page);
     await exerciseWorkAndSearch(page);
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);

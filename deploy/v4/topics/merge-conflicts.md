@@ -1,0 +1,1 @@
+- [Fewer merge conflicts](../../../docs/v4/merge-conflicts.md): hot-file scheduling, automatic branch updates, one file per topic, a merge queue, and the conflict share in Command Center

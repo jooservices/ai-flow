@@ -39,6 +39,10 @@ A saved layout is always *resolved* against the blocks that exist now:
 - a block that the saved layout does not name (added by a later release) is appended at the end of the layout, visible,
   so a saved layout never loses it. The console also puts a block the server does not know yet at the end.
 
+The Dashboard block `disagreements` ("Jira and GitHub disagree", full width by default) lists the tickets whose Jira
+status and pull request have differed for more than five minutes; it is described in
+[Merged means Done](merged-means-done.md).
+
 ## Role defaults
 
 Without a saved layout a person gets the default of their role. `ROLE_PROFILE` maps the current role names in

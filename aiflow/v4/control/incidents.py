@@ -292,7 +292,7 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
                 licensing.enforce_project_entitlement(ctx, key, public_key=ctx.settings.license_public_key,
                                                        state=license_state)
             except licensing.LicenseError as exc:
-                reasons.append(f"licence blocks project {key}: {exc}")
+                reasons.append(f"licence limit stops new work for project {key}: {exc}")
     except Exception as exc:  # a broken licence read still needs an understandable cause
         reasons.append(f"licence status could not be checked ({type(exc).__name__})")
 
@@ -357,6 +357,7 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
         reasons.append("quota forecast is deferring new work for " + ", ".join(sorted(quota_risk)))
     try:
         from . import licensing
+        blocked_accounts: dict[str, list[str]] = {}
         for account in accounts:
             machine = account["node"] or next(iter(signed_in.get(account["id"], set())), "")
             if not machine:
@@ -365,7 +366,10 @@ def idle_reasons(ctx, projects: set[str], ticket_keys: set[str] | None = None) -
                 licensing.enforce_work_entitlement(ctx, account["id"], machine,
                                                    public_key=ctx.settings.license_public_key)
             except licensing.LicenseError as exc:
-                reasons.append(f"licence blocks account {account['id']}: {exc}")
+                blocked_accounts.setdefault(str(exc), []).append(account["id"])
+        for message, ids in blocked_accounts.items():
+            shown = ", ".join(sorted(ids)[:6]) + (f" and {len(ids) - 6} more" if len(ids) > 6 else "")
+            reasons.append(f"licence limit stops new work for {len(ids)} AI account(s) ({shown}): {message}")
     except Exception as exc:  # preserve other known causes if a plan check cannot run
         reasons.append(f"licence work entitlement could not be checked ({type(exc).__name__})")
     if not ready:

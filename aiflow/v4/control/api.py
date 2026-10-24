@@ -2347,7 +2347,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     def licensing_status(request: Request) -> dict:
         console_user(request, "console.read")
         state = licensing.snapshot(ctx.db, ctx.settings.license_public_key)
-        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only")}
+        return {key: state[key] for key in ("status", "reason", "plan", "expires_at", "grace_until", "read_only",
+                                            "licence_required")}
 
     @app.post("/v1/licensing/activate")
     def activate_license(body: LicenseKeyBody, request: Request) -> dict:

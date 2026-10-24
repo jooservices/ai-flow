@@ -43,7 +43,8 @@ def record_missing(ctx, run: dict, names: list[str], detail: str) -> list[str]:
     recorded: list[str] = []
     for name in dict.fromkeys(str(n).strip().upper() for n in names if str(n).strip()):
         item = _item(ctx, run["project"], name)
-        if not item:
+        # A developer run cannot wait on a configured item that its run step is forbidden to receive.
+        if not item or "dev" not in item.runs:
             continue
         ctx.db.run("INSERT INTO environment_reports (ticket_key, project, item, machine, run_id, detail, fingerprint)"
                    " VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (ticket_key, item) WHERE resolved_at IS NULL"

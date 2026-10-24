@@ -58,6 +58,7 @@ def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
         "use the shared Docker": "machine", "connect to 192.168.1.20": "ip address",
         "open https://wp.example.com for the smoke test": "host", "connect to 2001:db8::1": "ip address",
         "browse http://wp.office.local:8080/": "host", "through the VPN": "network", "ssh into the box": "access instruction",
+        "open http://localhost": "host", "visit https://localhost/health": "host",
         "Run tests on the server": "machine", "Use the server": "machine", "Use host node4": "host",
         "Run tests on node4": "host",
         "password: hunter22": "access instruction", "write a Jira comment when done": "jira action",
@@ -91,6 +92,21 @@ def test_public_hostname_and_compressed_ipv6_are_rejected_at_intake(host):
 def test_generic_server_and_host_wording_is_rejected_at_intake(wording):
     text = REWRITE + f"\nTechnical notes: {wording}."
     assert intake.parse(f"DESCRIPTION:\n<<<\n{text}\n>>>\nINTAKE: REWRITE")[0] == "invalid"
+
+
+def test_intake_rejects_a_host_bearing_summary_and_keeps_the_ticket_in_intake(iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-46", status="Intake", labels=())
+    ctx.db.run("UPDATE tickets SET summary=%s WHERE key=%s", ("Deploy the site at http://localhost", "TESTWP-46"))
+
+    result, _adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-46",
+                                  f"DESCRIPTION:\n<<<\n{REWRITE}\n>>>\nINTAKE: REWRITE\n")
+
+    comments = [text for key, text in ctx.jira.comments if key == "TESTWP-46"]
+    assert result["outcome"] == "failed" and "ticket summary" in result["summary"]
+    assert len(comments) == 1 and "rewrite rejected" in comments[0]
+    assert "http://localhost" not in comments[0] and "describe the requirement instead" in comments[0]
+    assert not getattr(ctx.jira, "descriptions", [])
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-46'")["status"] == "Intake"
 
 
 def test_intake_run_rejects_a_host_in_the_rewrite_and_writes_nothing(iclient, ctx, tmp_path, monkeypatch):
@@ -368,6 +384,22 @@ def test_dev_run_reports_a_missing_environment_item_by_name(monkeypatch, tmp_pat
     assert not any("question for the owner" in str(c[2].get("body", "")) for c in api.calls)
 
 
+def test_auto_answered_dev_question_comment_does_not_echo_server_question(monkeypatch, tmp_path):
+    monkeypatch.setattr(dev, "classify_question", lambda *_args: {
+        "resolved": True, "outcome": "auto_answered", "class": "missing_tool_or_environment",
+        "label": "Missing environment", "reason": "the environment register answered it",
+        "answer": "Use the configured environment item.", "citation": "", "missing_tools": [],
+    })
+    result, api, _adapter = _run_dev(monkeypatch, tmp_path, "BLOCKED",
+                                     "Which address should I use at http://localhost?")
+
+    comments = [call[2]["body"] for call in api.calls if call[1].endswith("/comment")]
+    answered = next(comment for comment in comments if "question answered without the owner" in comment)
+    assert result["outcome"] == "auto_answered"
+    assert "http://localhost" not in answered and "Which address" not in answered
+    assert "answered automatically" in answered
+
+
 def test_free_text_is_not_an_environment_item(monkeypatch, tmp_path):
     result, api, _ = _run_dev(monkeypatch, tmp_path, "BLOCKED", "MISSING-ENV: the shared staging site - cannot run")
     assert result["outcome"] == "failed" and "not free text" in result["summary"]
@@ -410,6 +442,29 @@ def test_the_report_is_recorded_by_name_and_the_ticket_waits_without_asking_the_
     owner_sign_in(client, ctx)
     shown = client.get("/v1/environment/missing").json()["missing"]
     assert [(m["item"], m["ticket"], m["state"]) for m in shown] == [("WP_DB_NAME", "TESTWP-51", "waiting")]
+
+
+def test_dev_report_cannot_wait_for_an_item_not_permitted_in_dev(client, ctx, envrepo):
+    path = envrepo / "projects" / "TESTWP.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config["environment"][-1]["runs"] = ["verify"]
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    ctx.repo = lambda: ControlRepo.load(envrepo)
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+    add_ticket(ctx.db, "TESTWP-52")
+    run = client.post("/v1/work/claim", json={"ticket": "TESTWP-52", "account": "claude-01"}, headers=cc).json()
+    assert run["claimed"]
+
+    response = client.post(f"/v1/runs/{run['run_id']}/result", json={
+        "fence": run["fence"], "outcome": "environment_missing", "summary": "item unavailable",
+        "details": {"missing_environment": ["WP_ADMIN_PASSWORD"]}}, headers=cc)
+
+    assert response.status_code == 200, response.text
+    saved = ctx.db.one("SELECT outcome,error_kind,details FROM runs WHERE id=%s", (run["run_id"],))
+    assert saved["outcome"] == "failed" and saved["error_kind"] == "missing_environment_unaccepted"
+    assert saved["details"]["missing_environment"] == []
+    assert ctx.db.one("SELECT count(*) AS n FROM environment_reports WHERE ticket_key='TESTWP-52'")["n"] == 0
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-52'")["status"] == "To Do"
 
 
 def test_node_secret_confirmation_resolves_the_wait_and_reoffers_the_ticket(client, ctx, envrepo):
@@ -611,7 +666,8 @@ def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the
              "TESTWP-64": ("Intake", "ssh into the lab machines"), "TESTWP-65": ("Backlog", "Write a Jira comment when done"),
              "TESTWP-66": ("To Do", "Release on https://wp.example.com"),
              "TESTWP-68": ("To Do", "Run tests on the server"), "TESTWP-69": ("To Do", "Use host node4"),
-             "TESTWP-70": ("To Do", "Use the server"), "TESTWP-71": ("To Do", "Run tests on node4")}
+             "TESTWP-70": ("To Do", "Use the server"), "TESTWP-71": ("To Do", "Run tests on node4"),
+             "TESTWP-72": ("To Do", "Visitors can deploy")}
     for key, (status, description) in texts.items():
         add_ticket(ctx.db, key, status=status)
         ctx.db.run("UPDATE tickets SET description=%s WHERE key=%s", (description, key))
@@ -619,11 +675,18 @@ def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the
     add_ticket(ctx.db, "TESTWP-67", status="To Do")
     ctx.db.run("UPDATE tickets SET type='Epic', description='The Epic is deployed to 2001:db8::1' WHERE key='TESTWP-67'")
     ctx.jira.status_of["TESTWP-67"] = "To Do"
+    add_ticket(ctx.db, "TESTWP-73", status="To Do")
+    ctx.db.run("UPDATE tickets SET summary='Deploy at http://localhost' WHERE key='TESTWP-73'")
+    ctx.jira.status_of["TESTWP-73"] = "To Do"
+    add_ticket(ctx.db, "TESTWP-74", status="To Do")
+    ctx.db.run("UPDATE tickets SET description='Visit http://localhost' WHERE key='TESTWP-74'")
+    ctx.jira.status_of["TESTWP-74"] = "To Do"
     report = environment_reports.scan(ctx)
     by_ticket = {o["ticket"]: o for o in report["offenders"]}
     assert set(by_ticket) == {"TESTWP-60", "TESTWP-62", "TESTWP-64", "TESTWP-65", "TESTWP-66", "TESTWP-67",
-                              "TESTWP-68", "TESTWP-69", "TESTWP-70", "TESTWP-71"}
-    assert report["scanned"] == 11
+                              "TESTWP-68", "TESTWP-69", "TESTWP-70", "TESTWP-71", "TESTWP-73", "TESTWP-74"}
+    assert {"TESTWP-73", "TESTWP-74"} <= set(by_ticket)
+    assert report["scanned"] == 14
     assert set(by_ticket["TESTWP-60"]["kinds"]) == {"machine", "ip address"}
     assert by_ticket["TESTWP-60"]["action"] == "sent back to intake" and by_ticket["TESTWP-65"]["action"] == "sent back to intake"
     assert by_ticket["TESTWP-62"]["action"] == "work in flight; left as it is"

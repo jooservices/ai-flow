@@ -132,6 +132,12 @@ def readiness_problems(description: str, issue_type: str | None = "Story") -> li
     return problems
 
 
+def summary_readiness_problems(summary: str) -> list[str]:
+    """Why a title cannot be accepted as ready: it must also carry a requirement, never a server detail."""
+    wording = find_server_wording(summary or "")
+    return [rejection_message(wording)] if wording else []
+
+
 def read_spec(worktree: Path | None) -> str:
     f = worktree / "docs" / "SPEC.md" if worktree else None
     if not f or not f.is_file():
@@ -268,6 +274,15 @@ def refined(c: Claimed, jira, result: dict, description: str, t0: float | None, 
     When the author named a host, an address, a machine, a network or an access instruction, that wording is not kept
     in Jira: the comment holds the original with a marker in its place and a record of what was removed, the full
     record is stored by the control plane, and a real need behind the wording becomes (or joins) an environment ticket."""
+    summary_problems = summary_readiness_problems(c.ticket.get("summary") or "")
+    if summary_problems:
+        reason = "the ticket summary is not a requirement only: " + summary_problems[0]
+        result["summary"] = redact(reason)[:1000]
+        jira("comment", body=note(c, "rewrite rejected", what="The ticket title did not meet the ready check",
+                                  why=redact(reason), result="The ticket remains in Intake and its description was not changed",
+                                  next_="Describe the product requirement in the title and remove where or how it runs",
+                                  t0=t0))
+        return result
     original = (c.ticket.get("description") or "").strip() or "(empty)"
     found = find_server_wording(original)
     removal_lines: list[str] = []

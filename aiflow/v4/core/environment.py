@@ -167,6 +167,8 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     ("host", rf"(?<![\w.@-])(?:{_HOST_LABEL}\.)+(?!(?:md|py|html?|css|js|json|yaml|yml|toml|txt|sh|rst|xml|in)\b)[a-z]{{2,63}}(?![\w-]|\.[a-z0-9])"),
     ("host", r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|intranet|corp|home|localdomain)\b"),
     ("host", r"\blocalhost:\d{2,5}\b|\bssh://\S+|\bhost\s?name\s*(?:[:=]|is\b|called\b)"),
+    # A local hostname is still a host when it appears in a URL without an explicit port.
+    ("host", r"\bhttps?://localhost\b"),
     ("machine", rf"\b(?:shared|dev|development|lab|staging|stage|production|prod|jump|build|ci|qa|uat|remote|physical|"
                rf"virtual)\s+{_MACHINE_NOUN}\b"),
     ("machine", r"\bshared\s+(?:docker|database|db|redis|postgres(?:ql)?|mysql|mariadb|wordpress|environment|"

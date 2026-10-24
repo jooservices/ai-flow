@@ -448,6 +448,63 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
     assert "post_merge_results" not in complete[2]
 
 
+def test_version_release_worker_redacts_a_short_configured_secret_from_check_output(tmp_path, monkeypatch):
+    class FakeGit:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def mirror(self, *_args):
+            return tmp_path
+
+        def remote_branch_exists(self, _mirror, branch):
+            return branch == "release/core-a"
+
+        def detached(self, _mirror, path, _ref):
+            path.mkdir(parents=True, exist_ok=True)
+            return "a" * 40
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "xy", None
+
+    class FakeApi:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, _method, path, body=None, params=None):
+            self.calls.append((path, body))
+            if path == "/v1/github/token":
+                return {"token": "test-token"}
+            if path.endswith("/complete"):
+                return {"released": True, "status": "released"}
+            raise AssertionError(path)
+
+    monkeypatch.setattr(release_worker, "Git", FakeGit)
+    monkeypatch.setattr(release_worker, "project_env", lambda *_args: {"SHORT_SECRET": "xy"})
+    monkeypatch.setattr(release_worker.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    api = FakeApi()
+    claimed = Claimed(run_id="run-short-secret", fence=1, run_token="", account="claude-01", provider="claude",
+                      model="", effort="", ticket={"key": "release:TESTWP:1"},
+                      project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "checks": ["echo secret"],
+                               "source_branch": "develop", "release_branch": "release/core-a",
+                               "source_sha": "a" * 40, "work_minutes": {"hard": 1},
+                               "environment": [{"name": "SHORT_SECRET", "kind": "secret",
+                                                "runs": ["post_merge"]}]},
+                      identity=("bot", "bot@example.test"), step="version_release")
+
+    result = release_worker.run_version_release(api, claimed, {"id": "101", "name": CORE}, "TESTWP-900",
+                                                str(tmp_path), 1, [])
+
+    completion = next(body for path, body in api.calls if path.endswith("/complete"))
+    assert result["outcome"] == "done"
+    assert completion["checks"][0]["output"] == "[redacted]"
+    assert result["details"]["checks"][0]["output"] == "[redacted]"
+    assert "xy" not in str(result["details"])
+    assert "xy" not in str(completion)
+
+
 def test_failed_release_checks_create_one_bug_per_failed_command_linked_as_blocker(ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-30")

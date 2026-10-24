@@ -124,7 +124,8 @@ console.log(knowledgeView.innerHTML);
 
 
 def render_projects(projects: list[dict], catalog: dict, preflight: dict | None = None,
-                    user: dict | None = None, repository_editor: dict | None = None) -> str:
+                    user: dict | None = None, repository_editor: dict | None = None,
+                    invalid_projects: list[dict] | None = None) -> str:
     node_js = shutil.which("node")
     if not node_js:
         pytest.skip("Node.js is needed to render the Projects screen")
@@ -134,6 +135,7 @@ def render_projects(projects: list[dict], catalog: dict, preflight: dict | None 
 var projectsView = {{innerHTML: ''}};
 document.querySelector = function (selector) {{ return selector === '#view-projects' ? projectsView : null; }};
 S.projectAdmin.projects = {json.dumps(projects)};
+S.projectAdmin.invalidProjects = {json.dumps(invalid_projects or [])};
 S.projectAdmin.catalog = {json.dumps(catalog)};
 S.projectAdmin.showForm = true;
 S.projectAdmin.preflight = {json.dumps(preflight)};
@@ -549,7 +551,7 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
              "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "system-check", "support")
+             "system-check", "settings", "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -731,27 +733,27 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/system-check', '/licensing', '/notifications', '/support']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/system-check', '/licensing', '/notifications', '/settings', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,system-check,licensing,notifications,support"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,system-check,licensing,notifications,settings,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
     assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
+    assert 'id="view-settings"' in page and 'id="tab-settings"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
     assert "else if (S.view === 'system-check') renderSystemCheck();" in page
     assert "else if (S.view === 'licensing') renderLicensing();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support']") in page
-    assert "else if (S.view === 'system-check') renderSystemCheck();" in page
+             "'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -1277,6 +1279,19 @@ def test_projects_readiness_escapes_node_condition_names_and_actions():
     assert "&lt;svg onload=&quot;alert(2)&quot;&gt;" in rendered
 
 
+def test_projects_screen_shows_invalid_project_file_and_reason():
+    rendered = render_projects([], {}, invalid_projects=[{
+        "file": "TESTWP.yaml",
+        "reason": "unknown test service names: postgress. Use postgres or redis.",
+    }])
+
+    assert 'role="alert"' in rendered
+    assert "Project files could not be loaded." in rendered
+    assert "TESTWP.yaml" in rendered
+    assert "unknown test service names: postgress" in rendered
+    assert "unavailable to machines until their files are corrected in aiflow-control" in rendered
+
+
 def test_projects_editor_renders_live_epics_and_repository_specific_settings():
     editor = {"key": "JOOWP", "busy": False, "saving": False, "error": "", "data": {
         "default_repo": "jooservices/wordpress-core",
@@ -1358,6 +1373,28 @@ console.log(drawerTicket(ticket.key));
     assert "Repository" in result.stdout
 
 
+def test_board_card_shows_already_done_reason_and_clickable_pull_request():
+    node_js = shutil.which("node")
+    if not node_js:
+        pytest.skip("Node.js is needed to render the console")
+    script = re.search(r"<script>\n(.*?)</script>", PAGE.read_text(), re.S).group(1)
+    script = script[:script.index(BOOT)]
+    driver = r"""
+var ticket = {key: 'TESTWP-9', project: 'TESTWP', summary: 'Already implemented', status: 'In Verify', type: 'Bug',
+  priority: 'Medium', labels: [], blocked_by: [], last_run: {outcome: 'done', account: 'claude-01', duration_s: 12,
+  step: 'verify'}, already_done: {pr_url: 'https://github.com/jooservices/test-aiflow-wp/pull/42', run_id: 'r1'}};
+S.data = {tickets: [ticket], projects: [], nodes: [], accounts: [], active_runs: [], recent_runs: [],
+  incidents: [], events: [], totals: {}, versions: {}};
+console.log(card(ticket, {}));
+"""
+    result = subprocess.run([node_js, "-"], input=STUBS + script + driver + "\n})();\n",
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "Already done · sent to verification" in result.stdout
+    assert 'href="https://github.com/jooservices/test-aiflow-wp/pull/42"' in result.stdout
+    assert ">Pull request #42 " in result.stdout
+
+
 def test_projects_screen_is_mounted_and_uses_owner_protected_project_endpoints():
     page = html()
     assert 'data-view="projects">Projects</button>' in page
@@ -1375,6 +1412,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
         ("projects", "Projects"), ("system-check", "System check"), ("licensing", "Licence"), ("notifications", "Notifications"),
+        ("settings", "Settings"),
         ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
@@ -1386,6 +1424,7 @@ def test_command_center_menu_order_and_role_visibility():
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "system-check": "node.operations.read",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
+        "settings": "console.manage",
         "support": "console.manage",
     }
     visible = json.loads(run_script("""

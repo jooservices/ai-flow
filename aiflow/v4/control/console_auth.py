@@ -114,9 +114,11 @@ ROLE_VIEW_IDS = {
     "projects": "projects.manage",
     "system_check": "node.operations.read",
     "support": "console.manage",
+    "logs": "view.logs",
     "licensing": "licensing.manage",
     "backup": "backup.read",
     "notifications": "notifications.manage",
+    "settings": "console.manage",
 }
 PAGE_VIEWS = {
     "/": "dashboard", "/cc": "dashboard", "/dashboard": "dashboard",
@@ -125,7 +127,9 @@ PAGE_VIEWS = {
     "/stakeholder": "stakeholder", "/knowledge": "knowledge", "/integrations": "integrations",
     "/machines": "machines_ai", "/projects": "projects", "/system-check": "system_check", "/users": "users",
     "/licensing": "licensing", "/backup": "backup", "/notifications": "notifications",
+    "/settings": "settings",
     "/support": "support",
+    "/logs": "logs",
 }
 
 

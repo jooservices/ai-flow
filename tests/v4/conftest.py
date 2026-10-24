@@ -24,6 +24,12 @@ REDIS_URL = os.environ.get("AIFLOW4_TEST_REDIS_URL", "redis://127.0.0.1:16399/5"
 DATABASE_URL = os.environ.get("AIFLOW4_TEST_DATABASE_URL", "postgresql://aiflow:test@127.0.0.1:15499/aiflow4")
 
 
+@pytest.fixture(autouse=True)
+def runtime_operation_key_in_test_workspace(tmp_path, monkeypatch):
+    """Keep per-node runtime-setting private keys inside the test's temporary workspace."""
+    monkeypatch.setenv("AIFLOW4_NODE_OPERATION_KEY_FILE", str(tmp_path / "runtime-settings.key"))
+
+
 @pytest.fixture
 def leases():
     r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -56,15 +62,14 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
-    # The node agent's test-database sweeper must see this per-session database as in use even between
-    # function-scoped DB connections, or a long pytest run can sweep its own database after the crowding limit.
-    session_guard = None
+    # Keep the per-session database visible as active to the node agent's idle test-database sweeper. Individual
+    # test DB pools close between tests, and a long docs/browser check must not make this still-running session
+    # look like an abandoned database.
+    session_guard = psycopg.connect(own, autocommit=True)
     try:
-        session_guard = psycopg.connect(own, autocommit=True)
         yield own
     finally:
-        if session_guard is not None:
-            session_guard.close()
+        session_guard.close()
         try:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:
@@ -330,6 +335,11 @@ class FakeGitHub:
         self.pr_by_number[number] = pr
         return pr
 
+    def find_pr(self, repo, head):
+        return next((pr for pr in self.prs if pr.get("repo") == repo
+                     and (pr.get("head", {}).get("ref") if isinstance(pr.get("head"), dict) else pr.get("head")) == head
+                     and pr.get("state") == "open"), None)
+
     def create_control_pr(self, repo, head, base, title, body):
         return self.create_pr(repo, head, base, title, body, draft=True)
 
@@ -452,12 +462,23 @@ def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), pr
             priority, list(blocked_by)))
 
 
+def add_open_escalation(db, key: str, question: str = "Which option should be used?") -> None:
+    """A ticket in Needs owner is offered to triage only while an escalation is open for it."""
+    from aiflow.v4.control import escalations
+    escalations.record(db, key, key.split("-")[0], "dev", "", escalations.AMBIGUITY, question)
+
+
 def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
     joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
     if joined.status_code == 200:
+        # A machine join starts a provider-backed readiness thread. Finish it before this helper seeds the
+        # connected-agent baseline so its older join snapshot cannot overwrite that baseline afterwards.
+        for thread in list(threading.enumerate()):
+            if thread.name == f"aiflow4-join-readiness-{name}":
+                thread.join(timeout=15)
         # The API tests model an installed agent: after join it reports a healthy baseline before tests change a
         # particular condition. Tests of the join-only result post directly to /v1/nodes/join instead.
         from aiflow.v4.core.system_check import condition

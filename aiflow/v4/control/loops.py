@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from . import environment as environment_reports
-from . import escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
+from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
 from . import system_check
 from . import projects as project_lifecycle
 from . import rollout
@@ -291,6 +291,7 @@ def watchdog(ctx: Ctx) -> None:
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
+    tooling.declare_undeclared_services(ctx)
     tooling.sweep(ctx)
     tooling.check_stalled_waits(ctx)
     # environment items a run reported missing, and the daily scan of open tickets for server wording
@@ -506,7 +507,8 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = last_system_check = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
+    last_ba_chat = last_system_check = 0.0
     last_merge = 0.0
     from . import api as control_api
     ctx.events.start()
@@ -530,6 +532,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                 notify.process_retries(ctx)
                 notify.send_scheduled_summaries(ctx)
                 last_wd = now
+            if now - last_ba_chat >= 5 and ctx.leases.leader("ba_chat_poll", OWNER, 30_000):
+                ba_chat.poll(ctx)
+                last_ba_chat = now
             if now - last_merge >= merge_flow.MERGE_EVERY_S and ctx.leases.leader("merge_ready", OWNER, 60_000):
                 control_api.github_gateway(ctx)  # connect GitHub when the secret store has a connection
                 for key in merge_flow.merge_ready(ctx):
@@ -550,9 +555,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                     log.info("memory indexed: %s", written)
                 last_mem = now
             if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
-                from ..worker import backups as backup_worker
-                backup_worker.scheduled_backup(ctx)
-                backup_worker.weekly_restore_test(ctx)
+                from . import backups as backup_jobs
+                backup_jobs.scheduled_backup(ctx)
+                backup_jobs.weekly_restore_test(ctx)
                 last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)

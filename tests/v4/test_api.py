@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from conftest import add_ticket, join_node
+from conftest import add_open_escalation, add_ticket, join_node
 from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
@@ -58,6 +58,62 @@ def test_join_tokens_bind_node_role_and_project_and_can_only_be_redeemed_once(cl
                (control_api.h(expired),))
     assert client.post("/v1/nodes/join", json={"join_token": expired}).status_code == 403
     assert client.post("/v1/nodes/join-tokens/inspect", json={"join_token": expired}).status_code == 403
+
+
+def test_developer_pr_lookup_is_fenced_and_scoped_to_the_run_repository(client, ctx):
+    cc = join(client, "cc")
+    add_ticket(ctx.db, "TESTWP-6")
+    claimed = client.post("/v1/work/claim", json={"ticket": "TESTWP-6", "account": "claude-01"},
+                          headers=cc).json()
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    ctx.github.prs.append({"repo": "test-aiflow-wp", "head": {"ref": "TESTWP-6-no-change", "sha": "abc123"},
+                           "state": "open", "number": 42, "html_url": url})
+
+    found = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                "repo": "jooservices/test-aiflow-wp",
+                                                "head": "TESTWP-6-no-change"}, headers=cc)
+    assert found.status_code == 200 and found.json() == {"found": True, "url": url, "number": 42,
+                                                         "head_sha": "abc123"}
+    missing = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                  "repo": "jooservices/test-aiflow-wp",
+                                                  "head": "TESTWP-6-other"}, headers=cc)
+    assert missing.status_code == 200 and missing.json() == {"found": False}
+    wrong_repo = client.get("/v1/github/pr", params={"run_id": claimed["run_id"], "fence": claimed["fence"],
+                                                     "repo": "jooservices/other", "head": "TESTWP-6-no-change"},
+                            headers=cc)
+    assert wrong_repo.status_code == 403
+
+
+def test_board_snapshot_marks_already_done_runs_and_keeps_the_pull_request_link(client, ctx):
+    add_ticket(ctx.db, "TESTWP-8", status="In Verify")
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/43"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,pr_url,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-8','TESTWP','dev','claude-01','claude','cc',1,'finished','done',%s,%s,%s,now()-interval '1 minute',now())",
+               (str(uuid.uuid4()), "Already done: no new changes were needed", J({"already_done": True, "no_changes": True}), url))
+
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-8")
+
+    assert ticket["last_run"]["already_done"] is True
+    assert ticket["already_done"]["pr_url"] == url
+
+
+def test_already_done_marker_survives_a_later_verifier_run_without_verdict(client, ctx):
+    add_ticket(ctx.db, "TESTWP-10", status="In Verify")
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/44"
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,pr_url,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-10','TESTWP','dev','claude-01','claude','cc',1,'finished','done','Already done',%s,%s,now()-interval '5 minute',now()-interval '4 minute')",
+               (str(uuid.uuid4()), J({"already_done": True}), url))
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,summary,details,started_at,ended_at)"
+               " VALUES (%s,'TESTWP-10','TESTWP','verify','codex-01','codex','cc',2,'finished','quota','no verdict',%s,now()-interval '2 minute',now())",
+               (str(uuid.uuid4()), J({})))
+
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-10")
+
+    assert ticket["last_run"]["step"] == "verify" and ticket["last_run"]["already_done"] is False
+    assert ticket["already_done"]["pr_url"] == url
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-10'")
+    ticket = next(row for row in client.get("/v1/state").json()["tickets"] if row["key"] == "TESTWP-10")
+    assert ticket["already_done"] is None
 
 
 def test_bootstrap_installer_uses_pinned_server_installer_and_signed_ai_flow_release(client):
@@ -727,10 +783,13 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
     cc = join(client, "cc")
     n1 = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-63", status="Needs owner", labels=("aiflow-ready",))
+    add_open_escalation(ctx.db, "TESTWP-63")
     add_ticket(ctx.db, "TESTWP-64", status="Needs owner", labels=("owner-escalated",))
+    add_open_escalation(ctx.db, "TESTWP-64")
     add_ticket(ctx.db, "TESTWP-65", status="In Verify")
     add_ticket(ctx.db, "TESTWP-66", status="To Do")
     add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-67")
 
     def add_run(key, step, account, outcome, summary, pr_url="", details=None):
         run_id = str(uuid.uuid4())
@@ -782,9 +841,22 @@ def test_triage_candidates_follow_verify_and_exclude_last_dev_and_escalated(clie
             "hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_ticket_in_needs_owner_without_an_open_escalation_is_not_offered_to_triage(client, ctx):
+    n1 = join(client, "node1")
+    add_ticket(ctx.db, "TESTWP-80", status="Needs owner")
+    add_ticket(ctx.db, "TESTWP-81", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-81")
+
+    keys = [t["key"] for t in client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1)
+            .json()["tickets"] if t["step"] == "triage"]
+
+    assert keys == ["TESTWP-81"]
+
+
 def test_failed_triage_backs_off_before_the_ticket_is_offered_again(client, ctx):
     n1 = join(client, "node1")
     add_ticket(ctx.db, "TESTWP-67", status="Needs owner")
+    add_open_escalation(ctx.db, "TESTWP-67")
 
     def triage_keys():
         return [t["key"] for t in client.get("/v1/work/candidates", params={"account": "codex-01"}, headers=n1)
@@ -815,6 +887,7 @@ def test_triage_answer_reaches_the_next_dev_prompt(client, ctx):
         "summary": "Which Redis database should the cache use?"}, headers=cc)
     client.post(f"/v1/runs/{d['run_id']}/release", json={"fence": d["fence"]}, headers=cc)
     ctx.db.run("UPDATE tickets SET status='Needs owner' WHERE key='TESTWP-68'")
+    add_open_escalation(ctx.db, "TESTWP-68", "Which Redis database should the cache use?")
     t = client.post("/v1/work/claim", json={"ticket": "TESTWP-68", "account": "codex-01", "step": "triage"},
                     headers=n1).json()
     assert t["claimed"]

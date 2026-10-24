@@ -227,6 +227,20 @@ async function exerciseReviews(page, mode) {
     if (note) {
       const noteField = card.getByRole('textbox', { name: `Reviewer note for ${key}` });
       await noteField.fill(note);
+      if (action === 'ask-ai') {
+        const questionField = await noteField.elementHandle();
+        const stateRefresh = page.waitForResponse((item) => item.request().method() === 'GET' &&
+          new URL(item.url()).pathname === '/v1/state', { timeout: 12000 });
+        await stateRefresh;
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const questionState = await questionField.evaluate((field) => ({
+          connected: field.isConnected,
+          focused: document.activeElement === field,
+          value: field.value
+        }));
+        assert.deepEqual(questionState, { connected: true, focused: true, value: note },
+          'state polling replaced or blurred the focused review question');
+      }
       if (action === 'reject') {
         const refreshResponse = page.waitForResponse((item) => item.request().method() === 'GET' &&
           new URL(item.url()).pathname === '/v1/reviews');
@@ -237,23 +251,48 @@ async function exerciseReviews(page, mode) {
     }
     const endpoint = action === 'ask-ai' ? 'ask-ai' : action === 'rework' ? 'rework' : action;
     const actionButton = card.getByRole('button', { name: buttonName, exact: true });
-    const response = page.waitForResponse((item) => item.request().method() === 'POST' &&
-      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 5000 }).catch(async (error) => {
-        const details = await page.evaluate((reviewKey) => ({
-          toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
-          button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
-            card.getAttribute('data-key') === reviewKey).flatMap((card) =>
-            Array.from(card.querySelectorAll('button')).map((button) => ({
-              action: button.getAttribute('data-act'), disabled: button.disabled
-            }))),
-          noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
-            card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
-        }), key);
-        throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
-          `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${error.message}`);
-      });
+    if (mode === 'phone' && action === 'ask-ai') {
+      assert.equal(await actionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return hit === button || button.contains(hit);
+      }), true, 'a toast is covering the phone review action');
+    }
+    await page.waitForLoadState('networkidle');
+    const refreshedQueue = page.waitForResponse((item) => item.request().method() === 'GET' &&
+      new URL(item.url()).pathname === '/v1/reviews', { timeout: 15000 });
+    // The request is sent on the click; the answer can take a while on a busy machine (the control API works on the
+    // ticket under its lease), so wait for the answer instead of re-clicking.
+    let response = null, lastError = null;
+    const pending = page.waitForResponse((item) => item.request().method() === 'POST' &&
+      new URL(item.url()).pathname === `/v1/reviews/${key}/${endpoint}`, { timeout: 30000 });
+    pending.catch(() => null);
     await actionButton.click();
-    assert.equal((await response).status(), 200, `${buttonName} failed for ${key}`);
+    try { response = await pending; } catch (error) { lastError = error; }
+    if (!response) {
+      const details = await page.evaluate((reviewKey) => ({
+        toastTitles: Array.from(document.querySelectorAll('#toasts .t-title')).map((item) => item.textContent || ''),
+        button: Array.from(document.querySelectorAll('[data-review-card]')).filter((card) =>
+          card.getAttribute('data-key') === reviewKey).flatMap((card) =>
+          Array.from(card.querySelectorAll('button')).map((button) => ({
+            action: button.getAttribute('data-act'), disabled: button.disabled
+          }))),
+        noteLength: Array.from(document.querySelectorAll('[data-review-card]')).find((card) =>
+          card.getAttribute('data-key') === reviewKey)?.querySelector('[data-review-note]')?.value.length ?? -1
+      }), key);
+      throw new Error(`${buttonName} sent no review request. Observed: ${reviewTraffic.join(', ') || 'none'}. ` +
+        `Browser errors: ${pageErrors.join(' | ') || 'none'}. UI: ${JSON.stringify(details)}. ${lastError.message}`);
+    }
+    assert.equal(response.status(), 200, `${buttonName} failed for ${key}`);
+    const submittedRequest = response.request();
+    if (note) {
+      const expectedBody = action === 'reject' ? { reason: note } : action === 'rework' ? { comment: note } :
+        action === 'ask-ai' ? { question: note } : {};
+      assert.deepEqual(JSON.parse(submittedRequest.postData()), expectedBody,
+        `${buttonName} dropped its review note for ${key}`);
+    }
+    await refreshedQueue;
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 100))));
   }
 }
 
@@ -317,14 +356,27 @@ async function exerciseMachineAndUserAdministration(page, mode) {
     .waitFor({ state: 'visible' });
 }
 
+async function exerciseConflictLossDashboard(page) {
+  await page.getByRole('tab', { name: 'Dashboard', exact: true }).click();
+  const block = page.locator('#view-cc [data-block="conflict-loss"]');
+  await block.waitFor({ state: 'visible' });
+  await block.getByRole('heading', { name: 'Lost to merge conflicts', exact: true }).waitFor({ state: 'visible' });
+  await block.getByText(/Share lost:/).waitFor({ state: 'visible', timeout: 15000 });
+  await block.locator('.legend').getByText(/Time spent:/).waitFor({ state: 'visible' });
+  assert.equal(await block.locator('svg[aria-label="Share of verifications lost to conflicts per day"]').count(), 1,
+    'Command Center dashboard is missing the conflict loss trend');
+}
+
 async function exerciseMode(browser, mode) {
   const administrator = config.roles.find((person) => person.role === 'administrator');
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
-  const context = await browser.newContext({ viewport: dimensions, colorScheme: mode === 'dark' ? 'dark' : 'light' });
+  const context = await browser.newContext({ viewport: dimensions, colorScheme: mode === 'dark' ? 'dark' : 'light',
+    hasTouch: mode === 'phone' });
   const page = await context.newPage();
   await traceOnFailure(context, `administrator-${mode}`, async () => {
     await signInInPage(page, administrator, mode);
     await visitScreens(page, administrator.views);
+    await exerciseConflictLossDashboard(page);
     await exerciseWorkAndSearch(page);
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);

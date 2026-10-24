@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..core.system_check import condition
-from ..core.toolchains import STACK_TOOLS, toolchain_gaps
+from ..core.toolchains import CONTAINER_RUNTIME_TOOL, STACK_TOOLS, toolchain_gaps
 from .db import J
 from . import notify
 from .github import GITHUB_APP_REQUIRED_PERMISSIONS
@@ -471,6 +471,9 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
     required_tools = repo.tools_for_node(node, [project_key])
     gaps = toolchain_gaps(tools, required_tools, repo.versions, project.stacks,
                           require_pins=bool(project.stacks))
+    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
+    runtime_affects_all_work = project.containers or not repositories or all(
+        project.settings_for_repo(name).get("containers") for name in repositories)
     for tool in required_tools:
         if tool in gaps:
             stack_tool = any(tool in STACK_TOOLS.get(stack, ()) for stack in project.stacks)
@@ -482,7 +485,8 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
             else:
                 out.append(condition(f"tool:{tool}", f"Tool · {tool}", "needs_action",
                                      f"{tool} is missing, unhealthy, or outside its configured version.",
-                                     f"Install or repair {tool} on node {node}."))
+                                     f"Install or repair {tool} on node {node}.",
+                                     affects_work=tool != CONTAINER_RUNTIME_TOOL or runtime_affects_all_work))
         elif tool in auto_fixed_tools:
             out.append(condition(f"tool:{tool}", f"Tool · {tool}", "fixed_automatically",
                                  f"{tool} was installed automatically and passed its version check."))
@@ -504,7 +508,6 @@ def _project_conditions(ctx, node: str, project_key: str, repo, tools: dict, met
             out.append(condition(f"service:{service}", f"Service · {service}", "ready",
                                  f"The {service} service is healthy."))
 
-    repositories = [str(name) for name in project.configured_repositories if isinstance(name, str) and name]
     if not repositories or any(not project.settings_for_repo(name).get("base") for name in repositories):
         out.append(condition("repository-settings", "Repository settings", "needs_action",
                              "A repository and base branch are required to start work.",

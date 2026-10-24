@@ -28,6 +28,8 @@ from .intake import run_intake
 from .verify import run_verify
 from .master import run_master
 from .version_release import run_version_release
+from .post_merge import run_post_merge
+from .ba_chat import run_turn as run_ba_chat_turn
 
 log = logging.getLogger("aiflow4.worker")
 STATE_DIR = Path("/run/aiflow4/workers")
@@ -148,8 +150,9 @@ class Worker:
             self.probe()
         if not self.probe_ok:
             return False
-        for release in self.api.call("GET", "/v1/version-releases/candidates",
-                                     params={"account": self.account}).get("versions", []):
+        release_candidates = self.api.call("GET", "/v1/version-releases/candidates",
+                                            params={"account": self.account}, allow_not_found=True) or {}
+        for release in release_candidates.get("versions", []):
             try:
                 claimed = self.api.call("POST", "/v1/version-releases/claim",
                                         {"project": release["project"], "version_id": release["version_id"],
@@ -177,6 +180,23 @@ class Worker:
             except Exception as e:  # noqa: BLE001
                 log.warning("version release lease cleanup failed: %s", e)
             self.publish(state="idle", ticket=None, run_id=None, last_outcome=result.get("outcome"), since=time.time())
+            return True
+        chat_job = self.api.call("GET", "/v1/ba-chat/candidate", params={"account": self.account}).get("job")
+        if chat_job:
+            self.publish(state="working", ticket="BA chat", run_id=chat_job["job_id"], step="ba_chat", since=time.time())
+            try:
+                result = run_ba_chat_turn(self.api, chat_job, self.account, self.srv, self.control_url, self.run_as)
+            except Exception as e:  # noqa: BLE001 - the result API receives only a safe error kind
+                log.warning("BA chat turn failed account=%s error=%s", self.account, type(e).__name__)
+                result = {"error_kind": "worker_error", "output": {}}
+            try:
+                self.api.call("POST", f"/v1/ba-chat/{chat_job['job_id']}/result",
+                              {"account": self.account, "claim_token": chat_job["claim_token"],
+                               "output": result.get("output") or {},
+                               "error_kind": result.get("error_kind") or ""})
+            except Exception as e:  # noqa: BLE001
+                log.warning("BA chat result was not recorded account=%s error=%s", self.account, type(e).__name__)
+            self.publish(state="idle", ticket=None, run_id=None, last_outcome="ba_chat", since=time.time())
             return True
         master = self.api.call("GET", "/v1/master/candidate", params={"account": self.account}).get("candidate")
         cands = ([master] if master else []) + self.api.call(
@@ -206,6 +226,8 @@ class Worker:
             log.info("claimed %s for %s (fence %s)", c.ticket["key"], step, c.fence)
             if step == "verify":
                 res = run_verify(self.api, c, c.pr or {}, self.srv, self.control_url, self.hb_s, self.run_as)
+            elif step == "post_merge":
+                res = run_post_merge(self.api, c, self.srv, self.hb_s, self.run_as)
             elif step == "triage":
                 res = run_triage(self.api, c, self.srv, self.control_url, self.hb_s, self.run_as)
             elif step == "master":

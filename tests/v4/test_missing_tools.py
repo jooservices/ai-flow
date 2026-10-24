@@ -75,9 +75,10 @@ def test_marker_and_known_names_are_read_from_the_blocked_reason():
 class _API:
     node_name = "cc"
 
-    def __init__(self, raise_result=None):
+    def __init__(self, raise_result=None, existing_pr=None):
         self.calls = []
         self.raise_result = raise_result
+        self.existing_pr = existing_pr
 
     def call(self, method, path, body=None, params=None):
         self.calls.append((method, path, body))
@@ -90,6 +91,13 @@ class _API:
                     "reason": "reported missing tool" if missing else "requirements conflict",
                     "resolved": missing, "outcome": "tool_missing" if missing else "blocked",
                     "answer": "", "citation": "", "missing_tools": []}
+        if method == "GET" and path == "/v1/github/pr":
+            if self.existing_pr:
+                return {"found": True, **self.existing_pr}
+            return {"found": False}
+        if method == "POST" and path == "/v1/github/pr":
+            self.created_pr = body
+            return {"url": "https://github.com/jooservices/test-aiflow-wp/pull/9", "number": 9}
         return {"token": "github-token", "url": "https://github.com/x/y/pull/1", "number": 1}
 
 
@@ -102,7 +110,10 @@ def _claimed():
                    project=project, identity=("bot", "bot@example.test"))
 
 
-def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_text="", command_results=None):
+def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_text="", command_results=None,
+             branch_commits=0, existing_pr=None):
+    git_calls = []
+
     class Git:
         def __init__(self, *_a, **_k):
             pass
@@ -114,7 +125,20 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
             return None
 
         def worktree(self, _m, _p, _b, base):
-            return "origin/" + base
+            return "origin/" + (_b if branch_commits else base)
+
+        def commits_ahead(self, _path, _base):
+            return branch_commits
+
+        def merge_base_in(self, *_a):
+            return []
+
+        def push(self, _path, branch, token):
+            git_calls.append(("push", branch, token))
+
+        def run(self, *args, **kwargs):
+            git_calls.append(("run", args, kwargs))
+            return "head-sha\n"
 
         def changed(self, _path):
             return []
@@ -130,7 +154,8 @@ def _run_dev(monkeypatch, tmp_path, verdict, reason, raise_result=None, final_te
 
     monkeypatch.setattr(dev, "Git", Git)
     monkeypatch.setattr(dev, "get_adapter", lambda _p: Adapter())
-    api = _API(raise_result)
+    api = _API(raise_result, existing_pr)
+    api.git_calls = git_calls
     return dev.run_dev(api, _claimed(), str(tmp_path), "https://control", 3600, []), api
 
 
@@ -148,9 +173,59 @@ def test_missing_tool_is_not_a_question_for_the_owner(monkeypatch, tmp_path):
 def test_summary_naming_docker_or_php_and_missing_is_not_a_missing_tool(monkeypatch, tmp_path):
     result, api = _run_dev(monkeypatch, tmp_path, "DONE", "",
                            final_text="SUMMARY: Docker and PHP are installed; no missing checks remain.")
-    assert result["outcome"] == "no_changes"
+    assert result["outcome"] == "failed" and result["error_kind"] == "no_work"
     assert "missing_tools" not in result.get("details", {})
     assert not any(call[1] == "/v1/escalations/raise" for call in api.calls)
+
+
+def test_clean_no_changes_with_an_open_pull_request_succeeds_into_verification(monkeypatch, tmp_path):
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    result, api = _run_dev(monkeypatch, tmp_path, "DONE", "", final_text="SUMMARY: Nothing to change.",
+                           existing_pr={"url": url, "number": 42})
+
+    assert result["outcome"] == "done" and result["pr_url"] == url
+    assert result["details"]["already_done"] is True
+    assert result["head_sha"] == "head-sha"
+    assert any(call[1] == "/v1/github/pr" and call[0] == "GET" for call in api.calls)
+    assert not any(call[1] == "/v1/github/pr" and call[0] == "POST" for call in api.calls)
+    assert [call[2]["to"] for call in api.calls if call[1].endswith("/transition")][-1] == "In Verify"
+    note_text = "\n".join(str(call[2].get("body", "")) for call in api.calls if call[1].endswith("/comment"))
+    assert "already done" in note_text.lower() and url in note_text
+
+
+def test_clean_no_changes_without_work_is_a_recorded_failure_for_the_flow_doctor(monkeypatch, tmp_path):
+    result, api = _run_dev(monkeypatch, tmp_path, "DONE", "", final_text="SUMMARY: Nothing to change.")
+
+    assert result["outcome"] == "failed" and result["error_kind"] == "no_work"
+    assert result["details"]["no_changes"] is True
+    assert "no committed work" in result["summary"] and "no open pull request" in result["summary"]
+    assert [call[2]["to"] for call in api.calls if call[1].endswith("/transition")][-1] == "To Do"
+    note_text = "\n".join(str(call[2].get("body", "")) for call in api.calls if call[1].endswith("/comment"))
+    assert "flow doctor" in note_text.lower() and "no committed work" in note_text
+    assert not any(call[1] == "/v1/github/pr" and call[0] == "POST" for call in api.calls)
+
+
+def test_clean_no_changes_with_branch_commits_opens_a_pull_request_and_verifies(monkeypatch, tmp_path):
+    result, api = _run_dev(monkeypatch, tmp_path, "DONE", "", final_text="SUMMARY: Nothing to change.",
+                           branch_commits=2)
+
+    assert result["outcome"] == "done" and result["pr_url"].endswith("/pull/9")
+    assert result["details"]["already_done"] is True and result["details"]["branch_commits"] == 2
+    assert api.git_calls[0] == ("push", "TESTWP-1-s", "github-token")
+    assert any(call[1] == "/v1/github/pr" and call[0] == "POST" for call in api.calls)
+    assert [call[2]["to"] for call in api.calls if call[1].endswith("/transition")][-1] == "In Verify"
+
+
+def test_no_changes_push_uses_branch_scoped_credential_and_records_pushed_sha(monkeypatch, tmp_path):
+    url = "https://github.com/jooservices/test-aiflow-wp/pull/42"
+    result, api = _run_dev(monkeypatch, tmp_path, "DONE", "", final_text="SUMMARY: Nothing to change.",
+                           branch_commits=3, existing_pr={"url": url, "number": 42, "head_sha": "stale-pr-head"})
+
+    assert result["outcome"] == "done" and result["pr_url"] == url
+    scoped = [call for call in api.calls if call[1] == "/v1/github/token" and call[2].get("branch")]
+    assert scoped and scoped[-1][2]["branch"] == "TESTWP-1-s"
+    # the pushed (base-integrated) commit is verified, not the PR head fetched before the push
+    assert result["head_sha"] == "head-sha"
 
 
 def test_fail_verdict_without_file_changes_is_failed_not_no_changes(monkeypatch, tmp_path):

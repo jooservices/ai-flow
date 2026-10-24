@@ -19,14 +19,17 @@ import subprocess
 import threading
 import time
 import select
+from datetime import datetime, timezone
 from urllib.parse import quote
 from pathlib import Path
 
 import httpx
 
 from .. import VERSION
+from ..core.settings import read_env_file
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
+from ..install.secrets import read_env_timestamps, update_env
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -183,6 +186,52 @@ def worker_states() -> list[dict]:
             except (OSError, ValueError):
                 pass
     return out
+
+
+def runtime_settings_inventory(projects_dir: str | Path = "/etc/aiflow/projects") -> dict[str, list[dict]]:
+    """Report project env key names, set state, and per-key change time; never include values in the heartbeat."""
+    out: dict[str, list[dict]] = {}
+    root = Path(projects_dir)
+    if not root.is_dir():
+        return out
+    for path in sorted(root.glob("*.env")):
+        project = path.stem
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            entries = read_env_file(path)
+            timestamps = read_env_timestamps(path, entries)
+        except OSError:
+            continue
+        out[project] = [{"name": key, "is_set": bool(value), "changed_at": timestamps.get(key, "")}
+                        for key, value in sorted(entries.items()) if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)]
+    return out
+
+
+def apply_runtime_settings_bootstrap(node: str, entries: list[dict],
+                                     projects_dir: str | Path = "/etc/aiflow/projects") -> None:
+    """Install encrypted project settings supplied at heartbeat before the node starts assigned workers."""
+    from ..core.runtime_settings_crypto import decrypt_value
+
+    root = Path(projects_dir)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        project, key = str(entry.get("project") or ""), str(entry.get("name") or "")
+        changed_at = str(entry.get("changed_at") or "")[:40]
+        if (not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project)
+                or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
+                or not changed_at or not isinstance(entry.get("envelope"), dict)):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        context = f"runtime-settings-bootstrap:{node}:{project}:{key}:{changed_at}"
+        value = decrypt_value(entry["envelope"], context)
+        if not re.fullmatch(r"[\x21-\x7e]{1,4096}", value):
+            raise ValueError("runtime setting bootstrap value is invalid")
+        path = root / f"{project}.env"
+        if path.is_symlink():
+            raise ValueError("runtime setting bootstrap path is invalid")
+        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
+                   track_timestamps=True, timestamps={key: changed_at})
 
 
 def credential_expiries(states: list[dict]) -> dict[str, str | None]:
@@ -544,6 +593,37 @@ _RELEASE_VERSION = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\
 _RELEASE_WORKFLOW_IDENTITY = "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{}"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_INCOMING_DIR = Path("/srv/aiflow/releases/incoming")
+_WORKTREE_CLEANUP_IMAGE = "busybox:1.36.1"
+
+
+def _remove_e2e_artifacts_as_root(worktree: Path) -> None:
+    """Use a disposable root container to clear generated artifacts before host-side worktree removal.
+
+    The container sees only this worktree and removes its artifacts directory, which is disposable because
+    the worktree itself has already been approved for deletion. Removing the directory inside the container
+    also handles root-owned, read-only directory entries that the node agent cannot chmod or unlink.
+    """
+    artifacts = worktree / "artifacts"
+    e2e = artifacts / "reports" / "e2e"
+    if not e2e.is_dir() or any(part.is_symlink() for part in (artifacts, artifacts / "reports", e2e)):
+        return
+
+    source = str(worktree.resolve(strict=True))
+    if "," in source:
+        raise OSError("worktree path contains a comma and cannot be mounted safely")
+    command = [
+        "docker", "run", "--rm", "--pull=missing", "--user=0:0", "--network=none", "--read-only",
+        "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
+        "--mount", f"type=bind,source={source},target=/worktree",
+        _WORKTREE_CLEANUP_IMAGE, "rm", "-rf", "--", "/worktree/artifacts",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("root cleanup container timed out after 120 seconds") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip().splitlines()
+        raise OSError(f"root cleanup container failed: {detail[0][:240] if detail else result.returncode}")
 
 
 def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow", min_age_s: int = 600) -> int:
@@ -573,6 +653,7 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
         if path is None:
             continue
         try:
+            _remove_e2e_artifacts_as_root(path)
             for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
                 os.chmod(root, 0o700)  # read-only triage checkouts
             shutil.rmtree(path)
@@ -831,7 +912,24 @@ def process_node_operation(api: ControlClient, node: str) -> None:
 
     operation_id = operation["id"]
     try:
-        result = execute(operation)
+        if operation.get("action") == "read_logs":
+            from ..core.log_sources import read_source
+            payload = operation.get("payload") or {}
+            result = read_source(str(payload.get("kind") or ""), str(payload.get("target") or ""),
+                                 payload.get("lines", 100))
+        else:
+            payload = operation.get("payload") or {}
+            if payload.get("action") in {"runtime_setting_project", "runtime_setting_control"}:
+                def checkpoint(envelope):
+                    response = api.call("POST", f"/v1/nodes/{node}/operations/{operation_id}/checkpoint",
+                                        {"rollback_envelope": envelope}, retries=2)
+                    saved = response.get("rollback_envelope")
+                    if not isinstance(saved, dict):
+                        raise OperationError("runtime setting snapshot could not be checkpointed")
+                    return saved
+                result = execute(operation, checkpoint=checkpoint)
+            else:
+                result = execute(operation)
         body = {"status": "completed", "result": result}
     except OperationError as exc:
         log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])
@@ -871,7 +969,10 @@ def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str
 
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
+    from ..core.runtime_settings_crypto import node_public_key
+
     api = ControlClient(control_url, token, timeout=15)
+    runtime_settings_public_key = node_public_key()
     stop = stop or threading.Event()
     relay = PolicyRelay(control_url) if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1" else None
     if relay:
@@ -879,6 +980,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     tools, tools_at, prev = tool_versions(), time.time(), None
     auto_fixed_tools: set[str] = set()
     auto_fixed_conditions: set[str] = set()
+    project_environment: dict[str, list[str]] = {}
     pending_network_events: list[dict] = []
     operation_thread: threading.Thread | None = None
     toolchain_thread: threading.Thread | None = None
@@ -903,6 +1005,12 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     tools, tools_at = tool_versions(), time.time()
                 ws = worker_states()
                 used = sum(1 for w in ws if w.get("state") == "working" and w.get("alive"))
+                environment_items = {}
+                for project, names in project_environment.items():
+                    local = read_env_file(f"/etc/aiflow/projects/{project}.env")
+                    present = [name for name in names if local.get(name)]
+                    if present:
+                        environment_items[project] = present
                 heartbeat = api.call("POST", f"/v1/nodes/{name}/heartbeat", {
                     "slots_total": slots, "slots_used": used, "release_version": installed_release() or VERSION,
                     "release_protocol": 1,
@@ -914,7 +1022,10 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "system_conditions": _system_machine_conditions(m, auto_fixed_conditions),
                     "credential_checks": _credential_conditions(ws),
                     "auto_fixed_tools": sorted(auto_fixed_tools),
-                    "auto_fixed_conditions": sorted(auto_fixed_conditions)}, retries=2)
+                    "auto_fixed_conditions": sorted(auto_fixed_conditions),
+                    "runtime_settings": runtime_settings_inventory(),
+                    "runtime_settings_public_key": runtime_settings_public_key,
+                    "environment_items": environment_items}, retries=2)
                 auto_fixed_tools.clear()
                 auto_fixed_conditions.clear()
                 desired = heartbeat["desired"]
@@ -928,6 +1039,15 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            bootstrap = desired.get("runtime_settings_bootstrap") or []
+            if bootstrap:
+                try:
+                    apply_runtime_settings_bootstrap(name, bootstrap)
+                except Exception as exc:  # noqa: BLE001 - do not start workers without backed-up settings applied
+                    log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
+                    stop.wait(every_s)
+                    continue
+            project_environment = desired.get("project_environment", {})
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)
             stack_request = {"release": desired.get("release", ""),

@@ -241,6 +241,8 @@ tbody tr:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
 .col-empty{font-size:12px; color:var(--faint); text-align:center; padding:14px 0}
 .card{display:flex; flex-direction:column; gap:7px; text-align:left; background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:10px 11px; cursor:pointer; width:100%; transition:border-color .15s, box-shadow .2s, transform .15s}
 .card:hover{border-color:var(--accent); box-shadow:0 6px 18px rgba(16,24,40,.10); transform:translateY(-1px)}
+.card-wrap{display:flex;flex-direction:column;gap:3px}
+.card-pr-link{align-self:flex-start;padding:2px 8px;font-size:12px;color:var(--accent);text-decoration:underline}
 .card .c-top{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
 .card .c-key{font-family:var(--f-mono); font-size:12px; color:var(--muted)}
 .card .c-type{font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:5px; padding:0 5px}
@@ -412,6 +414,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .notify-meta{font-size:12px;color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.notify-routing{display:grid;grid-template-columns:minmax(180px,1fr) repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:center}
 .notify-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.notify-form-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .notify-form-grid input,.notify-form-grid select{min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--fg)}
+.notify-form-grid label.checkline{flex-direction:row;align-items:center;gap:8px}.notify-form-grid label.checkline input{min-height:0;width:auto}
 .notify-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.notify-state{white-space:pre-wrap;font-size:12px;color:var(--muted);margin-top:8px}
 .lead-tablebox{width:100%;overflow:auto;border:1px solid var(--line);border-radius:9px}.lead-table{width:100%;border-collapse:collapse;min-width:920px}.lead-table th,.lead-table td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft)}
 .lead-table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--surface-2);white-space:nowrap}.lead-table ul{margin:0;padding-left:18px}.lead-table li{margin:2px 0}.lead-gap{color:var(--crit);font-weight:600}.lead-ac{white-space:normal;min-width:300px}.lead-tools{display:flex;gap:8px;flex-wrap:wrap}
@@ -543,12 +546,14 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-system-check" aria-controls="view-system-check" aria-selected="false" data-act="view" data-menu-view data-view="system-check">System check</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
+      <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" data-act="view" data-menu-view data-view="settings">Settings</button>
       <button class="tab" role="tab" id="tab-support" aria-controls="view-support" aria-selected="false" data-act="view" data-menu-view data-view="support">Support</button>
     </div>
     <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
+    <a class="iconbtn" id="logs-nav" href="/logs" hidden title="Open the administrator log viewer">Host/service logs</a>
     <a class="iconbtn" id="help-link" href="/help/screens/cc.html" target="_blank" rel="noopener" title="Help for this screen">Help</a>
     <a class="iconbtn" href="/o2/" target="_blank" rel="noopener" title="Logs and metrics (OpenObserve)">Logs</a>
     <a class="iconbtn" href="/mail/" target="_blank" rel="noopener" title="Alert emails (Mailpit)">Alerts mail</a>
@@ -590,6 +595,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-system-check" role="tabpanel" aria-labelledby="tab-system-check" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
+  <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
 </main>
 <footer class="footer" id="footer">
@@ -674,6 +680,7 @@ var ICON = {
 var S = {
   data: null, fetchedAt: 0, lastOk: 0, error: '', services: [], svcError: '', analytics: [], anError: '',
   systemCheck: null, systemCheckError: '', systemCheckBusy: false,
+  conflicts: null, conflictsError: '',
   dashboardUsage: [], dashboardUsageError: '', capacity: { data: null, error: '', loading: false, loadedAt: 0 },
   dashboardWaiting: { keys: null, error: '', loading: false, loadedAt: 0 },
   dashboardQuota: { rows: null, error: '', loading: false, loadedAt: 0, user: '' },
@@ -688,13 +695,14 @@ var S = {
   autonomy: { data: null, error: '', busy: false, saving: false },
   esc: { data: null, error: "", busy: false, saving: false },
   nodeOperations: {}, joinCommands: {}, operationBusy: {},
-  projectAdmin: { projects: null, catalog: null, error: '', preflight: null, busy: false, showForm: false,
+  projectAdmin: { projects: null, invalidProjects: [], catalog: null, error: '', preflight: null, busy: false, showForm: false,
     repositoryEditor: null, envEditor: null, envMissing: [], envScan: null, envScanBusy: false,
-    form: { site: '', project: '', repo: '', base: 'develop', stack: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
+    form: { site: '', project: '', repo: '', base: 'develop', stack: '', services: '', checks: '', containers: false, priority: 5, parallel_limit: 2, merge_method: 'squash' } },
   integrations: { data: null, connections: [], target: '', recommendation: '', error: '', busy: false, pending: null, installations: [], selected: '', notice: '' },
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
     form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
+  runtimeSettings: { data: null, error: '', notice: '', busy: false, scope: 'secret', project: '', key: '', value: '', changes: [] },
   machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
     addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
@@ -719,16 +727,17 @@ S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
   lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
   machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage', 'system-check': 'node.operations.read',
-  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', support: 'console.manage' };
+  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', settings: 'console.manage', support: 'console.manage' };
 var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
   review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
-  projects: '/projects', 'system-check': '/system-check', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', support: '/support' };
+  projects: '/projects', 'system-check': '/system-check', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', settings: '/settings', support: '/support' };
 var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
-  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support']];
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support']];
 function viewOf(path) {
   if (path.indexOf('/system-check') === 0) return 'system-check';
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
+  if (path.indexOf('/settings') === 0) return 'settings';
   if (path.indexOf('/support') === 0) return 'support';
   if (path.indexOf('/work') === 0 || path.indexOf('/board') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
@@ -749,7 +758,7 @@ function viewOf(path) {
 }
 var STATUS_COLS = [['Backlog', 'Backlog'], ['Intake', 'Intake'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['In Verify', 'In Verify'], ['Human review', 'Human review'], ['Needs owner', 'Needs owner'], ['Done', 'Done']];
 function inColumn(ticket, column) { return ticket.status === column || (column === 'Human review' && ticket.status === 'Ready to merge'); }
-var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
+var KIND = { node_down: 'Node down', node_no_ai: 'Empty node', node_tools: 'Missing tools', node_services: 'Test services', service_undeclared: 'Undeclared services', ticket_stuck: 'Stuck ticket', role_coverage: 'Role coverage', account_quota: 'Account', quota_high: 'Quota', quota_prediction: 'Quota forecast', run_slow: 'Slow run', run_hard_limit: 'Run limit', jira_auth: 'Jira connection', role_health: 'Role health' };
 var PROVIDER = { claude: 'Claude', codex: 'Codex', grok: 'Grok', opencode: 'OpenCode' };
 var MENU_ITEMS = [
   { view: 'cc', label: 'Dashboard' },
@@ -768,7 +777,8 @@ var MENU_ITEMS = [
   { view: 'projects', label: 'Projects' },
   { view: 'system-check', label: 'System check' },
   { view: 'licensing', label: 'Licence' },
-  { view: 'notifications', label: 'Notifications' }
+  { view: 'notifications', label: 'Notifications' },
+  { view: 'settings', label: 'Settings', permission: 'console.manage' }
 ];
 MENU_ITEMS.push({ view: 'support', label: 'Support', permission: 'console.manage' });
 // Visibility reads the effective permissions sent from ROLE_PERMISSIONS; the server enforces the same grants.
@@ -1026,6 +1036,7 @@ function pollConsoleSession() {
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.userAdmin.loadedAt > 30000 && !S.userAdmin.loading) loadUsers(true);
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
+    if (S.view === 'settings' && consoleCan('console.manage') && !S.runtimeSettings.data && !S.runtimeSettings.busy) loadRuntimeSettings();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (consoleCan('view.machines_ai')) pollServices();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
@@ -1075,6 +1086,7 @@ function applyRoleNavigation() {
     tab.setAttribute('aria-hidden', String(tab.hidden));
   });
   var nav = $('.tabs');
+  var logLink = $('#logs-nav'); if (logLink) logLink.hidden = !S.consoleUser || !consoleCan('view.logs');
   if (nav) {
     $$('.tab-divider', nav).forEach(function (divider) { divider.remove(); });
     VIEW_GROUPS.forEach(function (group, index) {
@@ -1118,7 +1130,7 @@ function projectResponseError(response) {
 }
 function loadProjectList() {
   fetch('/v1/projects', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
-    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
+    .then(function (d) { S.projectAdmin.projects = d.projects || []; S.projectAdmin.invalidProjects = d.invalid_projects || []; S.projectAdmin.error = ''; if (S.view === 'projects') renderProjects(); })
     .catch(function (e) { S.projectAdmin.error = String(e.message || e); if (S.view === 'projects') renderProjects(); });
   loadEnvironmentOverview();
 }
@@ -1189,8 +1201,19 @@ function projectEnvironmentPanels(state) {
     else {
       h += '<div class="project-table"><table><thead><tr><th>Ticket</th><th>Deferred criteria</th><th>Result</th><th>Release checks</th><th>Checked</th></tr></thead><tbody>';
       postMerge.forEach(function (item) {
-        var result = item.result || {}, checks = (result.checks || []).map(function (c) { return c.command + ': ' + (c.passed ? 'passed' : 'failed'); });
-        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + (item.criteria || []).map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('') + '</td>';
+        var result = item.result || {}, outcomes = result.criteria || [];
+        var criteria = (item.criteria || []).map(function (c) {
+          var criterion = typeof c === 'string' ? { text: c } : c;
+          return '<div><strong>' + esc(criterion.id || '') + '</strong> ' + esc(criterion.text || '') +
+            '<div class="hint">Configured check: ' + esc(criterion.check || 'unmapped') + '</div></div>';
+        });
+        var checks = outcomes.map(function (c) {
+          var check = c.check_result || {}, command = check.command || c.check || 'unmapped';
+          var status = check.passed === true ? 'passed' : check.passed === false ? 'failed' : (c.status || 'pending');
+          var exit = Number.isInteger(check.exit_code) ? ' (exit ' + check.exit_code + ')' : '';
+          return (c.id ? c.id + ': ' : '') + command + ': ' + status + exit;
+        });
+        h += '<tr><td class="mono">' + esc(item.ticket) + '</td><td>' + criteria.join('') + '</td>';
         h += '<td><span class="pill" data-tone="' + (item.status === 'passed' ? 'ok' : item.status === 'failed' ? 'crit' : 'warn') + '">' + esc(item.status) + '</span></td>';
         h += '<td>' + esc(checks.join(', ') || result.error || '—') + (item.release_ticket ? ' · ' + esc(item.release_ticket) : '') + '</td><td>' + esc(item.checked_at ? when(item.checked_at) : 'waiting') + '</td></tr>';
       });
@@ -1580,9 +1603,29 @@ function renderGitHubIntegrations() {
 function projectRequestBody() {
   var f = S.projectAdmin.form;
   return { site: f.site, project: f.project, repo: f.repo, base: f.base || 'develop', stack: f.stack || '',
+    services: servicesFromText(f.services),
     containers: Boolean(f.containers),
     checks: String(f.checks || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean),
     priority: Number(f.priority), parallel_limit: Number(f.parallel_limit), merge_method: f.merge_method };
+}
+function servicesFromText(text) {
+  return String(text || '').split(/[\s,]+/).map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+}
+function saveProjectServices(key, button) {
+  var input = document.querySelector('[data-project-services="' + key + '"]');
+  if (!input) return;
+  if (button) button.disabled = true;
+  fetch('/v1/projects/' + encodeURIComponent(key) + '/services', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ services: servicesFromText(input.value) }) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (d) { toast('Test services saved', d.project + ': ' + ((d.services || []).join(', ') || 'none') + '. Every machine of the project prepares them within two minutes.', 'ok'); loadProjectList(); poll(); })
+    .catch(function (e) { toast('Could not save test services', String(e.message || e), 'warn'); if (button) button.disabled = false; });
+}
+function projectServicesCell(p) {
+  var current = (p.services || []).join(', ');
+  if (!consoleCan('projects.manage')) return '<span class="mono">' + esc(current || 'none') + '</span>';
+  return '<div class="project-actions"><input data-project-services="' + esc(p.key) + '" value="' + esc(current) + '" placeholder="postgres, redis" aria-label="Test services of ' + esc(p.key) + '" size="16">' +
+    '<button class="btn sm" data-act="project-services-save" data-key="' + esc(p.key) + '">Save</button></div>';
 }
 function runProjectPreflight() {
   S.projectAdmin.busy = true; S.projectAdmin.error = ''; S.projectAdmin.preflight = null; renderProjects();
@@ -1748,6 +1791,17 @@ function pollAnalytics() {
     if (S.view === 'cc' && S.data) renderDashboard();
   }).catch(function (e) { S.anError = String(e.message || e); })
     .then(function () { setTimeout(pollAnalytics, ANALYTICS_MS); });
+}
+function pollConflicts() {
+  fetch('/v1/analytics/conflicts?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    S.conflicts = d; S.conflictsError = '';
+    if ((S.view === 'delivery' || S.view === 'work') && S.data) renderDBody();
+    if (S.view === 'cc' && S.data) renderDashboard();
+  }).catch(function (e) { S.conflictsError = String(e.message || e); })
+    .then(function () { setTimeout(pollConflicts, ANALYTICS_MS); });
 }
 function pollDashboardUsage() {
   fetch('/v1/analytics/usage/daily?days=' + ANALYTICS_DAYS, { cache: 'no-store' }).then(function (r) {
@@ -2173,6 +2227,7 @@ function renderDashboard() {
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="in-flight"><span class="label">In flight</span><span class="kpi-main"><span class="value">' + inFlight + '</span>' + dashboardSpark(inFlightTrend, 'var(--provider-codex)') + '</span><span class="kpi-delta">' + Number(d.active_runs.length || 0) + ' live runs</span><span class="detail">In progress, verify or human review</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="waiting"><span class="label">Waiting for you</span><span class="kpi-main"><span class="value">' + (S.dashboardWaiting.keys === null && S.dashboardWaiting.loading ? '—' : waitingCount) + '</span>' + dashboardSpark(waitingTrend, 'var(--warn)') + '</span><span class="kpi-delta">' + (waitingCount ? 'Needs a person' : 'All clear') + '</span><span class="detail">Questions, decisions and reviews</span></button>';
   h += '<button type="button" class="dash-kpi" data-act="dashboard-card" data-card="ai-usage"><span class="label">AI usage today</span><span class="kpi-main"><span class="value">' + tok(usage.tokensToday) + ' <small>tokens</small></span>' + dashboardSpark(days.map(function (day) { return usage.tokenDays[day] || 0; }), 'var(--provider-claude)') + '</span><span class="kpi-delta">' + (usage.costToday ? 'Approx. $' + usage.costToday.toFixed(4) : 'Approx. $0.0000') + '</span><span class="detail">Approximate cost today</span></button></div>';
+  h += '<section class="panel" data-block="conflict-loss">' + conflictLossBlock() + '</section>';
   h += '<section class="panel" data-block="flow" aria-labelledby="dashboard-flow-title"><div class="panel-h"><h2 id="dashboard-flow-title">Flow at a glance</h2><span class="hint">Tickets across every project</span></div><div class="dash-flow">' + flow + '</div></section>';
   h += '<section class="panel" data-block="projects"><div class="panel-h"><h2>Projects</h2><span class="hint">' + projectRows.length + ' shown · choose a project to open its board</span></div>';
   h += '<div class="dash-tools"><label for="dash-project-search">Search projects</label><input class="in" id="dash-project-search" type="search" placeholder="Name or key" value="' + esc(S.dashboardQuery) + '"></div>';
@@ -2879,6 +2934,16 @@ function renderDBody() {
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
   var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
+  var active = document.activeElement;
+  var activeInsideReview = typeof root.contains === 'function' && root.contains(active);
+  if (activeInsideReview && active.matches && active.matches('[data-review-note]')) {
+    var activeCard = active.closest('[data-review-card]');
+    if (activeCard) noteDrafts[activeCard.getAttribute('data-key')] = active.value;
+    return;
+  }
+  if (activeInsideReview && active.matches && active.matches('button[data-act^="review-"]')) {
+    return;
+  }
   if (typeof root.querySelectorAll === 'function') {
     root.querySelectorAll('[data-review-note]').forEach(function (field) {
       var card = field.closest('[data-review-card]');
@@ -2999,6 +3064,8 @@ function submitReview(key, action, comment) {
     if (noteField) noteField.value = '';
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
+    var focusedAction = document.activeElement;
+    if (focusedAction && focusedAction.matches && focusedAction.matches('button[data-act^="review-"]')) focusedAction.blur();
     loadReviews();
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
@@ -3409,6 +3476,123 @@ function loadNotifications() {
     .then(function (d) { state.data = d; state.error = ''; if (!state.preferencesDraft || !state.preferencesDirty) state.preferencesDraft = JSON.parse(JSON.stringify(d.preferences)); })
     .catch(function (e) { state.error = String(e.message || e); })
     .then(function () { state.busy = false; renderNotifications(); });
+}
+function loadRuntimeSettings() {
+  if (!consoleCan('console.manage')) return;
+  var state = S.runtimeSettings; state.busy = true; state.error = ''; renderRuntimeSettings();
+  fetch('/v1/runtime-settings', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) {
+      state.data = d; state.error = '';
+      state.changes = d.changes || [];
+      if (!state.project && (d.projects || []).length) state.project = d.projects[0];
+      state.changes.filter(function (change) { return change.status === 'running' || change.status === 'rolling_back'; })
+        .forEach(function (change) { pollRuntimeSettingChange(change.id); });
+    }).catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderRuntimeSettings(); });
+}
+function pollRuntimeSettingChange(changeId) {
+  fetch('/v1/runtime-settings/changes/' + encodeURIComponent(changeId), { cache: 'no-store' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (change) {
+      var state = S.runtimeSettings;
+      state.changes = [change].concat((state.changes || []).filter(function (item) { return item.id !== change.id; }));
+      if (S.view === 'settings') renderRuntimeSettings();
+      if (change.status === 'running' || change.status === 'rolling_back') setTimeout(function () { pollRuntimeSettingChange(change.id); }, 2500);
+      else if (change.status === 'completed') {
+        state.notice = 'All affected services restarted and passed their health checks.';
+        loadRuntimeSettings();
+      } else {
+        var failed = (change.operations || []).filter(function (item) {
+          return item.status === 'failed' && !(item.result && item.result.cancelled);
+        })[0];
+        var service = failed && failed.result && (failed.result.failed_service || failed.result.error);
+        if (change.recovery_status === 'restored') {
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. The previous value was restored on all affected machines.';
+        } else if (change.recovery_status === 'failed') {
+          var recovery = change.recovery_error || 'rollback did not pass its health check';
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. Recovery failed on ' + (change.recovery_node || 'an affected machine') + ': ' + recovery +
+            '. The previous value could not be confirmed across the fleet, and affected machines remain paused.';
+        } else {
+          state.error = service ? 'Restart failed on ' + failed.node + ': ' + service + '. Recovery is still pending.' :
+            'Restart failed. Recovery is still pending.';
+        }
+        renderRuntimeSettings();
+      }
+    }).catch(function () { setTimeout(function () { pollRuntimeSettingChange(changeId); }, 5000); });
+}
+function saveRuntimeSetting() {
+  var state = S.runtimeSettings;
+  if (state.busy) return;
+  var scope = $('[data-runtime-scope]'), project = $('[data-runtime-project]'), key = $('[data-runtime-key]'), value = $('[data-runtime-value]');
+  state.scope = scope ? scope.value : state.scope;
+  state.project = project ? project.value : state.project;
+  state.key = key ? key.value.trim() : '';
+  var secretValue = value ? value.value : '';
+  if (value) value.value = '';
+  state.value = '';
+  if (!state.key || !secretValue) { state.error = 'Enter a key name and value.'; renderRuntimeSettings(); return; }
+  var body = { scope: state.scope, project: state.scope === 'project' ? state.project : '', key: state.key, value: secretValue };
+  state.busy = true; state.error = ''; state.notice = ''; state.key = '';
+  renderRuntimeSettings();
+  fetch('/v1/runtime-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (change) {
+      state.notice = 'Change queued. New work is paused on affected machines until active work drains and services pass health checks.';
+      state.changes = [{ id: change.change_id, status: 'running', operations: (change.operations || []).map(function (op) {
+        return { node: op.node, status: 'queued', services: change.services || [], result: {} };
+      }) }].concat(state.changes || []);
+      pollRuntimeSettingChange(change.change_id);
+    }).catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderRuntimeSettings(); });
+}
+function renderRuntimeSettings() {
+  var root = $('#view-settings'); if (!root) return;
+  var state = S.runtimeSettings, data = state.data || {}, projects = data.projects || [], items = data.settings || [];
+  if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><p>Settings are available to owners and administrators.</p></section>'; return; }
+  if (!state.project && projects.length) state.project = projects[0];
+  var services = state.scope === 'project' ? (data.project_services || {})[state.project] || [] : data.secret_services || [];
+  var h = '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
+    '<p class="hint">Values are never shown after entry. The control APIs restart one at a time; project workers drain active work before they restart.</p>' +
+    '<div class="project-form"><label>Location<select class="in" data-runtime-scope>' +
+    '<option value="secret"' + (state.scope === 'secret' ? ' selected' : '') + '>Control runtime secret or setting</option>' +
+    '<option value="project"' + (state.scope === 'project' ? ' selected' : '') + '>Project environment</option></select></label>';
+  if (state.scope === 'project') h += '<label>Project<select class="in" data-runtime-project>' + projects.map(function (project) {
+    return '<option value="' + esc(project) + '"' + (state.project === project ? ' selected' : '') + '>' + esc(project) + '</option>';
+  }).join('') + '</select></label>';
+  h += '<label>Key name<input class="in" data-runtime-key autocomplete="off" spellcheck="false" placeholder="EXTERNAL_API_TOKEN" value="' + esc(state.key || '') + '"></label>' +
+    '<label>Value<input class="in" data-runtime-value type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter value" value="' + esc(state.value || '') + '"></label>' +
+    '<div class="wide"><div class="small">Affected services</div><div class="chiprow">' +
+    (services.length ? services.map(function (service) { return '<span class="pill">' + esc(service) + '</span>'; }).join('') : '<span class="hint">No online service targets are available for this selection.</span>') +
+    '</div></div><div class="wide project-actions"><button class="btn primary" data-act="runtime-setting-save"' +
+    (state.busy || !services.length ? ' disabled' : '') + '>Save and restart safely</button><span class="hint">Active work finishes before workers restart. A failed health check restores the previous file value.</span></div></div>';
+  if (state.notice) h += '<p class="notice" role="status">' + esc(state.notice) + '</p>';
+  if (state.error) h += '<p class="error" role="alert">' + esc(state.error) + '</p>';
+  h += '</section><section class="panel"><div class="panel-h"><h2>Stored keys</h2><span class="hint">Names and set state only</span></div><div class="tablewrap"><table><thead><tr><th>Location</th><th>Key</th><th>Type</th><th>State</th><th>Last changed</th><th>Machines</th></tr></thead><tbody>';
+  if (!items.length) h += '<tr><td colspan="6" class="empty">No runtime keys are stored yet.</td></tr>';
+  else h += items.map(function (item) { return '<tr><td>' + esc(item.scope === 'project' ? 'Project · ' + item.project : 'Control') +
+    '</td><td><code>' + esc(item.name) + '</code></td><td>' + (item.is_secret ? 'Secret' : 'Setting') + '</td><td>' +
+    (item.is_set ? '<span class="badge ok">Set</span>' : '<span class="badge">Empty</span>') + '</td><td>' +
+    esc(item.changed_at ? when(item.changed_at) : '—') + '</td><td>' + esc((item.nodes || []).join(', ') || 'Control') + '</td></tr>'; }).join('');
+  h += '</tbody></table></div></section>';
+  var changes = state.changes || [];
+  if (changes.length) {
+    h += '<section class="panel"><div class="panel-h"><h2>Restart results</h2></div><div class="stack">' + changes.slice(0, 8).map(function (change) {
+      var status = change.status === 'completed' ? '<span class="badge ok">Succeeded</span>' : change.status === 'failed' ? '<span class="badge danger">Failed</span>' : change.status === 'rolling_back' ? '<span class="badge">Rolling back</span>' : '<span class="badge">Running</span>';
+      var operations = (change.operations || []).map(function (op) {
+        var detail = op.result && op.result.cancelled ? 'Not applied after a peer failed' :
+          op.status === 'failed' ? ((op.result && (op.result.failed_service || op.result.error)) || 'Restart failed') : op.status;
+        return '<div class="small">' + esc(op.node) + ' · ' + esc(detail) + '</div>';
+      }).join('');
+      var rollbacks = (change.rollbacks || []).map(function (op) {
+        var detail = op.status === 'failed' ? ((op.result && op.result.error) || 'Rollback failed') : op.status;
+        return '<div class="small">' + esc(op.node) + ' · recovery · ' + esc(detail) + '</div>';
+      }).join('');
+      return '<div class="review-card"><div class="panel-h">' + status + '<code>' + esc(change.id) + '</code></div>' + operations + rollbacks + '</div>';
+    }).join('') + '</div></section>';
+  }
+  root.innerHTML = h;
 }
 function renderIntegrations() {
   var root = $('#view-integrations'); if (!root) return;
@@ -3850,10 +4034,33 @@ function analyticsChart(rows) {
   });
   return svg + '</svg>';
 }
+function conflictLossBlock() {
+  /* Work lost to merge conflicts (/v1/analytics/conflicts): share of verifications, time spent, trend */
+  var c = S.conflicts;
+  var h = '<div id="d-conflicts" class="conflict-loss" aria-label="Work lost to merge conflicts"><h3>Lost to merge conflicts</h3>';
+  if (S.conflictsError) return h + '<div class="empty">Conflict numbers unavailable: ' + esc(S.conflictsError) + '</div></div>';
+  if (!c) return h + '<div class="empty">Loading…</div></div>';
+  var cur = c.current, prev = c.previous, ch = c.change;
+  var dir = function (v, unit) { return v === 0 ? 'no change' : (v > 0 ? '+' : '') + v + unit; };
+  h += '<div class="legend"><span>Share lost: <b class="mono">' + cur.share_percent + '%</b> (' + cur.conflicts + ' of ' + cur.verifications + ' verifications)</span>';
+  h += '<span>Time spent: <b class="mono">' + mmss(cur.seconds) + '</b>, average <span class="mono">' + mmss(cur.average_seconds) + '</span> per conflict</span>';
+  h += '<span>Previous ' + c.days + ' days: <span class="mono">' + prev.share_percent + '%</span>, <span class="mono">' + mmss(prev.seconds) + '</span></span>';
+  h += '<span>Change: <span class="mono">' + dir(ch.share_points, ' points') + '</span></span>';
+  h += '<span>Updated automatically, not counted: <span class="mono">' + cur.clean_updates + '</span></span></div>';
+  var max = 1; c.trend.forEach(function (t) { max = Math.max(max, t.share_percent); });
+  var W = 28, G = 8, H = 60, LB = 16, svg = '<svg class="an-chart" viewBox="0 0 ' + (c.trend.length * (W + G)) + ' ' + (H + LB) + '" role="img" aria-label="Share of verifications lost to conflicts per day">';
+  c.trend.forEach(function (t, i) {
+    var x = i * (W + G) + G / 2, hh = H * t.share_percent / max;
+    svg += '<rect class="an-rework" x="' + x + '" y="' + (H - hh).toFixed(1) + '" width="' + W + '" height="' + hh.toFixed(1) + '"><title>' + esc(t.period) + ' · ' + t.share_percent + '% (' + t.conflicts + ' of ' + t.verifications + ') · ' + mmss(t.seconds) + '</title></rect>';
+    svg += '<text x="' + (x + W / 2) + '" y="' + (H + LB - 3) + '" text-anchor="middle">' + esc(t.period.slice(8)) + '</text>';
+  });
+  return h + svg + '</svg><p class="hint">' + esc(c.definition) + '</p></div>';
+}
 function analyticsPanel() {
   var rows = S.analytics.filter(function (r) { return r.project === S.project; });
   var h = '<section class="panel" data-block="analytics" id="d-analytics" aria-labelledby="h-an"><div class="panel-h"><h2 id="h-an">Analytics</h2><span class="hint">Last ' + ANALYTICS_DAYS + ' days (UTC) per account; refreshed every minute</span><span class="spacer"></span><div class="legend"><span><i class="an-ok"></i>Done or merged</span><span><i class="an-rework"></i>Rework</span><span><i class="an-failed"></i>Failed</span><span><i class="an-other"></i>Other</span></div></div>';
   if (S.anError) h += '<div class="empty">Analytics unavailable: ' + esc(S.anError) + '</div>';
+  h += conflictLossBlock();
   h += analyticsChart(rows);
   if (!rows.length) return h + '<div class="empty">No runs for this project in the last ' + ANALYTICS_DAYS + ' days.</div></section>';
   h += '<div class="tablebox"><table class="an-table" style="min-width:880px"><thead><tr><th>Day</th><th>Account</th><th>Runs</th><th>Done</th><th>Merged</th><th>Rework</th><th>Failed</th><th>Tokens in</th><th>Tokens out</th><th>Cost</th><th>Median run</th></tr></thead><tbody>';
@@ -3869,6 +4076,7 @@ function card(t, p) {
   if (t.labels.indexOf('aiflow-ready') >= 0 && t.status === 'To Do') flags += '<span class="flag" data-tone="ok">ready</span>';
   if (t.labels.indexOf('require-human') >= 0) flags += '<span class="flag" data-tone="info">require human</span>';
   if (t.labels.indexOf('tier-senior') >= 0) flags += '<span class="flag" data-tone="muted">senior</span>';
+  if (t.status === 'In Verify' && t.already_done) flags += '<span class="flag" data-tone="ok">Already done · sent to verification</span>';
   var blocked = (t.blocked_by || []).filter(function (k) { var b = ticketBy(k); return !b || b.status !== 'Done'; });
   if (blocked.length && t.status !== 'Done') flags += '<span class="flag" data-tone="warn">blocked by ' + esc(blocked.join(', ')) + '</span>';
   var h = '<button class="card" data-act="open-ticket" data-key="' + esc(t.key) + '">';
@@ -3885,7 +4093,12 @@ function card(t, p) {
     var lr = t.last_run;
     h += '<span class="c-run">' + pill(runTone(lr.outcome), lr.outcome) + ' <span class="mono">' + esc(lr.account) + '</span> · ' + mmss(lr.duration_s) + (lr.pr_url ? ' · PR #' + esc(lr.pr_url.split('/').pop()) : '') + '</span>';
   }
-  return h + '</button>';
+  h += '</button>';
+  if (t.status === 'In Verify' && t.already_done && t.already_done.pr_url) {
+    var prMatch = t.already_done.pr_url.match(/\/pull\/(\d+)(?:\/|$)/), prLabel = prMatch ? 'Pull request #' + prMatch[1] : 'Open pull request';
+    return '<div class="card-wrap">' + h + '<a class="card-pr-link" href="' + esc(t.already_done.pr_url) + '" target="_blank" rel="noopener" aria-label="' + esc(prLabel + ' for ' + t.key) + '">' + esc(prLabel) + ' ' + ICON.ext + '</a></div>';
+  }
+  return h;
 }
 
 /* ---------- drawers ---------- */
@@ -4076,6 +4289,7 @@ function drawerInc(id) {
     node_no_ai: 'The node heartbeats and adds slots, but no AI account is assigned to it, so no worker runs there. Assign accounts in aiflow-control/accounts.yaml and sign them in on the node.',
     node_tools: 'A project this node serves needs a tool that is missing from the node, so its checks cannot run. Install the tool on the node; the incident closes when a later heartbeat reports it.',
     node_services: 'A test service (PostgreSQL or Redis) that a project declares is missing or unhealthy on this node, so the node takes no work for that project. The node agent recreates missing or stopped services; the incident closes when a later heartbeat reports them healthy.',
+    service_undeclared: 'Tickets of a project are parked on a test service (PostgreSQL or Redis) that the project does not declare. The flow doctor declares it itself; this alert appears only when it could not. Add the service to Test services of the project on the Projects screen.',
     ticket_stuck: 'Dev runs of this ticket keep failing. Retries wait longer each time (up to 30 minutes). Read the last run in the ticket drawer, fix the cause or put the ticket on hold.',
     run_hard_limit: 'The run passed the hard limit; the worker stops it and the ticket goes back to To Do.'
   }[i.kind] || 'Handled by the watchdog.') + '</div></div>';
@@ -4421,15 +4635,19 @@ function toolWaitsPanel(d) {
 
 function renderProjects() {
   var root = $('#view-projects'); if (!root) return;
-  var state = S.projectAdmin, rows = state.projects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
+  var state = S.projectAdmin, rows = state.projects || [], invalid = state.invalidProjects || [], h = '<section class="panel"><div class="panel-h"><h2>Projects</h2>';
   h += '<span class="hint">Projects configured in aiflow-control and mirrored from Jira</span><span class="spacer"></span>';
   if (consoleCan('projects.manage')) h += '<button class="btn primary" data-act="project-add-open">Add project</button>';
   h += '</div>';
   if (state.error && !state.showForm) h += '<div class="stakeholder-error">' + esc(state.error) + '</div>';
+  if (invalid.length) {
+    h += '<div class="stakeholder-error" role="alert"><strong>Project files could not be loaded.</strong> These projects are unavailable to machines until their files are corrected in aiflow-control.';
+    h += '<ul>' + invalid.map(function (item) { return '<li><span class="mono">' + esc(item.file) + '</span>: ' + esc(item.reason) + '</li>'; }).join('') + '</ul></div>';
+  }
   if (state.projects === null) h += '<div class="muted">Loading projects…</div>';
-  else if (!rows.length) h += '<div class="muted">No projects are configured.</div>';
-  else {
-    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Machine readiness</th><th>Actions</th></tr></thead><tbody>';
+  else if (!rows.length && !invalid.length) h += '<div class="muted">No projects are configured.</div>';
+  else if (rows.length) {
+    h += '<div class="project-table"><table><thead><tr><th>Key</th><th>Repository</th><th>Status</th><th>Priority</th><th>Tickets</th><th>Checks</th><th>Machine readiness</th><th>Test services</th><th>Actions</th></tr></thead><tbody>';
     rows.forEach(function (p) {
       h += '<tr><td class="mono">' + esc(p.key) + '</td><td>' + esc((p.repositories || [p.repo]).join(', ')) + '</td><td><span class="pill" data-tone="' + (p.status === 'active' ? 'ok' : 'warn') + '">' + esc(p.status) + '</span></td>';
       h += '<td class="mono">' + esc(p.priority) + '</td><td class="mono">' + esc(p.ticket_count) + '</td><td class="project-check-state">' + projectChecksCell(p.checks) + '</td><td>';
@@ -4439,7 +4657,7 @@ function renderProjects() {
         h += '<div class="bad"><span class="mono">' + esc(n.name) + '</span>: ' + reasons + '</div>';
       });
       else h += '<span class="good">' + (readiness.length ? 'Ready on ' + readiness.length + ' machine' + (readiness.length === 1 ? '' : 's') : 'No assigned machine') + '</span>';
-      h += '</td><td><div class="project-actions">';
+      h += '</td><td>' + projectServicesCell(p) + '</td><td><div class="project-actions">';
       if (consoleCan('projects.manage')) {
         h += '<button class="btn sm" data-act="project-repositories" data-key="' + esc(p.key) + '">Repositories</button>';
         h += '<button class="btn sm" data-act="project-environment" data-key="' + esc(p.key) + '">Environment</button>';
@@ -4466,6 +4684,7 @@ function renderProjects() {
       h += '<a class="btn sm" href="/v1/integrations/github/installation-settings" target="_blank" rel="noopener">Add repository on GitHub</a></div>';
       h += '<label>Base branch<input data-project-field="base" value="' + esc(form.base || 'develop') + '"></label>';
       h += '<label>Stack<select data-project-field="stack"><option value="">No stack</option>' + (catalog.stacks || []).map(function (stack) { return '<option value="' + esc(stack) + '"' + (form.stack === stack ? ' selected' : '') + '>' + esc(stack) + '</option>'; }).join('') + '</select></label>';
+      h += '<label>Test services (postgres, redis)<input data-project-field="services" value="' + esc(form.services) + '" placeholder="postgres, redis"></label>';
       h += '<label>Checks need Docker containers<select data-project-field="containers"><option value="false"' + (!form.containers ? ' selected' : '') + '>No</option><option value="true"' + (form.containers ? ' selected' : '') + '>Yes · require the safe rootless runtime</option></select></label>';
       h += '<label>Priority (lower runs first)<input type="number" min="0" max="100" data-project-field="priority" value="' + esc(form.priority) + '"></label>';
       h += '<label>Parallel limit<input type="number" min="1" max="100" data-project-field="parallel_limit" value="' + esc(form.parallel_limit) + '"></label>';
@@ -4703,7 +4922,12 @@ function renderNotifications() {
       notificationField('password', 'Password (leave blank to keep saved password)', 'password', 'Hidden after saving') +
       notificationField('from', 'From address', 'email', 'aiflow@example.com') + notificationField('to', 'To address', 'email', 'owner@example.com') +
       '<label>Connection security<select data-notify-field="tls_mode"><option value="starttls"' + (state.form.tls_mode !== 'ssl' && state.form.tls_mode !== 'none' ? ' selected' : '') + '>STARTTLS</option><option value="ssl"' + (state.form.tls_mode === 'ssl' ? ' selected' : '') + '>TLS (SSL)</option><option value="none"' + (state.form.tls_mode === 'none' ? ' selected' : '') + '>None</option></select></label>',
-    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Chat ID', 'text', '-100…'),
+    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Private Telegram chat ID', 'text', 'Your numeric chat ID') +
+      '<label><span>Jira project for brainstorms</span><select data-notify-field="project_key"><option value="">Choose a configured project</option>' +
+      (data.projects || []).map(function (p) { return '<option value="' + esc(p.key) + '"' + (state.form.project_key === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') +
+      '</select></label><label class="checkline"><input type="checkbox" data-notify-checkbox="ba_chat_enabled"' +
+      (state.form.ba_chat_enabled ? ' checked' : '') + '> Enable BA brainstorming chat</label>' +
+      '<div class="notify-meta">Use the bot in a private chat. The BA AI asks questions, sends a draft proposal, and creates Jira tickets only after approval in chat.</div>',
     slack: notificationField('webhook_url', 'Slack incoming webhook URL', 'password', 'Hidden after saving'),
     teams: notificationField('webhook_url', 'Microsoft Teams webhook URL', 'password', 'Hidden after saving'),
     webhook: notificationField('url', 'Webhook URL', 'password', 'Hidden after saving') + notificationField('auth_token', 'Bearer token (optional)', 'password', 'Hidden after saving')
@@ -4741,7 +4965,7 @@ function renderNotifications() {
 }
 function notificationConfigFromForm(form) {
   var keys = { email: ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode'],
-    telegram: ['bot_token', 'chat_id'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
+    telegram: ['bot_token', 'chat_id', 'ba_chat_enabled', 'project_key'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
   var config = {}; keys.forEach(function (key) { if (form[key] !== undefined) config[key] = form[key]; }); return config;
 }
 function notificationFormSubmit() {
@@ -4863,6 +5087,7 @@ function render() {
   else if (S.view === 'system-check') renderSystemCheck();
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
+  else if (S.view === 'settings') renderRuntimeSettings();
   else if (S.view === 'support') renderSupport();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
@@ -4906,7 +5131,8 @@ var HINTS = {
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
   support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.',
-  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.'
+  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.',
+  settings: 'Review write-only runtime keys, see affected services, and save a value with a safe restart.'
 };
 function helpUrl(view) { return HELP_BASE + view + '.html'; }
 function hintSeen(view) { try { return localStorage.getItem('aiflow4-hint-' + view) === '1'; } catch (e) { return false; } }
@@ -4921,7 +5147,7 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'support'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'system-check', 'licensing', 'notifications', 'settings', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
@@ -4951,6 +5177,7 @@ function setView(v) {
   if (v === 'users') loadUsers();
   if (v === 'machines') pollServices();
   if (v === 'notifications') loadNotifications();
+  if (v === 'settings') loadRuntimeSettings();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -5209,13 +5436,15 @@ document.addEventListener('keydown', layoutKey);
 
 /* ---------- interactions ---------- */
 document.addEventListener('click', function (e) {
-  if (e.target.closest('[data-stop]')) return;
-  if (S.projectPickerOpen && !e.target.closest('#project-picker')) {
+  var target = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
+  if (!target || !target.closest) return;
+  if (target.closest('[data-stop]')) return;
+  if (S.projectPickerOpen && !target.closest('#project-picker')) {
     S.projectPickerOpen = false;
     renderProjectPickerOptions();
   }
-  var el = e.target.closest('[data-act]');
-  if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
+  var el = target.closest('[data-act]');
+  if (!el) { if (target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'system-check-run') runSystemCheck();
@@ -5254,6 +5483,8 @@ document.addEventListener('click', function (e) {
     submitLicense('/v1/licensing/limits', { plan: limitPlan, limits: limits }, 'Plan limits saved');
   }
   else if (act === 'notifications-refresh') loadNotifications();
+  else if (act === 'runtime-settings-refresh') loadRuntimeSettings();
+  else if (act === 'runtime-setting-save') saveRuntimeSetting();
   else if (act === 'notification-test') notificationTest(el.getAttribute('data-id'));
   else if (act === 'notification-preferences-save') notificationPreferencesSubmit();
   else if (act === 'notification-edit') {
@@ -5340,12 +5571,15 @@ document.addEventListener('click', function (e) {
   else if (act === 'project-add-cancel') { S.projectAdmin.showForm = false; S.projectAdmin.preflight = null; S.projectAdmin.error = ''; renderProjects(); }
   else if (act === 'project-preflight') runProjectPreflight();
   else if (act === 'project-save') saveProject();
+  else if (act === 'project-services-save') saveProjectServices(el.getAttribute('data-key'), el);
   else if (act === 'project-pause') setProjectPaused(el.getAttribute('data-key'), el.getAttribute('data-paused') === 'true');
   else if (act === 'project-remove') removeManagedProject(el.getAttribute('data-key'));
   else if (act === 'refresh-reviews') loadReviews();
   else if (act.indexOf('review-') === 0) {
     var card = el.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
-    submitReview(el.getAttribute('data-key'), act.slice('review-'.length), note ? note.value : '');
+    var reviewKey = el.getAttribute('data-key'), reviewComment = note ? note.value : (S.reviewNoteDrafts[reviewKey] || '');
+    if (note) S.reviewNoteDrafts[reviewKey] = reviewComment;
+    submitReview(reviewKey, act.slice('review-'.length), reviewComment);
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
@@ -5493,6 +5727,7 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-user-email]')) S.userAdmin.addForm.email = e.target.value;
   if (e.target && e.target.matches('[data-user-name]')) S.userAdmin.addForm.name = e.target.value;
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-notify-checkbox]')) S.notifications.form[e.target.getAttribute('data-notify-checkbox')] = e.target.checked;
   if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
   if (e.target && e.target.id === 'work-project') {
@@ -5539,6 +5774,8 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-integ-owner-token]')) S.integ.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-backup-field]')) S.backup.form[e.target.getAttribute('data-backup-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-runtime-key]')) S.runtimeSettings.key = e.target.value;
+  if (e.target && e.target.matches('[data-runtime-value]')) S.runtimeSettings.value = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
     S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
@@ -5553,11 +5790,14 @@ document.addEventListener('change', function (e) {
   if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.matches('[data-notify-kind-select]')) {
     S.notifications.form.kind = e.target.value;
-    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
+    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'ba_chat_enabled', 'project_key', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
     renderNotifications();
   }
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-notify-checkbox]')) S.notifications.form[e.target.getAttribute('data-notify-checkbox')] = e.target.checked;
   if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
+  if (e.target && e.target.matches('[data-runtime-scope]')) { S.runtimeSettings.scope = e.target.value; renderRuntimeSettings(); }
+  if (e.target && e.target.matches('[data-runtime-project]')) { S.runtimeSettings.project = e.target.value; renderRuntimeSettings(); }
   if (e.target && e.target.matches('[data-backup-field]')) {
     var backupField = e.target.getAttribute('data-backup-field');
     S.backup.form[backupField] = e.target.value;
@@ -5715,7 +5955,7 @@ if (S.view === 'integrations') {
   loadIntegrations();
 }
 if (S.view === 'notifications') loadNotifications();
-poll(); pollServices(); pollAnalytics(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
+poll(); pollServices(); pollAnalytics(); pollConflicts(); pollDashboardUsage(); pollConsoleSession(); pollReviews(); pollDashboardWaiting();
 setInterval(tick, 1000);
 })();
 </script>

@@ -13,6 +13,7 @@ from aiflow.v4.control.github_connections import GitHubConnections
 from aiflow.v4.core.controlrepo import Account, Project
 from aiflow.v4.core.system_check import condition
 from aiflow.v4.worker import version_release as release_worker
+from aiflow.v4.worker import post_merge as post_merge_worker
 from aiflow.v4.worker.dev import Claimed
 from conftest import FakeGitHub, add_ticket, join_node
 
@@ -181,7 +182,7 @@ def test_release_candidates_and_claims_obey_project_and_account_readiness_gate(
     assert ctx.db.one("SELECT count(*) AS n FROM version_releases WHERE status='checking'")["n"] == 0
 
 
-def test_release_claim_receives_only_permitted_post_merge_environment_and_deferred_ticket_criteria(client, ctx):
+def test_version_release_receives_only_its_permitted_environment_not_ticket_deferred_criteria(client, ctx):
     configure(ctx)
     evidence(ctx, "TESTWP-24")
     project = ctx.repo().projects["TESTWP"]
@@ -190,16 +191,107 @@ def test_release_claim_receives_only_permitted_post_merge_environment_and_deferr
          "runs": ["post_merge"]},
         {"name": "DEV_ONLY_SECRET", "kind": "secret", "runs": ["dev"]},
     ]
+    project.checks = ["canary-check"]
     environment_reports.record_post_merge_criteria(
         ctx, {"id": "verify-24", "step": "verify", "ticket_key": "TESTWP-24", "project": "TESTWP"},
-        ["AC4: verify the site after merge"])
+        [{"id": "AC4", "text": "verify the site after merge", "check": "canary-check"}])
     response = claim_release(client, node_headers(client))
 
     assert response.status_code == 200
     project_data = response.json()["project"]
     assert [item["name"] for item in project_data["environment"]] == ["POST_MERGE_URL"]
-    assert project_data["post_merge_criteria"] == [{
-        "key": "TESTWP-24", "post_merge_criteria": ["AC4: verify the site after merge"]}]
+    assert "post_merge_criteria" not in project_data
+
+
+def test_merged_human_review_ticket_outside_a_version_gets_its_per_criterion_post_merge_run(client, ctx):
+    project = ctx.repo().projects["TESTWP"]
+    project.checks = ["vendor/bin/phpunit", "composer validate"]
+    project.environment = [{"name": "POST_MERGE_URL", "kind": "base_url", "value": "https://site.example.test",
+                            "runs": ["post_merge"]}]
+    account = ctx.repo().account("claude-01")
+    account.roles.append("release")
+    client.app.state.sync_accounts()
+    add_ticket(ctx.db, "TESTWP-245", status="Human review", labels=())
+    criteria = environment_reports.record_post_merge_criteria(
+        ctx, {"id": "verify-245", "step": "verify", "ticket_key": "TESTWP-245", "project": "TESTWP"},
+        [{"id": "AC4", "text": "the site responds after merge", "check": "vendor/bin/phpunit"}])
+    assert criteria[0]["check"] == "vendor/bin/phpunit"
+    assert environment_reports.pending_post_merge(ctx, "TESTWP") == []
+
+    # The human review flow merges the change and marks the ticket Done later.
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-245'")
+    headers = node_headers(client)
+    candidates = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=headers).json()["tickets"]
+    assert {item["key"] for item in candidates if item["step"] == "post_merge"} == {"TESTWP-245"}
+    claim = client.post("/v1/work/claim", json={"ticket": "TESTWP-245", "account": "claude-01",
+                                                 "step": "post_merge"}, headers=headers)
+    assert claim.status_code == 200, claim.text
+    claimed = claim.json()
+    assert [item["name"] for item in claimed["project"]["environment"]] == ["POST_MERGE_URL"]
+    assert claimed["post_merge_criteria"] == criteria
+
+    refused = client.post("/v1/environment/post-merge/complete", json={
+        "run_id": claimed["run_id"], "fence": claimed["fence"], "head_sha": "a" * 40,
+        "checks": [{"command": "unconfigured command", "passed": True}],
+    }, headers=headers)
+    assert refused.status_code == 422
+    completed = client.post("/v1/environment/post-merge/complete", json={
+        "run_id": claimed["run_id"], "fence": claimed["fence"], "head_sha": "a" * 40,
+        "checks": [{"command": "vendor/bin/phpunit", "passed": True, "exit_code": 0}],
+    }, headers=headers)
+    assert completed.status_code == 200 and completed.json()["results"][0]["status"] == "passed"
+    saved = ctx.db.one("SELECT status,result FROM environment_post_merge_checks WHERE ticket_key='TESTWP-245'")
+    assert saved["status"] == "passed" and saved["result"]["criteria"][0]["id"] == "AC4"
+
+
+def test_post_merge_worker_runs_only_the_check_mapped_to_its_criterion(tmp_path, monkeypatch):
+    refs = []
+
+    class FakeGit:
+        def __init__(self, _root, run_as=None):
+            pass
+
+        def mirror(self, _repo, _token, _transport_url=""):
+            return tmp_path
+
+        def remote_branch_exists(self, _mirror, branch):
+            return branch == "develop"
+
+        def detached(self, _mirror, path, ref):
+            refs.append(ref)
+            path.mkdir(parents=True, exist_ok=True)
+            return "b" * 40
+
+    class FakeApi:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, method, path, json=None, params=None):
+            self.calls.append((method, path, json, params))
+            if path == "/v1/github/token":
+                return {"token": "test-token"}
+            if path == "/v1/environment/post-merge/complete":
+                return {"recorded": True, "results": [{"status": "passed"}]}
+            raise AssertionError(path)
+
+    monkeypatch.setattr(post_merge_worker, "Git", FakeGit)
+    monkeypatch.setattr(post_merge_worker, "project_env", lambda *_args: {
+        "POST_MERGE_URL": "http://site.test", "SHORT_SECRET": "x"})
+    api = FakeApi()
+    claimed = Claimed(run_id="post-merge-1", fence=4, run_token="", account="claude-01", provider="claude",
+                      model="", effort="", ticket={"key": "TESTWP-245"},
+                      project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "base": "develop",
+                               "checks": ["true", "false", "printf x"], "work_minutes": {"hard": 1},
+                               "environment": [{"name": "SHORT_SECRET", "kind": "secret", "runs": ["post_merge"]}],
+                               "post_merge_criteria": [{"id": "AC4", "text": "works", "check": "printf x"}]},
+                      identity=("bot", "bot@example.test"), step="post_merge")
+
+    result = post_merge_worker.run_post_merge(api, claimed, str(tmp_path), 1, [])
+
+    assert result["outcome"] == "done" and refs == ["origin/develop"]
+    complete = next(call for call in api.calls if call[1] == "/v1/environment/post-merge/complete")
+    assert [item["command"] for item in complete[2]["checks"]] == ["printf x"]
+    assert complete[2]["checks"][0]["output"] == "[redacted]"
 
 
 def test_shared_release_account_is_a_candidate_on_its_secondary_machine(client, ctx):
@@ -375,8 +467,7 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
                                "source_branch": "develop", "work_minutes": {"hard": 1},
                                "environment": [{"name": "POST_MERGE_URL", "kind": "base_url",
                                                 "value": "https://site.example.test", "runs": ["post_merge"]}],
-                               "post_merge_criteria": [{"key": "TESTWP-25",
-                                                        "post_merge_criteria": ["AC4: verify the site after merge"]}]},
+                               },
                       identity=("bot", "bot@example.test"), step="version_release")
     claimed.project.update({"release_branch": "release/core-a", "source_sha": "a" * 40})
 
@@ -390,10 +481,64 @@ def test_full_project_check_worker_uses_current_develop_checkout_and_reports_res
     assert complete[2]["head_sha"] == "a" * 40
     assert complete[2]["source_sha"] == "a" * 40
     assert complete[2]["checks"] == [{"command": "true", "passed": True, "exit_code": 0, "output": ""}]
-    assert complete[2]["post_merge_results"] == [{"ticket": "TESTWP-25",
-                                                   "criteria": ["AC4: verify the site after merge"],
-                                                   "status": "passed", "head_sha": "a" * 40,
-                                                   "checks": [{"command": "true", "passed": True}]}]
+    assert "post_merge_results" not in complete[2]
+
+
+def test_version_release_worker_redacts_a_short_configured_secret_from_check_output(tmp_path, monkeypatch):
+    class FakeGit:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def mirror(self, *_args):
+            return tmp_path
+
+        def remote_branch_exists(self, _mirror, branch):
+            return branch == "release/core-a"
+
+        def detached(self, _mirror, path, _ref):
+            path.mkdir(parents=True, exist_ok=True)
+            return "a" * 40
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "xy", None
+
+    class FakeApi:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, _method, path, body=None, params=None):
+            self.calls.append((path, body))
+            if path == "/v1/github/token":
+                return {"token": "test-token"}
+            if path.endswith("/complete"):
+                return {"released": True, "status": "released"}
+            raise AssertionError(path)
+
+    monkeypatch.setattr(release_worker, "Git", FakeGit)
+    monkeypatch.setattr(release_worker, "project_env", lambda *_args: {"SHORT_SECRET": "xy"})
+    monkeypatch.setattr(release_worker.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    api = FakeApi()
+    claimed = Claimed(run_id="run-short-secret", fence=1, run_token="", account="claude-01", provider="claude",
+                      model="", effort="", ticket={"key": "release:TESTWP:1"},
+                      project={"key": "TESTWP", "repo": "jooservices/test-aiflow-wp", "checks": ["echo secret"],
+                               "source_branch": "develop", "release_branch": "release/core-a",
+                               "source_sha": "a" * 40, "work_minutes": {"hard": 1},
+                               "environment": [{"name": "SHORT_SECRET", "kind": "secret",
+                                                "runs": ["post_merge"]}]},
+                      identity=("bot", "bot@example.test"), step="version_release")
+
+    result = release_worker.run_version_release(api, claimed, {"id": "101", "name": CORE}, "TESTWP-900",
+                                                str(tmp_path), 1, [])
+
+    completion = next(body for path, body in api.calls if path.endswith("/complete"))
+    assert result["outcome"] == "done"
+    assert completion["checks"][0]["output"] == "[redacted]"
+    assert result["details"]["checks"][0]["output"] == "[redacted]"
+    assert "xy" not in str(result["details"])
+    assert "xy" not in str(completion)
 
 
 def test_failed_release_checks_create_one_bug_per_failed_command_linked_as_blocker(ctx):

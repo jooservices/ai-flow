@@ -6,7 +6,10 @@ land. See the change with `git diff origin/{base}` and `git log --oneline origin
 
 Do this:
 1. Read AGENTS.md and docs/SPEC.md if they exist, then the ticket below.
-2. Check every acceptance criterion against the code: is it implemented, complete and tested?
+2. Check every acceptance criterion against the code: is it implemented, complete and tested? If a criterion can
+   only be proven after merge with a project's configured environment, list its exact criterion ID and text under
+   `POST-MERGE CHECKS:`. Do not fail review for that criterion and do not ask about its environment. List nothing
+   when all criteria can be checked in this review run.
 3. Run the project's checks and the tests of this change:
 {checks}
    A check that cannot run here (Docker, network) is not a failure; say so. A check that runs and fails is.
@@ -22,7 +25,9 @@ The developer's summary:
 {dev_summary}
 {related}{environment}
 A criterion that can only be proven on one particular machine is verified by AI Flow after the merge (canary,
-release checks); it is not a failure of this review and never a question about a server.
+release checks); it is not a failure of this review and never a question about a server. The configured version
+release run executes the project's post-merge checks with only environment items permitted for `post_merge`, then
+records their result against each ticket whose deferred criteria were included in that release.
 
 Ticket description:
 ---

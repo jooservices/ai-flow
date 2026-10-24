@@ -28,6 +28,14 @@ from .wordpress import declares_wordpress, start_site as start_wordpress_site
 log = logging.getLogger("aiflow4.verify")
 VERDICT = re.compile(r"^VERDICT:\s*(PASS|FAIL|BLOCKED)\b", re.M)
 CHECKS = re.compile(r"^CHECKS:\s*(.+)$", re.M)
+POST_MERGE_CHECKS = re.compile(r"^POST-MERGE CHECKS:\s*\n((?:\s*[-*].*\n?)+)", re.M | re.I)
+
+
+def deferred_criteria(text: str) -> list[str]:
+    """Read the reviewer AI's explicit list of criteria that need the post-merge environment."""
+    match = POST_MERGE_CHECKS.search(text or "")
+    return list(dict.fromkeys(re.sub(r"^[ \t]*[-*][ \t]*", "", line).strip()[:600]
+                              for line in (match.group(1).splitlines() if match else []) if line.strip()))[:20]
 
 
 def findings_of(text: str) -> str:
@@ -136,9 +144,10 @@ def run_verify(api: ControlClient, c: Claimed, pr: dict, srv_root: str, control_
         verdict_m = VERDICT.search(text)
         verdict = verdict_m.group(1) if verdict_m else ""
         findings = findings_of(text)
+        post_merge = deferred_criteria(text)
         result["details"] = {"verdict": verdict, "checks": checks, "findings": findings, "exit_code": res.exit_code,
                              "duration_s": int(res.duration_s), "log": res.log_path,
-                             "qc_passed": False, "ci": []}
+                             "qc_passed": False, "ci": [], "post_merge_criteria": post_merge}
         if res.error_kind in ("quota", "auth"):
             result.update(outcome="quota", summary=f"verifier {c.account} cannot work now ({res.error_kind}): {res.error_message}"[:500])
             return result

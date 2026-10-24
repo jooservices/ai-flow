@@ -3123,7 +3123,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         items, problems = parse_env_items(project.environment)
         return {"project": key, "items": [item.public() for item in items], "problems": problems,
                 "kinds": list(ENV_KINDS), "runs": list(ENV_RUN_STEPS),
-                "missing": [r for r in environment_reports.reports(ctx) if r["project"] == key]}
+                "missing": [r for r in environment_reports.reports(ctx) if r["project"] == key],
+                "post_merge": environment_reports.post_merge_report(ctx, key)}
 
     @app.put("/v1/projects/{key}/environment")
     def save_project_environment(key: str, body: ProjectEnvironmentBody, request: Request) -> dict:
@@ -4820,7 +4821,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
                        (J({"repository": project.repo, "repository_settings": selected_settings,
-                          "github_connection": connection_id}), run_id))
+                          "github_connection": connection_id,
+                          "post_merge_criteria": [{"ticket": item["key"],
+                                                   "criteria": item.get("post_merge_criteria") or []}
+                                                  for item in snapshot["tickets"]
+                                                  if item.get("post_merge_criteria")]}), run_id))
             ctx.db.run("INSERT INTO version_releases (project,version_id,version_name,tracker_key,status,gate_detail,ticket_snapshot,repository)"
                        " VALUES (%s,%s,%s,%s,'checking','',%s,%s)"
                        " ON CONFLICT (project,version_id,repository) DO UPDATE SET"
@@ -4845,6 +4850,12 @@ def create_app(ctx: Ctx) -> FastAPI:
                         "checks": version_release.check_commands(project), "source_branch": version_release.source_branch(project),
                         "target_branch": version_release.target_branch(project),
                         "release_branch": release_branch, "source_sha": source_sha,
+                        "environment": ([item.public() for item in project.environment_items
+                                         if "post_merge" in item.runs]),
+                        "post_merge_criteria": [{"key": item["key"],
+                                                 "post_merge_criteria": item.get("post_merge_criteria") or []}
+                                                for item in snapshot["tickets"]
+                                                if item.get("post_merge_criteria")],
                         "containers": bool(project.settings_for_repo(project.repo).get("containers")),
                         "work_minutes": project.work_minutes()}
         ticket = {"key": key, "project": project.key, "summary": f"Release {version['name']}",
@@ -4908,10 +4919,23 @@ def create_app(ctx: Ctx) -> FastAPI:
             result = version_release.complete(release_ctx, project, version, run, report)
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
+            post_merge_results = environment_reports.record_post_merge_results(
+                ctx, run, version["name"], report,
+                (run.get("details") or {}).get("post_merge_criteria") or [])
+            ctx.db.run("UPDATE runs SET details=details || %s WHERE id=%s",
+                       (J({"post_merge_results": post_merge_results}), body.run_id))
             return version_release.publish_failed(release_ctx, project, version, run, exc)
+        check_report = dict(report)
+        if result.get("status") in ("stale", "blocked"):
+            check_report["error"] = check_report.get("error") or str(result.get("reason") or result["status"])
+        post_merge_results = environment_reports.record_post_merge_results(
+            ctx, run, version["name"], check_report,
+            (run.get("details") or {}).get("post_merge_criteria") or [])
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
-                                                                              "checks": body.checks}), body.run_id))
+                                                                              "checks": body.checks,
+                                                                              "post_merge_results": post_merge_results}),
+                    body.run_id))
         return result
 
     # --- runs -----------------------------------------------------------------------------------------------
@@ -4939,6 +4963,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         details.pop("pr_url_source", None)  # provenance is set by the control API, never trusted from the worker
         if body.pr_url:
             details["pr_url_source"] = "current"
+        if run["step"] == "verify" and body.outcome == "merged":
+            details["post_merge_criteria"] = environment_reports.record_post_merge_criteria(
+                ctx, run, details.get("post_merge_criteria") or [])
         run_log = details.pop("support_log_text", None)  # raw logs never reach the runs table or its backups
         details.pop("support_log_truncated", None)
         if isinstance(run_log, str) and run_log:

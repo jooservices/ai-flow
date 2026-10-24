@@ -56,6 +56,7 @@ def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
     cases = {
         "Use the Dev VM for the tests": "machine", "the lab machines have it": "machine", "run it on WSL": "machine",
         "use the shared Docker": "machine", "connect to 192.168.1.20": "ip address",
+        "open https://wp.example.com for the smoke test": "host", "connect to 2001:db8::1": "ip address",
         "browse http://wp.office.local:8080/": "host", "through the VPN": "network", "ssh into the box": "access instruction",
         "password: hunter22": "access instruction", "write a Jira comment when done": "jira action",
     }
@@ -65,6 +66,8 @@ def test_wording_that_names_a_host_ip_machine_network_or_access_is_found():
                         "The page lists the projects at /portfolio"):
         assert find_server_wording(requirement) == [], requirement
     assert redact("run it on the Dev VM now") == "run it on the [server detail removed] now"
+    assert "[server detail removed]" in redact("open https://wp.example.com")
+    assert "[server detail removed]" in redact("connect to 2001:db8::1")
 
 
 def test_a_ticket_naming_a_host_is_rejected_and_the_same_requirement_without_it_is_accepted():
@@ -73,6 +76,12 @@ def test_a_ticket_naming_a_host_is_rejected_and_the_same_requirement_without_it_
     assert "describe the requirement instead" in why and "10.0.0.5" in why and "project configuration" in why
     assert intake.readiness_problems(HOSTY) and not intake.readiness_problems(REWRITE)
     assert intake.parse(f"DESCRIPTION:\n<<<\n{REWRITE}\n>>>\nINTAKE: REWRITE") == ("rewrite", REWRITE)
+
+
+@pytest.mark.parametrize("host", ["https://wp.example.com", "2001:db8::1"])
+def test_public_hostname_and_compressed_ipv6_are_rejected_at_intake(host):
+    text = REWRITE + f"\nTechnical notes: tests use {host}."
+    assert intake.parse(f"DESCRIPTION:\n<<<\n{text}\n>>>\nINTAKE: REWRITE")[0] == "invalid"
 
 
 def test_intake_run_rejects_a_host_in_the_rewrite_and_writes_nothing(iclient, ctx, tmp_path, monkeypatch):
@@ -117,6 +126,28 @@ def test_removed_wording_is_recorded_and_the_real_need_opens_one_environment_tic
     assert sorted(row["linked_tickets"]) == ["TESTWP-41", "TESTWP-42"]
 
 
+def test_failed_environment_ticket_creation_keeps_the_need_and_sweep_retries_it(iclient, ctx, tmp_path, monkeypatch):
+    create_issue = ctx.jira.create_issue
+
+    def fail_once(*args, **kwargs):
+        ctx.jira.create_issue = create_issue
+        raise RuntimeError("temporary Jira outage")
+
+    ctx.jira.create_issue = fail_once
+    original = "Portfolio page. Run the tests on the shared Docker; they need a seeded site."
+    result, _ = _rewrite_with_removal(iclient, ctx, tmp_path, monkeypatch, "TESTWP-44", original)
+    assert result["outcome"] == "refined"  # the story is rewritten only after the need is durably tracked
+    pending = ctx.db.one("SELECT need,environment_ticket,linked_tickets FROM environment_needs")
+    assert pending["need"] == "tests need a seeded site" and pending["environment_ticket"] == ""
+    assert pending["linked_tickets"] == ["TESTWP-44"]
+
+    opened = environment_reports.sweep(ctx)
+
+    saved = ctx.db.one("SELECT environment_ticket FROM environment_needs")
+    assert len(opened) == 1 and saved["environment_ticket"] == opened[0]
+    assert (opened[0], "TESTWP-44", "Relates") in ctx.jira.issue_links
+
+
 def test_an_ordinary_rewrite_records_nothing_about_the_environment(iclient, ctx, tmp_path, monkeypatch):
     add_ticket(ctx.db, "TESTWP-43", status="Intake", labels=())
     run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-43", f"DESCRIPTION:\n<<<\n{REWRITE}\n>>>\nINTAKE: REWRITE\n")
@@ -127,6 +158,7 @@ def test_an_ordinary_rewrite_records_nothing_about_the_environment(iclient, ctx,
 def test_environment_section_is_validated_secrets_are_by_name_only():
     items, problems = parse_items(ENVIRONMENT)
     assert problems == [] and [i.name for i in items] == ["WP_BASE_URL", "WP_DB_NAME", "BROWSERS", "WP_ADMIN_PASSWORD"]
+    assert items_of([{"name": "DEFAULT_RUNS", "kind": "secret"}])[0].runs == ("dev", "verify")
     assert items[3].public() == {"name": "WP_ADMIN_PASSWORD", "kind": "secret", "value": "", "runs": ["dev", "verify"],
                                  "description": ""}
     for bad, fragment in (
@@ -254,6 +286,18 @@ def test_verify_runs_get_the_items_allowed_for_verify(monkeypatch):
     assert "- BROWSERS (" in prompt and SECRET not in prompt
 
 
+def test_a_dev_only_secret_is_removed_before_a_verify_run(monkeypatch):
+    items = [*ENVIRONMENT, {"name": "DEV_ONLY_TOKEN", "kind": "secret", "runs": ["dev"]}]
+    monkeypatch.setattr(core_settings, "read_env_file", lambda _p: {"DEV_ONLY_TOKEN": SECRET})
+    from aiflow.v4.worker.notes import project_env
+
+    verify_env = project_env("TESTWP", items, "verify")
+    dev_env = project_env("TESTWP", items, "dev")
+
+    assert "DEV_ONLY_TOKEN" not in verify_env
+    assert dev_env["DEV_ONLY_TOKEN"] == SECRET
+
+
 def test_the_claim_carries_the_environment_without_secret_values(client, ctx, envrepo):
     cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
     add_ticket(ctx.db, "TESTWP-50")
@@ -352,13 +396,18 @@ def test_changing_the_item_in_the_configuration_offers_the_ticket_again(client, 
 
 
 # --- AC9: the AI never asks the owner about servers --------------------------------------------------------------------
-def test_a_question_about_a_server_is_answered_without_the_owner(client, ctx):
+@pytest.mark.parametrize("question", [
+    "Which server should I use for the integration site? Please give me the address and the login.",
+    "Which address should I use?",
+    "Where should I run the tests?",
+])
+def test_a_question_about_a_server_is_answered_without_the_owner(client, ctx, question):
     cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
     add_ticket(ctx.db, "TESTWP-56")
     r = client.post("/v1/work/claim", json={"ticket": "TESTWP-56", "account": "claude-01"}, headers=cc).json()
     raised = client.post("/v1/escalations/raise", json={
         "run_id": r["run_id"], "fence": r["fence"],
-        "question": "Which server should I use for the integration site? Please give me the address and the login."},
+        "question": question},
         headers=cc).json()
     assert raised["class"] == "missing_tool_or_environment" and raised["resolved"] and raised["outcome"] == "auto_answered"
     assert "MISSING-ENV" in raised["answer"] and "environment variables" in raised["answer"]
@@ -371,26 +420,55 @@ def test_prompts_leave_machine_bound_criteria_to_the_flow_after_the_merge(monkey
     _result, _api, adapter = _run_dev(monkeypatch, tmp_path)
     assert "verified by AI Flow after the merge (canary, release checks)" in adapter.spec.prompt.replace("\n", " ").replace("  ", " ")
     review = verify.build_prompt(_claimed(), {"number": 1, "branch": "b", "url": "u"}, {})
-    assert "verified by AI Flow after the merge" in review.replace("\n", " ")
+    assert "POST-MERGE CHECKS:" in review and "verified by AI Flow after the merge" in review.replace("\n", " ")
+
+
+def test_deferred_post_merge_criteria_are_saved_and_the_check_result_is_recorded_on_the_ticket(ctx):
+    run = {"id": "verify-44", "step": "verify", "ticket_key": "TESTWP-44", "project": "TESTWP"}
+    criteria = environment_reports.record_post_merge_criteria(ctx, run, ["AC4: verify the seeded site after merge"])
+    pending = environment_reports.pending_post_merge(ctx, "TESTWP", ["TESTWP-44"])
+
+    assert criteria == ["AC4: verify the seeded site after merge"]
+    assert pending == [{"ticket": "TESTWP-44", "criteria": criteria}]
+    recorded = environment_reports.record_post_merge_results(
+        ctx, {"id": "release-44", "ticket_key": "release:TESTWP:101", "project": "TESTWP"},
+        "WordPress Core 0.5.0-beta",
+        {"head_sha": "a" * 40, "source_sha": "b" * 40,
+         "checks": [{"command": "canary-check", "passed": True}]}, pending)
+
+    row = ctx.db.one("SELECT status,criteria,result,release_ticket,run_id FROM environment_post_merge_checks"
+                     " WHERE ticket_key='TESTWP-44'")
+    assert recorded == [{"ticket": "TESTWP-44", "status": "passed", "criteria": criteria}]
+    assert row["status"] == "passed" and row["criteria"] == criteria
+    assert row["release_ticket"] == "release:TESTWP:101" and row["run_id"] == "release-44"
+    assert row["result"]["source_sha"] == "b" * 40 and row["result"]["checks"] == [
+        {"command": "canary-check", "passed": True}]
+    assert environment_reports.post_merge_report(ctx, "TESTWP")[0]["ticket"] == "TESTWP-44"
 
 
 # --- AC11: the scan of the open tickets -----------------------------------------------------------------------------------
 def test_scan_lists_open_tickets_that_break_the_rule_corrects_them_and_keeps_the_report(client, ctx):
     texts = {"TESTWP-60": ("To Do", "Run on the Dev VM at 10.1.2.3"), "TESTWP-61": ("To Do", "Visitors can sort the list"),
              "TESTWP-62": ("In Progress", "Use the shared Docker"), "TESTWP-63": ("Done", "Use the shared Docker"),
-             "TESTWP-64": ("Intake", "ssh into the lab machines"), "TESTWP-65": ("Backlog", "Write a Jira comment when done")}
+             "TESTWP-64": ("Intake", "ssh into the lab machines"), "TESTWP-65": ("Backlog", "Write a Jira comment when done"),
+             "TESTWP-66": ("To Do", "Release on https://wp.example.com")}
     for key, (status, description) in texts.items():
         add_ticket(ctx.db, key, status=status)
         ctx.db.run("UPDATE tickets SET description=%s WHERE key=%s", (description, key))
         ctx.jira.status_of[key] = status
+    add_ticket(ctx.db, "TESTWP-67", status="To Do")
+    ctx.db.run("UPDATE tickets SET type='Epic', description='The Epic is deployed to 2001:db8::1' WHERE key='TESTWP-67'")
+    ctx.jira.status_of["TESTWP-67"] = "To Do"
     report = environment_reports.scan(ctx)
     by_ticket = {o["ticket"]: o for o in report["offenders"]}
-    assert set(by_ticket) == {"TESTWP-60", "TESTWP-62", "TESTWP-64", "TESTWP-65"}  # done and clean ones are not listed
-    assert report["scanned"] == 5
+    assert set(by_ticket) == {"TESTWP-60", "TESTWP-62", "TESTWP-64", "TESTWP-65", "TESTWP-66", "TESTWP-67"}
+    assert report["scanned"] == 7
     assert set(by_ticket["TESTWP-60"]["kinds"]) == {"machine", "ip address"}
     assert by_ticket["TESTWP-60"]["action"] == "sent back to intake" and by_ticket["TESTWP-65"]["action"] == "sent back to intake"
     assert by_ticket["TESTWP-62"]["action"] == "work in flight; left as it is"
     assert by_ticket["TESTWP-64"]["action"] == "already in intake"
+    assert by_ticket["TESTWP-66"]["kinds"] == ["host"]
+    assert by_ticket["TESTWP-67"]["kinds"] == ["ip address"] and by_ticket["TESTWP-67"]["action"] == "sent back to intake"
     row = ctx.db.one("SELECT status, labels FROM tickets WHERE key='TESTWP-60'")
     assert row["status"] == "Intake" and "aiflow-ready" not in row["labels"]
     assert ctx.jira.status_of["TESTWP-60"] == "Intake" and ctx.jira.status_of["TESTWP-62"] == "In Progress"

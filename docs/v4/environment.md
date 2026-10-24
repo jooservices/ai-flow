@@ -1,5 +1,7 @@
 # Tickets carry requirements only; the environment lives in the project configuration
 
+**Console screens:** `projects`.
+
 A ticket says what the product must do and how to know it is done. It never says which computer, server, host,
 address, network, folder, account or tool to use, and never a Jira action ("write a comment"). Where and how
 something runs belongs to the **environment section of the project configuration** and to the **environment of the
@@ -58,7 +60,7 @@ environment:
 | `name` | the environment variable, upper case (`WP_BASE_URL`) |
 | `kind` | `service`, `base_url`, `database`, `browser` or `secret` |
 | `value` | one line; required except for a secret. A value that carries a credential (`user:pass@`) is refused: list the credential as a secret |
-| `runs` | which runs may use it: `dev`, `verify` (default both) |
+| `runs` | which runs may use it: `dev`, `verify`, `post_merge` (default `dev` and `verify`) |
 
 A **secret is listed by name only**. Its value lives on the machine in the root-only node-local project `.env` file
 (`projects/<KEY>.env` under the AI Flow configuration folder, read by `worker/notes.py`) and is never in the
@@ -66,16 +68,15 @@ project file, the claim, the notes or the audit. Today the configuration lives i
 moves to the control database and the Machines and AI screen without changing these fields.
 
 **Screen**: *Projects → Environment* edits the items (variable, kind, value, runs) and commits
-`projects/<KEY>.yaml` to the control repository (`GET`/`PUT /v1/projects/<KEY>/environment`, permission
-`projects.manage`, audited by names only).
+`projects/<KEY>.yaml` to the control repository (permission `projects.manage`, audited by names only).
 
 ## What the run receives (AC6)
 
-The claim carries the items of the project (a secret without a value). The worker (`worker/notes.py: project_env`)
-builds the run environment: `PLAYWRIGHT_BROWSERS_PATH`, the node-local `.env` file, then the configured values of the
-items the run's step may use, and the secrets those items name from the `.env` file. The variables reach the AI
-process (`RunSpec.extra_env`). The run notes (the prompt of the dev and verify runs) list the **names**, their kind
-and whether each is set; never a value. Nothing about a server is in a ticket, a source repository or the notes.
+The work claim carries the items of the project (a secret without a value). The worker (`worker/notes.py: project_env`)
+builds the run environment: `PLAYWRIGHT_BROWSERS_PATH`, unconfigured legacy node-local variables, then only the
+configured values and secrets permitted for that run's step. The variables reach the AI process (`RunSpec.extra_env`).
+Run notes list the **names**, their kind and whether each is set; never a value. A configured secret for `dev` is
+removed from a `verify` or `post_merge` process. Nothing about a server is in a ticket, a source repository or the notes.
 
 ## A missing environment item (AC8, AC9)
 
@@ -97,11 +98,18 @@ the waiting tickets again. If the item is still missing after one hour, the watc
 ticket per project and item (label `environment`). A change of the item in the configuration, a removed item or a
 Done ticket also ends the wait. The **Projects** screen lists the missing items (*Missing environment items*).
 
-## Criteria that need a particular machine (AC10)
+## Criteria that need the post-merge environment (AC10)
 
-The dev and verify prompts say that an acceptance criterion that can only be proven on one particular machine is
-verified by the flow after the merge (canary, release checks), not by the developer run: implement it, test what runs
-in the run, and say so in the summary. It is not a reason to stop or to ask.
+The reviewer lists criteria that need a configured post-merge environment under `POST-MERGE CHECKS:`. On a configured
+Jira version release, the release claim carries those criteria and the project's environment items whose `runs`
+include `post_merge`. The version-release worker runs the configured full-project release checks with those items in
+its environment. Control records each check result, checked commit, version and release run against every ticket
+with deferred criteria. *Projects → Environment* shows pending, passed or failed criteria, the release checks and
+when they ran. The `post_merge` permission is opt-in for each item; it is not implied by `dev` or `verify`.
+
+The verify prompt directs criteria that cannot be proven in the development run to this path; the verify result
+stores them by ticket. The regular release run, after those tickets have merged, provides the post-merge check and
+keeps its result on the original ticket record.
 
 ## Scan of the open tickets (AC11)
 
@@ -109,8 +117,21 @@ in the run, and say so in the summary. It is not a reason to stop or to ask.
 the report (`environment_scans`; kinds and counts, never the wording). Tickets nobody works on (Created, Backlog,
 To Do, Needs owner) lose `aiflow-ready`, get a note that names the kinds and go back to **Intake**, where the intake AI
 removes the wording and records it; tickets in flight are listed and left alone; tickets already in Intake are listed.
-The watchdog runs it once a day; *Projects → Tickets that name servers* shows the last report and a *Scan now* button
-(`GET`/`POST /v1/environment/scan`).
+The watchdog runs it once a day; *Projects → Tickets that name servers* shows the last report and a *Scan now* button.
+
+## Control API
+
+- `GET /v1/projects/{key}/environment` reads project items, missing reports and post-merge check results.
+- `PUT /v1/projects/{key}/environment` validates and saves items to the control repository.
+- `GET /v1/environment/missing` returns missing items for the Projects screen.
+- `GET /v1/environment/scan` reads the latest open-ticket scan; `POST /v1/environment/scan` runs and stores one.
+- `POST /v1/work/claim` returns only the environment items permitted for that work step.
+- `POST /v1/runs/{run_id}/result` records a missing item report or queues deferred criteria after a successful merge.
+- `POST /v1/version-releases/{version_id}/complete` records the project release-check result against the deferred
+  criteria on each included ticket. The version-release claim passes the permitted `post_merge` items and deferred
+  criteria to the release worker; results are stored in `environment_post_merge_checks` against each original ticket.
+- `GET /v1/capacity` reports quota capacity for the Machines and AI dashboard; it is separate from project run
+  environment configuration, which uses `GET /v1/projects/{key}/environment` and the work claim.
 
 ## Developer reference
 

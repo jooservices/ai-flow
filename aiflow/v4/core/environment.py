@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from ipaddress import ip_address
 from typing import Any
 
 KINDS = ("service", "base_url", "database", "browser", "secret")
-RUN_STEPS = ("dev", "verify")
+RUN_STEPS = ("dev", "verify", "post_merge")
+DEFAULT_RUN_STEPS = ("dev", "verify")
 NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 MAX_ITEMS = 100
 MAX_VALUE = 500
@@ -76,7 +78,7 @@ def parse_items(raw: Any) -> tuple[list[EnvItem], list[str]]:
             errors.append(f"{name}: the kind must be one of {', '.join(KINDS)}")
             continue
         runs = entry.get("runs")
-        runs = RUN_STEPS if runs in (None, "", []) else tuple(
+        runs = DEFAULT_RUN_STEPS if runs in (None, "", []) else tuple(
             dict.fromkeys(str(r).strip().lower() for r in (runs if isinstance(runs, (list, tuple)) else [runs])))
         if not set(runs) <= set(RUN_STEPS):
             errors.append(f"{name}: runs may only be {', '.join(RUN_STEPS)}")
@@ -158,10 +160,11 @@ def parse_missing_environment(text: str, items: list[EnvItem]) -> tuple[list[str
 
 # --- the server-wording rule -------------------------------------------------------------------------------------
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _MACHINE_NOUN = r"(?:vms?|servers?|machines?|hosts?|boxes|box|computers?|nodes?|laptops?|pcs?)"
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.I)) for kind, rx in (
     ("ip address", rf"(?<![\w.]){_OCTET}(?:\.{_OCTET}){{3}}(?:/\d{{1,2}})?(?::\d{{2,5}})?(?![\w]|\.\d)"),
-    ("ip address", r"(?<![\w:])(?:[0-9a-f]{1,4}:){5,7}[0-9a-f]{1,4}(?![\w:])"),
+    ("host", rf"(?<![\w.@-])(?:{_HOST_LABEL}\.)+(?!(?:md|py|html?|css|js|json|yaml|yml|toml|txt|sh|rst|xml|in)\b)[a-z]{{2,63}}(?![\w-]|\.[a-z0-9])"),
     ("host", r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|intranet|corp|home|localdomain)\b"),
     ("host", r"\blocalhost:\d{2,5}\b|\bssh://\S+|\bhost\s?name\s*(?:[:=]|is\b|called\b)"),
     ("machine", rf"\b(?:shared|dev|development|lab|staging|stage|production|prod|jump|build|ci|qa|uat|remote|physical|"
@@ -181,16 +184,30 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
                     r"\b(?:transition|move)\s+(?:the\s+)?jira\s+(?:ticket|issue)\b"),
 ))
 REPLACEMENT = "[server detail removed]"
+_IPV6_CANDIDATE = re.compile(r"(?<![0-9a-f:.])[0-9a-f:.]{2,}(?![0-9a-f:.])", re.I)
+
+
+def _wording_spans(text: str) -> list[tuple[int, int, str]]:
+    """Find all rule matches, validating IPv6 candidates with the standard library parser."""
+    text = text or ""
+    found = [(m.start(), m.end(), kind) for kind, rx in RULES for m in rx.finditer(text)]
+    for match in _IPV6_CANDIDATE.finditer(text):
+        candidate = match.group().rstrip(".")  # a final sentence period is punctuation, not part of the address
+        if candidate.count(":") < 2:
+            continue
+        try:
+            ip = ip_address(candidate)
+        except ValueError:
+            continue
+        if ip.version == 6:
+            found.append((match.start(), match.start() + len(candidate), "ip address"))
+    return sorted(found)
 
 
 def find_server_wording(text: str) -> list[dict[str, str]]:
     """Every place the text names a host, an IP address, a machine, a network, an access instruction or a Jira
     action: [{"kind", "text"}] in reading order (empty when the text is a requirement only)."""
-    found: list[tuple[int, int, str]] = []
-    for kind, rx in RULES:
-        for m in rx.finditer(text or ""):
-            found.append((m.start(), m.end(), kind))
-    found.sort()
+    found = _wording_spans(text)
     out, last_end = [], -1
     for start, end, kind in found:  # overlapping hits count once
         if start < last_end:
@@ -200,8 +217,12 @@ def find_server_wording(text: str) -> list[dict[str, str]]:
     return out
 
 
-SERVER_QUESTION = re.compile(r"\b(?:servers?|hosts?|vms?|machines?|ip addresses|ip address|network|vpn|ssh|credentials|"
-                             r"logins?|passwords?|base urls?|endpoints? to use)\b", re.I)
+SERVER_QUESTION = re.compile(
+    r"\b(?:servers?|hosts?|vms?|machines?|ip address(?:es)?|address(?:es)?|network|vpn|ssh|credentials|"
+    r"logins?|passwords?|base urls?|endpoints? to use)\b|"
+    r"\bwhere\s+(?:(?:should|can|do|would)\s+i\s+)?(?:run|test|deploy|connect|access)\b",
+    re.I,
+)
 
 
 def is_server_question(text: str) -> bool:
@@ -211,9 +232,7 @@ def is_server_question(text: str) -> bool:
 
 def redact(text: str) -> str:
     """The text with every server wording replaced by a fixed marker (for what is kept in a Jira comment)."""
-    spans: list[tuple[int, int]] = []
-    for _kind, rx in RULES:
-        spans.extend((m.start(), m.end()) for m in rx.finditer(text or ""))
+    spans = [(start, end) for start, end, _kind in _wording_spans(text)]
     spans.sort()
     merged: list[list[int]] = []
     for start, end in spans:

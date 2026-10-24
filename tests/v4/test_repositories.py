@@ -67,7 +67,9 @@ def test_jira_version_release_targets_the_repository_of_its_epic_tickets():
 
 def test_jira_version_membership_is_partitioned_by_repository_for_release_gates(monkeypatch):
     class DB:
-        def all(self, _query, _params):
+        def all(self, query, _params):
+            if "environment_post_merge_checks" in query:
+                return []
             return [
                 {"key": "JOOWP-2", "type": "Epic", "parent_key": None},
                 {"key": "JOOWP-3", "type": "Epic", "parent_key": None},

@@ -24,13 +24,20 @@ def project_env(project_key: str, items: list[dict] | None = None, step: str = "
     them, and the node-local /etc/aiflow/projects/<KEY>.env (root-only, never in the control repo) holds the secrets
     those items name; the file also keeps working for variables the section does not list. Per-run values
     (such as the throw-away WordPress URL and credentials) always take precedence over static values."""
-    from ..core.environment import items_of, run_environment
+    from ..core.environment import for_step, items_of, run_environment
     from ..core.settings import read_env_file
     from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
     node_env = read_env_file(f"/etc/aiflow/projects/{project_key}.env")
+    configured = items_of(items or [])
+    all_configured_names = {item.name for item in configured}
+    allowed_names = {item.name for item in for_step(configured, step)}
+    # Keep legacy node-local variables working, but do not leak a configured item's value into
+    # a run whose project permissions exclude that name.
+    node_env = {name: value for name, value in node_env.items()
+                if name not in all_configured_names or name in allowed_names}
     # the shared browsers folder is part of every run's environment; a project file may override it
     return {"PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-            **node_env, **run_environment(items_of(items or []), step, node_env), **(runtime_env or {})}
+            **node_env, **run_environment(configured, step, node_env), **(runtime_env or {})}
 
 
 def environment_notes(items: list[dict] | None, step: str, env: dict[str, str]) -> str:

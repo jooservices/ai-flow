@@ -92,6 +92,7 @@ def sweep(ctx) -> list[str]:
         key = open_environment_ticket(ctx, g["project"], g["item"], g["tickets"])
         if key:
             opened.append(key)
+    opened.extend(retry_pending_needs(ctx))
     return opened
 
 
@@ -147,58 +148,157 @@ def record_removal(ctx, run: dict, removed: list[str], needs: list[str]) -> None
                     reason=f"{len(removed)} removed, {len(needs)} environment need(s)")
 
 
+def record_post_merge_criteria(ctx, run: dict, criteria: list[str]) -> list[str]:
+    """Save criteria that the independent reviewer deferred to a configured post-merge check run."""
+    clean = list(dict.fromkeys(redact(str(item)).strip()[:600] for item in criteria if str(item).strip()))[:20]
+    if run.get("step") != "verify":
+        return []
+    if not clean:
+        ctx.db.run("DELETE FROM environment_post_merge_checks WHERE ticket_key=%s AND status='pending'",
+                   (run["ticket_key"],))
+        return []
+    ctx.db.run("INSERT INTO environment_post_merge_checks (ticket_key, project, criteria, status, result, release_ticket, run_id, checked_at)"
+               " VALUES (%s,%s,%s,'pending','{}','',%s,NULL) ON CONFLICT (ticket_key) DO UPDATE SET"
+               " project=EXCLUDED.project, criteria=EXCLUDED.criteria, status='pending', result='{}',"
+               " release_ticket='', run_id=EXCLUDED.run_id, updated_at=now(), checked_at=NULL",
+               (run["ticket_key"], run["project"], J(clean), str(run["id"])))
+    ctx.events.emit("environment.post_merge_queued", ticket=run["ticket_key"], project=run["project"],
+                    step="verify", run_id=str(run["id"]), outcome="pending",
+                    reason=f"{len(clean)} criterion/criteria queued for post-merge verification")
+    return clean
+
+
+def pending_post_merge(ctx, project: str, ticket_keys: list[str] | None = None) -> list[dict[str, Any]]:
+    """Pending deferred criteria for the tickets included in a configured project release."""
+    if ticket_keys is not None and not ticket_keys:
+        return []
+    if ticket_keys is None:
+        rows = ctx.db.all("SELECT ticket_key, criteria FROM environment_post_merge_checks"
+                          " WHERE project=%s AND status='pending' ORDER BY created_at, ticket_key", (project,))
+    else:
+        rows = ctx.db.all("SELECT ticket_key, criteria FROM environment_post_merge_checks"
+                          " WHERE project=%s AND status='pending' AND ticket_key = ANY(%s)"
+                          " ORDER BY created_at, ticket_key", (project, ticket_keys))
+    return [{"ticket": row["ticket_key"], "criteria": row["criteria"] or []} for row in rows]
+
+
+def record_post_merge_results(ctx, run: dict, version: str, report: dict[str, Any],
+                              criteria: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Record the configured release-check result against every ticket whose criterion it checked."""
+    checks = report.get("checks") or []
+    passed = bool(checks) and not report.get("error") and all(bool(item.get("passed")) for item in checks)
+    result = {"version": version, "release_ticket": run["ticket_key"], "run_id": str(run["id"]),
+              "head_sha": str(report.get("head_sha") or ""), "source_sha": str(report.get("source_sha") or ""),
+              "checks": [{"command": str(item.get("command") or ""), "passed": bool(item.get("passed"))}
+                         for item in checks], "error": str(report.get("error") or "")[:1000]}
+    recorded = []
+    for item in criteria:
+        ticket = str(item.get("ticket") or "")
+        if not ticket:
+            continue
+        count = ctx.db.run("UPDATE environment_post_merge_checks SET status=%s, result=%s, release_ticket=%s,"
+                           " run_id=%s, checked_at=now(), updated_at=now() WHERE ticket_key=%s AND project=%s"
+                           " AND status='pending'",
+                           ("passed" if passed else "failed", J(result), run["ticket_key"], str(run["id"]),
+                            ticket, run["project"]))
+        if count:
+            ctx.events.emit("environment.post_merge_result", ticket=ticket, project=run["project"],
+                            step="post_merge", run_id=str(run["id"]), outcome="passed" if passed else "failed",
+                            reason=f"project release checks for {version}", data=result)
+            recorded.append({"ticket": ticket, "status": "passed" if passed else "failed", "criteria": item.get("criteria") or []})
+    return recorded
+
+
+def post_merge_report(ctx, project: str) -> list[dict[str, Any]]:
+    rows = ctx.db.all("SELECT ticket_key, criteria, status, result, release_ticket, updated_at, checked_at"
+                      " FROM environment_post_merge_checks WHERE project=%s ORDER BY updated_at DESC LIMIT 100",
+                      (project,))
+    return [{"ticket": row["ticket_key"], "criteria": row["criteria"] or [], "status": row["status"],
+             "result": row["result"] or {}, "release_ticket": row["release_ticket"],
+             "updated_at": row["updated_at"].isoformat(),
+             "checked_at": row["checked_at"].isoformat() if row["checked_at"] else None} for row in rows]
+
+
 def open_need_tickets(ctx, run: dict, needs: list[str]) -> list[dict[str, Any]]:
-    """A real need behind removed wording becomes (or joins) one environment ticket instead of staying in the story."""
+    """Durably record each real need, then open or link its environment ticket."""
     out: list[dict[str, Any]] = []
-    project_key = getattr(ctx.settings, "maintenance_project", "JAIF")
     for need in dict.fromkeys(n.strip() for n in needs if n and n.strip()):
         need = redact(need)[:300]
         nk = need_key(need)
         if not nk:
             continue
+        ctx.db.run("INSERT INTO environment_needs (project, need_key, need, environment_ticket, linked_tickets)"
+                   " VALUES (%s,%s,%s,'',%s) ON CONFLICT (project, need_key) DO UPDATE SET"
+                   " linked_tickets=CASE WHEN %s = ANY(environment_needs.linked_tickets)"
+                   " THEN environment_needs.linked_tickets ELSE array_append(environment_needs.linked_tickets,%s) END",
+                   (run["project"], nk, need, [run["ticket_key"]], run["ticket_key"], run["ticket_key"]))
         row = ctx.db.one("SELECT environment_ticket FROM environment_needs WHERE project=%s AND need_key=%s",
                          (run["project"], nk))
+        key = str((row or {}).get("environment_ticket") or "")
         created = False
-        if row:
-            key = row["environment_ticket"]
-        else:
-            key = ""
-            if ctx.jira:
-                summary = f"[Environment] {need}"[:240]
-                description = (f"Business requirement: {need}. A story of project {run['project']} needs this from the "
-                               "environment of its runs; the story states the requirement only, so the environment "
-                               "feature is tracked here.\n\nAcceptance criteria:\n"
-                               "- AC1: The runs of the project get what is needed, through the environment section "
-                               "of the project configuration, as environment variables.\n\n"
-                               "Technical notes: Opened by the intake AI of AI Flow from a story that named where and "
-                               "how this runs; that wording was removed from the story.\n\n"
-                               "Definition of done:\n- The environment section lists the item and a run receives it.")
-                try:
-                    key = ctx.jira.create_issue(project_key, summary, description, issuetype="Task",
-                                                labels=[ENVIRONMENT_LABEL])
-                    created = True
-                except Exception as exc:  # noqa: BLE001 - the story is still refined; the need is in the record
-                    log.warning("could not open the environment ticket for %s: %s", run["ticket_key"], type(exc).__name__)
-            if key:
-                ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created,"
-                           " jira_updated) VALUES (%s,%s,'Created','Task',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
-                           (key, project_key, [ENVIRONMENT_LABEL], summary, description))
-                ctx.db.run("INSERT INTO environment_needs (project, need_key, need, environment_ticket)"
-                           " VALUES (%s,%s,%s,%s) ON CONFLICT (project, need_key) DO NOTHING",
-                           (run["project"], nk, need, key))
-        if key and ctx.jira:
-            try:
-                ctx.jira.link_issues(key, run["ticket_key"], "Relates")
-            except Exception as exc:  # noqa: BLE001 - the link is a convenience; the record below is authoritative
-                log.warning("could not link %s to %s: %s", key, run["ticket_key"], type(exc).__name__)
+        if not key:
+            key, created = _create_pending_need_ticket(ctx, run["project"], nk)
+        elif ctx.jira:
+            _link_need_ticket(ctx, key, [run["ticket_key"]])
         if key:
-            ctx.db.run("UPDATE environment_needs SET linked_tickets=CASE WHEN %s = ANY(linked_tickets) THEN linked_tickets"
-                       " ELSE array_append(linked_tickets,%s) END WHERE project=%s AND need_key=%s",
-                       (run["ticket_key"], run["ticket_key"], run["project"], nk))
-            ctx.events.emit("environment.need", ticket=run["ticket_key"], project=run["project"], outcome="created" if created else "linked",
-                            reason=f"{key}: {need}")
-        out.append({"need": need, "ticket": key, "created": created})
+            ctx.events.emit("environment.need", ticket=run["ticket_key"], project=run["project"],
+                            outcome="created" if created else "linked", reason=f"{key}: {need}")
+        out.append({"need": need, "ticket": key, "created": created, "pending": not bool(key)})
     return out
+
+
+def _link_need_ticket(ctx, key: str, tickets: list[str]) -> None:
+    for ticket in dict.fromkeys(tickets):
+        if not ctx.jira:
+            return
+        try:
+            ctx.jira.link_issues(key, ticket, "Relates")
+        except Exception as exc:  # noqa: BLE001 - linked tickets remain in the durable need record
+            log.warning("could not link %s to %s: %s", key, ticket, type(exc).__name__)
+
+
+def _create_pending_need_ticket(ctx, project: str, nk: str) -> tuple[str, bool]:
+    """Try Jira creation for a need that is already durably stored in environment_needs."""
+    row = ctx.db.one("SELECT need, environment_ticket, linked_tickets FROM environment_needs"
+                     " WHERE project=%s AND need_key=%s", (project, nk))
+    if not row or row["environment_ticket"] or not ctx.jira:
+        return str((row or {}).get("environment_ticket") or ""), False
+    project_key = getattr(ctx.settings, "maintenance_project", "JAIF")
+    need = str(row["need"])
+    summary = f"[Environment] {need}"[:240]
+    description = (f"Business requirement: {need}. A story of project {project} needs this from the environment of its "
+                   "runs; the story states the requirement only, so the environment feature is tracked here.\n\n"
+                   "Acceptance criteria:\n"
+                   "- AC1: The runs of the project get what is needed, through the environment section of the project "
+                   "configuration, as environment variables.\n\n"
+                   "Technical notes: Opened automatically by AI Flow from a story that named where and how this runs; "
+                   "that wording was removed from the story.\n\n"
+                   "Definition of done:\n- The environment section lists the item and a run receives it.")
+    try:
+        key = ctx.jira.create_issue(project_key, summary, description, issuetype="Task", labels=[ENVIRONMENT_LABEL])
+    except Exception as exc:  # noqa: BLE001 - the next environment sweep retries this pending need
+        log.warning("could not open the environment ticket for %s: %s", project, type(exc).__name__)
+        return "", False
+    ctx.db.run("UPDATE environment_needs SET environment_ticket=%s WHERE project=%s AND need_key=%s"
+               " AND environment_ticket=''", (key, project, nk))
+    ctx.db.run("INSERT INTO tickets (key, project, status, type, labels, summary, description, jira_created, jira_updated)"
+               " VALUES (%s,%s,'Created','Task',%s,%s,%s,now(),now()) ON CONFLICT (key) DO NOTHING",
+               (key, project_key, [ENVIRONMENT_LABEL], summary, description))
+    _link_need_ticket(ctx, key, row["linked_tickets"] or [])
+    ctx.events.emit("environment.need_ticket", ticket=key, project=project_key, outcome="created",
+                    reason=f"{need}; requested by " + ", ".join(row["linked_tickets"] or []))
+    return key, True
+
+
+def retry_pending_needs(ctx) -> list[str]:
+    """Retry environment-ticket creation after Jira was temporarily unavailable during intake."""
+    opened = []
+    for row in ctx.db.all("SELECT project, need_key FROM environment_needs WHERE environment_ticket=''"
+                          " ORDER BY created_at"):
+        key, created = _create_pending_need_ticket(ctx, row["project"], row["need_key"])
+        if key and created:
+            opened.append(key)
+    return opened
 
 
 # --- the scan of the open tickets ---------------------------------------------------------------------------------
@@ -207,7 +307,7 @@ def scan(ctx, actor: str = "system", correct: bool = True) -> dict[str, Any]:
     ones nobody works on back to intake (the intake AI removes the wording and keeps the requirement), and keep
     the report. The report never repeats the wording; it names the kinds."""
     rows = ctx.db.all("SELECT key, project, status, labels, summary, description FROM tickets"
-                      " WHERE NOT (status = ANY(%s)) AND type <> 'Epic' ORDER BY project, key", (list(CLOSED_STATUSES),))
+                      " WHERE NOT (status = ANY(%s)) ORDER BY project, key", (list(CLOSED_STATUSES),))
     offenders: list[dict[str, Any]] = []
     for t in rows:
         findings = find_server_wording(f"{t['summary']}\n{t['description']}")

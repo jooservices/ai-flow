@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pty
+import pwd
 import re
 import shutil
 import signal
@@ -21,6 +22,7 @@ import time
 import select
 from urllib.parse import quote
 from pathlib import Path
+from datetime import datetime, timezone
 
 from .. import VERSION
 from ..core.settings import read_env_file
@@ -57,6 +59,125 @@ _SIGN_IN_CODE = re.compile(
     r"([A-Z0-9][A-Z0-9-]{3,31})\b")
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _SIGN_IN_RUN_AS = ["setpriv", "--reuid=aiflow-worker", "--regid=aiflow-worker", "--init-groups", "--"]
+_AUDIT_EVENT_ID = re.compile(rb"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
+_AUDIT_TYPE = re.compile(rb"type=([A-Z_]+)")
+_AUDIT_AUID = re.compile(rb"\bauid=(\d+)\b")
+_AUDIT_EXE = re.compile(rb'\bexe="((?:\\.|[^"\\])*)"')
+_AUDIT_PATH = re.compile(rb'\bname="((?:\\.|[^"\\])*)"')
+
+
+def notify_systemd(message: str) -> bool:
+    """Send a readiness/status message to systemd without an extra dependency."""
+    address = os.environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as connection:
+            connection.connect(address)
+            connection.sendall(message.encode("utf-8"))
+        return True
+    except OSError:
+        return False
+
+
+def _audit_interventions(raw: bytes) -> list[dict]:
+    """Extract human shell/config changes without retaining command arguments or file contents."""
+    groups: dict[bytes, list[bytes]] = {}
+    current = None
+    for line in raw.splitlines():
+        match = _AUDIT_EVENT_ID.search(line)
+        if not match:
+            continue
+        event_id = match.group(0)
+        if current is not None and event_id != current:
+            groups.setdefault(current, []).append(b"")
+        groups.setdefault(event_id, []).append(line)
+        current = event_id
+    results = []
+    for event_id, lines in groups.items():
+        text = b"\n".join(lines)
+        auid = _AUDIT_AUID.search(text)
+        if not auid:
+            continue
+        uid = int(auid.group(1))
+        if uid >= 4_294_967_295:
+            continue  # unset loginuid: systemd services are not operator sessions
+        try:
+            actor = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            actor = str(uid)
+        stamp = _AUDIT_EVENT_ID.search(event_id)
+        if not stamp:
+            continue
+        timestamp, serial = stamp.group(1).decode(), stamp.group(2).decode()
+        try:
+            happened_at = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            continue
+        types = {m.group(1) for line in lines if (m := _AUDIT_TYPE.search(line))}
+        exe = _AUDIT_EXE.search(text)
+        if b"EXECVE" in types and exe:
+            command = os.path.basename(exe.group(1).decode("utf-8", "replace").replace(r"\x22", '"'))[:120]
+            results.append({"source_key": f"{timestamp}:{serial}:shell", "source": "shell", "actor": actor,
+                            "action": "execute", "target": command, "happened_at": happened_at,
+                            "reason": f"Interactive host session invoked {command}; auditd captured the executable name."})
+        if b"PATH" in types and b"SYSCALL" in types:
+            paths = [m.group(1).decode("utf-8", "replace") for line in lines if _AUDIT_TYPE.search(line)
+                     and _AUDIT_TYPE.search(line).group(1) == b"PATH" for m in _AUDIT_PATH.finditer(line)]
+            for filename in sorted(set(os.path.basename(path) for path in paths if path)):
+                results.append({"source_key": f"{timestamp}:{serial}:config:{filename}", "source": "configuration",
+                                "actor": actor, "action": "write", "target": filename[:120],
+                                "happened_at": happened_at,
+                                "reason": f"Interactive host session changed {filename}; auditd captured the file name."})
+    return _group_interventions(results)
+
+
+def _group_interventions(events: list[dict]) -> list[dict]:
+    """One intervention per actor and source in a batch: an SSH session or a deploy is one intervention, not one
+    per command or file written. The first event names the group; the others are counted and sampled."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for event in sorted(events, key=lambda e: e["happened_at"]):
+        groups.setdefault((event["actor"], event["source"]), []).append(event)
+    out = []
+    for members in groups.values():
+        first = dict(members[0])
+        targets = list(dict.fromkeys(m["target"] for m in members))
+        first["details"] = {"events": len(members), "targets": targets[:10], "last_at": members[-1]["happened_at"]}
+        if len(members) > 1:
+            first["action"] = "session"
+            first["target"] = ", ".join(targets[:3])[:300]
+        out.append(first)
+    return out
+
+
+def forward_operator_audit(api: ControlClient, node: str, audit_path: str = "/var/log/audit/audit.log",
+                           cursor_path: str = "/var/lib/aiflow4/operator-audit.cursor") -> int:
+    """Forward auditd records created by human login sessions, keeping only an inode and byte cursor."""
+    path, cursor = Path(audit_path), Path(cursor_path)
+    if not path.is_file():
+        return 0
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        state = json.loads(cursor.read_text(encoding="utf-8")) if cursor.exists() else {}
+    except (OSError, ValueError):
+        state = {}
+    stat = path.stat()
+    offset = int(state.get("offset", 0)) if int(state.get("inode", -1)) == stat.st_ino else 0
+    with path.open("rb") as stream:
+        stream.seek(min(offset, stat.st_size))
+        data = stream.read()
+        end = stream.tell()
+    complete_length = data.rfind(b"\n") + 1
+    complete = data[:complete_length]
+    events = _audit_interventions(complete)
+    for event in events:
+        api.call("POST", f"/v1/nodes/{quote(node, safe='')}/operator-interventions", event, retries=1)
+    tmp = cursor.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"inode": stat.st_ino, "offset": offset + complete_length}), encoding="utf-8")
+    os.replace(tmp, cursor)
+    return len(events)
 
 
 def tool_versions(names: list[str] | None = None) -> dict[str, str]:
@@ -696,7 +817,7 @@ def self_update(api: ControlClient, version: str, node: str = "unknown") -> None
 
 
 def process_node_operation(api: ControlClient, node: str) -> None:
-    """Claim and run at most one owner-approved, server-created whitelist operation."""
+    """Claim and run at most one server-created whitelist operation."""
     operation = api.call("GET", f"/v1/nodes/{node}/operations/next", retries=1).get("operation")
     if not operation:
         return
@@ -773,6 +894,7 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
     sign_in_processes: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
     probe_thread: threading.Thread | None = None
     probe_tried: dict[tuple[str, str], float] = {}  # (project, signature) -> when the run started
+    ready_notified = False
     try:
         while not stop.is_set():
             try:
@@ -796,6 +918,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
                     "workers": ws, "credential_expiries": credential_expiries(ws),
                     "environment_items": environment_items}, retries=2)["desired"]
+                if not ready_notified:
+                    ready_notified = notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
             except Exception as e:  # noqa: BLE001 - keep heartbeat outages visible after connectivity returns
                 if "control API unreachable" in str(e) or type(e).__module__.startswith("httpx"):
                     pending_network_events.append({"type": "node.heartbeat.error", "error_kind": "network",
@@ -806,6 +930,10 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 log.warning("heartbeat failed: %s", e)
                 stop.wait(every_s)
                 continue
+            try:
+                forward_operator_audit(api, name)
+            except Exception as e:  # noqa: BLE001 - retain the cursor so the next heartbeat retries delivery
+                log.warning("host audit forwarding failed (%s)", type(e).__name__)
             project_environment = desired.get("project_environment", {})
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)

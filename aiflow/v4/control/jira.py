@@ -12,6 +12,7 @@ retry. With a source, the gateway is falsy while no credential is usable, so `if
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -122,6 +123,29 @@ class Jira:
         return {"fix_version_added": added, "first_in_progress": first_in_progress}
 
     @staticmethod
+    def operator_changes(issue: dict, since: datetime | None, flow_account_id: str) -> list[dict[str, Any]]:
+        """Return new Jira history authored outside AI Flow, retaining field names but no values."""
+        if since is None:
+            return []  # first mirror is a baseline, not a historical intervention import
+        key = str(issue.get("key") or "")
+        out = []
+        for history in (issue.get("changelog") or {}).get("histories") or []:
+            created = _ts(history.get("created"))
+            author = history.get("author") or {}
+            account_id = str(author.get("accountId") or "")
+            if not created or created <= since or not account_id or account_id == flow_account_id:
+                continue
+            fields = sorted({str(item.get("field") or "unknown")[:100] for item in history.get("items") or []})
+            if not fields:
+                continue
+            history_id = str(history.get("id") or "")
+            source_key = (f"jira:{key}:{history_id}" if history_id else "jira:" + hashlib.sha256(
+                f"{key}:{created.isoformat()}:{account_id}:{fields}".encode()).hexdigest())
+            out.append({"source_key": source_key, "happened_at": created,
+                        "actor": str(author.get("displayName") or account_id), "target": key, "fields": fields})
+        return out
+
+    @staticmethod
     def normalize(issue: dict) -> dict:
         """Jira issue -> registry row (tickets table)."""
         f = issue.get("fields", {})
@@ -150,6 +174,28 @@ class Jira:
 
     def status(self, key: str) -> str:
         return self.call("GET", f"/rest/api/3/issue/{key}?fields=status")["fields"]["status"]["name"]
+
+    def issue_links(self, key: str) -> list[dict[str, str]]:
+        """Return issue-link ids, direction and the other issue key for a ticket."""
+        data = self.call("GET", f"/rest/api/3/issue/{key}?fields=issuelinks")
+        links = (data.get("fields") or {}).get("issuelinks") or []
+        result = []
+        for link in links:
+            other = link.get("inwardIssue") or link.get("outwardIssue") or {}
+            if not link.get("id") or not other.get("key"):
+                continue
+            result.append({"id": str(link["id"]), "other": str(other["key"]),
+                           "direction": "inward" if link.get("inwardIssue") else "outward",
+                           "type": str((link.get("type") or {}).get("name") or "")})
+        return result
+
+    get_issue_links = issue_links
+
+    def delete_issue_link(self, link_id: str) -> None:
+        """Remove one exact Jira issue link by its server-issued id."""
+        if not str(link_id).isdigit():
+            raise JiraError("Jira issue-link id must be numeric")
+        self.call("DELETE", f"/rest/api/3/issueLink/{link_id}", ok=(200, 204))
 
     def projects(self) -> list[dict[str, str]]:
         """List projects visible to the connected Jira account, following Jira's pagination."""

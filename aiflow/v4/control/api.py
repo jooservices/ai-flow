@@ -47,8 +47,8 @@ from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
+from . import (ba_chat, business, escalations, flow_doctor, jira_connect, knowledge, layouts, licensing, log_viewer,
+               memory, role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -73,6 +73,7 @@ PRIORITY = {"Highest": 0, "High": 1, "Medium": 2, "Low": 3, "Lowest": 4}
 MASTER_SCOPE = "master:global"
 MASTER_CYCLE_S = 60
 DEFAULT_MASTER_DAILY_BUDGET_MINUTES = 60
+OWNER_TOKEN_PRINCIPAL = "owner-token"
 HUMAN_QUEUE_WAIT_S = 90  # an approve click waits this long for its turn in the merge queue
 HUMAN_QUEUE_POLL_S = 2
 RELEASES = Path("/srv/aiflow/control/releases")
@@ -222,11 +223,33 @@ _STATE_RELEASE_STEP = _state_object({"step": _STATE_STRING, "state": _STATE_STRI
     "node": _STATE_STRING, "detail": _STATE_STRING, "at": _state_nullable(_STATE_DATETIME), "url": _STATE_STRING},
     ("step", "state", "run_id", "node", "detail", "at"))
 
+_STATE_DOCTOR_FINDING = _state_object({"id": _STATE_INTEGER, "subject": _STATE_STRING, "cause": _STATE_STRING,
+    "detail": _STATE_STRING, "next_step": _STATE_STRING, "first_seen": _STATE_DATETIME,
+    "last_seen": _STATE_DATETIME}, ("id", "subject", "cause", "detail", "next_step", "first_seen", "last_seen"))
+_STATE_DOCTOR_ACTION = _state_object({"id": _STATE_INTEGER, "ticket_key": _STATE_STRING, "node": _STATE_STRING,
+    "account_id": _STATE_STRING, "action": _STATE_STRING, "outcome": _STATE_STRING,
+    "detail": _STATE_STRING, "created_at": _STATE_DATETIME},
+    ("id", "ticket_key", "node", "account_id", "action", "outcome", "detail", "created_at"))
+_STATE_ROLE_COVERAGE = _state_object({"role": _STATE_STRING, "ready_accounts": _STATE_STRING_ARRAY,
+    "providers": _STATE_STRING_ARRAY, "ready_count": _STATE_INTEGER, "provider_count": _STATE_INTEGER,
+    "healthy": _STATE_BOOLEAN, "reason": _STATE_STRING, "next_step": _STATE_STRING},
+    ("role", "ready_accounts", "providers", "ready_count", "provider_count", "healthy", "reason", "next_step"))
+_STATE_OPERATOR_INTERVENTION = _state_object({"id": _STATE_INTEGER, "happened_at": _STATE_DATETIME,
+    "source": _STATE_STRING, "actor": _STATE_STRING, "action": _STATE_STRING, "target": _STATE_STRING,
+    "reason": _STATE_STRING, "bug_ticket_key": _STATE_STRING},
+    ("id", "happened_at", "source", "actor", "action", "target", "reason", "bug_ticket_key"))
+
 STATE_RESPONSE_SCHEMA = _state_object({
     "generated_at": _STATE_DATETIME, "env": _STATE_STRING, "control_repo": _STATE_STRING,
     "versions": {"type": "object", "additionalProperties": _STATE_STRING}, "version": _STATE_STRING,
     "links": _state_object({"o2": _STATE_STRING, "mail": _STATE_STRING, "gatus": _STATE_STRING},
                             ("o2", "mail", "gatus")),
+    "flow_doctor": _state_object({"checked": _STATE_STRING_ARRAY,
+        "findings": _state_array(_STATE_DOCTOR_FINDING), "actions": _state_array(_STATE_DOCTOR_ACTION),
+        "role_coverage": _state_array(_STATE_ROLE_COVERAGE)},
+        ("checked", "findings", "actions", "role_coverage")),
+    "operator_interventions": _state_object({"last_24h": _STATE_INTEGER, "last_7d": _STATE_INTEGER,
+        "recent": _state_array(_STATE_OPERATOR_INTERVENTION)}, ("last_24h", "last_7d", "recent")),
     "tool_waits": _state_array(_state_object({
         "requirement": _STATE_STRING,
         "tickets": _state_array(_state_object({"key": _STATE_STRING, "summary": _STATE_STRING,
@@ -368,7 +391,8 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "tokens_in_24h": _STATE_INTEGER, "tokens_out_24h": _STATE_INTEGER,
         "done_24h": _STATE_INTEGER, "failed_24h": _STATE_INTEGER},
         ("runs_24h", "cost_24h", "tokens_in_24h", "tokens_out_24h", "done_24h", "failed_24h")),
-}, ("generated_at", "env", "control_repo", "versions", "version", "links", "tool_waits", "nodes", "accounts",
+}, ("generated_at", "env", "control_repo", "versions", "version", "links", "flow_doctor",
+    "operator_interventions", "tool_waits", "nodes", "accounts",
     "active_runs", "recent_runs", "projects", "tickets", "release_readiness", "release_progress", "incidents",
     "incidents_recent", "events", "sa", "role_health", "rollout", "version_policy", "totals"))
 
@@ -1128,6 +1152,17 @@ class ReleaseFailureBody(BaseModel):
     detail: str = ""
 
 
+class OperatorInterventionBody(BaseModel):
+    source_key: str = Field(min_length=1, max_length=240)
+    source: Literal["shell", "configuration", "database", "jira", "system"]
+    actor: str = Field(min_length=1, max_length=200)
+    action: str = Field(min_length=1, max_length=120)
+    target: str = Field(default="", max_length=300)
+    reason: str = Field(default="", max_length=1000)
+    happened_at: datetime | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]
@@ -1381,7 +1416,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if (configured and separator and scheme.lower() == "bearer" and token.strip()
                 and secrets.compare_digest(token.strip().encode("utf-8"), configured.encode("utf-8"))):
             writable()
-            return ""
+            return OWNER_TOKEN_PRINCIPAL
         claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
         user = resolve_session_user(ctx.db, claims) if claims else None
         if user and has_permission(user.effective_roles, "knowledge.approve"):
@@ -1407,17 +1442,30 @@ def create_app(ctx: Ctx) -> FastAPI:
         return "deploy"
 
     def audit(target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str, accepted: bool,
-              result: str, payload: dict | None = None) -> None:
+              result: str, payload: dict | None = None, *, human: bool = False) -> None:
         with ctx.db.pool.connection() as connection:
-            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload)
+            audit_in(connection, target, action, ticket, run_id, fence, actor, accepted, result, payload, human=human)
 
     def audit_in(connection, target: str, action: str, ticket: str, run_id: str, fence: int | None, actor: str,
-                  accepted: bool, result: str, payload: dict | None = None) -> None:
-        connection.execute(
+                 accepted: bool, result: str, payload: dict | None = None, *, human: bool = False) -> None:
+        entry = connection.execute(
             "INSERT INTO write_audit (target, action, ticket, run_id, fence, actor, accepted, result, payload)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (target, action, ticket, run_id, fence, actor, accepted, result[:500],
-             J(with_connection(target, payload))))
+             J(with_connection(target, payload)))).fetchone()
+        # A signed console principal is a human, even when the mutation goes through a product API route. Keep the
+        # intervention and write-audit entry in one transaction; the doctor creates its Bug on the next pass.
+        known_console_user = bool(actor and connection.execute(
+            "SELECT 1 AS person FROM console_users WHERE email=%s AND disabled=false", (actor,)).fetchone())
+        if accepted and entry and (human or known_console_user):
+            connection.execute(
+                "INSERT INTO operator_interventions (source_key,source,actor,action,target,reason,details)"
+                " VALUES (%s,'control-api',%s,%s,%s,%s,%s) ON CONFLICT (source_key) DO NOTHING",
+                (f"control-api:{entry['id']}", actor, f"{target}.{action}"[:120],
+                 (ticket or target)[:300], f"Authenticated principal {actor} completed {action} on {target}: "
+                 f"{result[:200]}.",
+                 J({"write_audit_id": entry["id"], "write_target": target, "write_action": action,
+                    "ticket": ticket, "result": result[:200]})))
 
     def with_connection(target: str, payload: dict | None) -> dict:
         """Name the GitHub connection behind a GitHub write; it is an id, never a credential."""
@@ -2257,7 +2305,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.put("/v1/notifications/channels")
     async def notification_channel_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         payload = await notification_json(request)
         config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
         if str(payload.get("kind") or "").strip().lower() == "telegram" and config.get("ba_chat_enabled"):
@@ -2268,22 +2316,31 @@ def create_app(ctx: Ctx) -> FastAPI:
             channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "channel_save", "", "", None, user.subject, True,
+              "notification channel saved", {"channel_id": channel["id"], "kind": channel["kind"],
+                                               "enabled": channel["enabled"]})
         return {"channel": channel}
 
     @app.delete("/v1/notifications/channels/{channel_id}")
     def notification_channel_delete(channel_id: int, request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         if not notify.delete_channel(ctx.db, channel_id):
             raise HTTPException(404, "notification channel was not found")
+        audit("notifications", "channel_delete", "", "", None, user.subject, True,
+              "notification channel deleted", {"channel_id": channel_id})
         return {"deleted": True}
 
     @app.put("/v1/notifications/preferences")
     async def notification_preferences_save(request: Request) -> dict:
-        notification_admin(request, "write")
+        user = notification_admin(request, "write")
         try:
             preferences = notify.save_preferences(ctx.db, await notification_json(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        audit("notifications", "preferences_save", "", "", None, user.subject, True,
+              "notification routing preferences saved",
+              {"route_count": sum(len(ids) for ids in preferences["routes"].values()),
+               "quiet_hours_enabled": bool(preferences["quiet_start"] and preferences["quiet_end"])})
         return {"preferences": preferences}
 
     @app.post("/v1/notifications/channels/{channel_id}/test")
@@ -2317,28 +2374,37 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/licensing/activate")
     def activate_license(body: LicenseKeyBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
-                                             ctx.settings.license_public_key)
+            state = licensing.activate_online(ctx.db, body.key, ctx.settings.license_service_url,
+                                              ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated online",
+              {"source": "online", "plan": state["plan"]}, human=True)
+        return state
 
     @app.post("/v1/licensing/offline")
     def activate_license_offline(body: OfflineLicenseBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_activate")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_activate")
         try:
-            return licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
+            state = licensing.activate(ctx.db, body.license_file, ctx.settings.license_public_key, "offline")
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_activate", "", "", None, user.subject, True, "activated offline",
+              {"source": "offline", "plan": state["plan"]}, human=True)
+        return state
 
     @app.put("/v1/licensing/limits")
     def update_license_limits(body: PlanLimitsBody, request: Request) -> dict:
-        console_user(request, "licensing.manage", target="licensing", action="license_limits")
+        user = console_user(request, "licensing.manage", target="licensing", action="license_limits")
         try:
-            return licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
+            state = licensing.save_limits(ctx.db, body.plan, body.limits, ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit("licensing", "license_limits", "", "", None, user.subject, True, "limits updated",
+              {"plan": body.plan, "limits": body.limits}, human=True)
+        return state
 
     @app.get("/v1/licensing/usage")
     def licensing_usage(request: Request) -> dict:
@@ -4034,6 +4100,18 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("node.removed", node=name, outcome="removed", reason="removed from Machines and AI screen")
         return {"node": name, "removed": True}
 
+    @app.post("/v1/nodes/{name}/operator-interventions", status_code=202)
+    def report_operator_intervention(name: str, body: OperatorInterventionBody,
+                                     node: str = Depends(node_auth)) -> dict:
+        """Accept host-audit records from the root-owned node agent; the bearer is scoped to that node."""
+        if name != node:
+            raise HTTPException(403, "token belongs to another node")
+        intervention_id = flow_doctor.record_operator_intervention(
+            ctx, source_key=f"host:{node}:{body.source_key}", source=body.source, actor=body.actor,
+            action=body.action, target=body.target, reason=body.reason,
+            happened_at=body.happened_at, details={"node": node, **body.details})
+        return {"recorded": bool(intervention_id), "id": intervention_id}
+
     @app.post("/v1/nodes/{name}/operations", status_code=202)
     def create_node_operation(name: str, body: NodeOperationBody, request: Request) -> dict:
         user = console_user(request, {"nodes.manage"}, target="node", action=body.action, node=name)
@@ -4346,7 +4424,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
-                              " AND removed_at IS NULL", (node,)) or {}
+                              " AND removed_at IS NULL AND status='online' AND last_heartbeat IS NOT NULL"
+                              " AND last_heartbeat > now() - make_interval(secs => %s)",
+                              (node, shared_accounts.NODE_ONLINE_S))
+        # A worker process can start before its node agent has delivered a post-reboot heartbeat. Never route from
+        # persisted pre-reboot readiness: the heartbeat refreshes machine state and installed tools first.
+        if not node_row:
+            return []
         if not node_row.get("accepting_work", True):
             return []
         projects = repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))
@@ -4527,6 +4611,12 @@ def create_app(ctx: Ctx) -> FastAPI:
             dev_rows.sort(key=lambda t: (prio.get(t["project"], 5), "rework" not in t["labels"],
                                          PRIORITY.get(t["priority"], 2), t["jira_created"] or utcnow()))
             out += dev_rows
+        # Routes the Flow doctor moved a ticket away from (failed account or machine) are not offered again.
+        if out:
+            avoided = {(r["ticket_key"], r["step"]) for r in ctx.db.all(
+                "SELECT ticket_key,step FROM flow_doctor_route_exclusions WHERE expires_at > now()"
+                " AND ((account_id<>'' AND account_id=%s) OR (node<>'' AND node=%s))", (account_id, node))}
+            out = [t for t in out if (t["key"], t["step"]) not in avoided]
         # Keep the normal workflow order stable, but put a generated flow bug first whenever it is eligible.
         out.sort(key=lambda t: "flow-bug" not in (t.get("labels") or []))
         if quota_at_risk and out:
@@ -6731,6 +6821,18 @@ def create_app(ctx: Ctx) -> FastAPI:
                        " cooldown_until=NULL, last_error='', cooldown_since=NULL,"
                        " idle_since=CASE WHEN status='working' THEN NULL ELSE coalesce(idle_since,now()) END"
                        " WHERE id=%s", (account_id,))
+            # Provider authorization is complete when the node reports the first successful credential probe.
+            # Clearing this state here removes the former nodes.manage console confirmation from recovery.
+            completed = ctx.db.one(
+                "UPDATE managed_ai_accounts m SET sign_in_url='',sign_in_code='',sign_in_error='',"
+                " sign_in_status='idle',sign_in_request_id='',sign_in_expires_at=NULL,"
+                " sign_in_started_at=NULL,updated_at=now() FROM accounts a"
+                " WHERE m.id=%s AND m.node=%s AND m.removed_at IS NULL AND m.sign_in_status='completed'"
+                " AND a.id=m.id AND a.status IN ('idle','working') AND a.last_probe_at>=m.sign_in_started_at"
+                " RETURNING m.provider", (account_id, node))
+            if completed:
+                ctx.events.emit("account.sign_in_completed", account=account_id, provider=completed["provider"],
+                                node=node, outcome="ready", reason="successful credential probe confirmed provider sign-in")
         else:
             ctx.db.run("UPDATE accounts SET status=CASE WHEN status='working' THEN status ELSE 'error' END, last_error=%s,"
                        " cooldown_since=NULL, idle_since=NULL"
@@ -7221,9 +7323,11 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_save")
         try:
             item = knowledge.save_item(ctx.db, project=body.project, scope=body.scope, epic=body.epic, kind=body.kind,
-                                       title=body.title, content=body.content, actor=body.actor or user.subject)
+                                       title=body.title, content=body.content, actor=user.subject)
         except knowledge.Invalid as exc:
             raise HTTPException(422, str(exc)) from exc
+        audit("knowledge", "item_save", str(item["id"]), "", None, user.subject, True, "saved",
+              {"kind": body.kind, "project": body.project, "scope": body.scope}, human=True)
         return knowledge._pack_item(item)
 
     @app.post("/v1/knowledge/items/{item_id}/{action}")
@@ -7231,12 +7335,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = console_user(request, "knowledge.manage", target="knowledge", action="item_" + action,
                             node=str(item_id))
         try:
-            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=body.actor or user.subject,
+            item = knowledge.moderate_item(ctx.db, item_id, action=action, actor=user.subject,
                                            content=body.content, title=body.title,
                                            duplicate_id=body.duplicate_id, project=body.project,
                                            scope=body.scope or None, epic=body.epic)
         except knowledge.Invalid as exc:
             raise HTTPException(422 if "not found" not in str(exc) else 404, str(exc)) from exc
+        audit("knowledge", "item_" + action, str(item_id), "", None, user.subject, True, "updated",
+              {"item_id": item_id}, human=True)
         return knowledge._pack_item(item)
 
     # --- Knowledge screen: versioned control-repo resources -------------------------------------------------
@@ -7275,7 +7381,8 @@ def create_app(ctx: Ctx) -> FastAPI:
                             current["version"] if current else 0, actor, action, branch, int(pr["number"]),
                             str(pr.get("html_url") or "")))
                 audit("aiflow-control", "policy-pr", "", "", None, actor, True, str(pr["html_url"]),
-                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha})
+                      {"type": kind, "id": resource_id, "branch": branch, "pr": int(pr["number"]), "commit": sha},
+                      human=True)
                 ctx.events.emit("resource.policy_proposed", project=resource_id if resource_id != "default" else "",
                                 account=actor, outcome="pending", reason=f"PR #{pr['number']}",
                                 data={"type": kind, "id": resource_id})
@@ -7292,7 +7399,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         row = knowledge.save_current(ctx.db, kind=kind, resource_id=resource_id, title=title, content=content,
                                      archived=archived, actor=actor, action=action, path=path, commit_sha=sha)
         audit("aiflow-control", "resource-commit", "", "", None, actor, True, sha,
-              {"type": kind, "id": resource_id, "version": row["version"], "path": path})
+              {"type": kind, "id": resource_id, "version": row["version"], "path": path}, human=True)
         ctx.events.emit("resource.changed", account=actor, outcome=action, reason=f"{kind}/{resource_id}",
                         data={"type": kind, "id": resource_id, "version": row["version"], "commit": sha})
         return row
@@ -7315,24 +7422,24 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/knowledge/resources")
     def knowledge_save(body: KnowledgeBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_save")
         if not body.id.strip():
             raise HTTPException(400, "resource id is required")
         action = "archive" if body.archived else "save"
-        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, body.actor, action,
+        return submit_resource_change(body.type, body.id, body.title, body.content, body.archived, user.subject, action,
                                       body.version)
 
     @app.post("/v1/knowledge/resources/{kind}/{resource_id}/restore")
     def knowledge_restore(kind: str, resource_id: str, body: KnowledgeRestoreBody, request: Request) -> dict:
-        console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
-                     node=resource_id)
+        user = console_user(request, "knowledge.manage", target="aiflow-control", action="resource_restore",
+                            node=resource_id)
         load_managed_resources()
         version = ctx.db.one("SELECT title,content,archived FROM managed_resource_history WHERE resource_type=%s"
                              " AND resource_id=%s AND version=%s", (kind, resource_id, body.version))
         if not version:
             raise HTTPException(404, "resource version not found")
         return submit_resource_change(kind, resource_id, version["title"], version["content"], version["archived"],
-                                      body.actor, "restore")
+                                      user.subject, "restore")
 
     @app.post("/v1/knowledge/proposals/{proposal_id}/approve")
     def knowledge_approve(proposal_id: int, body: KnowledgeApprovalBody,
@@ -7344,7 +7451,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             raise HTTPException(409, "policy proposal is no longer pending")
         github = github_control_gateway(ctx)
         repo_name = Path(ctx.settings.control_repo).name
-        owner = _owner or body.approved_by.strip() or "owner"
+        owner = _owner
         try:
             merged = github.merge_pr(repo_name, int(proposal["pr_number"]),
                                          f"Policy: {proposal['title']}", "squash")
@@ -7361,7 +7468,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.db.run("UPDATE managed_resource_proposals SET status='merged',merged_at=now(),approved_by=%s WHERE id=%s",
                    (owner, proposal_id))
         audit("aiflow-control", "policy-merge", "", "", None, owner, True, str(merged.get("sha") or ""),
-              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]})
+              {"id": proposal["resource_id"], "pr": proposal["pr_number"], "version": resource["version"]},
+              human=True)
         ctx.events.emit("resource.policy_merged", project=proposal["resource_id"] if proposal["resource_id"] != "default" else "",
                         account=owner, outcome="merged", reason=f"PR #{proposal['pr_number']}",
                         data={"type": "policy", "id": proposal["resource_id"], "version": resource["version"]})

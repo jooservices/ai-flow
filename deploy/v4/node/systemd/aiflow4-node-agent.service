@@ -1,9 +1,12 @@
 [Unit]
 Description=AI Flow v4 node agent (heartbeat, metrics, workers)
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service auditd.service
+Wants=network-online.target docker.service auditd.service
 
 [Service]
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=5min
 EnvironmentFile=/etc/aiflow/node.env
 ExecStart=/srv/aiflow/current/.venv/bin/aiflow4 node-agent --slots ${AIFLOW4_SLOTS}
 Restart=always

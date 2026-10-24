@@ -1,0 +1,5 @@
+# Capture interactive host commands, excluding services with an unset loginuid. The forwarder stores the
+# executable name and configuration path only; command arguments and file contents are never sent to AI Flow.
+-a always,exit -F arch=b64 -S execve -F auid!=4294967295 -k aiflow4-human-shell
+-w /etc/aiflow -p wa -k aiflow4-human-config
+-w /etc/systemd/system -p wa -k aiflow4-human-config

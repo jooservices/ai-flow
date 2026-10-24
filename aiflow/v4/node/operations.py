@@ -872,11 +872,23 @@ def _service_health(service: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute(operation: dict[str, Any]) -> dict[str, Any]:
-    """Install missing components or reconcile all tools and services in a server-created operation payload."""
+    """Run a whitelist-bound install, repair or worker-restart operation created by control."""
     payload = operation.get("payload") or {}
     from .agent import tool_versions
 
     action = payload.get("action")
+    if action == "restart_worker":
+        account = str(payload.get("account") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}", account):
+            raise OperationError("worker account id is invalid")
+        try:
+            result = subprocess.run(["systemctl", "restart", f"aiflow4-worker@{account}.service"],
+                                    capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OperationError(f"worker restart could not run ({type(exc).__name__})") from exc
+        if result.returncode:
+            raise OperationError(f"systemd could not restart worker {account} (exit {result.returncode})")
+        return {"healthy": True, "action": "restart_worker", "account": account}
     if action == "install":
         desired_tools = payload.get("tools") or []
         services: list[dict[str, Any]] = []

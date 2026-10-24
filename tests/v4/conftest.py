@@ -42,8 +42,8 @@ def test_database_url():
     from aiflow.v4.core import testdb
     name = testdb.new_name()
     try:
-        try:  # leftovers of killed sessions: keep at most a handful of idle databases around
-            testdb.sweep(DATABASE_URL)
+        try:  # leftovers of killed sessions; only stale ones, since a live parallel session is idle between tests
+            testdb.sweep(DATABASE_URL, max_databases=10**6)
         except Exception:  # noqa: BLE001 - a missing right to list or drop must not stop the tests
             pass
         admin = psycopg.connect(DATABASE_URL, autocommit=True)
@@ -54,13 +54,15 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
-    # Keep a backend visible in pg_stat_activity for the session so concurrent sweeps treat this DB as in use.
-    keepalive = psycopg.connect(own, autocommit=True)
+    # Keep this session database visible to the node-agent sweeper between tests, even while
+    # individual test DB pools are closed. The application name also makes concurrent-session
+    # protection explicit in pg_stat_activity.
+    keepalive = psycopg.connect(own, autocommit=True, application_name="aiflow4-pytest-session")
     try:
         yield own
     finally:
-        keepalive.close()
         try:
+            keepalive.close()
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:
             pass
@@ -103,6 +105,7 @@ def control_repo(tmp_path: Path) -> Path:
 
 class FakeJira:
     normalize = staticmethod(Jira.normalize)
+    operator_changes = staticmethod(Jira.operator_changes)
 
     def __init__(self) -> None:
         self.status_of: dict[str, str] = {}
@@ -217,6 +220,17 @@ class FakeJira:
 
     def link_issues(self, blocker, blocked, link_type="Blocks"):
         self.issue_links.append((blocker, blocked, link_type))
+
+    def issue_links_for(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def get_issue_links(self, key):
+        return list(getattr(self, "links_by_ticket", {}).get(key, []))
+
+    def delete_issue_link(self, link_id):
+        self.deleted_issue_links = getattr(self, "deleted_issue_links", []) + [str(link_id)]
+        for key in list(getattr(self, "links_by_ticket", {})):
+            self.links_by_ticket[key] = [link for link in self.links_by_ticket[key] if link.get("id") != str(link_id)]
 
     def add_attachment(self, key, filename, content, content_type):
         self.attachments.append((key, filename, content, content_type))
@@ -429,8 +443,14 @@ def add_ticket(db, key: str, status: str = "To Do", labels=("aiflow-ready",), pr
             priority, list(blocked_by)))
 
 
-def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP"):
+def join_node(client, name: str, ip: str = "", role: str = "worker", project: str = "TESTWP", *, heartbeat: bool = True):
     issued = client.post("/v1/nodes/join-tokens", json={"provision_key": "join-secret", "name": name,
                                                          "role": role, "project": project})
     assert issued.status_code == 200, issued.text
-    return client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    joined = client.post("/v1/nodes/join", json={"join_token": issued.json()["token"], "ip": ip})
+    assert joined.status_code == 200, joined.text
+    if heartbeat:
+        ready = client.post(f"/v1/nodes/{name}/heartbeat", json={},
+                            headers={"Authorization": "Bearer " + joined.json()["node_token"]})
+        assert ready.status_code == 200, ready.text
+    return joined

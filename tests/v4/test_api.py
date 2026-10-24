@@ -11,8 +11,8 @@ from aiflow.v4.control import api as control_api
 from aiflow.v4.control.db import J
 
 
-def join(client, name, ip=""):
-    r = join_node(client, name, ip=ip)
+def join(client, name, ip="", *, heartbeat=True):
+    r = join_node(client, name, ip=ip, heartbeat=heartbeat)
     assert r.status_code == 200
     return {"Authorization": f"Bearer {r.json()['node_token']}"}
 
@@ -266,7 +266,7 @@ def test_joined_project_node_is_online_preflight_green_and_can_claim_project_tic
 
 
 def test_node_health_reports_heartbeat_and_preflight_for_the_installer(client, ctx):
-    headers = join(client, "node1")
+    headers = join(client, "node1", heartbeat=False)
     before = client.get("/v1/nodes/node1/health", headers=headers).json()
     assert before["status"] != "online" and before["preflight_ok"] is False and before["missing_tools"]
     client.post("/v1/nodes/node1/heartbeat", json={
@@ -283,7 +283,7 @@ def test_node_health_reports_heartbeat_and_preflight_for_the_installer(client, c
 
 def test_node_heartbeat_is_shipped_to_openobserve_only(client, ctx):
     ctx.events.o2_url = "http://o2.test"  # queue only; the shipping thread is not started
-    cc = join(client, "cc")
+    cc = join(client, "cc", heartbeat=False)
     response = client.post("/v1/nodes/cc/heartbeat", json={
         "slots_total": 4, "slots_used": 2, "release_version": "4.0.0", "metrics": {"cpu_pct": 12.5}
     }, headers=cc)
@@ -974,7 +974,7 @@ def test_role_with_one_ready_account_is_reported(client, ctx):
     ctx.db.run("UPDATE accounts SET status='signed_out' WHERE id='codex-01'")
     watchdog(ctx)
     inc = ctx.db.one("SELECT severity, title FROM incidents WHERE kind='role_coverage' AND subject='verify' AND closed_at IS NULL")
-    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account"
+    assert inc["severity"] == "warning" and inc["title"] == "role verify has 1 ready account(s) from 1 provider(s)"
 
 
 def test_state_reports_registration_and_last_seen_for_an_offline_node(client, ctx):

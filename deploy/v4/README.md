@@ -72,6 +72,7 @@ by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topic
 - [Leftover test databases](../../docs/v4/test-database-sweep.md): the node agent drops `aiflow4_t_*` databases of killed pytest sessions
 - [Install the control plane](../../docs/v4/control-install.md): `aiflow4 install control --version vX.Y.Z --domain D` on a new Ubuntu host, hidden secret entry, idempotent reruns, upgrade and rollback, pinned server-installer and `SI_*`
 - [Idle flow alert](../../docs/v4/idle-flow-alert.md): critical incidents when ready tickets get no worker, naming the cause, and when a stack pin is missing
+- [Flow doctor and operator interventions](../../docs/v4/no-operator.md): minute-leased stall recovery, host/API/Jira audit, Dashboard role coverage, and reboot recovery
 - [Command Center V2](../../docs/v4/command-center-v2.md): implementation guide and design prototype for the warm theme, combined Dashboard, role views, Work board picker and Ctrl K search
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks

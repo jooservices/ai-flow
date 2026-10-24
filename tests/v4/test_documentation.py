@@ -380,7 +380,7 @@ def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     assert docsite.changed_views("origin/develop") == {"projects"}
 
 
-def test_project_environment_toast_style_maps_to_projects_screen(monkeypatch):
+def test_toast_style_maps_to_every_screen_that_uses_the_shared_style(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()
     line_no = next(i for i, line in enumerate(source_lines, 1) if line.startswith(".toasts{"))
@@ -397,7 +397,10 @@ def test_project_environment_toast_style_maps_to_projects_screen(monkeypatch):
         return Result(f"@@ -{line_no},1 +{line_no},1 @@\n")
 
     monkeypatch.setattr(docsite.subprocess, "run", fake_run)
-    assert docsite.changed_views("origin/develop") == {"projects"}
+    views = docsite.changed_views("origin/develop")
+    assert views == {"cc", "projects"}
+    pages = [ui, *(f"docs/guide/screens/{view}.md" for view in views)]
+    assert docsite.documentation_gaps(pages, views=views) == []
 
 
 def test_ci_check_maps_dashboard_v2_helpers_and_work_board_navigation(monkeypatch):

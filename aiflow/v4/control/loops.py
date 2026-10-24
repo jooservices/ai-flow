@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 from . import environment as environment_reports
 from . import ba_chat, escalations, jira_connect, knowledge, memory, merge_flow, notify, role_health, tooling
+from . import flow_doctor
 from . import projects as project_lifecycle
 from . import rollout
 from . import version_release
@@ -155,9 +156,20 @@ def jira_sync(ctx: Ctx, full: bool = False) -> int:
     }
     # The sync reads each issue with its change history (Fix version attach dates, first In Progress).
     search = getattr(ctx.jira, "search_history", ctx.jira.search)
+    try:
+        jira_flow_actor = ctx.jira.current_account_id()
+    except Exception:  # noqa: BLE001 - no authenticated identity means external history cannot be classified safely
+        jira_flow_actor = ""
     for issue in search(jql + " ORDER BY updated DESC"):
         t = ctx.jira.normalize(issue)
-        old = ctx.db.one("SELECT status, labels, parent_key FROM tickets WHERE key=%s", (t["key"],))
+        old = ctx.db.one("SELECT status, labels, parent_key, jira_updated FROM tickets WHERE key=%s", (t["key"],))
+        if old and jira_flow_actor:
+            for change in ctx.jira.operator_changes(issue, old.get("jira_updated"), jira_flow_actor):
+                flow_doctor.record_operator_intervention(
+                    ctx, source_key=change["source_key"], source="jira", actor=change["actor"],
+                    action="edit", target=change["target"], happened_at=change["happened_at"],
+                    reason="Jira history records a change by an account outside AI Flow",
+                    details={"fields": change["fields"]})
         if not old:
             first_seen_ticket_keys.add(t["key"])
         if (not old or old["parent_key"] != t["parent_key"] or
@@ -420,14 +432,17 @@ def watchdog(ctx: Ctx) -> None:
     switched_off = role_health.disabled_roles(ctx.db)
     for role in ("master", "intake_refiner", "verify", "dev"):
         holders = [a for a in repo.accounts if role in (a.roles or [])]
-        ok = [a.id for a in holders if a.id in ready and (a.id, role) not in switched_off]
+        ok = [a for a in holders if a.id in ready and (a.id, role) not in switched_off]
         if not holders:
             continue
-        if len(ok) < 2:
+        providers = {a.provider for a in ok}
+        if len(ok) < 2 or len(providers) < 2:
             open_incident(ctx, "role_coverage", role, "critical" if not ok else "warning",
-                          f"role {role} has {len(ok)} ready account{'s' if len(ok) != 1 else ''}",
-                          f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: {', '.join(ok) or 'none'}."
-                          " Every role needs two ready accounts of different providers so one quota or outage cannot stop the flow.")
+                          f"role {role} has {len(ok)} ready account(s) from {len(providers)} provider(s)",
+                          f"Accounts with the role: {', '.join(a.id for a in holders)}; ready: "
+                          f"{', '.join(a.id for a in ok) or 'none'}; providers ready: "
+                          f"{', '.join(sorted(providers)) or 'none'}. Every role needs two ready accounts from "
+                          "different providers so one quota or outage cannot stop the flow.")
         else:
             close_incident(ctx, "role_coverage", role, f"{len(ok)} accounts ready")
     # quota windows reported by the provider (Claude: five_hour and seven_day utilization with reset times)
@@ -504,7 +519,8 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
 
     support_bundle.control_log_buffer(ctx.settings.support_log_dir, ctx.settings.o2_source)
     stop = stop or threading.Event()
-    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = last_ba_chat = 0.0
+    last_sync = last_full = last_wd = last_mem = last_rollout = last_release = last_backup_jobs = 0.0
+    last_doctor = last_ba_chat = 0.0
     last_merge = 0.0
     from . import api as control_api
     ctx.events.start()
@@ -555,4 +571,12 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)
             ctx.events.emit("control.error", reason=str(e)[:300])
+        if now - last_doctor >= 60 and ctx.leases.leader("flow_doctor", OWNER, 70_000):
+            last_doctor = now  # a failed pass still observes the minute cadence, rather than retrying every 2 s
+            try:
+                report = flow_doctor.tick(ctx)
+                log.info("flow doctor: %s", report)
+            except Exception as e:  # noqa: BLE001 - doctor failures stay visible and retry next minute
+                log.exception("flow doctor failed: %s", e)
+                ctx.events.emit("flow_doctor.error", outcome="failed", reason=type(e).__name__)
         stop.wait(2)

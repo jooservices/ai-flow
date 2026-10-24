@@ -251,7 +251,7 @@ def claim_job(ctx, account: str, node: str) -> dict | None:
                 return None
             claim_token = str(uuid.uuid4())
             connection.execute("UPDATE ba_chat_jobs SET status='claimed',claimed_by=%s,claimed_node=%s,"
-                               "claim_token=%s,claim_until=clock_timestamp()+interval '5 minutes',updated_at=now()"
+                               "claim_token=%s,claim_until=clock_timestamp()+interval '15 minutes',updated_at=now()"
                                " WHERE id=%s",
                                (account, node, claim_token, row["id"]))
             return {"job_id": str(row["id"]), "conversation_id": str(row["conversation_id"]),

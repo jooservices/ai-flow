@@ -244,3 +244,16 @@ def test_console_configures_ba_chat_project_without_returning_the_bot_token(clie
     invalid = client.put("/v1/notifications/channels", json={"kind": "telegram", "name": "Bad project",
         "config": {"bot_token": BOT_TOKEN, "chat_id": CHAT_ID, "ba_chat_enabled": True, "project_key": "OTHER"}})
     assert invalid.status_code == 400
+    mixed = client.put("/v1/notifications/channels", json={"kind": " TELEGRAM ", "name": "Mixed case",
+        "config": {"bot_token": BOT_TOKEN, "chat_id": CHAT_ID, "ba_chat_enabled": True, "project_key": "OTHER"}})
+    assert mixed.status_code == 400
+
+
+def test_claim_outlives_the_worker_turn_timeout(ctx):
+    channel(ctx)
+    assert ba_chat.accept_update(ctx, ctx.db.one("SELECT * FROM notification_channels WHERE kind='telegram'"),
+                                 message(9, "Plan something"))
+    job = ba_chat.claim_job(ctx, "claude-01", "cc")
+    seconds = ctx.db.one("SELECT extract(epoch FROM claim_until-clock_timestamp()) AS s FROM ba_chat_jobs "
+                         "WHERE id=%s", (job["job_id"],))["s"]
+    assert seconds > 600  # the worker allows a turn 600 s

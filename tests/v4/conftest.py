@@ -54,9 +54,11 @@ def test_database_url():
         yield DATABASE_URL
         return
     own = make_conninfo(DATABASE_URL, dbname=name)
+    keepalive = psycopg.connect(own, autocommit=True)
     try:
         yield own
     finally:
+        keepalive.close()
         try:
             admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
         except psycopg.Error:

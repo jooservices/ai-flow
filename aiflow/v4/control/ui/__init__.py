@@ -32,6 +32,7 @@ CONSOLE_PAGE_PATHS = (
 
 def mount_ui(app: FastAPI, ctx) -> None:
     page = HERE / "console.html"
+    logs_page = HERE / "logs.html"
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
@@ -41,8 +42,19 @@ def mount_ui(app: FastAPI, ctx) -> None:
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     for path in CONSOLE_PAGE_PATHS:
-        if path not in {"/", "/help", "/notifications"}:
+        if path not in {"/", "/help", "/notifications", "/logs"}:
             app.add_api_route(path, console, methods=["GET"], include_in_schema=False)
+
+    @app.get("/logs", include_in_schema=False)
+    def logs(request: Request) -> FileResponse:
+        claims = verify_session(request.cookies.get(COOKIE_NAME, ""), ctx.settings.console_session_secret)
+        user = resolve_session_user(ctx.db, claims) if claims else None
+        if not user:
+            raise HTTPException(401, "authenticated console session required")
+        if not role_satisfies(user.effective_roles, {"view.logs"}):
+            raise HTTPException(403, "not available for your role")
+        return FileResponse(logs_page, media_type="text/html",
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"})
 
     @app.get("/help", include_in_schema=False)
     def help_root() -> RedirectResponse:

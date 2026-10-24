@@ -549,6 +549,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
+    <a class="iconbtn" id="logs-nav" href="/logs" hidden title="Open the administrator log viewer">Host/service logs</a>
     <a class="iconbtn" id="help-link" href="/help/screens/cc.html" target="_blank" rel="noopener" title="Help for this screen">Help</a>
     <a class="iconbtn" href="/o2/" target="_blank" rel="noopener" title="Logs and metrics (OpenObserve)">Logs</a>
     <a class="iconbtn" href="/mail/" target="_blank" rel="noopener" title="Alert emails (Mailpit)">Alerts mail</a>
@@ -1072,6 +1073,7 @@ function applyRoleNavigation() {
     tab.setAttribute('aria-hidden', String(tab.hidden));
   });
   var nav = $('.tabs');
+  var logLink = $('#logs-nav'); if (logLink) logLink.hidden = !S.consoleUser || !consoleCan('view.logs');
   if (nav) {
     $$('.tab-divider', nav).forEach(function (divider) { divider.remove(); });
     VIEW_GROUPS.forEach(function (group, index) {

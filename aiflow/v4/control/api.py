@@ -43,7 +43,7 @@ from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
 from ..core import backups as control_backups, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
-from ..core.services import service_gaps
+from ..core.services import normalize_services, service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
@@ -563,6 +563,28 @@ def github_control_gateway(ctx: Ctx) -> GitHubApp:
     return gateway
 
 
+def declare_project_services(ctx: Ctx, key: str, services: list[str], message: str) -> tuple[list[str], str]:
+    """Write the project's test services (`services`, the only setting; `databases` is dropped) to its project file in
+    aiflow-control and reload it. Returns the saved services and the commit. Used by the Projects screen and by the
+    flow doctor (docs/v4/test-services.md)."""
+    names = normalize_services(services)
+    project_file = ctx.repo().root / "projects" / f"{key}.yaml"
+    config = yaml.safe_load(project_file.read_text(encoding="utf-8")) or {}
+    config.pop("databases", None)
+    if names:
+        config["services"] = names
+    else:
+        config.pop("services", None)
+    control_name = Path(ctx.settings.control_repo).name
+    github = github_control_gateway(ctx)
+    branch = github.default_branch(control_name)
+    commit = github.commit_file(control_name, branch, f"projects/{key}.yaml",
+                                yaml.safe_dump(config, sort_keys=False, allow_unicode=True), message)
+    if ctx.refresh_repo:
+        ctx.refresh_repo()
+    return names, commit or ""
+
+
 def github_context_for_repository(ctx: Ctx, repo: str) -> tuple[GitHubApp, str]:
     gateway = github_gateway(ctx, repo)
     if gateway is None:
@@ -775,7 +797,12 @@ class ProjectPreflightBody(BaseModel):
     containers: bool = False
 
 
+class ProjectServicesBody(BaseModel):
+    services: list[str] = Field(default_factory=list, max_length=10)
+
+
 class ProjectCreateBody(ProjectPreflightBody):
+    services: list[str] = Field(default_factory=list, max_length=10)
     checks: list[str] = Field(default_factory=list, max_length=50)
     priority: int = Field(default=5, ge=0, le=100)
     parallel_limit: int = Field(default=2, ge=1, le=100)
@@ -2984,11 +3011,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                               "status": "paused" if project.paused else "active",
                               "priority": project.priority, "ticket_count": counts.get(project.key, 0),
                               "base": project.base, "stack": project.stack,
+                              "services": project.required_services,
                               "checks": probes.get(project.key, {})}
                     for project in sorted(repo.projects.values(), key=lambda item: item.key)]
         if user and user.project_keys is not None:
             projects = [project for project in projects if project["key"] in user.project_keys]
-        return {"projects": projects}
+        invalid_projects = [{"file": f"{name}.yaml", "reason": reason}
+                            for name, reason in sorted(repo.invalid_projects.items())
+                            if not user or user.project_keys is None or name in user.project_keys]
+        return {"projects": projects, "invalid_projects": invalid_projects}
 
     @app.get("/v1/projects/catalog")
     def project_catalog(request: Request) -> dict:
@@ -3279,6 +3310,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     def add_project(body: ProjectCreateBody, request: Request) -> dict:
         user = console_user(request, {"projects.manage"}, target="aiflow-control", action="add_project",
                             node=body.project[:32])
+        unknown = [service for service in body.services if service.strip() and not normalize_services(service)]
+        if unknown:
+            raise HTTPException(422, "unknown test services: " + ", ".join(unknown) + ". Use postgres or redis.")
         with ctx.db.pool.connection() as connection:
             with connection.transaction():
                 # Keep the shared admission lock through preflight, the external commit, and repo refresh. A
@@ -3316,7 +3350,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 worker_nodes.update(row["name"] for row in ctx.db.all("SELECT name FROM nodes WHERE role='worker'"))
                 checks = [check.strip() for check in body.checks if check.strip()]
                 config = {"key": key, "repo": body.repo, "base": body.base, "stack": body.stack,
-                          "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
+                          "services": normalize_services(body.services), "checks": checks, "containers": body.containers, "merge": {"method": body.merge_method},
                           "limits": {"parallel": body.parallel_limit,
                                      "work_minutes": {"target": 30, "warn": 45, "hard": 60}},
                           "priority": body.priority, "paused": False, "nodes": sorted(worker_nodes)}
@@ -3339,6 +3373,28 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("project.added", project=key, account=user.subject, outcome="saved",
                         reason=f"control repo commit {commit or 'created'}")
         return {"saved": True, "project": key, "commit": commit, "preflight": result}
+
+    @app.post("/v1/projects/{key}/services")
+    def save_project_services(key: str, body: ProjectServicesBody, request: Request) -> dict:
+        user = console_user(request, {"projects.manage"}, target="aiflow-control", action="project_services", node=key)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) or key not in ctx.repo().projects:
+            project_audit("project_services", key[:32], user.subject, False, "project is not configured")
+            raise HTTPException(404, "project is not configured")
+        unknown = [s for s in body.services if s.strip() and not normalize_services(s)]
+        if unknown:
+            raise HTTPException(422, "unknown test services: " + ", ".join(unknown) + ". Use postgres or redis.")
+        try:
+            names, commit = declare_project_services(ctx, key, body.services, f"projects: test services of {key} via AI Flow console")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("project services update failed (%s)", type(exc).__name__)
+            project_audit("project_services", key, user.subject, False, "control repo commit failed", {"services": body.services})
+            raise HTTPException(502, "could not update the project in aiflow-control") from exc
+        project_audit("project_services", key, user.subject, True, commit or "bot commit created", {"services": names})
+        ctx.events.emit("project.services_saved", project=key, account=user.subject, outcome="saved",
+                        reason=", ".join(names) or "none")
+        return {"saved": True, "project": key, "services": names, "commit": commit}
 
     @app.post("/v1/projects/{key}/pause")
     def pause_project(key: str, body: ProjectPauseBody, request: Request) -> dict:

@@ -6,6 +6,7 @@ repo and branches, the policy of a project).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,25 @@ class Project:
     repositories: list[dict[str, Any]] = field(default_factory=list)
     epic_repositories: dict[str, str] = field(default_factory=dict)
     default_repo: str = ""  # retained on repository-specific project views
+
+    def __post_init__(self) -> None:
+        # `databases` is the old name of `services`: both are read as one setting, so a project file can never name
+        # a database that no machine prepares (docs/v4/test-services.md). Reject unsupported legacy names instead of
+        # silently keeping a declaration that nodes cannot prepare.
+        legacy = [self.databases] if isinstance(self.databases, str) else list(self.databases or [])
+        unknown_legacy = [str(database).strip() for database in legacy
+                          if str(database).strip() and not normalize_services([database])]
+        if unknown_legacy:
+            raise ValueError("unknown legacy database/test service names: " + ", ".join(unknown_legacy) +
+                             ". Use postgres or redis.")
+        declared = [self.services] if isinstance(self.services, str) else list(self.services or [])
+        unknown_services = [str(service).strip() for service in declared
+                            if str(service).strip() and not normalize_services([service])]
+        if unknown_services:
+            raise ValueError("unknown test service names: " + ", ".join(dict.fromkeys(unknown_services)) +
+                             ". Use postgres or redis.")
+        self.services = normalize_services([*declared, *legacy])
+        self.databases = []
 
     @property
     def repo_name(self) -> str:
@@ -215,6 +235,7 @@ class ControlRepo:
     policy_projects: dict[str, dict[str, Any]] = field(default_factory=dict)
     policy_archived: bool = False
     ref: str = ""
+    invalid_projects: dict[str, str] = field(default_factory=dict)  # project file stem -> why it was skipped
 
     @classmethod
     def load(cls, root: str | Path) -> "ControlRepo":
@@ -241,9 +262,16 @@ class ControlRepo:
             n = Node(**{k: v for k, v in d.items() if k in Node.__dataclass_fields__})
             nodes[n.name] = n
         projects: dict[str, Project] = {}
+        invalid_projects: dict[str, str] = {}
         for p in sorted((r / "projects").glob("*.yaml")):
             d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            pr = Project(**{k: v for k, v in d.items() if k in Project.__dataclass_fields__})
+            try:
+                pr = Project(**{k: v for k, v in d.items() if k in Project.__dataclass_fields__})
+            except (TypeError, ValueError) as exc:
+                # One bad project file must not stop the others loading: quarantine it and keep the reason for the alert.
+                invalid_projects[p.stem] = str(exc)
+                logging.getLogger(__name__).warning("project file %s skipped: %s", p.name, exc)
+                continue
             projects[pr.key] = pr
         ref = ""
         head = r / ".git" / "HEAD"
@@ -261,7 +289,8 @@ class ControlRepo:
                 policy_projects[p.stem] = data
         return cls(root=r, versions=y("versions.lock", {}), policy={} if policy_archived else y("policy/default.yaml", {}),
                    profiles=y("profiles.yaml", {}), sa=y("sa.yaml", {}), accounts=accounts, nodes=nodes,
-                   projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref)
+                   projects=projects, policy_projects=policy_projects, policy_archived=policy_archived, ref=ref,
+                   invalid_projects=invalid_projects)
 
     def accounts_on(self, node: str) -> list[Account]:
         return [a for a in self.accounts if a.runs_on(node)]

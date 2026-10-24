@@ -8,8 +8,10 @@ Do this:
 1. Read AGENTS.md and docs/SPEC.md if they exist, then the ticket below.
 2. Check every acceptance criterion against the code: is it implemented, complete and tested? If a criterion can
    only be proven after merge with a project's configured environment, list its exact criterion ID and text under
-   `POST-MERGE CHECKS:`. Do not fail review for that criterion and do not ask about its environment. List nothing
-   when all criteria can be checked in this review run.
+   `POST-MERGE CHECKS:` as `- ACn: <exact criterion text> | check: <one exact command from the configured checks above>`.
+   Map each criterion to the one configured command that proves it. Do not reuse an unrelated passing check, invent
+   a command, fail review for a deferred criterion, or ask about its environment. List nothing when all criteria can be
+   checked in this review run.
 3. Run the project's checks and the tests of this change:
 {checks}
    A check that cannot run here (Docker, network) is not a failure; say so. A check that runs and fails is.
@@ -24,10 +26,10 @@ Rules:
 The developer's summary:
 {dev_summary}
 {related}{environment}
-A criterion that can only be proven on one particular machine is verified by AI Flow after the merge (canary,
-release checks); it is not a failure of this review and never a question about a server. The configured version
-release run executes the project's post-merge checks with only environment items permitted for `post_merge`, then
-records their result against each ticket whose deferred criteria were included in that release.
+A criterion that can only be proven in the project's configured environment is checked by AI Flow after the ticket is
+merged, whether or not the ticket belongs to a Jira version. The post-merge worker runs the configured command mapped
+to each deferred criterion, with only environment items permitted for `post_merge`, then records each result against
+that ticket.
 
 Ticket description:
 ---

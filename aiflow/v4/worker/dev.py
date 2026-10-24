@@ -19,13 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
-from ..core.environment import items_of, parse_missing_environment
+from ..core.environment import items_of, parse_missing_environment, redact
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
 from .client import Conflict, ControlClient
 from .gitops import Git
-from .notes import environment_notes, note, project_env
+from .notes import environment_notes, environment_status, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
@@ -256,8 +256,9 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         hb.progress = {"phase": "worktree", "start": start, "conflicts": len(conflicts)}
         if moved:
             hb.progress["repo_change"] = f"{moved['old_repo']} -> {repo}"
+        env = project_env(project["key"], project.get("environment"), "dev")
         jira("transition", to="In Progress")
-        jira("fields", fields={"Workspace": f"{c.account}@{api_node(api)}",
+        jira("fields", fields={"Workspace": environment_status(project.get("environment"), "dev", env),
                                "Agent (AI)": {"value": PROVIDER_NAME.get(c.provider, c.provider)}})
         jira("comment", body=note(c, "started", what=f"Develop the ticket on branch {branch} from {start}"
                                   + (f", with the latest {project['base']} merged in ({len(conflicts)} conflicted files to resolve)" if conflicts else ""),
@@ -293,10 +294,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         with runtime as containers:
             if wordpress:
                 hb.progress = {"phase": "wordpress-site"}
-                site_notes = start_wordpress_site(containers, wt, project, c.run_id, spec)
+                start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
-                    c, "WordPress test site ready", what=f"Run site: {spec.extra_env['WP_BASE_URL']}",
-                    result="WP_BASE_URL, WP_ADMIN_USER, and WP_ADMIN_PASSWORD are set in the run environment",
+                    c, "WordPress test site ready", what="A temporary WordPress test site is ready",
+                    result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",
                     next_="Use `npx playwright test` with the project config; Chromium, Firefox, and WebKit are installed",
                     node=api_node(api)))
             res = adapter.run(spec, on_progress, stop=hb.lost)
@@ -380,12 +381,12 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 result["outcome"] = "auto_answered"
                 result["details"]["escalation_class"] = raised.get("class", "")
                 result["details"]["missing_tools"] = []
-                cited = f" {raised['citation']}." if raised.get("citation") else ""
+                cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
                 jira("comment", body=note(c, "question answered without the owner",
-                                          what=f"The developer AI stopped with a question: {res.verdict_reason[:400]}",
-                                          why=f"Classified as: {raised.get('label', 'Resolved automatically')} "
-                                              f"({raised.get('reason', 'the register answered this')}).{cited}",
-                                          result=raised.get("answer", ""),
+                                          what="The developer AI stopped with a question that AI Flow answered automatically",
+                                          why=redact(f"Classified as: {raised.get('label', 'Resolved automatically')} "
+                                                     f"({raised.get('reason', 'the register answered this')}).{cited}"),
+                                          result=redact(raised.get("answer", "")),
                                           next_="Back to To Do; the next run gets this answer in its prompt",
                                           t0=t0, node=api_node(api)))
                 jira("transition", to="To Do")
@@ -397,10 +398,10 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             result["details"]["tool_missing_evidence"] = (
                 "explicit_marker" if parse_missing_requirements(res.verdict_reason or "") else "command_not_found")
             result["details"]["escalation_class"] = raised.get("class", "")
-            jira("comment", body=note(c, "waiting for a machine with the tool", what="A check cannot run on this machine",
-                                      why=f"{', '.join(missing)} missing on {api_node(api)}: {res.verdict_reason[:300]}",
-                                      result="No question goes to the owner; the machine and the tool are recorded",
-                                      next_="Back to To Do; AI Flow offers it again when a machine with the tool is available",
+            jira("comment", body=note(c, "waiting for a check tool", what="A configured check could not run",
+                                      why=f"Missing tool(s): {', '.join(missing)}. {redact(res.verdict_reason)[:300]}",
+                                      result="No question goes to the owner; the missing tool is recorded by name",
+                                      next_="Back to To Do; AI Flow offers it again when a worker with the tool is available",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result
@@ -413,11 +414,11 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
                 if raised.get("missing_tools"):
                     result["details"]["missing_tools"] = raised["missing_tools"]
                 result["details"]["escalation_class"] = raised["class"]
-                cited = f" {raised['citation']}." if raised.get("citation") else ""
+                cited = f" {redact(raised['citation'])}." if raised.get("citation") else ""
                 jira("comment", body=note(c, "question answered without the owner",
-                                          what=f"The developer AI stopped with a question: {res.verdict_reason[:400]}",
-                                          why=f"Classified as: {raised['label']} ({raised['reason']}).{cited}",
-                                          result=raised["answer"],
+                                          what="The developer AI stopped with a question that AI Flow answered automatically",
+                                          why=redact(f"Classified as: {raised['label']} ({raised['reason']}).{cited}"),
+                                          result=redact(raised["answer"]),
                                           next_="Back to To Do; the next run gets this answer in its prompt",
                                           t0=t0, node=api_node(api)))
                 jira("transition", to="To Do")

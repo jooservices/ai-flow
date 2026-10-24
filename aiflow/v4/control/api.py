@@ -142,9 +142,10 @@ _STATE_RECENT_RUN = _state_object({
     "node": _STATE_STRING, "outcome": _STATE_STRING, "error_kind": _STATE_STRING,
     "duration_s": _state_nullable(_STATE_INTEGER), "cost_usd": _STATE_NUMBER,
     "tokens_in": _STATE_INTEGER, "tokens_out": _STATE_INTEGER, "pr_url": _STATE_STRING,
+    "already_done": _STATE_BOOLEAN,
     "ended_age_s": _state_nullable(_STATE_INTEGER),
 }, ("id", "ticket", "summary", "step", "account", "provider", "model", "node", "outcome", "error_kind",
-    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "ended_age_s"))
+    "duration_s", "cost_usd", "tokens_in", "tokens_out", "pr_url", "already_done", "ended_age_s"))
 _STATE_ACCOUNT = _state_object({
     "id": _STATE_STRING, "provider": _STATE_STRING, "node": _STATE_STRING, "tier": _STATE_STRING,
     "roles": _STATE_STRING_ARRAY, "explicit_only": _STATE_BOOLEAN, "paused": _STATE_BOOLEAN,
@@ -276,8 +277,9 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "done_at": _state_nullable(_STATE_DATETIME),
         "epic": _STATE_STRING, "repository": _STATE_STRING, "run": _state_nullable(_STATE_RUN),
         "last_run": _state_nullable(_STATE_RECENT_RUN), "updated_age_s": _state_nullable(_STATE_INTEGER),
+        "already_done": _state_nullable(_state_object({"pr_url": _STATE_STRING, "run_id": _STATE_STRING}, ("pr_url", "run_id"))),
     }, ("key", "project", "status", "type", "priority", "labels", "summary", "parent_key", "blocked_by", "done_at", "epic",
-        "repository", "run", "last_run", "updated_age_s"))),
+        "repository", "run", "last_run", "updated_age_s", "already_done"))),
     "release_readiness": _state_array(_state_object({
         "project": _STATE_STRING, "version_id": _STATE_STRING, "version": _STATE_STRING, "ready": _STATE_BOOLEAN,
         "ticket_count": _STATE_INTEGER, "done_count": _STATE_INTEGER, "tickets": _STATE_STRING_ARRAY,
@@ -5959,6 +5961,28 @@ def create_app(ctx: Ctx) -> FastAPI:
     async def github_git_proxy_post(git_path: str, request: Request) -> Response:
         return await github_git_proxy(git_path, request)
 
+    @app.get("/v1/github/pr")
+    def github_find_pr(run_id: str = Query(min_length=1), fence: int = Query(ge=1),
+                       repo: str = Query(min_length=1, max_length=200),
+                       head: str = Query(min_length=1, max_length=240), node: str = Depends(node_auth)) -> dict:
+        run = fenced(run_id, fence, "github", "find_pr", {"repo": repo, "head": head})
+        if run["node"] != node:
+            raise HTTPException(403, "run belongs to another node")
+        project = ctx.repo().projects.get(run["project"])
+        repository = repository_for_run(run, project)
+        if not project or not matches_run_repository(repository, repo):
+            raise HTTPException(403, "repository does not belong to the run's project")
+        pr = github_gateway(ctx, repository).find_pr(repository.split("/", 1)[-1], head)
+        found = {"found": bool(pr)}
+        if pr:
+            found.update(url=pr.get("html_url", ""), number=pr.get("number"))
+            head_sha = str((pr.get("head") or {}).get("sha") or "")
+            if head_sha:
+                found["head_sha"] = head_sha
+        audit("github", "find_pr", run["ticket_key"], run_id, fence, run["account_id"], True,
+              found.get("url", "not found"), {"repo": repository, "head": head})
+        return found
+
     @app.post("/v1/github/pr")
     def github_pr(body: PRBody, node: str = Depends(node_auth)) -> dict:
         run = fenced(body.run_id, body.fence, "github", "pr", {"repo": body.repo, "head": body.head})
@@ -6936,12 +6960,13 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if ticket.get("last_run"):
                     ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
                                           ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "ended_age_s")}
+                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
             data["active_runs"] = [{key: run[key] for key in ("id", "ticket", "project", "summary", "step",
                                                                   "elapsed_s", "heartbeat_age_s", "lease_ms", "progress")}
                                     for run in data["active_runs"]]
             data["recent_runs"] = [{key: run[key] for key in ("id", "ticket", "summary", "step", "outcome",
-                                                                  "error_kind", "duration_s", "pr_url", "ended_age_s")}
+                                                                  "error_kind", "duration_s", "pr_url", "already_done",
+                                                                  "ended_age_s")}
                                     for run in data["recent_runs"]]
             for ticket in data["tickets"]:
                 if ticket.get("run"):
@@ -6950,7 +6975,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if ticket.get("last_run"):
                     ticket["last_run"] = {key: ticket["last_run"].get(key) for key in
                                           ("id", "ticket", "summary", "step", "outcome", "error_kind",
-                                           "duration_s", "pr_url", "ended_age_s")}
+                                           "duration_s", "pr_url", "already_done", "ended_age_s")}
         return data
 
     @app.get("/v1/deploy/state")

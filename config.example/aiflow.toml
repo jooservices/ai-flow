@@ -59,7 +59,7 @@ probe_hours = 3                  # every AI is probed with one word this often; 
 ci_wait_minutes = 90             # CI without a result for this long: the ticket is Blocked (CI)
 feedback_settle_minutes = 5      # wait after marking the PR ready so the review bots can comment
 gate_poll_seconds = 60           # how often the gate looks at a pull request
-max_cycles = 6                   # rework rounds on one ticket before it is Blocked
+loop_limit = 3                   # allowed rework rounds before the ticket is Blocked (project files may override)
 ignored_authors = ["codecov-commenter", "github-actions", "sonarqubecloud", "sonarcloud", "dependabot", "codeql", "github-advanced-security"]  # automation: their comments are not feedback
 # --- health and visibility ---
 health_ticket = "JAIF-12"        # ticket that receives health alerts and the daily AI usage summary (built-in default: none, no alert is written)

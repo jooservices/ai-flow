@@ -61,7 +61,9 @@ def read_source(kind: str, target: str, lines: int = MAX_LOG_LINES) -> dict[str,
         return {"available": False, "lines": []}
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=15, check=False)
+        # Docker routes container stderr separately; combine it with stdout so service errors appear in the viewer.
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors="replace", timeout=15, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return {"available": False, "lines": []}
     if result.returncode:

@@ -105,6 +105,25 @@ def test_unknown_log_source_is_refused_and_node_reader_does_not_run_arbitrary_ta
     assert called == []
 
 
+def test_container_log_reader_merges_stderr_with_stdout(monkeypatch):
+    import subprocess
+
+    called = {}
+
+    def run(command, **kwargs):
+        called["command"] = command
+        called.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="stdout line\nstderr error line\n")
+
+    monkeypatch.setattr("aiflow.v4.core.log_sources.subprocess.run", run)
+
+    result = read_source("container", "aiflow4-control-api-a")
+
+    assert result == {"available": True, "lines": ["stdout line", "stderr error line"]}
+    assert called["stderr"] is subprocess.STDOUT
+    assert called["stdout"] is subprocess.PIPE
+
+
 def test_unavailable_and_empty_log_sources_have_clear_messages(client, ctx):
     node_headers = joined_control_node(client)
     sign_in(client, ctx)

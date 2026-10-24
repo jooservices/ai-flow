@@ -251,6 +251,49 @@ def sweep(ctx) -> list[str]:
     return opened
 
 
+def undeclared_service_waits(ctx) -> dict[str, list[str]]:
+    """Open waits on a test service (postgres, redis) that the ticket's project does not declare: {project: services}."""
+    repo = ctx.repo()
+    out: dict[str, set[str]] = {}
+    for wait in ctx.db.all("SELECT project,requirement FROM tool_waits WHERE resolved_at IS NULL"):
+        name = normalize(wait["requirement"])
+        project = repo.projects.get(wait["project"])
+        if project and name in SERVICES and name not in project.required_services:
+            out.setdefault(wait["project"], set()).add(name)
+    return {key: sorted(names) for key, names in out.items()}
+
+
+def declare_undeclared_services(ctx) -> list[str]:
+    """Flow doctor: a ticket parked on a test service its project does not declare is never left parked. The service
+    is declared for the project (machines prepare and report it on the next heartbeats and the wait ends); when that
+    cannot be done, one alert per project says what to declare. Returns the projects declared."""
+    from .api import declare_project_services
+    from .incidents import close_incident, open_incident
+
+    declared: list[str] = []
+    alerts: set[str] = set()
+    for key, missing in undeclared_service_waits(ctx).items():
+        wanted = list(dict.fromkeys([*ctx.repo().projects[key].required_services, *missing]))
+        try:
+            declare_project_services(ctx, key, wanted, f"projects: declare test services of {key} (flow doctor)")
+        except Exception as exc:
+            log.warning("flow doctor could not declare services for %s (%s)", key, type(exc).__name__)
+            alerts.add(key)
+            open_incident(ctx, "service_undeclared", key, "warning", f"{key} tickets wait for undeclared test services",
+                          f"Tickets of {key} are parked on {', '.join(missing)}, which the project does not declare, so no "
+                          f"machine prepares or reports them. The flow doctor could not declare them itself. Add "
+                          f"{', '.join(missing)} to Test services of {key} on the Projects screen; the incident closes when "
+                          "the project declares them.")
+            continue
+        declared.append(key)
+        ctx.events.emit("project.services_declared", project=key, outcome="declared",
+                        reason=f"flow doctor declared {', '.join(missing)}")
+    for i in ctx.db.all("SELECT subject FROM incidents WHERE kind='service_undeclared' AND closed_at IS NULL"):
+        if i["subject"] not in alerts:
+            close_incident(ctx, "service_undeclared", i["subject"], "the project declares the test services")
+    return declared
+
+
 def check_stalled_waits(ctx) -> None:
     """Warn once per ticket and requirement when a parked wait has made no progress for two hours."""
     from .incidents import close_incident, open_incident

@@ -78,6 +78,7 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
     "renderKnowledge": ("knowledge",),
     "renderLearningKnowledge": ("knowledge",),
     "renderMachines": ("machines",),
+    "addMachineAccount": ("machines",),
     "renderJiraIntegrations": ("integrations",),
     "renderIntegrations": ("integrations",),
     "renderLead": ("lead",),

@@ -26,6 +26,14 @@ they are setup details, not scheduling facts.
 - Sessions and jobs are changed on the same screen. The node reads them on its next heartbeat, so a change is applied
   within the heartbeat interval (well under a minute) with no restart.
 
+## API
+
+- `POST /v1/nodes/join-tokens` and `POST /v1/nodes/{name}/join-command` create the one-use token and the join
+  command shown on the screen.
+- `POST /v1/machines/{name}/accounts` adds an account (provider, optional name, sessions, jobs) and returns its
+  sign-in link and code.
+- `GET /v1/state` and `GET /v1/deploy/state` read machines and accounts from the database, not from files.
+
 ## One-time import
 
 Older installations keep machines and accounts in `accounts.yaml` and `nodes/*.yaml`. On the first start of the

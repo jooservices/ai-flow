@@ -1,9 +1,15 @@
 # Role-based console views
 
+**Console screens:** Notifications (`notifications`), Settings (`settings`), and Support (`support`).
+
 The console uses `ROLE_PERMISSIONS` in `aiflow/v4/control/console_auth.py` as the single role-to-permission table.
 The browser receives the signed-in person's effective permissions from `GET /v1/console/session` and builds its
 menu from those grants. The API applies the same grants to direct view URLs and view-specific endpoints. A person
 with multiple roles receives the union of their views.
+
+The administration group includes Notifications, Settings, and Support. Settings is limited to the
+`console.manage` permission, so only Administrators (including the legacy `owner` and `super_admin` roles) can open
+it or use its API.
 
 | Role | Views | Sign-in landing page |
 |---|---|---|

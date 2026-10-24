@@ -258,6 +258,9 @@ async function exerciseReviews(page, mode) {
         return hit === button || button.contains(hit);
       }), true, 'a toast is covering the phone review action');
     }
+    await page.waitForLoadState('networkidle');
+    const refreshedQueue = page.waitForResponse((item) => item.request().method() === 'GET' &&
+      new URL(item.url()).pathname === '/v1/reviews', { timeout: 15000 });
     // The request is sent on the click; the answer can take a while on a busy machine (the control API works on the
     // ticket under its lease), so wait for the answer instead of re-clicking.
     let response = null, lastError = null;
@@ -288,6 +291,7 @@ async function exerciseReviews(page, mode) {
       assert.deepEqual(JSON.parse(submittedRequest.postData()), expectedBody,
         `${buttonName} dropped its review note for ${key}`);
     }
+    await refreshedQueue;
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 100))));
   }
 }

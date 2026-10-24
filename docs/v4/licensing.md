@@ -1,5 +1,7 @@
 # Licensing and usage
 
+**Console screens:** `licensing`
+
 Owners and Super Administrators open **Licence** in the console to view the installation ID, current plan, expiry,
 resource limits and usage. They can activate online with a licence key or select a signed licence file for offline
 activation. The key is sent only to the configured licence service; AI Flow does not save it. A rejected key or file
@@ -64,3 +66,15 @@ for the extra ones. That stop opens a **critical `licence_limit` incident** at o
 the action (raise the limit in the Licence screen or remove the extra ones), and alerts the owner's channels. The
 incident closes by itself when work resumes (usage within the limit, limit raised, or grace applies). The idle-flow
 alert names the licence limit as the cause when ready tickets get no worker because of it.
+
+## Control API
+
+The control API reads the licence state on these routes:
+
+- `GET /v1/licensing` returns the plan, limits, usage, grace state and the "no licence required" flag.
+- `GET /v1/licensing/status` returns the short state used by the console banner.
+- `GET /v1/work/candidates` and `POST /v1/work/claim` offer and claim tickets; a limit that stops new work is named
+  in the `reason` and opens the `licence_limit` incident.
+- `GET /v1/ba-chat/candidate`, `GET /v1/master/candidate`, `GET /v1/version-releases/candidates` and
+  `POST /v1/version-releases/claim` apply the same AI account entitlement to the other roles.
+- `GET /v1/auth/users` lists console users, the count that the users limit applies to.

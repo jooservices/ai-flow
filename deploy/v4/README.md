@@ -82,6 +82,7 @@ by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topic
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs
 - [Licensing and usage](../../docs/v4/licensing.md): activate signed online or offline licences, manage plan limits, read usage by project and month, and export CSV
 - [Account quota awareness](../../docs/v4/quota-awareness.md): record account usage, forecast burn and reset risk, route around accounts likely to run out, and show estimates and seven-day history
+- [Load-aware scheduling](../../docs/v4/load-aware-scheduling.md): set machine and shared-host load limits, hold or reduce offers by heartbeat measurements, and chart throttling beside throughput
 - [Ticket estimates and AI capacity planning](../../docs/v4/capacity-planning.md): estimate tokens, time and rework ranges from completed work, route by quota headroom, and show next-week capacity and estimate error
 - [Backup and restore](../../docs/v4/backup-restore.md): encrypted daily or weekly backups of the database, stored secrets, control repository settings and knowledge, with a one-time key and isolated weekly restore tests
 

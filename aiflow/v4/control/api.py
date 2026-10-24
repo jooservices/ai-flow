@@ -47,7 +47,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
+from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, load_policy, log_viewer, memory,
                role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -245,6 +245,8 @@ STATE_RESPONSE_SCHEMA = _state_object({
         "role": _STATE_STRING, "status": _STATE_STRING, "accepting_work": _STATE_BOOLEAN,
         "sessions_busy": _STATE_INTEGER, "slots_total": _STATE_INTEGER, "slots_used": _STATE_INTEGER,
         "release": _STATE_STRING, "metrics": _STATE_ANY_OBJECT, "tools": _STATE_ANY_OBJECT,
+        "load_limits": _STATE_ANY_OBJECT, "load_state": _STATE_ANY_OBJECT,
+        "host_load_limits": _STATE_ANY_OBJECT, "host_load_state": _STATE_ANY_OBJECT,
         "has_agent": _STATE_BOOLEAN, "required_tools": _STATE_STRING_ARRAY,
         "desired_services": _state_array(_state_object({"name": _STATE_STRING, "unit": _STATE_STRING,
             "healthcheck_configured": _STATE_BOOLEAN}, ("name", "unit", "healthcheck_configured"))),
@@ -1185,6 +1187,14 @@ class ManagedAccountUpdateBody(BaseModel):
 class ConfirmBody(BaseModel):
     model_config = {"extra": "forbid"}
     confirm: bool = False
+
+
+class MachineLoadLimitsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    cpu_load_per_cpu: float = Field(gt=0, le=8)
+    memory_used_pct: float = Field(gt=0, le=100)
+    disk_free_pct: float = Field(ge=0, lt=100)
+    host_cpu_load_per_cpu: float | None = Field(default=None, gt=0, le=8)
 
 
 class ManagedAccountSignInStatusBody(BaseModel):
@@ -3522,6 +3532,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                    (body.slots_total, body.slots_used, body.release_version, J(body.tools),
                     J({**body.metrics, "services": body.services}),
                     body.release_protocol, body.slots_used, node))
+        load_policy.record_heartbeat(ctx, node)
         repo = ctx.repo()
         node_state = ctx.db.one("SELECT projects,dynamic,tools,metrics FROM nodes WHERE name=%s", (node,)) or {}
         environment_reports.confirm_node_environment(ctx, node, body.environment_items)
@@ -3990,6 +4001,30 @@ def create_app(ctx: Ctx) -> FastAPI:
         ctx.events.emit("account.removed", account=account_id, provider=account.provider, node=account.node,
                         outcome="removed", reason="removed from Machines and AI screen")
         return {"account": account_id, "removed": True}
+
+    @app.put("/v1/machines/{name}/load-limits")
+    def set_machine_load_limits(name: str, body: MachineLoadLimitsBody, request: Request) -> dict:
+        user = console_user(request, {"nodes.manage"}, target="machine-load", action="limits", node=name)
+        row = ctx.db.one("SELECT metrics FROM nodes WHERE name=%s AND removed_at IS NULL", (name,))
+        if not row:
+            raise HTTPException(404, "machine is not registered")
+        hostname = load_policy.host_name(row.get("metrics"))
+        limits = {"cpu_load_per_cpu": body.cpu_load_per_cpu,
+                  "memory_used_pct": body.memory_used_pct, "disk_free_pct": body.disk_free_pct}
+        ctx.db.run("UPDATE nodes SET load_limits=%s,load_state='{}'::jsonb WHERE name=%s", (J(limits), name))
+        if hostname and body.host_cpu_load_per_cpu is not None:
+            ctx.db.run("INSERT INTO machine_host_load_limits (hostname,cpu_load_per_cpu,state,updated_at)"
+                       " VALUES (%s,%s,'{}'::jsonb,now()) ON CONFLICT (hostname) DO UPDATE SET"
+                       " cpu_load_per_cpu=EXCLUDED.cpu_load_per_cpu,state='{}'::jsonb,updated_at=now()",
+                       (hostname, body.host_cpu_load_per_cpu))
+        load_policy.record_heartbeat(ctx, name)
+        audit("machine-load", "limits", name, "", None, user.subject, True, "load limits saved",
+              {"machine": limits, "host": hostname,
+               "host_cpu_load_per_cpu": body.host_cpu_load_per_cpu})
+        host_limit = (body.host_cpu_load_per_cpu if body.host_cpu_load_per_cpu is not None else
+                      load_policy.DEFAULT_HOST_LIMITS["cpu_load_per_cpu"])
+        return {"machine": name, "hostname": hostname, "load_limits": limits,
+                "host_load_limits": {"cpu_load_per_cpu": host_limit}}
 
     @app.put("/v1/nodes/{name}/work-acceptance")
     def set_node_work_acceptance(name: str, body: ConfirmBody, accepting_work: bool, request: Request) -> dict:
@@ -4663,6 +4698,9 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        capacity = load_policy.claim_limits(ctx, node)
+        if not capacity["allowed"]:
+            return {"tickets": [], "reason": capacity["reason"] or "machine load capacity is full"}
         try:
             tickets, reason = entitled_candidates(account, node)
         except licensing.LicenseError as exc:
@@ -4678,6 +4716,9 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.get("/v1/master/candidate")
     def master_cycle_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        capacity = load_policy.claim_limits(ctx, node)
+        if not capacity["allowed"]:
+            return {"candidate": None, "reason": capacity["reason"] or "machine load capacity is full"}
         try:
             licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
         except licensing.LicenseError as exc:
@@ -4717,6 +4758,10 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/work/claim")
     def claim(body: ClaimBody, node: str = Depends(node_auth)) -> Any:
+        load_capacity = load_policy.claim_limits(ctx, node)
+        if not load_capacity["allowed"]:
+            return JSONResponse({"claimed": False, "reason": load_capacity["reason"] or "machine load capacity is full"},
+                                status_code=409)
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -4840,12 +4885,15 @@ def create_app(ctx: Ctx) -> FastAPI:
                           "quota history is not reliable enough to compare eligible accounts.")
             run_details["capacity"] = {"estimate": ticket_estimate, "account_fit": fit,
                                        "assignment_reason": reason, "assigned_at": utcnow().isoformat()}
-        if not shared_accounts.claim_run(ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
-                                                       model, node, c.fence, h(run_token))):
+        if not shared_accounts.claim_run(
+                ctx.db, acc, (run_id, t["key"], t["project"], body.step, acc.id, acc.provider,
+                              model, node, c.fence, h(run_token)),
+                max_node_runs=load_capacity["max_node_runs"], hostname=load_capacity["hostname"],
+                max_host_runs=load_capacity["max_host_runs"]):
             ctx.leases.release(t["key"], run_id, c.fence)
             hotfiles.unreserve(ctx.db, run_id)
             return JSONResponse({"claimed": False, "reason": f"account {acc.id} is at its limit of {acc.sessions}"
-                                 " concurrent sessions"}, status_code=409)
+                                 " concurrent sessions or machine load capacity is full"}, status_code=409)
         if run_details:
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s", (J(run_details), run_id))
         if body.step == "dev" and prior_dev and prior_dev.get("pr_url") and prior_dev.get("branch"):
@@ -4949,6 +4997,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     # --- configured Jira version releases ------------------------------------------------------------------
     @app.get("/v1/version-releases/candidates")
     def version_release_candidates(account: str, node: str = Depends(node_auth)) -> dict:
+        capacity = load_policy.claim_limits(ctx, node)
+        if not capacity["allowed"]:
+            return {"versions": [], "reason": capacity["reason"] or "machine load capacity is full"}
         try:
             state = licensing.enforce_work_entitlement(ctx, account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -4992,6 +5043,9 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     @app.post("/v1/version-releases/claim")
     def version_release_claim(body: VersionReleaseClaimBody, node: str = Depends(node_auth)) -> Any:
+        load_capacity = load_policy.claim_limits(ctx, node)
+        if not load_capacity["allowed"]:
+            raise HTTPException(409, load_capacity["reason"] or "machine load capacity is full")
         try:
             state = licensing.enforce_work_entitlement(ctx, body.account, node,
                                                         public_key=ctx.settings.license_public_key)
@@ -5087,7 +5141,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                                  "containers": bool(project.settings_for_repo(project.repo).get("containers"))}
             if not shared_accounts.claim_run(
                     ctx.db, acc,
-                    (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, "")):
+                    (run_id, key, project.key, "version_release", acc.id, acc.provider, "", node, lease.fence, ""),
+                    max_node_runs=load_capacity["max_node_runs"], hostname=load_capacity["hostname"],
+                    max_host_runs=load_capacity["max_host_runs"]):
                 raise HTTPException(409, f"account {acc.id} has no shared session capacity on {node}")
             ctx.db.run("UPDATE runs SET details=%s WHERE id=%s",
                        (J({"repository": project.repo, "repository_settings": selected_settings,
@@ -5249,11 +5305,26 @@ def create_app(ctx: Ctx) -> FastAPI:
             except Exception as exc:  # noqa: BLE001 - a missing diagnostic log must not lose the run result
                 log.warning("support log for run %s not stored: %s", run_id, type(exc).__name__)
         outcome = body.outcome
+        error_kind = body.error_kind
+        if outcome in {"failed", "timeout"}:
+            load_row = ctx.db.one("SELECT metrics,load_limits FROM nodes WHERE name=%s", (node,)) or {}
+            reported_metrics = load_row.get("metrics") or {}
+            hostname = load_policy.host_name(reported_metrics)
+            host_row = (ctx.db.one("SELECT cpu_load_per_cpu FROM machine_host_load_limits WHERE hostname=%s",
+                                   (hostname,)) if hostname else None)
+            host_limits = {"cpu_load_per_cpu": float(host_row["cpu_load_per_cpu"])} if host_row else None
+            violations = load_policy.current_violations(reported_metrics, load_row.get("load_limits"), host_limits)
+            if violations:
+                outcome = "load_shed"
+                error_kind = "machine_load"
+                details["load_shed"] = {"violations": violations, "metrics": load_policy.measured(reported_metrics),
+                                        "hostname": hostname, "measured_at": utcnow().isoformat()}
+                details["retryable"] = True
         ctx.db.run("UPDATE runs SET outcome=%s, error_kind=%s, reset_at=%s, tokens_in=tokens_in+%s, tokens_out=tokens_out+%s,"
                    " cost_usd=cost_usd+%s, branch=coalesce(nullif(%s,''),branch), pr_url=coalesce(nullif(%s,''),pr_url),"
                    " head_sha=coalesce(nullif(%s,''),head_sha), summary=%s, details=details || %s, status='finished', ended_at=now()"
                    " WHERE id=%s",
-                   (body.outcome, body.error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
+                   (outcome, error_kind, body.reset_at, body.tokens_in, body.tokens_out, body.cost_usd,
                     body.branch, body.pr_url, body.head_sha, body.summary[:2000], J(details), run_id))
         if body.quota:
             ctx.db.run("UPDATE accounts SET quota=%s, updated_at=now() WHERE id=%s", (J(body.quota), run["account_id"]))
@@ -5275,7 +5346,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         else:
             ctx.db.run("UPDATE accounts SET status='idle', last_error=CASE WHEN %s IN ('failed','timeout') THEN %s ELSE '' END,"
                        " updated_at=now(), idle_since=coalesce(idle_since,now()), cooldown_since=NULL"
-                       " WHERE id=%s AND status='working'", (body.outcome, body.summary[:300], run["account_id"]))
+                       " WHERE id=%s AND status='working'", (outcome, body.summary[:300], run["account_id"]))
         if body.outcome == "tool_missing" and run["step"] == "dev":
             recorded = tooling.record_missing(ctx, run, [str(x) for x in body.details.get("missing_tools") or []],
                                               body.summary)
@@ -5303,17 +5374,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - capture cannot undo a completed worker run
             log.warning("knowledge capture for run %s failed: %s", run_id, type(exc).__name__)
         dur = int((utcnow() - run["started_at"]).total_seconds() * 1000)
-        if ctx.jira and run["step"] == "dev" and body.outcome not in ("lost",):
+        if ctx.jira and run["step"] == "dev" and outcome not in ("lost",):
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
                 ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
                                      f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
-                                     f"{'/' + run['model'] if run['model'] else ''}): {body.outcome}."
+                                     f"{'/' + run['model'] if run['model'] else ''}) on {node}: {outcome}."
                                      f" Run {run_id}, fence {body.fence}.")
             except Exception as e:  # noqa: BLE001
                 log.warning("worklog for %s failed: %s", run["ticket_key"], e)
         ctx.events.emit("run.finished", ticket=run["ticket_key"], project=run["project"], step=run["step"], run_id=run_id,
                         fence=body.fence, account=run["account_id"], provider=run["provider"], model=run["model"],
-                        node=node, duration_ms=dur, outcome=outcome, reason=body.error_kind or body.summary[:200],
+                        node=node, duration_ms=dur, outcome=outcome, reason=error_kind or body.summary[:200],
                         tokens_in=body.tokens_in, tokens_out=body.tokens_out, cost_usd=body.cost_usd,
                         still_owner=still_owner, pr_url=body.pr_url)
         try:  # quality by role: this result may switch the role off or settle a probation ticket

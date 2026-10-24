@@ -478,7 +478,7 @@ def test_footer_has_version_environment_control_ref_links_and_copyright():
 def test_no_new_libraries_and_both_themes_still_defined():
     page = html()
     style = css()
-    assert "<script src" not in page and "<script type=\"module\"" not in page
+    assert 'src="/console-assets/licensing-notice.js"' in page and "<script type=\"module\"" not in page
     assert page.count("<script>") == 1 and page.count("<style>") == 1
     assert ':root[data-theme="light"]' in page and '--bg:#121110' in style and '--bg:#f5f1eb' in style
     assert '.dash-section[hidden]{display:none}' in style

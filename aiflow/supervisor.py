@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, rework_rounds, runner, usage
+from . import agents, deploy, events, github, operator_status, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -1893,9 +1893,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  memory: {'ON' if memory.get('AIFLOW_MEMORY_URL') and memory.get('AIFLOW_MEMORY_TOKEN') else 'off'} -> {memory.get('AIFLOW_MEMORY_URL') or 'no memory_url'}"
                   + ("" if memory.get('AIFLOW_MEMORY_TOKEN') else " (needs AIFLOW_MEMORY_TOKEN in Workspaces/.env)")
                   + ("" if memory.get('AIFLOW_MEMORY_AI_TOKEN') else "; the AIs get no aiflow-mem access without AIFLOW_MEMORY_AI_TOKEN"))
-            policy = config.operator_policy
-            print(f"  operator: {'ON' if policy.enabled else 'off (config/operator.toml)'}, agent {policy.agent}, limits {policy.max_runs_per_hour}/hour "
-                  f"{policy.max_runs_per_day}/day, {policy.retries_per_ticket_per_day}/ticket/day; switch: `aiflow-work operator on|off`")
+            print(operator_status.check_line(config, Redis, RedisError))
             for project in config.registry.projects.values():
                 deploy_setting = (f"configured (timeout {project.deploy_timeout_minutes} min, on {project.deploy_on})"
                                   if project.deploy_command.strip() else "disabled")

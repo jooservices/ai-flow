@@ -27,6 +27,11 @@ A warning banner shows on every screen for a 14-day grace period; AI Flow keeps 
 read-only. No data is deleted in any state. In read-only mode this screen still works, and a valid key restores
 normal operation.
 
+## Licence notice
+
+The notice at the top of this screen (no licence required, or usage above a plan limit with its 14-day grace
+period) is drawn by a small script that the console loads next to the page. Its text and behaviour are unchanged.
+
 ## Usage report
 
 The report lists tickets finished, AI tokens and cost per project and month. Select **Export spreadsheet** to

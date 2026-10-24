@@ -40,9 +40,14 @@ HOT_FILES: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
     "CHANGELOG.md",
+    # Console components loaded alongside the oversized page share its scheduling reservation.
+    "aiflow/v4/control/ui/licensing_notice.js",
 )
 
-_CONSOLE = ("Command Center console page", ("aiflow/v4/control/ui/console.html",))
+_CONSOLE = (
+    "Command Center console page",
+    ("aiflow/v4/control/ui/console.html", "aiflow/v4/control/ui/licensing_notice.js"),
+)
 # Words in a ticket that point to a hot file even when no path is written down.
 AREAS: dict[str, tuple[str, tuple[str, ...]]] = {
     "console": _CONSOLE,

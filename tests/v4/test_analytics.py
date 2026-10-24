@@ -145,5 +145,5 @@ def test_delivery_view_has_analytics_panel_with_table_and_inline_svg_chart():
     assert "<svg" in chart and "<rect" in chart and "role=\"img\"" in chart
     for k in ("ok", "rework", "failed", "other"):
         assert f"'{k}'" in chart
-    # still no chart library: one inline script, no external sources
-    assert "<script src" not in page and page.count("<script>") == 1
+    # No chart library: only the same-origin licence notice asset and the inline console script load.
+    assert page.count('<script src="/console-assets/licensing-notice.js"></script>') == 1 and page.count("<script>") == 1

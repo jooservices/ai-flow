@@ -75,6 +75,7 @@ by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topic
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
+- [Host and service log viewer](../../docs/v4/log-viewer.md): administrators read recent host, systemd service and fixed control-container logs from the Command Center with server-side secret redaction
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 - [Codex sandbox and Git commits](../../docs/v4/codex-sandbox.md): Codex edits with `workspace-write`; the worker commits outside the sandbox to keep shared mirror metadata protected
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs

@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from .environment import EnvItem, items_of
 from .services import normalize_services
 from .toolchains import (BASE_TOOLS, CATALOG_TOOLS, CONTAINER_RUNTIME_TOOL, NODE_TOOLS, STACK_TOOLS, missing_tools,
                          tools_for_providers, tools_for_stack,
@@ -83,6 +84,7 @@ class Project:
     tag_prefix: str = ""
     environments: dict[str, Any] = field(default_factory=dict)
     urls: dict[str, str] = field(default_factory=dict)
+    environment: list[dict[str, Any]] | dict[str, Any] = field(default_factory=list)  # docs/v4/environment.md
     merge: dict[str, Any] = field(default_factory=dict)
     version_release: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, Any] = field(default_factory=dict)
@@ -164,6 +166,11 @@ class Project:
             if isinstance(item, dict):
                 values.extend(normalize_stacks(item.get("stack")))
         return list(dict.fromkeys(values))
+
+    @property
+    def environment_items(self) -> list[EnvItem]:
+        """The valid items of the project's environment section (test services, URLs, databases, browsers, secrets)."""
+        return items_of(self.environment)
 
     @property
     def required_services(self) -> list[str]:

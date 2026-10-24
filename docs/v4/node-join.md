@@ -6,7 +6,7 @@ creates the node credential. A copied token cannot be used for a second join, an
 
 An Administrator with machine management permission names the machine and chooses its role and project in **Machines
 and AI**. Command Center creates a five-minute one-use enrollment grant and shows the copyable command. The browser
-session authorizes token creation; the owner never has to retrieve or type the control plane's provisioning secret.
+session authorizes token creation through `POST /v1/nodes/{name}/join-command`; the owner never has to retrieve or type the control plane's provisioning secret.
 ```sh
 curl -fsSL https://<control>/v1/install.sh | sudo sh -s -- --token T
 ```

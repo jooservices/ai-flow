@@ -100,11 +100,13 @@ def validate_public_url(value: str) -> str:
 
 
 def _row(ctx) -> dict:
-    row = ctx.db.one("SELECT public_url,skipped_steps,sample_ticket_key,completed_at FROM setup_wizard_state WHERE id=true")
+    columns = "public_url,skipped_steps,sample_ticket_key,sample_confirmed_at,completed_at"
+    row = ctx.db.one(f"SELECT {columns} FROM setup_wizard_state WHERE id=true")
     if not row:
         ctx.db.run("INSERT INTO setup_wizard_state (id) VALUES (true) ON CONFLICT (id) DO NOTHING")
-        row = ctx.db.one("SELECT public_url,skipped_steps,sample_ticket_key,completed_at FROM setup_wizard_state WHERE id=true")
-    return row or {"public_url": "", "skipped_steps": [], "sample_ticket_key": "", "completed_at": None}
+        row = ctx.db.one(f"SELECT {columns} FROM setup_wizard_state WHERE id=true")
+    return row or {"public_url": "", "skipped_steps": [], "sample_ticket_key": "", "sample_confirmed_at": None,
+                   "completed_at": None}
 
 
 def _administrator(request: Request, ctx):
@@ -143,14 +145,10 @@ def status(ctx) -> dict:
                         for item in account_rows)
     projects = sorted(ctx.repo().projects)
     sample_key = str(row.get("sample_ticket_key") or "")
-    sample_ready = False
-    sample_status = ""
-    if sample_key and jira_ready and ctx.jira:
-        try:
-            sample_status = ctx.jira.status(sample_key)
-            sample_ready = sample_status == "Intake"
-        except Exception:  # noqa: BLE001 - explain the observable state without exposing provider details
-            sample_status = "unavailable"
+    # Ready from the stored Jira confirmation, never from the live status: the flow moves the sample on, and the
+    # Dashboard poll must not call Jira.
+    sample_ready = bool(row.get("sample_confirmed_at"))
+    sample_status = "Intake" if sample_ready else ""
     steps = {
         "public_address": _step(bool(stored_url or (admin_exists and ctx.settings.public_url)),
                                 "Choose the address people use to open AI Flow."),
@@ -166,12 +164,11 @@ def status(ctx) -> dict:
     for step_id in STEP_IDS:
         steps[step_id]["skipped"] = step_id in skipped
     # Setup is finished only when every step is ready; a skipped step keeps the Dashboard panel and stays resumable.
-    all_ready = all(item["ready"] for item in steps.values())
+    # Completion is sticky: once every step was ready it is never cleared by a later change.
+    all_ready = bool(row.get("completed_at")) or all(item["ready"] for item in steps.values())
     if all_ready and not row.get("completed_at"):
         ctx.db.run("UPDATE setup_wizard_state SET completed_at=now(),updated_at=now() WHERE id=true"
                    " AND completed_at IS NULL")
-    elif not all_ready and row.get("completed_at"):
-        ctx.db.run("UPDATE setup_wizard_state SET completed_at=NULL,updated_at=now() WHERE id=true")
     return {"admin_exists": admin_exists, "public_url": url, "completed": all_ready,
             "locked": admin_exists, "sample_ticket": sample_key, "sample_status": sample_status,
             "projects": projects,
@@ -309,13 +306,15 @@ def install(app: FastAPI, ctx) -> None:
         user = _administrator(request, ctx)
         if setup_complete(ctx):
             raise HTTPException(409, "Setup is complete. Follow ticket progress on the normal ticket and Dashboard screens.")
+        row = _row(ctx)
+        key = str(row.get("sample_ticket_key") or "")
+        if row.get("sample_confirmed_at"):
+            raise HTTPException(409, f"Sample ticket {key} was already sent to Intake. Follow it on the ticket screens.")
         if not jira_connected(ctx) or not ctx.jira:
             raise HTTPException(409, "Connect Jira in Integrations before sending the sample ticket.")
         project = body.project.strip().upper()
         if project not in ctx.repo().projects:
             raise HTTPException(422, "Choose a project already configured in Projects.")
-        row = _row(ctx)
-        key = str(row.get("sample_ticket_key") or "")
         if not key:
             summary = "AI Flow setup sample ticket"
             description = ("Sample ticket created by the AI Flow first-run setup wizard.\n\n"
@@ -338,6 +337,8 @@ def install(app: FastAPI, ctx) -> None:
             _audit(ctx, "sample_ticket", user.subject, False, "sample issue not confirmed in Intake",
                    {"project": project, "ticket": key})
             raise HTTPException(502, f"Ticket {key} exists, but AI Flow could not confirm it in Intake. Check the Jira workflow and try again.") from exc
+        ctx.db.run("UPDATE setup_wizard_state SET sample_confirmed_at=now(),updated_at=now() WHERE id=true"
+                   " AND sample_confirmed_at IS NULL")
         ctx.db.run("INSERT INTO tickets (key,project,status,type,labels,summary,description,jira_created,jira_updated)"
                    " VALUES (%s,%s,'Intake','Task',%s,'AI Flow setup sample ticket',%s,now(),now())"
                    " ON CONFLICT (key) DO UPDATE SET status='Intake',synced_at=now()",

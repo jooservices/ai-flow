@@ -31,6 +31,10 @@ failed and how to retry. Sending the sample does not close setup while other ste
 stays, and those steps stay resumable, until every step is ready. The ticket's later pipeline progress is followed on
 the normal ticket and Dashboard screens; setup does not wait for Done.
 
+Jira's confirmation of Intake is stored (`sample_confirmed_at`), and the step is ready from that record, not from the
+ticket's live status, so the Dashboard poll makes no Jira call and the flow can move the sample on freely. Once every
+step has been ready, completion is permanent. A second send is refused with 409 and never moves the ticket again.
+
 ## Bootstrap and access
 
 - `GET /login` serves the wizard while there is no console user, then serves the regular sign-in form.

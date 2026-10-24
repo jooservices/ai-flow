@@ -218,3 +218,50 @@ def test_sample_ticket_failure_says_it_was_not_confirmed_and_keeps_setup_open(ct
     assert current["completed"] is False
     assert by_id(current, "sample_ticket")["ready"] is False
     assert by_id(current, "sample_ticket")["missing"].startswith("Choose a configured project")
+
+
+def test_sample_ticket_stays_confirmed_after_the_flow_moves_it_and_is_never_re_transitioned(ctx):
+    client = make_client(ctx)
+    _, created = bootstrap(client)
+    assert created.status_code == 200
+    jira = SetupJira()
+    ctx.jira = jira
+    assert client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"}).status_code == 200
+    ctx.jira_auth = SetupJiraAuth(True)
+    ctx.github = FakeGitHub()
+    ctx.db.run("INSERT INTO nodes (name,role,status) VALUES ('move-node','worker','joined')")
+    ctx.db.run("INSERT INTO accounts (id,provider,node,status) VALUES ('codex-move','codex','move-node','idle')")
+    assert status(client)["completed"] is True
+
+    # The flow picks the sample up: Jira no longer reports Intake.
+    for moved in ("To Do", "In Progress"):
+        jira.status_of["TESTWP-99"] = moved
+        current = status(client)
+        assert current["completed"] is True
+        assert by_id(current, "sample_ticket")["ready"] is True and by_id(current, "sample_ticket")["missing"] == ""
+    assert ctx.db.one("SELECT completed_at FROM setup_wizard_state WHERE id=true")["completed_at"] is not None
+
+    # A second send is refused and never drags the live ticket back to Intake.
+    again = client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"})
+    assert again.status_code == 409
+    assert jira.transitions == [("TESTWP-99", "Intake")] and len(jira.created) == 1
+    assert jira.status_of["TESTWP-99"] == "In Progress"
+
+    # Completion is sticky even when a later condition changes, and the poll makes no Jira call.
+    ctx.db.run("DELETE FROM accounts WHERE id='codex-move'")
+    jira.status = lambda key: (_ for _ in ()).throw(AssertionError("status polling must not call Jira"))
+    assert status(client)["completed"] is True
+
+
+def test_second_send_before_other_steps_are_done_does_not_re_transition(ctx):
+    client = make_client(ctx)
+    _, created = bootstrap(client)
+    assert created.status_code == 200
+    jira = SetupJira()
+    ctx.jira = jira
+    assert client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"}).status_code == 200
+    jira.status_of["TESTWP-99"] = "In Progress"
+    again = client.post("/v1/setup/sample-ticket", json={"project": "TESTWP"})
+    assert again.status_code == 409 and "already sent" in again.json()["detail"]
+    assert jira.transitions == [("TESTWP-99", "Intake")]
+    assert by_id(status(client), "sample_ticket")["ready"] is True

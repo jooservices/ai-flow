@@ -273,6 +273,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
+        env = project_env(project["key"], project.get("environment"), "dev")
         spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
@@ -291,7 +292,7 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
         with runtime as containers:
             if wordpress:
                 hb.progress = {"phase": "wordpress-site"}
-                site_notes = start_wordpress_site(containers, wt, project, c.run_id, spec)
+                start_wordpress_site(containers, wt, project, c.run_id, spec)
                 jira("comment", body=note(
                     c, "WordPress test site ready", what="A temporary WordPress test site is ready",
                     result="WP_BASE_URL (provided), WP_ADMIN_USER (provided), and WP_ADMIN_PASSWORD (provided) are set in the run environment",

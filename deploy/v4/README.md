@@ -16,6 +16,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console layouts](../../docs/v4/console-layouts.md): every section of a console page is a block each person can drag, resize, hide and reset, saved with the user on the server and reset to the default of their role
 - [Command Center Dashboard V2](../../docs/v4/dashboard-v2.md): Work and AI and machines tabs, linked work summaries, live usage and quota, and a per-person dark or light theme
 - [Notifications](../../docs/v4/notifications.md): administrator-managed email, Telegram, Slack, Teams and webhook channels, routing, quiet hours, summaries and delivery incidents
+- [Telegram BA chat](../../docs/v4/telegram-ba-chat.md): private-chat follow-up questions, owner-approved epic/story/task proposals, and Jira ticket creation through the configured Telegram channel
 - [Role health](../../docs/v4/role-health.md): only real failures count; role capacity preserves two enabled accounts and limits switches to half the pool, with shared-cause incidents and immediate recovery when a tool or run history is fixed
 - [Missing tools](../../docs/v4/missing-tools.md): a tool missing on a machine parks the ticket for a capable machine instead of asking the owner; tooling ticket after 24 hours; project checks probed on a clean checkout
 - [Environment of the runs](../../docs/v4/environment.md): tickets carry requirements only; test services, base URLs, databases, browsers and secrets by name live in the project configuration and reach runs as environment variables; server wording is rejected at intake, removed with a record, and found by a scan of open tickets; missing environment items are reported by name
@@ -72,6 +73,7 @@ One line per feature document in `docs/v4/` (add yours here; keep details in the
 - [Console login](../../docs/v4/console-login.md): email and password sign-in with roles (Super Administrator first), a gate for console pages and read APIs, and `aiflow4 console-user` to seed users
 - [Console browser tests](../../docs/v4/console-browser-tests.md): Playwright covers every role and console view, all primary journeys in light, dark and phone modes, and uploads sanitized failure traces from pull request and release install checks
 - [Support bundles](../../docs/v4/support-bundle.md): build, scan, review the inventory of and download a temporary support bundle from the console
+- [Host and service log viewer](../../docs/v4/log-viewer.md): administrators read recent host, systemd service and fixed control-container logs from the Command Center with server-side secret redaction
 - [Grok adapter](../../docs/v4/grok-adapter.md): parse streaming-json answers and record Grok probe usage and cost
 - [Codex sandbox and Git commits](../../docs/v4/codex-sandbox.md): Codex edits with `workspace-write`; the worker commits outside the sandbox to keep shared mirror metadata protected
 - [Offline node bundle and Debian packages](../../docs/v4/offline-bundle.md): build checksummed release, image, Python wheels and version-pinned AI CLIs for offline Ubuntu/Debian node installs

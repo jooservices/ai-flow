@@ -39,15 +39,15 @@ from pydantic import BaseModel, Field
 
 from .. import VERSION
 from ..core.controlrepo import Account, ControlRepo, epic_for_ticket
-from ..core import backups as control_backups
+from ..core import backups as control_backups, log_sources as log_sources_core
 from ..core.fencing import Leases
 from ..core.settings import Settings
 from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
-               shared_accounts, support_bundle, tooling, version_release)
+from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
+               role_health, rollout, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -1059,6 +1059,13 @@ class ViewAsBody(BaseModel):
     role: str
 
 
+class BaChatResultBody(BaseModel):
+    account: str = ""
+    claim_token: str = ""
+    output: dict[str, Any] = Field(default_factory=dict)
+    error_kind: str = ""
+
+
 class BackupConfigBody(BaseModel):
     schedule: Literal["daily", "weekly"] = "daily"
     destination_kind: Literal["local", "mounted", "s3"] = "local"
@@ -1120,6 +1127,11 @@ class NodeOperationBody(BaseModel):
     model_config = {"extra": "forbid"}
     action: Literal["install", "repair"]
     component: str = ""
+
+
+class LogReadBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    source_id: str = Field(min_length=1, max_length=256)
 
 
 class NodeOperationResultBody(BaseModel):
@@ -2210,13 +2222,21 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/notifications")
     def notification_settings(request: Request) -> dict:
         notification_admin(request)
-        return notify.public_settings(ctx.db)
+        projects = [{"key": project.key, "name": project.key}
+                    for project in sorted(ctx.repo().projects.values(), key=lambda item: item.key)]
+        return notify.public_settings(ctx.db, projects)
 
     @app.put("/v1/notifications/channels")
     async def notification_channel_save(request: Request) -> dict:
         notification_admin(request, "write")
+        payload = await notification_json(request)
+        config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        if str(payload.get("kind") or "").strip().lower() == "telegram" and config.get("ba_chat_enabled"):
+            project_key = str(config.get("project_key") or "").strip().upper()
+            if project_key not in ctx.repo().projects:
+                raise HTTPException(400, "choose a configured Jira project for BA chat")
         try:
-            channel = notify.save_channel(ctx.db, await notification_json(request))
+            channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         return {"channel": channel}
@@ -4021,10 +4041,63 @@ def create_app(ctx: Ctx) -> FastAPI:
     def node_operations(name: str, request: Request) -> dict:
         console_user(request, {"console.read"})
         rows = ctx.db.all("SELECT id, node, action, actor, status, result, created_at, started_at, completed_at"
-                          " FROM node_operations WHERE node=%s ORDER BY created_at DESC LIMIT 50", (name,))
+                          " FROM node_operations WHERE node=%s AND action <> 'read_logs'"
+                          " ORDER BY created_at DESC LIMIT 50", (name,))
         for row in rows:
             row["id"] = str(row["id"])
         return {"node": name, "operations": rows}
+
+    @app.get("/v1/log-sources")
+    def log_sources(request: Request) -> JSONResponse:
+        console_user(request, "view.logs")
+        return JSONResponse({"sources": log_viewer.source_catalog(ctx)},
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    @app.post("/v1/logs", status_code=202)
+    def request_log_read(body: LogReadBody, request: Request) -> JSONResponse:
+        user = console_user(request, "view.logs")
+        source = log_viewer.find_source(ctx, body.source_id)
+        if source is None:
+            raise HTTPException(404, "unknown log source")
+        if not source["available"]:
+            raise HTTPException(409, "log source is unavailable")
+        operation_id = str(uuid.uuid4())
+        payload = {"action": "read_logs", "source": source["id"], "kind": source["kind"],
+                   "target": source["target"], "lines": log_sources_core.MAX_LOG_LINES}
+        with ctx.db.pool.connection() as connection:
+            connection.execute("DELETE FROM node_operations WHERE action='read_logs'"
+                               " AND status IN ('completed','failed') AND created_at < now() - interval '15 minutes'")
+            connection.execute("INSERT INTO node_operations (id,node,action,actor,payload)"
+                               " VALUES (%s,%s,'read_logs',%s,%s)",
+                               (operation_id, source["node"], user.subject, J(payload)))
+        return JSONResponse({"id": operation_id, "source": source["id"], "status": "queued"}, status_code=202,
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    @app.get("/v1/logs/requests/{operation_id}")
+    def log_read_status(operation_id: str, request: Request) -> JSONResponse:
+        console_user(request, "view.logs")
+        try:
+            parsed_id = str(uuid.UUID(operation_id))
+        except ValueError as exc:
+            raise HTTPException(404, "unknown log request") from exc
+        row = ctx.db.one("SELECT id,payload,status,result FROM node_operations"
+                         " WHERE id=%s AND action='read_logs'"
+                         " AND created_at >= now() - interval '15 minutes'", (parsed_id,))
+        if not row:
+            raise HTTPException(404, "unknown log request")
+        status = str(row["status"])
+        result = row.get("result") or {}
+        if status == "completed" and result.get("available"):
+            lines = log_viewer.redact_log_lines(result.get("lines"))
+            available = True
+            message = "" if lines else "No recent log lines for this source."
+        elif status in {"failed", "completed"}:
+            lines, available, message = [], False, "This log source is unavailable right now."
+        else:
+            lines, available, message = [], None, "Waiting for the node agent to read this source."
+        return JSONResponse({"id": str(row["id"]), "source": (row.get("payload") or {}).get("source", ""),
+                             "status": status, "available": available, "lines": lines, "message": message},
+                            headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
     def probe_project(name: str, key: str):
         """The project when this machine serves it (a probe of anything else is refused)."""
@@ -4103,15 +4176,21 @@ def create_app(ctx: Ctx) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(404, "unknown node operation") from exc
         status = body.status
+        current = ctx.db.one("SELECT action FROM node_operations WHERE id=%s AND node=%s AND status='running'",
+                             (parsed_id, node))
+        if not current:
+            raise HTTPException(404, "unknown or completed node operation")
+        result = (log_viewer.safe_node_result(body.result, status) if current["action"] == "read_logs"
+                  else body.result)
         updated = ctx.db.one(
             "UPDATE node_operations SET status=%s, result=%s, completed_at=now()"
             " WHERE id=%s AND node=%s AND status='running' RETURNING id, action",
-            (status, J(body.result), parsed_id, node))
+            (status, J(result), parsed_id, node))
         if not updated:
             raise HTTPException(404, "unknown or completed node operation")
         ctx.events.emit(f"node.operation.{status}", node=node, outcome=status,
                         reason=f"{updated['action']} finished", data={"operation_id": parsed_id,
-                                                                     "healthy": body.result.get("healthy")})
+                                                                     "healthy": result.get("healthy")})
         return {"id": parsed_id, "status": status}
 
     # --- releases: nodes follow a tagged, signed release written by aiflow4-deploy ---------------------------
@@ -4558,6 +4637,29 @@ def create_app(ctx: Ctx) -> FastAPI:
         except licensing.LicenseError as exc:
             return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
+
+    @app.get("/v1/ba-chat/candidate")
+    def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"job": None, "reason": str(exc)}
+        try:
+            return {"job": ba_chat.claim_job(ctx, account, node)}
+        except Exception as exc:  # noqa: BLE001 - poll failures must not expose chat text
+            log.warning("BA chat claim failed account=%s error=%s", account, type(exc).__name__)
+            return {"job": None}
+
+    @app.post("/v1/ba-chat/{job_id}/result")
+    def ba_chat_result(job_id: str, body: BaChatResultBody, node: str = Depends(node_auth)) -> dict:
+        try:
+            parsed_id = str(uuid.UUID(job_id))
+        except ValueError:
+            raise HTTPException(404, "chat turn was not found") from None
+        if not ba_chat.complete_job(ctx, parsed_id, body.claim_token, body.account, node,
+                                    body.output, body.error_kind):
+            raise HTTPException(409, "chat turn is no longer assigned to this worker")
+        return {"accepted": True}
 
     def related_hits(t: dict) -> list[dict]:
         """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
@@ -5023,9 +5125,6 @@ def create_app(ctx: Ctx) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - park the version behind one blocker; idempotent once it is Done
             log.exception("version release publication failed for %s %s", project.key, version["name"])
             return version_release.publish_failed(release_ctx, project, version, run, exc)
-        check_report = dict(report)
-        if result.get("status") in ("stale", "blocked"):
-            check_report["error"] = check_report.get("error") or str(result.get("reason") or result["status"])
         ctx.db.run("UPDATE runs SET head_sha=%s,summary=%s,details=details || %s WHERE id=%s",
                    (body.head_sha, f"version release {result['status']}", J({"release_result": result,
                                                                               "checks": body.checks}),
@@ -5148,7 +5247,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             try:  # developer time on the ticket (each dev run, rework included); the detailed timeline is in OpenObserve
                 ctx.jira.add_worklog(run["ticket_key"], max(60, dur // 1000), run["started_at"],
                                      f"AI Flow {run['step']} by {run['account_id']} ({run['provider']}"
-                                     f"{'/' + run['model'] if run['model'] else ''}) on {node}: {body.outcome}."
+                                     f"{'/' + run['model'] if run['model'] else ''}): {body.outcome}."
                                      f" Run {run_id}, fence {body.fence}.")
             except Exception as e:  # noqa: BLE001
                 log.warning("worklog for %s failed: %s", run["ticket_key"], e)

@@ -263,6 +263,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     notes = "\n".join(call[2].get("body", "") for call in api.calls if isinstance(call[2], dict))
     assert "WordPress test site ready" in notes and "npx playwright test" in notes
     assert "private-to-run" not in notes
+    assert "http://127.0.0.1:40123" not in notes and "node1" not in notes
 
 
 def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypatch, tmp_path):

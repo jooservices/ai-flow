@@ -103,6 +103,20 @@ def test_intake_run_rejects_a_host_in_the_rewrite_and_writes_nothing(iclient, ct
     assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-40'")["status"] == "Intake"
 
 
+def test_intake_server_question_is_answered_without_asking_the_owner(iclient, ctx, tmp_path, monkeypatch, envrepo):
+    add_ticket(ctx.db, "TESTWP-45", status="Intake", labels=())
+    answer = "QUESTIONS:\n- Which address should I use?\nINTAKE: QUESTIONS\n"
+
+    result, _adapter = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-45", answer)
+
+    comments = [text for key, text in ctx.jira.comments if key == "TESTWP-45"]
+    assert result["outcome"] == "environment_question_answered"
+    assert len(comments) == 1 and "environment question answered" in comments[0]
+    assert "Which address should I use?" not in comments[0] and "WP_BASE_URL" in comments[0]
+    assert ctx.db.one("SELECT status FROM tickets WHERE key='TESTWP-45'")["status"] == "Intake"
+    assert not [action for action in ctx.jira.transitions if action[0] == "TESTWP-45"]
+
+
 # --- AC3/AC4: wording removed, recorded, and a real need becomes an environment ticket ------------------------------
 def _rewrite_with_removal(iclient, ctx, tmp_path, monkeypatch, key, description):
     add_ticket(ctx.db, key, status="Intake", labels=())
@@ -275,7 +289,7 @@ def _run_dev(monkeypatch, tmp_path, verdict="DONE", reason=""):
 
 
 def test_environment_variables_reach_the_run_and_the_notes_list_their_names(monkeypatch, tmp_path):
-    _result, _api, adapter = _run_dev(monkeypatch, tmp_path)
+    _result, api, adapter = _run_dev(monkeypatch, tmp_path)
     env = adapter.spec.extra_env
     assert env["WP_BASE_URL"] == "http://site.example.test:8080" and env["WP_DB_NAME"] == "wp_test"
     assert env["WP_ADMIN_PASSWORD"] == SECRET  # configured secret by name
@@ -287,6 +301,9 @@ def test_environment_variables_reach_the_run_and_the_notes_list_their_names(monk
     assert "- BROWSERS (" not in prompt
     assert SECRET not in prompt and "site.example.test" not in prompt  # names only
     assert "MISSING-ENV" in prompt and "never ask the owner" in prompt.lower()
+    fields = next(call[2]["fields"] for call in api.calls if call[1].endswith("/fields"))
+    assert "node" not in fields["Workspace"].lower() and "UNLISTED_SECRET" not in fields["Workspace"]
+    assert "WP_BASE_URL (provided)" in fields["Workspace"]
 
 
 def test_verify_runs_get_the_items_allowed_for_verify(monkeypatch):
@@ -376,6 +393,7 @@ def test_the_report_is_recorded_by_name_and_the_ticket_waits_without_asking_the_
     offered = client.get("/v1/work/candidates", params={"account": "claude-01"}, headers=cc).json()["tickets"]
     assert "TESTWP-51" not in [t["key"] for t in offered]  # parked until the item is provided
     assert ctx.db.one("SELECT count(*) AS n FROM events WHERE type='ticket.waiting_for_environment'")["n"] == 1
+    assert ctx.jira.worklogs and "on cc:" not in ctx.jira.worklogs[-1][2]
     owner_sign_in(client, ctx)
     shown = client.get("/v1/environment/missing").json()["missing"]
     assert [(m["item"], m["ticket"], m["state"]) for m in shown] == [("WP_DB_NAME", "TESTWP-51", "waiting")]
@@ -414,6 +432,34 @@ def test_node_secret_confirmation_is_fenced_to_config_and_node(client, ctx, envr
     client.post("/v1/nodes/cc/heartbeat", json={
         "environment_items": {"TESTWP": ["WP_ADMIN_PASSWORD"]}}, headers=cc)
     assert ctx.db.one("SELECT resolved_at FROM environment_reports WHERE ticket_key='TESTWP-58'")["resolved_at"] is None
+
+
+def test_successful_human_review_queues_per_ticket_post_merge_checks(client, ctx):
+    from uuid import uuid4
+
+    add_ticket(ctx.db, "TESTWP-59", status="Human review")
+    ctx.repo().projects["TESTWP"].checks = ["canary-check"]
+    run_id = str(uuid4())
+    lease = ctx.leases.claim("TESTWP-59", run_id, ctx.settings.lease_ms)
+    assert lease.ok
+    ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,token_hash,details)"
+               " VALUES (%s,'TESTWP-59','TESTWP','verify','claude-01','claude','cc',%s,'','{}')",
+               (run_id, lease.fence))
+    cc = {"Authorization": "Bearer " + join_node(client, "cc").json()["node_token"]}
+
+    response = client.post(f"/v1/runs/{run_id}/result", headers=cc, json={
+        "fence": lease.fence, "outcome": "human", "summary": "passed; waiting for human review",
+        "details": {"post_merge_criteria": [{"id": "AC4", "text": "verify after merge",
+                                               "check": "canary-check"}]},
+    })
+
+    assert response.status_code == 200, response.text
+    assert environment_reports.pending_post_merge(ctx, "TESTWP") == []  # still in Human review
+    ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-59'")
+    assert environment_reports.pending_post_merge(ctx, "TESTWP") == [{
+        "ticket": "TESTWP-59",
+        "criteria": [{"id": "AC4", "text": "verify after merge", "check": "canary-check"}],
+    }]
 
 
 def test_an_unknown_name_alone_fails_the_run(client, ctx, envrepo):

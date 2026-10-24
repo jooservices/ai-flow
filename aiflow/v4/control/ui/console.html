@@ -412,6 +412,7 @@ label{font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:
 .notify-meta{font-size:12px;color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.notify-routing{display:grid;grid-template-columns:minmax(180px,1fr) repeat(auto-fit,minmax(110px,1fr));gap:8px;align-items:center}
 .notify-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.notify-form-grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
 .notify-form-grid input,.notify-form-grid select{min-height:38px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--fg)}
+.notify-form-grid label.checkline{flex-direction:row;align-items:center;gap:8px}.notify-form-grid label.checkline input{min-height:0;width:auto}
 .notify-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.notify-state{white-space:pre-wrap;font-size:12px;color:var(--muted);margin-top:8px}
 .lead-tablebox{width:100%;overflow:auto;border:1px solid var(--line);border-radius:9px}.lead-table{width:100%;border-collapse:collapse;min-width:920px}.lead-table th,.lead-table td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft)}
 .lead-table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:var(--surface-2);white-space:nowrap}.lead-table ul{margin:0;padding-left:18px}.lead-table li{margin:2px 0}.lead-gap{color:var(--crit);font-weight:600}.lead-ac{white-space:normal;min-width:300px}.lead-tools{display:flex;gap:8px;flex-wrap:wrap}
@@ -548,6 +549,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
     <div class="spacer"></div>
     <span class="live" id="live" aria-live="polite"></span>
     <span class="envtag" id="envtag">lab</span>
+    <a class="iconbtn" id="logs-nav" href="/logs" hidden title="Open the administrator log viewer">Host/service logs</a>
     <a class="iconbtn" id="help-link" href="/help/screens/cc.html" target="_blank" rel="noopener" title="Help for this screen">Help</a>
     <a class="iconbtn" href="/o2/" target="_blank" rel="noopener" title="Logs and metrics (OpenObserve)">Logs</a>
     <a class="iconbtn" href="/mail/" target="_blank" rel="noopener" title="Alert emails (Mailpit)">Alerts mail</a>
@@ -1070,6 +1072,7 @@ function applyRoleNavigation() {
     tab.setAttribute('aria-hidden', String(tab.hidden));
   });
   var nav = $('.tabs');
+  var logLink = $('#logs-nav'); if (logLink) logLink.hidden = !S.consoleUser || !consoleCan('view.logs');
   if (nav) {
     $$('.tab-divider', nav).forEach(function (divider) { divider.remove(); });
     VIEW_GROUPS.forEach(function (group, index) {
@@ -2826,6 +2829,16 @@ function renderDBody() {
 function renderReviews() {
   var root = $('#view-review'); if (!root) return;
   var noteDrafts = S.reviewNoteDrafts || (S.reviewNoteDrafts = {});
+  var active = document.activeElement;
+  var activeInsideReview = typeof root.contains === 'function' && root.contains(active);
+  if (activeInsideReview && active.matches && active.matches('[data-review-note]')) {
+    var activeCard = active.closest('[data-review-card]');
+    if (activeCard) noteDrafts[activeCard.getAttribute('data-key')] = active.value;
+    return;
+  }
+  if (activeInsideReview && active.matches && active.matches('button[data-act^="review-"]')) {
+    return;
+  }
   if (typeof root.querySelectorAll === 'function') {
     root.querySelectorAll('[data-review-note]').forEach(function (field) {
       var card = field.closest('[data-review-card]');
@@ -2946,6 +2959,8 @@ function submitReview(key, action, comment) {
     if (noteField) noteField.value = '';
     if (action === 'approve' && !d.merged) toast('Merge refused', d.message || 'GitHub refused the merge.', 'warn');
     else toast('Review action recorded', key + (d.status ? ' · ' + d.status : ''), 'ok');
+    var focusedAction = document.activeElement;
+    if (focusedAction && focusedAction.matches && focusedAction.matches('button[data-act^="review-"]')) focusedAction.blur();
     loadReviews();
   }).catch(function (e) { toast('Review action failed', String(e.message || e), 'crit'); });
 }
@@ -4643,7 +4658,12 @@ function renderNotifications() {
       notificationField('password', 'Password (leave blank to keep saved password)', 'password', 'Hidden after saving') +
       notificationField('from', 'From address', 'email', 'aiflow@example.com') + notificationField('to', 'To address', 'email', 'owner@example.com') +
       '<label>Connection security<select data-notify-field="tls_mode"><option value="starttls"' + (state.form.tls_mode !== 'ssl' && state.form.tls_mode !== 'none' ? ' selected' : '') + '>STARTTLS</option><option value="ssl"' + (state.form.tls_mode === 'ssl' ? ' selected' : '') + '>TLS (SSL)</option><option value="none"' + (state.form.tls_mode === 'none' ? ' selected' : '') + '>None</option></select></label>',
-    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Chat ID', 'text', '-100…'),
+    telegram: notificationField('bot_token', 'Bot token', 'password', 'Hidden after saving') + notificationField('chat_id', 'Private Telegram chat ID', 'text', 'Your numeric chat ID') +
+      '<label><span>Jira project for brainstorms</span><select data-notify-field="project_key"><option value="">Choose a configured project</option>' +
+      (data.projects || []).map(function (p) { return '<option value="' + esc(p.key) + '"' + (state.form.project_key === p.key ? ' selected' : '') + '>' + esc(p.key) + '</option>'; }).join('') +
+      '</select></label><label class="checkline"><input type="checkbox" data-notify-checkbox="ba_chat_enabled"' +
+      (state.form.ba_chat_enabled ? ' checked' : '') + '> Enable BA brainstorming chat</label>' +
+      '<div class="notify-meta">Use the bot in a private chat. The BA AI asks questions, sends a draft proposal, and creates Jira tickets only after approval in chat.</div>',
     slack: notificationField('webhook_url', 'Slack incoming webhook URL', 'password', 'Hidden after saving'),
     teams: notificationField('webhook_url', 'Microsoft Teams webhook URL', 'password', 'Hidden after saving'),
     webhook: notificationField('url', 'Webhook URL', 'password', 'Hidden after saving') + notificationField('auth_token', 'Bearer token (optional)', 'password', 'Hidden after saving')
@@ -4681,7 +4701,7 @@ function renderNotifications() {
 }
 function notificationConfigFromForm(form) {
   var keys = { email: ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode'],
-    telegram: ['bot_token', 'chat_id'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
+    telegram: ['bot_token', 'chat_id', 'ba_chat_enabled', 'project_key'], slack: ['webhook_url'], teams: ['webhook_url'], webhook: ['url', 'auth_token'] }[form.kind] || [];
   var config = {}; keys.forEach(function (key) { if (form[key] !== undefined) config[key] = form[key]; }); return config;
 }
 function notificationFormSubmit() {
@@ -5146,13 +5166,15 @@ document.addEventListener('keydown', layoutKey);
 
 /* ---------- interactions ---------- */
 document.addEventListener('click', function (e) {
-  if (e.target.closest('[data-stop]')) return;
-  if (S.projectPickerOpen && !e.target.closest('#project-picker')) {
+  var target = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
+  if (!target || !target.closest) return;
+  if (target.closest('[data-stop]')) return;
+  if (S.projectPickerOpen && !target.closest('#project-picker')) {
     S.projectPickerOpen = false;
     renderProjectPickerOptions();
   }
-  var el = e.target.closest('[data-act]');
-  if (!el) { if (e.target.id === 'overlay') closeAll(); return; }
+  var el = target.closest('[data-act]');
+  if (!el) { if (target.id === 'overlay') closeAll(); return; }
   var act = el.getAttribute('data-act');
   if (act === 'view') setView(el.getAttribute('data-view'));
   else if (act === 'dashboard-tab') setDashboardTab(el.getAttribute('data-tab'));
@@ -5281,7 +5303,9 @@ document.addEventListener('click', function (e) {
   else if (act === 'refresh-reviews') loadReviews();
   else if (act.indexOf('review-') === 0) {
     var card = el.closest('[data-review-card]'), note = card && $('[data-review-note]', card);
-    submitReview(el.getAttribute('data-key'), act.slice('review-'.length), note ? note.value : '');
+    var reviewKey = el.getAttribute('data-key'), reviewComment = note ? note.value : (S.reviewNoteDrafts[reviewKey] || '');
+    if (note) S.reviewNoteDrafts[reviewKey] = reviewComment;
+    submitReview(reviewKey, act.slice('review-'.length), reviewComment);
   }
   else if (act === 'stakeholder-refresh') { S.sh.renderKey = ''; loadStakeholder(S.project, true); }
   else if (act === 'stakeholder-submit') submitStakeholder(el.getAttribute('data-key'), el.getAttribute('data-verdict'));
@@ -5429,6 +5453,7 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-user-email]')) S.userAdmin.addForm.email = e.target.value;
   if (e.target && e.target.matches('[data-user-name]')) S.userAdmin.addForm.name = e.target.value;
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-notify-checkbox]')) S.notifications.form[e.target.getAttribute('data-notify-checkbox')] = e.target.checked;
   if (e.target && (e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.id === 'command-query') renderCommandSearchResults(e.target.value);
   if (e.target && e.target.id === 'work-project') {
@@ -5489,10 +5514,11 @@ document.addEventListener('change', function (e) {
   if (e.target && (e.target.matches('[data-route-kind]') || e.target.id === 'notification-quiet-start' || e.target.id === 'notification-quiet-end')) captureNotificationPreferences();
   if (e.target && e.target.matches('[data-notify-kind-select]')) {
     S.notifications.form.kind = e.target.value;
-    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
+    ['host', 'port', 'username', 'password', 'from', 'to', 'tls_mode', 'bot_token', 'chat_id', 'ba_chat_enabled', 'project_key', 'webhook_url', 'url', 'auth_token'].forEach(function (key) { delete S.notifications.form[key]; });
     renderNotifications();
   }
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-notify-checkbox]')) S.notifications.form[e.target.getAttribute('data-notify-checkbox')] = e.target.checked;
   if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
   if (e.target && e.target.matches('[data-backup-field]')) {
     var backupField = e.target.getAttribute('data-backup-field');

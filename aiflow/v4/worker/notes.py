@@ -24,7 +24,7 @@ def project_env(project_key: str, items: list[dict] | None = None, step: str = "
     them, and the node-local project environment file holds the secrets those items name. Only configured items
     permitted for this step and explicit safe built-ins reach a run. Per-run values (such as a temporary test site)
     take precedence over configured values."""
-    from ..core.environment import for_step, items_of, run_environment
+    from ..core.environment import items_of, run_environment
     from ..core.settings import read_env_file
     from ..core.toolchains import PLAYWRIGHT_BROWSERS_DIR
     node_env = read_env_file(f"/etc/aiflow/projects/{project_key}.env")
@@ -38,8 +38,6 @@ def environment_notes(items: list[dict] | None, step: str, env: dict[str, str]) 
     """The names (never the values of secrets) of the environment items of this run, for the run notes."""
     from ..core.environment import items_of, notes_block
     return notes_block(items_of(items or []), step, env)
-
-
 def environment_status(items: list[dict] | None, step: str, env: dict[str, str]) -> str:
     """A ticket-safe status string: configured item names and presence, never a node or value."""
     from ..core.environment import for_step, items_of

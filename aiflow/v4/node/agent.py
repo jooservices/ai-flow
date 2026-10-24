@@ -404,6 +404,37 @@ _RELEASE_VERSION = re.compile(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\
 _RELEASE_WORKFLOW_IDENTITY = "https://github.com/jooservices/ai-flow/.github/workflows/release-v4.yml@refs/tags/{}"
 _GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_INCOMING_DIR = Path("/srv/aiflow/releases/incoming")
+_WORKTREE_CLEANUP_IMAGE = "busybox:1.36.1"
+
+
+def _remove_e2e_artifacts_as_root(worktree: Path) -> None:
+    """Use a disposable root container to clear generated artifacts before host-side worktree removal.
+
+    The container sees only this worktree and removes its artifacts directory, which is disposable because
+    the worktree itself has already been approved for deletion. Removing the directory inside the container
+    also handles root-owned, read-only directory entries that the node agent cannot chmod or unlink.
+    """
+    artifacts = worktree / "artifacts"
+    e2e = artifacts / "reports" / "e2e"
+    if not e2e.is_dir() or any(part.is_symlink() for part in (artifacts, artifacts / "reports", e2e)):
+        return
+
+    source = str(worktree.resolve(strict=True))
+    if "," in source:
+        raise OSError("worktree path contains a comma and cannot be mounted safely")
+    command = [
+        "docker", "run", "--rm", "--pull=missing", "--user=0:0", "--network=none", "--read-only",
+        "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
+        "--mount", f"type=bind,source={source},target=/worktree",
+        _WORKTREE_CLEANUP_IMAGE, "rm", "-rf", "--", "/worktree/artifacts",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("root cleanup container timed out after 120 seconds") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip().splitlines()
+        raise OSError(f"root cleanup container failed: {detail[0][:240] if detail else result.returncode}")
 
 
 def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow", min_age_s: int = 600) -> int:
@@ -433,6 +464,7 @@ def clean_worktrees(api: ControlClient, node: str, srv_root: str = "/srv/aiflow"
         if path is None:
             continue
         try:
+            _remove_e2e_artifacts_as_root(path)
             for root, _dirs, _files in os.walk(path, topdown=True, followlinks=False):
                 os.chmod(root, 0o700)  # read-only triage checkouts
             shutil.rmtree(path)
@@ -672,7 +704,13 @@ def process_node_operation(api: ControlClient, node: str) -> None:
 
     operation_id = operation["id"]
     try:
-        result = execute(operation)
+        if operation.get("action") == "read_logs":
+            from ..core.log_sources import read_source
+            payload = operation.get("payload") or {}
+            result = read_source(str(payload.get("kind") or ""), str(payload.get("target") or ""),
+                                 payload.get("lines", 100))
+        else:
+            result = execute(operation)
         body = {"status": "completed", "result": result}
     except OperationError as exc:
         log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])

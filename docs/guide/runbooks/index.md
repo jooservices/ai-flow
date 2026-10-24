@@ -15,6 +15,7 @@ condition clears. Critical and warning incidents are emailed. The list below has
 | [node_down](node_down.md) | critical | A node stopped sending heartbeats |
 | [node_tools](node_tools.md) | warning | A node misses tools for a project or its AI accounts |
 | [node_services](node_services.md) | warning | A node's test services (PostgreSQL, Redis) are unhealthy |
+| [service_undeclared](service_undeclared.md) | warning | Tickets are parked on a test service the project does not declare |
 | [node_no_ai](node_no_ai.md) | warning | A node has no AI account |
 | [master_invalid_plan](master_invalid_plan.md) | critical | The master repeatedly returned an invalid action plan |
 | [ticket_stuck](ticket_stuck.md) | warning | A ticket failed three runs in a row |

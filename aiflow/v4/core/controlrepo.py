@@ -96,6 +96,14 @@ class Project:
     epic_repositories: dict[str, str] = field(default_factory=dict)
     default_repo: str = ""  # retained on repository-specific project views
 
+    def __post_init__(self) -> None:
+        # `databases` is the old name of `services`: both are read as one setting, so a project file can never name
+        # a database that no machine prepares (docs/v4/test-services.md). Names that are no test service stay behind.
+        legacy = [self.databases] if isinstance(self.databases, str) else list(self.databases or [])
+        self.services = normalize_services([*([self.services] if isinstance(self.services, str) else self.services or []),
+                                            *legacy])
+        self.databases = [d for d in legacy if not normalize_services([d])]
+
     @property
     def repo_name(self) -> str:
         return self.repo.split("/", 1)[-1]

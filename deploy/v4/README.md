@@ -9,6 +9,7 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
 
+- [Test services of a project](../../docs/v4/test-services.md): one `services` setting (the old `databases` is read as the same), one field on the Projects screen, and the flow doctor declares a service a ticket is parked on
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Shared AI accounts](../../docs/v4/shared-accounts.md): one account enabled on several machines, signed in once per machine, with one total session limit, usage and quota counted per account and a per-machine breakdown
 - [Clean-install acceptance test](../../docs/v4/clean-install-acceptance.md): fresh control machine and two machines with sign-in on, through to a merged ticket and a Human review ticket; fast on pull requests, full nightly and before every release, with a bug ticket on failure

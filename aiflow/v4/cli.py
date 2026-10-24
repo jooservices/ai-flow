@@ -8,6 +8,7 @@
   aiflow4 canary record-promotion ...     record an under-observed canary promotion
   aiflow4 canary retry-tickets           retry pending rollback flow-bug tickets
   aiflow4 notify --severity S --title T --detail D   deliver through saved notification channels
+  aiflow4 ba-chat setup --name N --chat-id ID --project KEY  configure Telegram BA chat (token read privately)
   aiflow4 upgrade-check --target vX.Y.Z  check migrations and version skew before a control upgrade (exit 9: blocked)
   aiflow4 node join [--name N] (--join-token-file F | --join-token-stdin) [--control URL]
   aiflow4 node-agent                    heartbeat, metrics, worker supervision (root)
@@ -243,6 +244,13 @@ def main(argv: list[str] | None = None) -> int:
     pnotify.add_argument("--title", required=True)
     pnotify.add_argument("--detail", default="")
     pnotify.add_argument("--link", default="")
+    pba = sub.add_parser("ba-chat", help="configure the developer Telegram BA chat channel")
+    ba_sub = pba.add_subparsers(dest="ba_action", required=True)
+    pba_setup = ba_sub.add_parser("setup", help="add or update a Telegram BA chat channel")
+    pba_setup.add_argument("--name", required=True)
+    pba_setup.add_argument("--chat-id", required=True)
+    pba_setup.add_argument("--project", required=True)
+    pba_setup.add_argument("--token-stdin", action="store_true", help="read the bot token from stdin")
     pu = sub.add_parser("upgrade-check")
     pu.add_argument("--target", required=True)
     pu.add_argument("--current", default="")
@@ -366,6 +374,37 @@ def main(argv: list[str] | None = None) -> int:
             notify.send(a.severity, a.title, a.detail, a.link, ctx=SimpleNamespace(db=db, settings=s))
         finally:
             db.close()
+        return 0
+    if a.cmd == "ba-chat" and a.ba_action == "setup":
+        import getpass
+        from .control.db import DB
+        from .control import ba_chat, notify
+        from .core.controlrepo import ControlRepo
+        project_key = a.project.strip().upper()
+        if not ba_chat.PROJECT_KEY.fullmatch(project_key) or project_key not in ControlRepo.load(s.control_repo).projects:
+            print("choose a configured Jira project", file=sys.stderr)
+            return 2
+        if not a.token_stdin and not sys.stdin.isatty():
+            print("use --token-stdin for non-interactive setup", file=sys.stderr)
+            return 2
+        bot_token = (sys.stdin.read() if a.token_stdin else getpass.getpass("Telegram bot token: ")).strip()
+        if not bot_token:
+            print("Telegram bot token is required", file=sys.stderr)
+            return 2
+        db = DB(s.database_url, max_size=2)
+        try:
+            db.migrate()
+            existing = db.one("SELECT id FROM notification_channels WHERE kind='telegram' AND name=%s", (a.name,))
+            notify.save_channel(db, {"id": existing["id"] if existing else None, "kind": "telegram",
+                "name": a.name, "enabled": True,
+                "config": {"bot_token": bot_token, "chat_id": a.chat_id, "ba_chat_enabled": True,
+                           "project_key": project_key}})
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        finally:
+            db.close()
+        print("Telegram BA chat channel configured; credentials are hidden.")
         return 0
     if a.cmd == "canary":
         from datetime import datetime, timezone

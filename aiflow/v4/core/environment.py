@@ -167,11 +167,26 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = tuple((kind, re.compile(rx, re.
     ("host", rf"(?<![\w.@-])(?:{_HOST_LABEL}\.)+(?!(?:md|py|html?|css|js|json|yaml|yml|toml|txt|sh|rst|xml|in)\b)[a-z]{{2,63}}(?![\w-]|\.[a-z0-9])"),
     ("host", r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|intranet|corp|home|localdomain)\b"),
     ("host", r"\blocalhost:\d{2,5}\b|\bssh://\S+|\bhost\s?name\s*(?:[:=]|is\b|called\b)"),
+    # A local hostname is still a host when it appears in a URL without an explicit port.
+    ("host", r"\bhttps?://localhost\b"),
     ("machine", rf"\b(?:shared|dev|development|lab|staging|stage|production|prod|jump|build|ci|qa|uat|remote|physical|"
                rf"virtual)\s+{_MACHINE_NOUN}\b"),
     ("machine", r"\bshared\s+(?:docker|database|db|redis|postgres(?:ql)?|mysql|mariadb|wordpress|environment|"
                r"integration environment|site)\b"),
     ("machine", r"\bWSL2?\b|\b(?:my|your|the owner'?s)\s+(?:laptop|pc|computer|machine)\b"),
+    # A generic instruction to use a machine is still a run-location requirement, even with no machine name.
+    ("machine", r"\b(?:use|run|test|execute|deploy|install|build|start|connect(?:\s+to)?|access)\s+"
+                r"(?:(?:the|a|an)\s+)?(?:server|machine|vm|box|computer|node)\b"),
+    # Local names such as node4 often have no DNS suffix. Match them when they are used as a run destination.
+    ("host", r"\b(?:on|at|to|against|via|from)\s+(?:the\s+)?"
+             r"(?:node|host|server|vm|machine|box|worker|runner|agent)[-_]?\d+\b"),
+    # Generic machine references still leave a run-location question, even when no hostname follows.
+    ("machine", r"\b(?:run|test|execute|deploy|install|build|start)\b.{0,80}\b(?:on|at|against|to)\s+(?:the\s+)?(?:server|machine)\b"),
+    ("host", r"\b(?:use|connect(?:\s+to)?|access|run|test|deploy)\s+(?:the\s+)?host"
+             r"(?!\s+(?:or|and|for|is|to|with|on|as|at|should|could|would)\b)"
+             r"(?:\s+[a-z0-9][a-z0-9.-]*)?\b"),
+    ("host", r"\bhost\s+(?!or\b|and\b|for\b|is\b|to\b|with\b|on\b|as\b|at\b|should\b|could\b|would\b)"
+             r"[a-z0-9][a-z0-9.-]*\b"),
     ("network", r"\b(?:vpn|vlan|subnet|bastion|intranet|dmz)\b|\bjump\s?host\b|\bport[- ]forward\w*|\bfirewall rule\b"),
     ("access instruction", r"\b(?:ssh|rdp|scp|sftp|telnet)\s+(?:in)?to\b|\b(?:ssh|rdp)\s+(?:access|key|session|tunnel)\b|"
                            r"\bssh\s+[\w.-]+@"),
@@ -220,7 +235,8 @@ def find_server_wording(text: str) -> list[dict[str, str]]:
 SERVER_QUESTION = re.compile(
     r"\b(?:servers?|hosts?|vms?|machines?|ip address(?:es)?|address(?:es)?|network|vpn|ssh|credentials|"
     r"logins?|passwords?|base urls?|endpoints? to use)\b|"
-    r"\bwhere\s+(?:(?:should|can|do|would)\s+i\s+)?(?:run|test|deploy|connect|access)\b",
+    r"\bwhere\s+(?:(?:should|can|do|would)\s+i\s+)?(?:run|test|deploy|connect|access)\b|"
+    r"\b(?:which|what)\s+(?:address|url|host|server|machine|network)\b",
     re.I,
 )
 

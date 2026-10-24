@@ -36,7 +36,7 @@ METRICS_DAYS = 30            # cost and rework are shown for the last 30 days
 HISTORY_RUNS = 500           # finished runs read per account
 DEFAULT_ROLES = ("dev", "verify")
 STEP_ROLE = {"dev": "dev", "verify": "verify", "triage": "master", "master": "master",
-             "intake": "intake_refiner", "impact": "intake_refiner"}
+             "intake": "intake_refiner", "impact": "intake_refiner", "post_merge": "release"}
 # error kinds that mean the account or its machine could not work, not that the AI did bad work
 UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool", "tools", "missing_tool",
                   "missing-tool", "offline", "toolchain", "services"}
@@ -74,10 +74,13 @@ def classify(run: dict) -> Scored | None:
     """Score one finished run; None while verification has not yet judged a finished dev run."""
     outcome, kind = run["outcome"], (run.get("error_kind") or "").lower()
     summary = (run.get("summary") or "").strip().lower()
+    details = run.get("details") or {}
     if outcome == "merged":
         return Scored("merged", 0.0)
-    if outcome == "no_changes" or (run.get("step") == "dev" and outcome == "failed" and not kind
-                                    and summary.startswith(("no changes", "nothing to change"))):
+    no_work_failure = outcome == "failed" and kind == "no_work" and details.get("no_changes") is True
+    legacy_no_changes = (run.get("step") == "dev" and outcome == "failed" and not kind
+                         and summary.startswith(("no changes", "nothing to change")))
+    if outcome == "no_changes" or no_work_failure or legacy_no_changes:
         return Scored("no_changes", 0.0)
     if outcome == "quota" or kind in UNSCORED_KINDS:
         return Scored("excluded", None)

@@ -192,12 +192,25 @@ class Git:
         out = self.run("diff", "--name-only", "--diff-filter=U", cwd=path, check=False)
         return [x for x in out.splitlines() if x.strip()]
 
+    def behind(self, path: Path, base: str, ref: str = "HEAD") -> int:
+        """Commits of origin/<base> that `ref` does not have (0: up to date). Works in a worktree or a mirror."""
+        out = self.run("rev-list", "--count", f"{ref}..origin/{base}", cwd=path, check=False).strip()
+        return int(out) if out.isdigit() else 0
+
     def abort_merge(self, path: Path) -> None:
         self.run("merge", "--abort", cwd=path, check=False)
 
     def changed(self, path: Path) -> list[str]:
         out = self.run("status", "--porcelain", "--untracked-files=all", cwd=path)
         return [line[3:] for line in out.splitlines() if line.strip()]
+
+    def commits_ahead(self, path: Path, base: str) -> int:
+        """Count branch commits not contained in the fetched base, before merging that base into the branch."""
+        out = self.run("rev-list", "--count", f"origin/{base}..HEAD", cwd=path).strip()
+        try:
+            return int(out)
+        except ValueError as exc:
+            raise GitError(f"git rev-list returned an invalid commit count for origin/{base}") from exc
 
     def commit_all(self, path: Path, message: str, identity: tuple[str, str]) -> str:
         self.run("add", "-A", cwd=path)

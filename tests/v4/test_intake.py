@@ -368,8 +368,23 @@ def test_malformed_rewrite_is_rejected(iclient, ctx, tmp_path, monkeypatch):
     res, _ = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-31", answer)
     assert res["outcome"] == "failed" and "does not follow the template" in res["summary"]
     assert "Business requirement:" in res["summary"] and "AC1" in res["summary"]
-    assert not getattr(ctx.jira, "descriptions", []) and not ctx.jira.comments
+    assert not getattr(ctx.jira, "descriptions", [])
+    comments = [text for key, text in ctx.jira.comments if key == "TESTWP-31"]
+    assert len(comments) == 1 and "does not follow the template" in comments[0]
+    assert "ticket remains in Intake" in comments[0]
     assert "TESTWP-31" not in ctx.jira.status_of and ("add", "TESTWP-31", "aiflow-ready") not in ctx.jira.labels
+
+
+def test_server_question_from_intake_is_answered_by_environment_without_owner_transition(iclient, ctx, tmp_path, monkeypatch):
+    add_ticket(ctx.db, "TESTWP-36", status="Intake", labels=())
+    answer = "QUESTIONS:\n- Which address should I use?\nINTAKE: QUESTIONS\n"
+    result, _ = run_worker(iclient, ctx, tmp_path, monkeypatch, "TESTWP-36", answer)
+
+    assert result["outcome"] == "environment_question_answered"
+    comments = [text for key, text in ctx.jira.comments if key == "TESTWP-36"]
+    assert len(comments) == 1 and "MISSING-ENV" in comments[0]
+    assert "Which address should I use?" not in comments[0]
+    assert ctx.jira.status_of.get("TESTWP-36", "Intake") == "Intake"
 
 
 def test_parse():

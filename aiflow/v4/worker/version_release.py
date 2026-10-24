@@ -32,7 +32,7 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
     hb.start()
     started = time.monotonic()
     report: dict = {"head_sha": "", "source_sha": str(project.get("source_sha") or ""), "checks": [], "error": ""}
-    env = project_env(project["key"])
+    env = project_env(project["key"], project.get("environment"), "post_merge")
     try:
         credential = api.call("POST", "/v1/github/token", {"run_id": c.run_id, "fence": c.fence,
                                                              "repo": project["repo"]})
@@ -85,6 +85,12 @@ def run_version_release(api: ControlClient, c: Claimed, version: dict, tracker_k
             clean_output = _redact(output or "", env)[-12_000:]
             report["checks"].append({"command": command, "passed": proc.returncode == 0,
                                      "exit_code": proc.returncode, "output": clean_output})
+        report["post_merge_results"] = [
+            {"ticket": item["key"], "criteria": item.get("post_merge_criteria") or [],
+             "status": "passed" if report["checks"] and all(x["passed"] for x in report["checks"]) else "failed",
+             "head_sha": head, "checks": [{"command": x["command"], "passed": x["passed"]} for x in report["checks"]]}
+            for item in project.get("post_merge_criteria") or []
+        ]
         if hb.lost.is_set():
             raise LeaseLost()
         result = api.call("POST", f"/v1/version-releases/{version['id']}/complete",

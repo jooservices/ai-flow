@@ -133,8 +133,8 @@ def test_project_environment_runtime_values_override_static_values(monkeypatch):
 
     monkeypatch.setattr("aiflow.v4.core.settings.read_env_file", lambda _path: {
         "WP_BASE_URL": "http://shared-site", "WP_CORE_VERSION": "6.8.3"})
-    merged = notes.project_env("JOOWP", {"WP_BASE_URL": "http://127.0.0.1:12345",
-                                          "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": "one-run"})
+    merged = notes.project_env("JOOWP", runtime_env={"WP_BASE_URL": "http://127.0.0.1:12345",
+                                                     "WP_ADMIN_USER": "aiflow-admin", "WP_ADMIN_PASSWORD": "one-run"})
     assert merged["WP_BASE_URL"] == "http://127.0.0.1:12345"
     assert merged["WP_CORE_VERSION"] == "6.8.3"
     assert merged["WP_ADMIN_PASSWORD"] == "one-run"

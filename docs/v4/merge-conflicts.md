@@ -1,6 +1,6 @@
 # Fewer merge conflicts
 
-**Console screens:** Delivery (`delivery`).
+**Console screens:** Delivery (`delivery`) and Command Center (`cc`).
 
 Many tickets run at once and most touch the same few files, so branches conflicted with the base and went back for
 another development run and a new verification. Five measures keep that work from being lost.
@@ -75,7 +75,7 @@ on that click and the reviewer approves again.
 The claim reservation is in `POST /v1/work/claim`; the queue is behind `POST /v1/github/merge`,
 `POST /v1/reviews/{key}/approve` and `POST /v1/reviews/{key}/skip-gate`. The control API's
 `POST /v1/github/token`, `GET /v1/github/git/{git_path:path}`, `POST /v1/github/git/{git_path:path}` and
-`GET /v1/state` are unchanged by this work.
+`GET /v1/state` and `GET /v1/reviews` are unchanged by this work.
 
 ## Command Center: work lost to conflicts
 

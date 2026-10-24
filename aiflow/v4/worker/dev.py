@@ -19,12 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..adapters import RunSpec, get_adapter
+from ..core.environment import items_of, parse_missing_environment
 from ..core.text import slug
 from ..core.toolchains import (has_missing_marker, parse_command_not_found_requirements,
                                parse_missing_requirements)
 from .client import Conflict, ControlClient
 from .gitops import Git
-from .notes import note, project_env
+from .notes import environment_notes, note, project_env
 from .wordpress import declares_wordpress, start_site as start_wordpress_site
 
 log = logging.getLogger("aiflow4.dev")
@@ -89,7 +90,8 @@ class Heartbeat(threading.Thread):
                 log.warning("heartbeat failed: %s", e)
 
 
-def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "") -> str:
+def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci_log: str = "",
+                 env: dict[str, str] | None = None) -> str:
     tpl = (REPO_ROOT / "prompts" / "v4" / "dev.md").read_text(encoding="utf-8")
     checks = "\n".join(f"  - {x}" for x in c.project.get("checks") or []) or "  - the project's test suite"
     if c.project.get("containers"):
@@ -113,7 +115,10 @@ def build_prompt(c: Claimed, branch: str, conflicts: list[str] | None = None, ci
                    " intent is kept; AI Flow commits the merge with your work.\n")
     prompt = tpl.format(key=t["key"], project=t["project"], summary=t["summary"], repo=c.project["repo"], branch=branch,
                       base=c.project["base"], checks=checks, description=t["description"] or "(no description)",
-                      rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools))
+                      rework=rework, related=related_block(c.related), machine=machine_block(c.machine_tools),
+                      environment=environment_notes(
+                          c.project.get("environment"), "dev",
+                          project_env(t["project"], c.project.get("environment"), "dev") if env is None else env))
     return with_knowledge_context(prompt, c.context_pack)
 
 
@@ -267,11 +272,12 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             hb.progress = {"phase": "ai", "events": events["n"], "last": str(ev.get("type", ""))[:40],
                            "elapsed_s": int(time.time() - t0)}
 
-        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log), cwd=str(wt),
+        env = project_env(project["key"], project.get("environment"), "dev")
+        spec = RunSpec(prompt=build_prompt(c, branch, conflicts, ci_log, env), cwd=str(wt),
                        account_home=str(Path(srv_root) / "accounts" / c.account), model=c.model, effort=c.effort,
                        timeout_s=int(project.get("work_minutes", {}).get("hard", 60)) * 60,
                        control_url=control_url, run_token=c.run_token,
-                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=project_env(project["key"]))
+                       log_path=str(logs / f"{key}-{c.run_id}.jsonl"), extra_env=env)
         adapter = get_adapter(c.provider)
         adapter_argv = adapter.argv
         adapter.argv = lambda s: run_as + adapter_argv(s)  # the AI runs as the unprivileged AI user
@@ -309,6 +315,33 @@ def run_dev(api: ControlClient, c: Claimed, srv_root: str, control_url: str, hea
             jira("comment", body=note(c, "paused", what="The run stopped before finishing",
                                       why=f"{c.account} cannot work now ({res.error_kind}): {res.error_message[:200]}",
                                       result="No change was pushed", next_="Back to To Do for another account; this account pauses until its limit resets",
+                                      t0=t0, node=api_node(api)))
+            jira("transition", to="To Do")
+            return result
+        env_names, _env_other, env_marked = (parse_missing_environment(res.verdict_reason,
+                                                                       items_of(project.get("environment")))
+                                             if res.verdict == "BLOCKED" else ([], [], False))
+        if env_marked:
+            # a missing environment item is reported by its name in the project configuration, never as free text,
+            # and it is never a question for the owner (docs/v4/environment.md)
+            absent = env_names
+            if not absent:
+                reason = ("unaccepted missing environment report: name an item of the project's environment list, "
+                          f"not free text ({res.verdict_reason})")[:1000]
+                result.update(outcome="failed", summary=reason)
+                jira("comment", body=note(c, "check could not run", what="The run ended without a change AI Flow can push",
+                                          why=reason[:600], result=(res.final_text or summary)[:600],
+                                          next_="Back to To Do; the next run retries after a short wait",
+                                          t0=t0, node=api_node(api)))
+                jira("transition", to="To Do")
+                return result
+            result["outcome"] = "environment_missing"
+            result["details"]["missing_environment"] = absent
+            jira("comment", body=note(c, "waiting for an environment item",
+                                      what="The run needs an item of the project environment that is not provided",
+                                      why=f"Missing environment item(s): {', '.join(absent)}",
+                                      result="No question goes to the owner; the item is recorded by name",
+                                      next_="Back to To Do; AI Flow provides the item or raises one environment ticket",
                                       t0=t0, node=api_node(api)))
             jira("transition", to="To Do")
             return result

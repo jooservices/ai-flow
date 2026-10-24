@@ -23,6 +23,8 @@ x-app: &app
     - /etc/aiflow/secrets/github:/etc/aiflow/secrets/github
     - /etc/aiflow/secrets/jira:/etc/aiflow/secrets/jira
     - /etc/aiflow/secrets/control:/etc/aiflow/secrets/control
+    - /etc/aiflow/secrets/runtime.env:/etc/aiflow/secrets/runtime.env:ro
+    - /etc/aiflow/projects:/etc/aiflow/projects:ro
     - /etc/aiflow/secrets/console:/etc/aiflow/secrets/console
     - /srv/aiflow/control/backups:/srv/aiflow/backups
     - /srv/aiflow/control/repos/aiflow-control:/srv/aiflow/control/repos/aiflow-control:ro
@@ -38,6 +40,9 @@ services:
   control-api-a: &api
     <<: *app
     container_name: aiflow4-control-api-a
+    env_file:
+      - /etc/aiflow/secrets/control/aiflow4.env
+      - /etc/aiflow/secrets/runtime.env
     environment:
       <<: *app-environment
       AIFLOW4_O2_SOURCE: control-api-a

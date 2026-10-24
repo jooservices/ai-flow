@@ -1040,7 +1040,8 @@ class Supervisor:
         parsed = sections(description)
         wanted = " ".join([str(view.get("summary", "")), (parsed.get("ac") or parsed.get("acceptance criteria") or "")[:600], parsed.get("scopes", "")[:300]])
         items = self.memory.search(wanted, project.company, project.jira_key, repo.name, limit=6)
-        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items))
+        events.emit("memory.recall", ticket=key, found=len(items), ids=",".join(str(i["id"])[:8] for i in items),
+                    case_ids=",".join(str(i["id"])[:8] for i in items if i.get("kind") == "case"))
         if items:
             self.redis.set(f"recalled:{key}", json.dumps([i["id"] for i in items]), 30 * DAY)
         return memory_cases.prompt_block(items)

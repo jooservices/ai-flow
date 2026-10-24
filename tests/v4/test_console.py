@@ -551,7 +551,7 @@ def test_traefik_control_router_covers_new_console_paths_and_excludes_monitoring
 def test_console_reload_selects_the_view_from_each_existing_address():
     views = ("cc", "work", "delivery", "sa", "machines", "users", "lead", "business", "review",
              "stakeholder", "knowledge", "backup", "integrations", "projects", "licensing", "notifications",
-             "support")
+             "settings", "support")
     page_paths = tuple(path for path in CONSOLE_PAGE_PATHS if path not in {"/", "/help"})
     for path in page_paths:
         expected_view = ("cc" if path in {"/cc", "/dashboard"} else
@@ -733,24 +733,25 @@ def test_team_lead_view_selects_epics_and_offers_three_report_formats():
 
 
 def test_team_lead_review_and_stakeholder_routes_select_their_console_views():
-    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/support']"
+    routes = run_script("console.log(['/dashboard', '/work', '/delivery', '/machines', '/users', '/sa', '/lead', '/business', '/review', '/stakeholder', '/knowledge', '/backup', '/integrations', '/projects', '/licensing', '/notifications', '/settings', '/support']"
                         ".map(viewOf).join(','));")
-    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,support"
+    assert routes.strip() == "cc,work,delivery,machines,users,sa,lead,business,review,stakeholder,knowledge,backup,integrations,projects,licensing,notifications,settings,support"
     page = html()
     assert 'id="view-lead"' in page and 'id="view-review"' in page and 'id="view-stakeholder"' in page
     assert 'id="view-integrations"' in page and 'id="tab-integrations"' in page
     assert 'id="view-notifications"' in page and 'id="tab-notifications"' in page
+    assert 'id="view-settings"' in page and 'id="tab-settings"' in page
     assert page.count('id="view-integrations"') == 1 and page.count('id="tab-integrations"') == 1
     assert "else if (S.view === 'lead') renderLead();" in page
     assert "else if (S.view === 'review') renderReviews();" in page
     assert "else if (S.view === 'stakeholder') renderStakeholder();" in page
     assert "else if (S.view === 'integrations') renderIntegrations();" in page
     assert ("var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],\n"
-            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];"
+            "  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];"
             ) in page
     assert "else if (S.view === 'notifications') renderNotifications();" in page
     assert ("['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', "
-            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']") in page
+            "'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']") in page
     assert "{ view: 'support', label: 'Support', permission: 'console.manage' }" in page
     assert "licensing: 'licensing.manage'" in page
 
@@ -1397,6 +1398,7 @@ def test_command_center_menu_order_and_role_visibility():
         ("stakeholder", "Stakeholder"), ("machines", "Machines and AI"), ("users", "Users and roles"),
         ("knowledge", "Knowledge"), ("backup", "Backup &amp; Restore"), ("integrations", "Integrations"),
         ("projects", "Projects"), ("licensing", "Licence"), ("notifications", "Notifications"),
+        ("settings", "Settings"),
         ("support", "Support"),
     ]
     assert "data-view=\"cc\">Command Center</button>" not in page
@@ -1407,6 +1409,7 @@ def test_command_center_menu_order_and_role_visibility():
         "stakeholder": "view.stakeholder", "machines": "view.machines_ai", "users": "console.manage",
         "knowledge": "view.knowledge", "integrations": "view.integrations", "projects": "projects.manage",
         "backup": "backup.read", "licensing": "licensing.manage", "notifications": "notifications.manage",
+        "settings": "console.manage",
         "support": "console.manage",
     }
     visible = json.loads(run_script("""

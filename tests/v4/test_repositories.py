@@ -263,6 +263,7 @@ def test_dev_worker_checks_out_mapped_repository_and_base(monkeypatch, tmp_path)
     notes = "\n".join(call[2].get("body", "") for call in api.calls if isinstance(call[2], dict))
     assert "WordPress test site ready" in notes and "npx playwright test" in notes
     assert "private-to-run" not in notes
+    assert "http://127.0.0.1:40123" not in notes and "node1" not in notes
 
 
 def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypatch, tmp_path):
@@ -285,6 +286,9 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
         def merge_base_in(self, _path, base, _identity, commit=False):
             calls["bases"].append((base, commit))
             return []
+
+        def behind(self, *_args, **_kwargs):
+            return 0
 
         def scrub(self, path):
             calls["scrubs"].append(str(path))
@@ -318,3 +322,46 @@ def test_verify_worker_uses_dev_repository_for_checkout_and_merge_base(monkeypat
     notes = "\n".join(call[2].get("body", "") for call in api.calls if isinstance(call[2], dict))
     assert "WordPress test site ready" in notes and "npx playwright test" in notes
     assert "private-to-verify" not in notes
+    assert "http://127.0.0.1:40124" not in notes and "node1" not in notes
+
+
+def test_verify_reworks_instead_of_merging_a_pass_with_an_unmapped_deferred_criterion(monkeypatch, tmp_path):
+    class Git:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def mirror(self, *_args):
+            return "mirror"
+
+        def remote_branch_exists(self, *_args):
+            return True
+
+        def detached(self, _mirror, _path, ref):
+            return ref
+
+        def merge_base_in(self, *_args, **_kwargs):
+            return []
+
+        def behind(self, *_args, **_kwargs):
+            return 0
+
+        def scrub(self, _path):
+            pass
+
+    monkeypatch.setattr(verify, "Git", Git)
+    monkeypatch.setattr(verify, "project_env", lambda *_args, **_kwargs: {})
+    project = {"key": "JOOWP", "repo": "jooservices/wordpress-core", "base": "main", "checks": ["pytest"],
+               "work_minutes": {"hard": 1}, "merge": {"method": "squash", "auto": True}}
+    pr = {"number": 4, "branch": "JOOWP-4-work", "url": "https://github.com/jooservices/wordpress-core/pull/4",
+          "head_sha": "a" * 40}
+    for deferred_line in ("- AC4: the merged site responds",
+                          "- AC4: the merged site responds | check: not-configured"):
+        api = _API({"/v1/github/token": {"token": "github-token"}})
+        answer = f"VERDICT: PASS\nCHECKS: pytest passed\nPOST-MERGE CHECKS:\n{deferred_line}\n"
+        monkeypatch.setattr(verify, "get_adapter", lambda _provider, answer=answer: _adapter(answer))
+
+        result = verify.run_verify(api, _claim(project), pr, str(tmp_path), "https://control", 3600, [])
+
+        assert result["outcome"] == "rework"
+        assert "configured checks" in result["summary"]
+        assert not any(path == "/v1/github/merge" for _method, path, _body, _params in api.calls)

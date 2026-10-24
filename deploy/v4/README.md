@@ -7,7 +7,9 @@ The v4 control plane runs the API and loops; each node runs `aiflow4-node-agent`
 
 ## Topics
 
-One line per feature document in `docs/v4/` (add yours here; keep details in the topic file).
+One line per feature document in `docs/v4/`. **Do not add your line here:** add one file `deploy/v4/topics/<topic>.md`
+holding that single line (see [Fewer merge conflicts](../../docs/v4/merge-conflicts.md)); the full index is generated
+by `uv run python -m aiflow.v4.core.topics`. The lines below are the older topics.
 
 - [Merged means Done](../../docs/v4/merged-means-done.md): approved tickets are merged by the flow, Jira follows GitHub within a minute whoever merges, the cause of every move is recorded, and the Dashboard lists tickets whose Jira and GitHub state disagree
 - [Provider routing by quota](../../docs/v4/provider-routing.md): tickets go first to the provider with the most quota left (default Codex, Grok, Claude), a provider above its owner-set ceiling is held back and returns after its window resets or below 60%, with the reason for each assignment shown on Machines and AI

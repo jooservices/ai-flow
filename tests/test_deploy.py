@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -395,11 +396,14 @@ class DeploySupervisorTests(unittest.TestCase):
         supervisor = self.supervisor(runner)
         first = threading.Thread(target=supervisor.deploy_after_merge,
                                  args=("JAIF-1", self.repo, "develop", self.project))
-        first.start()
-        self.assertTrue(started.wait(3))
-        supervisor.deploy_after_merge("JAIF-2", self.repo, "develop", self.project)
-        finish_first.set()
-        first.join(3)
+        frozen_now = datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("aiflow.deploy.datetime") as clock:
+            clock.now.return_value = frozen_now
+            first.start()
+            self.assertTrue(started.wait(3))
+            supervisor.deploy_after_merge("JAIF-2", self.repo, "develop", self.project)
+            finish_first.set()
+            first.join(3)
 
         self.assertFalse(first.is_alive())
         self.assertEqual(len(calls), 2)
@@ -500,15 +504,13 @@ if __name__ == "__main__":
 
 class LogNameTests(unittest.TestCase):
     def test_two_runs_in_the_same_clock_tick_write_two_logs(self):
-        import tempfile
-        from pathlib import Path
-        from unittest import mock
-
-        from aiflow import deploy
-
         with tempfile.TemporaryDirectory() as tmp:
             logs = Path(tmp) / "logs"
-            with mock.patch("aiflow.deploy.time.time_ns", return_value=1):
+            frozen_now = datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc)
+            with patch("aiflow.deploy.datetime") as clock:
+                clock.now.return_value = frozen_now
                 for _ in range(2):
                     deploy.run("true", Path(tmp), 1, logs)
-            self.assertEqual(len(list(logs.glob("deploy-*.log"))), 2)
+            log_paths = list(logs.glob("deploy-*.log"))
+            self.assertEqual(len(log_paths), 2)
+            self.assertEqual(len({path.name for path in log_paths}), 2)

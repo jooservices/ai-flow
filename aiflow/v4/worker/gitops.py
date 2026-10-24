@@ -204,6 +204,14 @@ class Git:
         out = self.run("status", "--porcelain", "--untracked-files=all", cwd=path)
         return [line[3:] for line in out.splitlines() if line.strip()]
 
+    def commits_ahead(self, path: Path, base: str) -> int:
+        """Count branch commits not contained in the fetched base, before merging that base into the branch."""
+        out = self.run("rev-list", "--count", f"origin/{base}..HEAD", cwd=path).strip()
+        try:
+            return int(out)
+        except ValueError as exc:
+            raise GitError(f"git rev-list returned an invalid commit count for origin/{base}") from exc
+
     def commit_all(self, path: Path, message: str, identity: tuple[str, str]) -> str:
         self.run("add", "-A", cwd=path)
         p = subprocess.run(self.run_as + ["git", "commit", "-q", "-F", "-"], cwd=str(path), input=message, text=True,

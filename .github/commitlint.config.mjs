@@ -3,6 +3,8 @@ export default {
     defaultIgnores: true,
     // CI sets this only from the trusted pull request author context.
     ignores: [
+        // Git's own merge commits (the branch is kept current with develop by merging).
+        (message) => /^Merge (?:remote-tracking branch|remote branch|branch)\b/u.test(message),
         (message) =>
             process.env.DEPENDABOT_PR === 'true' &&
             /^(?:chore\((?:deps|deps-dev)\)|ci\(deps\)): (?:[Bb]ump\s+|lockfile maintenance)/u.test(message),

@@ -81,7 +81,7 @@ required for a fresh install.
 
 ## Screens and API routes
 
-**Console screens:** `cc`
+**Console screens:** Command Center (`cc`), Delivery (`delivery`), Human review (`review`), Machines and AI (`machines`), Users and roles (`users`), and Knowledge (`knowledge`).
 
 The Dashboard (`cc`) shows the Flow doctor panel (ready accounts per role, open findings with the next step, recent
 doctor actions) and the Operator interventions tile (last 24 hours and 7 days).

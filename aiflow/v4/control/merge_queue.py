@@ -53,23 +53,41 @@ def snapshot(db, repo: str = "") -> list[dict[str, Any]]:
                   " AND (%s='' OR repo=%s) ORDER BY enqueued_at, number", (repo, repo))
 
 
-def advance(github, repo_name: str, number: int) -> dict[str, Any]:
+def advance(github, repo_name: str, number: int, before_call: Callable[[], None] | None = None) -> dict[str, Any]:
     """On the pull request's turn: bring its branch up to date with the base.
 
     Returns {"state": "current"} when nothing is behind, {"state": "updated", "head_sha"} after a clean update, or
     {"state": "conflict", "message"} when GitHub reports a merge conflict, or {"state": "error", "message"} for any
-    other failure (permission, service): that is not a conflict."""
+    other failure (permission, service): that is not a conflict. `before_call` lets the control merge flow renew its
+    ticket lease before each GitHub request."""
+    if before_call:
+        before_call()
     try:
         pr = github.pr(repo_name, number)
-        base, head = (pr.get("base") or {}).get("ref"), (pr.get("head") or {}).get("ref")
-        behind = int(github.compare_branches(repo_name, base, head).get("behind_by", 0) or 0) if base and head else 0
     except Exception as exc:  # noqa: BLE001 - without a comparison the merge itself reports a stale branch
         log.warning("merge queue: cannot compare PR #%s with its base: %s", number, exc)
         return {"state": "current", "head_sha": ""}
+    base, head = (pr.get("base") or {}).get("ref"), (pr.get("head") or {}).get("ref")
+    behind = 0
+    if base and head:
+        if before_call:
+            before_call()
+        try:
+            behind = int(github.compare_branches(repo_name, base, head).get("behind_by", 0) or 0)
+        except Exception as exc:  # noqa: BLE001 - the merge itself reports a stale branch
+            log.warning("merge queue: cannot compare PR #%s with its base: %s", number, exc)
+            return {"state": "current", "head_sha": (pr.get("head") or {}).get("sha", "")}
+    # GitHub may already report the PR as behind before compare metadata is populated.
+    if pr.get("mergeable_state") == "behind":
+        behind = max(behind, 1)
     if not behind:
         return {"state": "current", "head_sha": (pr.get("head") or {}).get("sha", "")}
+    if before_call:
+        before_call()
     res = github.update_branch(repo_name, number)
     if res.get("ok"):
+        if before_call:
+            before_call()
         return {"state": "updated", "head_sha": github.pr(repo_name, number)["head"]["sha"]}
     if res.get("conflict"):  # only a real merge conflict goes back to a developer AI
         return {"state": "conflict", "message": res.get("message", "")}
@@ -99,7 +117,7 @@ def _waiting(place: dict[str, Any], message: str = "") -> dict[str, Any]:
 
 
 def merge_next(db, github, repo: str, number: int, ticket_key: str, run_id: str,
-               merge: Callable[[], dict]) -> dict[str, Any]:
+               merge: Callable[[], dict], before_call: Callable[[], None] | None = None) -> dict[str, Any]:
     """The whole queue step for one `/v1/github/merge` call. `merge()` performs the real merge.
 
     The turn, the branch update and the merge run under the repository lock, so two concurrent calls can never
@@ -114,7 +132,7 @@ def merge_next(db, github, repo: str, number: int, ticket_key: str, run_id: str,
         place = turn(db, repo, number, ticket_key, run_id)  # the queue may have changed while the lock was taken
         if not place["turn"]:
             return _waiting(place)
-        step = advance(github, repo_name, number)
+        step = advance(github, repo_name, number, before_call)
         if step["state"] == "conflict":
             leave(db, repo, number)
             return {"merged": False, "conflict": True, "message": step["message"] or "conflicts with the base"}
@@ -126,6 +144,8 @@ def merge_next(db, github, repo: str, number: int, ticket_key: str, run_id: str,
         if step["state"] == "updated":
             return {"merged": False, "updated": True, "head_sha": step["head_sha"], "mergeable_state": "unknown",
                     "message": "branch brought up to date with the base; waiting for checks on the new head"}
+        if before_call:
+            before_call()
         res = merge()
         if res.get("merged"):
             finish(db, repo, number, True)

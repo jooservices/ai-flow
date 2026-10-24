@@ -47,7 +47,7 @@ from ..core.services import service_gaps
 from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tools, pinned_version, toolchain_gaps,
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
-from . import (business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
+from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, memory, role_health, rollout,
                shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
@@ -1051,6 +1051,13 @@ class ConsoleUserDisabledBody(BaseModel):
 
 class ViewAsBody(BaseModel):
     role: str
+
+
+class BaChatResultBody(BaseModel):
+    account: str = ""
+    claim_token: str = ""
+    output: dict[str, Any] = Field(default_factory=dict)
+    error_kind: str = ""
 
 
 class BackupConfigBody(BaseModel):
@@ -2228,13 +2235,21 @@ def create_app(ctx: Ctx) -> FastAPI:
     @app.get("/v1/notifications")
     def notification_settings(request: Request) -> dict:
         notification_admin(request)
-        return notify.public_settings(ctx.db)
+        projects = [{"key": project.key, "name": project.key}
+                    for project in sorted(ctx.repo().projects.values(), key=lambda item: item.key)]
+        return notify.public_settings(ctx.db, projects)
 
     @app.put("/v1/notifications/channels")
     async def notification_channel_save(request: Request) -> dict:
         notification_admin(request, "write")
+        payload = await notification_json(request)
+        config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        if str(payload.get("kind") or "").strip().lower() == "telegram" and config.get("ba_chat_enabled"):
+            project_key = str(config.get("project_key") or "").strip().upper()
+            if project_key not in ctx.repo().projects:
+                raise HTTPException(400, "choose a configured Jira project for BA chat")
         try:
-            channel = notify.save_channel(ctx.db, await notification_json(request))
+            channel = notify.save_channel(ctx.db, payload)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         return {"channel": channel}
@@ -4411,9 +4426,9 @@ def create_app(ctx: Ctx) -> FastAPI:
                 if flying is None:
                     flying = hotfiles.in_flight_hot_files(ctx.db, footprint)
                 if hotfiles.blocking_ticket(footprint(t), {k: v for k, v in flying.items() if k != t["key"]}):
-                    # the wait counts from the first time the ticket was held back, not from its age
-                    if not hotfiles.released_by_wait(hotfiles.mark_blocked(ctx.db, t["key"])):
-                        continue
+                    # A hot-file holder keeps its reservation through development and review; waiting never permits overlap.
+                    hotfiles.mark_blocked(ctx.db, t["key"])
+                    continue
                 else:
                     hotfiles.clear_blocked(ctx.db, t["key"])
                 dev_rows.append({**t, "step": "dev", "probation": probation("dev")})
@@ -4577,6 +4592,29 @@ def create_app(ctx: Ctx) -> FastAPI:
             return {"candidate": None, "reason": str(exc)}
         return {"candidate": master_candidate(account, node)}
 
+    @app.get("/v1/ba-chat/candidate")
+    def ba_chat_candidate(account: str, node: str = Depends(node_auth)) -> dict:
+        try:
+            licensing.enforce_work_entitlement(ctx, account, node, public_key=ctx.settings.license_public_key)
+        except licensing.LicenseError as exc:
+            return {"job": None, "reason": str(exc)}
+        try:
+            return {"job": ba_chat.claim_job(ctx, account, node)}
+        except Exception as exc:  # noqa: BLE001 - poll failures must not expose chat text
+            log.warning("BA chat claim failed account=%s error=%s", account, type(exc).__name__)
+            return {"job": None}
+
+    @app.post("/v1/ba-chat/{job_id}/result")
+    def ba_chat_result(job_id: str, body: BaChatResultBody, node: str = Depends(node_auth)) -> dict:
+        try:
+            parsed_id = str(uuid.UUID(job_id))
+        except ValueError:
+            raise HTTPException(404, "chat turn was not found") from None
+        if not ba_chat.complete_job(ctx, parsed_id, body.claim_token, body.account, node,
+                                    body.output, body.error_kind):
+            raise HTTPException(409, "chat turn is no longer assigned to this worker")
+        return {"accepted": True}
+
     def related_hits(t: dict) -> list[dict]:
         """Up to 3 past entries related to the ticket summary; memory is advice, so an error gives none."""
         try:
@@ -4657,9 +4695,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         if body.step == "dev":
             # The eligibility check above is a snapshot: reserve the hot files now, atomically with the claim, so
             # two simultaneous claims of different tickets cannot both start on the same hot file.
-            wait_started = hotfiles.blocked_since(ctx.db, t["key"])
-            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"],
-                                     force=hotfiles.released_by_wait(wait_started))
+            taken = hotfiles.reserve(ctx.db, t["key"], run_id, hotfiles.predict(ctx.db, t, ticket_epic(t))["hot"])
             if taken:
                 ctx.leases.release(t["key"], run_id, c.fence)
                 if probation_id is not None:

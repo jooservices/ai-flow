@@ -17,9 +17,9 @@ Before a dev run is offered, AI Flow predicts the files the ticket will touch:
 
 A predicted file is *hot* when it matches `HOT_FILES` (the console page, `aiflow/v4/control/api.py`,
 `tests/v4/conftest.py`, `pyproject.toml`, `uv.lock`, `CHANGELOG.md`). A ticket is **not offered** while another ticket
-shares a hot file with it and has a running dev run or an open pull request (In Verify, Human review). The account is
-offered another ticket instead, or waits. The ticket starts when the other one merges, or after it has waited six
-hours (`MAX_WAIT`), so a hot file never starves a ticket.
+shares a hot file with it and has a running dev run or an open pull request (In Verify, Human review, Ready to merge). The account is
+offered another ticket instead, or waits. It remains blocked for as long as the holder is running or waiting in
+review; elapsed time never allows overlapping tickets on a hot file.
 
 The wait counts from the moment the ticket was first held back (table `hot_file_blocked`, migration
 `019_hot_file_blocked.sql`), not from the age of the ticket: an old backlog ticket is still held on its first check.
@@ -31,7 +31,8 @@ is taken, `hotfiles.reserve` writes one row per predicted hot file into `hot_fil
 `020_hot_file_reservations.sql`), in one transaction under an advisory lock. Of two simultaneous claims for different
 tickets only the first gets a shared file; the second is answered `409` ("hot file ... is reserved by <ticket>") and
 its lease is released. A reservation is dropped as stale when its run is no longer running and its ticket has no open
-pull request (In Verify, Human review). A ticket that waited past `MAX_WAIT` takes the files over.
+pull request (In Verify, Human review, Ready to merge) or its pull request remains open. A ticket that waited longer still waits for the holder to release its
+reservation.
 
 ## Automatic branch update (`aiflow/v4/worker/verify.py`)
 
@@ -56,7 +57,8 @@ Do not edit the README list.
 
 ## Merge queue (`aiflow/v4/control/merge_queue.py`)
 
-`POST /v1/github/merge` from a verify run joins the queue of the repository (table `merge_queue`). Only the oldest
+`POST /v1/github/merge` from a verify run and the background Ready to merge loop join the same repository queue
+(table `merge_queue`). Only the oldest
 waiting pull request has the turn; the others get `queued` with their position and the verify run polls (its lease
 heartbeat keeps running, up to 45 minutes). On its turn the pull request is brought up to date with the base, which
 includes the pull request merged just before it; CI runs on the new head, then it merges. A conflict at that point is
@@ -79,7 +81,7 @@ The claim reservation is in `POST /v1/work/claim`; the queue is behind `POST /v1
 
 ## Command Center: work lost to conflicts
 
-The Analytics panel shows, for the last 14 days and the 14 before, with a per-day trend (`GET
+The Delivery Analytics panel and the Command Center dashboard show, for the last 14 days and the 14 before, with a per-day trend (`GET
 /v1/analytics/conflicts?days=14&bucket=day|week`; it sits beside the per-account runs of `GET /v1/analytics/daily`
 and has the same access rule, `view.dashboard`):
 

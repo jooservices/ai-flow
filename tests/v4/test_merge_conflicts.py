@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import add_ticket, join_node
-from aiflow.v4.control import conflict_loss, hotfiles, merge_queue
+from aiflow.v4.control import conflict_loss, hotfiles, merge_flow, merge_queue
+from aiflow.v4.control.db import J
 from aiflow.v4.core import topics
 from aiflow.v4.worker import verify
 from aiflow.v4.worker.gitops import Git
@@ -96,12 +97,14 @@ def test_second_ticket_on_a_hot_file_waits_and_another_ticket_is_offered(client,
     assert "TESTWP-2" in offered()  # merged: the file is free
 
 
-def test_waiting_ticket_is_released_after_the_maximum_wait(client, ctx):
+def test_waiting_ticket_stays_blocked_after_six_hours_until_holder_releases_hot_file(client, ctx):
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-1", status="In Verify")
     add_ticket(ctx.db, "TESTWP-2")
+    add_ticket(ctx.db, "TESTWP-3")
     describe(ctx.db, "TESTWP-1", "Card", "Edit " + CONSOLE)
     describe(ctx.db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
+    describe(ctx.db, "TESTWP-3", "Backend rule", "Edit aiflow/v4/worker/loop.py")
     # an old backlog ticket is still held on its first check: the wait counts from the first block, not its age
     ctx.db.run("UPDATE tickets SET jira_created=now() - interval '3 days', jira_updated=now() - interval '3 days'"
                " WHERE key='TESTWP-2'")
@@ -112,10 +115,9 @@ def test_waiting_ticket_is_released_after_the_maximum_wait(client, ctx):
     assert "TESTWP-2" not in keys()
     assert ctx.db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key='TESTWP-2'")["blocked_at"] == first
     ctx.db.run("UPDATE hot_file_blocked SET blocked_at=now() - interval '7 hours' WHERE ticket_key='TESTWP-2'")
-    assert "TESTWP-2" in keys()
-    assert hotfiles.released_by_wait(datetime.now(timezone.utc) - timedelta(hours=7))
-    assert not hotfiles.released_by_wait(None)
-    # once nothing blocks it, the record goes and a later block starts a new wait
+    assert "TESTWP-2" not in keys()  # elapsed time cannot schedule overlapping work
+    assert "TESTWP-3" in keys()  # another ticket remains available
+    # once nothing blocks it, the record goes and the waiting ticket is offered
     ctx.db.run("UPDATE tickets SET status='Done' WHERE key='TESTWP-1'")
     assert "TESTWP-2" in keys()
     assert ctx.db.one("SELECT 1 AS x FROM hot_file_blocked WHERE ticket_key='TESTWP-2'") is None
@@ -136,10 +138,29 @@ def test_simultaneous_claims_reserve_a_hot_file_for_one_ticket_only(db):
     assert len(winners) == 1
     loser = next(k for k in results if k not in winners)
     assert results[loser] == (winners[0], sorted([CONSOLE, "pyproject.toml"]))
-    # a released (stale) reservation frees the files; a forced one (waited past MAX_WAIT) takes them over
-    assert hotfiles.reserve(db, loser, "run-x", [CONSOLE], force=True) is None
+    assert hotfiles.reserve(db, loser, "run-x", [CONSOLE]) == (winners[0], [CONSOLE])
+    hotfiles.unreserve(db, f"run-{winners[0]}")
+    assert hotfiles.reserve(db, loser, "run-x", [CONSOLE]) is None
     hotfiles.unreserve(db, "run-x")
     assert hotfiles.reserve(db, winners[0], "run-y", [CONSOLE]) is None
+
+
+@pytest.mark.parametrize(("holder_status", "pr_state"), [
+    ("Human review", ""), ("Ready to merge", ""), ("To Do", "open")
+])
+def test_live_or_open_pr_reservation_cannot_be_replaced_after_six_hours(db, holder_status, pr_state):
+    add_ticket(db, "TESTWP-1", status=holder_status)
+    add_ticket(db, "TESTWP-2")
+    if pr_state:
+        db.run("UPDATE tickets SET pr_state=%s WHERE key='TESTWP-1'", (pr_state,))
+    assert hotfiles.reserve(db, "TESTWP-1", "finished-dev-run", [CONSOLE]) is None
+    db.run("UPDATE hot_file_reservations SET reserved_at=now() - interval '7 hours' WHERE ticket_key='TESTWP-1'")
+
+    assert hotfiles.reserve(db, "TESTWP-2", "second-run", [CONSOLE]) == ("TESTWP-1", [CONSOLE])
+    assert db.one("SELECT ticket_key FROM hot_file_reservations WHERE path=%s", (CONSOLE,))["ticket_key"] == "TESTWP-1"
+
+    db.run("UPDATE tickets SET status='Done', pr_state='merged' WHERE key='TESTWP-1'")
+    assert hotfiles.reserve(db, "TESTWP-2", "second-run", [CONSOLE]) is None
 
 
 def test_stale_reservation_is_dropped(db):
@@ -481,6 +502,70 @@ def test_concurrent_merge_requests_merge_one_at_a_time(db):
         assert other
     with merge_queue.repo_lock(db, "o/r") as again:
         assert again  # released after the merge
+
+
+def test_ready_to_merge_and_verify_merges_share_the_repository_queue(client, ctx):
+    ctx.github.pr_data = {}
+
+    def seed(key, status, number, sha):
+        add_ticket(ctx.db, key, status=status)
+        ctx.db.run("INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,pr_url,details)"
+                   " VALUES (%s,%s,'TESTWP','dev','claude-01','claude','node1',1,'finished','done',%s,%s)",
+                   (str(uuid.uuid4()), key, f"https://github.com/jooservices/test-aiflow-wp/pull/{number}", J({})))
+        ctx.jira.status_of[key] = status
+        ctx.github.pr_data[number] = {"number": number, "state": "open", "merged": False,
+                                      "mergeable_state": "clean", "head": {"sha": sha}}
+        ctx.github.check_data = {**getattr(ctx.github, "check_data", {}), sha: [
+            {"name": "Unit", "state": "success", "url": ""}]}
+
+    seed("TESTWP-801", "Ready to merge", 801, "ready-head")
+    seed("TESTWP-802", "In Verify", 802, "verify-head")
+    node = join(client, "node1")
+    verify_run = client.post("/v1/work/claim", json={"ticket": "TESTWP-802", "account": "codex-01", "step": "verify"},
+                             headers=node).json()
+    assert verify_run["claimed"], verify_run
+
+    entered, release = threading.Event(), threading.Event()
+    active, peak, merged = [], [], []
+    real_merge = ctx.github.merge_pr
+    state_lock = threading.Lock()
+
+    def slow_merge(repo, number, title="", method="squash", sha=""):
+        with state_lock:
+            active.append(number)
+            peak.append(len(active))
+        if number == 801:
+            entered.set()
+            assert release.wait(5), "the test did not release the first merge"
+        try:
+            return real_merge(repo, number, title, method, sha)
+        finally:
+            with state_lock:
+                active.remove(number)
+                merged.append(number)
+
+    ctx.github.merge_pr = slow_merge
+    ready_result = {}
+    ready_thread = threading.Thread(target=lambda: ready_result.setdefault("keys", merge_flow.merge_ready(ctx)))
+    ready_thread.start()
+    try:
+        assert entered.wait(5), "Ready to merge did not enter its queued merge"
+        queued = client.post("/v1/github/merge", json={"run_id": verify_run["run_id"],
+                                  "fence": verify_run["fence"], "number": 802,
+                                  "title": "TESTWP-802: Summary", "method": "squash"}, headers=node)
+        assert queued.status_code == 200 and queued.json()["queued"] is True
+        assert merged == []
+    finally:
+        release.set()
+        ready_thread.join(10)
+
+    assert not ready_thread.is_alive()
+    assert ready_result["keys"] == ["TESTWP-801"]
+    verified = client.post("/v1/github/merge", json={"run_id": verify_run["run_id"],
+                               "fence": verify_run["fence"], "number": 802,
+                               "title": "TESTWP-802: Summary", "method": "squash"}, headers=node)
+    assert verified.status_code == 200 and verified.json()["merged"] is True
+    assert merged == [801, 802] and max(peak) == 1
 
 
 def test_the_repository_lock_is_released_when_the_merge_raises(db):

@@ -10,14 +10,14 @@ verification. Before a dev run is offered, `predict` builds the ticket's footpri
 
 Only *hot* files count: a path that matches HOT_FILES. `blocking_ticket` tells whether a candidate would share a
 hot file with work already in flight; the candidate is then not offered (the account gets another ticket, or
-waits) until the other ticket merges. A ticket that waited longer than MAX_WAIT is released anyway, so a hot
-file can never starve a ticket. docs/v4/merge-conflicts.md describes the rules.
+waits) until the other ticket releases its reservation. Waiting never permits two active tickets to share a hot
+file. docs/v4/merge-conflicts.md describes the rules.
 """
 from __future__ import annotations
 
 import fnmatch
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Callable, Iterable
 
 # Files that many tickets change at once. Entries are fnmatch globs on the repository path.
@@ -43,7 +43,6 @@ AREAS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 PATH = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:py|html|js|cjs|md|sql|yml|yaml|toml|lock|json|sh|css|txt))\b")
-MAX_WAIT = timedelta(hours=6)
 HISTORY_RUNS = 8
 
 
@@ -112,10 +111,11 @@ def blocking_ticket(footprint: dict[str, Any], in_flight: dict[str, Iterable[str
 
 
 def in_flight_hot_files(db, footprint_of: Callable[[dict], dict], exclude: str = "") -> dict[str, list[str]]:
-    """Hot files of the tickets with a running dev run or an open pull request that has not merged yet."""
+    """Hot files of active development tickets and tickets whose pull request is still open."""
     rows = db.all(
-        "SELECT * FROM tickets WHERE key <> %s AND (status IN ('In Verify', 'Human review') OR EXISTS ("
-        " SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key AND r.step = 'dev' AND r.status = 'running'))",
+        "SELECT * FROM tickets WHERE key <> %s AND (status IN ('In Verify', 'Human review', 'Ready to merge')"
+        " OR pr_state='open' OR EXISTS (SELECT 1 FROM runs r WHERE r.ticket_key = tickets.key"
+        " AND r.step = 'dev' AND r.status = 'running'))",
         (exclude,))
     return {t["key"]: footprint_of(t)["hot"] for t in rows}
 
@@ -134,18 +134,13 @@ def clear_blocked(db, ticket_key: str) -> None:
 RESERVATION_GRACE_S = 120  # a claim inserts its running run row right after it reserved
 
 
-def blocked_since(db, ticket_key: str) -> datetime | None:
-    row = db.one("SELECT blocked_at FROM hot_file_blocked WHERE ticket_key=%s", (ticket_key,))
-    return row["blocked_at"] if row else None
-
-
-def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], force: bool = False) -> tuple[str, list[str]] | None:
+def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str]) -> tuple[str, list[str]] | None:
     """Reserve the hot files of a claimed dev run, atomically with the claim.
 
     Everything runs in one transaction under an advisory lock, so of two simultaneous claims only the first gets a
     shared file. Returns (holder ticket, shared files) when another ticket holds one, else None and the files are
     reserved. A reservation is stale (and dropped here) when its run is not running any more and its ticket is not
-    waiting in verify or human review. `force` (the ticket waited longer than MAX_WAIT) takes the files over."""
+    waiting in verify or human review. Time spent waiting never overrides a live reservation."""
     paths = sorted(set(hot))
     if not paths:
         return None
@@ -155,12 +150,13 @@ def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], force: bool = 
             conn.execute(
                 "DELETE FROM hot_file_reservations h WHERE h.reserved_at < now() - %s * interval '1 second'"
                 " AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id::text = h.run_id AND r.status = 'running')"
-                " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key"
-                " AND t.status IN ('In Verify', 'Human review'))", (RESERVATION_GRACE_S,))
+                " AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.key = h.ticket_key AND ("
+                " t.status IN ('In Verify', 'Human review', 'Ready to merge') OR t.pr_state='open'))",
+                (RESERVATION_GRACE_S,))
             held = conn.execute("SELECT path, ticket_key FROM hot_file_reservations"
                                 " WHERE path = ANY(%s) AND ticket_key <> %s ORDER BY path",
                                 (paths, ticket_key)).fetchall()
-            if held and not force:
+            if held:
                 return held[0]["ticket_key"], [r["path"] for r in held if r["ticket_key"] == held[0]["ticket_key"]]
             for path in paths:
                 conn.execute(
@@ -172,13 +168,3 @@ def reserve(db, ticket_key: str, run_id: str, hot: Iterable[str], force: bool = 
 
 def unreserve(db, run_id: str) -> None:
     db.run("DELETE FROM hot_file_reservations WHERE run_id=%s", (run_id,))
-
-
-def released_by_wait(blocked_since: datetime | None, now: datetime | None = None) -> bool:
-    """A ticket that waited longer than MAX_WAIT since it was first held back starts anyway."""
-    if blocked_since is None:
-        return False
-    now = now or datetime.now(timezone.utc)
-    if blocked_since.tzinfo is None:
-        blocked_since = blocked_since.replace(tzinfo=timezone.utc)
-    return now - blocked_since > MAX_WAIT

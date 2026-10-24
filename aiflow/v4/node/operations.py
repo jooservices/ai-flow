@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import base64
+import json
 import os
 import platform
 import re
@@ -17,8 +19,9 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -53,6 +56,8 @@ _PYTHON_VERSION = re.compile(r"v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?\Z
 _INSTALL_ORDER = ("packages", "git", "node", "uv", "python3", "docker", "php", "composer", "wp", "podman",
                   "playwright", "chromium", "firefox", "webkit", "gh", "claude", "codex", "codex-code-mode-host",
                   "grok", "opencode", "gitleaks", "xdebug", "cosign")
+RUNTIME_SECRET_FILE = Path("/etc/aiflow/secrets/runtime.env")
+PROJECT_ENV_DIR = Path("/etc/aiflow/projects")
 
 
 class OperationError(RuntimeError):
@@ -871,12 +876,288 @@ def _service_health(service: dict[str, Any]) -> dict[str, Any]:
     return {"name": str(service.get("name") or unit), "unit": unit, "healthy": True, "check": "green"}
 
 
-def execute(operation: dict[str, Any]) -> dict[str, Any]:
+def _restore_runtime_file(path: Path, previous: bytes | None) -> None:
+    """Restore an env file atomically without exposing its contents in diagnostics."""
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.restore")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(previous)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _wait_for_worker_idle(units: list[str], timeout_s: int = 3900) -> bool:
+    """Wait for targeted workers to finish; only restart after a stable idle window."""
+    from .agent import worker_states
+
+    instances = {unit.split("@", 1)[1].removesuffix(".service") for unit in units}
+    started = time.monotonic()
+    idle_since: float | None = None
+    while time.monotonic() - started < timeout_s:
+        active = any(str(item.get("instance") or item.get("account") or "") in instances
+                     and item.get("state") in {"working", "probing"} and item.get("alive", True)
+                     for item in worker_states())
+        if active:
+            idle_since = None
+        elif idle_since is None:
+            idle_since = time.monotonic()
+        elif time.monotonic() - idle_since >= 5:
+            return True
+        time.sleep(1)
+    return False
+
+
+def _restart_worker(unit: str) -> bool:
+    if not _SAFE_UNIT.fullmatch(unit):
+        raise OperationError("runtime setting names an invalid worker service")
+    try:
+        active = subprocess.run(["systemctl", "is-active", "--quiet", unit], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if active.returncode:
+        return True  # stopped workers read the changed env file when they start again
+    try:
+        restarted = subprocess.run(["systemctl", "restart", unit], capture_output=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if restarted.returncode:
+        return False
+    try:
+        healthy = subprocess.run(["systemctl", "is-active", "--quiet", unit], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return healthy.returncode == 0
+
+
+def _control_compose_file() -> tuple[Path, dict[str, str]]:
+    """Resolve the compose file and image tag from an existing API container, never from request text."""
+    config = subprocess.run(
+        ["docker", "inspect", "--format", '{{ index .Config.Labels "com.docker.compose.project.config_files" }}',
+         "aiflow4-control-api-a"], capture_output=True, text=True, timeout=30)
+    image = subprocess.run(["docker", "inspect", "--format", "{{.Config.Image}}", "aiflow4-control-api-a"],
+                           capture_output=True, text=True, timeout=30)
+    if config.returncode or image.returncode:
+        raise OperationError("control API container could not be inspected")
+    raw = (config.stdout or "").strip().split(",", 1)[0]
+    try:
+        resolved = Path(raw).resolve(strict=True)
+    except OSError:
+        raise OperationError("control compose file is unavailable") from None
+    build_root = Path("/srv/aiflow/build").resolve(strict=False)
+    if (not resolved.is_relative_to(build_root) or resolved.name != "compose.yaml"
+            or resolved.parts[-4:] != ("deploy", "v4", "control", "compose.yaml")):
+        raise OperationError("control compose file is outside the installed release")
+    image_ref = (image.stdout or "").strip()
+    if ":" not in image_ref:
+        raise OperationError("control API image tag could not be determined")
+    repository, tag = image_ref.rsplit(":", 1)
+    return resolved, {"AIFLOW4_IMAGE_REPOSITORY": repository, "AIFLOW4_IMAGE_TAG": tag,
+                      "AIFLOW4_VERSION": tag}
+
+
+def _control_api_healthy(service: str, compose: Path, env: dict[str, str]) -> bool:
+    try:
+        result = subprocess.run(["docker", "compose", "-f", str(compose), "up", "-d", "--no-deps", service],
+                                capture_output=True, timeout=180, env={**os.environ, **env})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode:
+        return False
+    container = f"aiflow4-{service}"
+    for _ in range(40):
+        try:
+            health = subprocess.run(["docker", "inspect", "--format", "{{.State.Health.Status}}", container],
+                                    capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if health.returncode == 0 and (health.stdout or "").strip() == "healthy":
+            return True
+        time.sleep(2)
+    return False
+
+
+def _execute_runtime_setting(payload: dict[str, Any],
+                             checkpoint: Callable[[dict[str, str]], dict[str, str]] | None = None) -> dict[str, Any]:
+    """Write one validated env entry, restart fixed services, and restore the prior file on failure."""
+    from ..install.secrets import update_env
+
+    scope = str(payload.get("scope") or "")
+    project = str(payload.get("project") or "")
+    key, value = str(payload.get("key") or ""), str(payload.get("value") or "")
+    if (scope not in {"secret", "project"} or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
+            or not re.fullmatch(r"[\x21-\x7e]{1,4096}", value)):
+        raise OperationError("runtime setting request is invalid")
+    if scope == "secret" and ("'" in value or "\\" in value):
+        raise OperationError("control runtime value has an unsupported format")
+    if scope == "project":
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project):
+            raise OperationError("runtime project name is invalid")
+        path = PROJECT_ENV_DIR / f"{project}.env"
+    else:
+        path = RUNTIME_SECRET_FILE
+    if path.is_symlink():
+        raise OperationError("runtime env file is not a regular file")
+    try:
+        rollback_context = f"{payload.get('change_id')}:rollback:{payload.get('operation_id')}"
+        from ..core.runtime_settings_crypto import decrypt_value, encrypt_value, node_public_key
+        rollback_envelope = payload.get("rollback_envelope")
+        if not isinstance(rollback_envelope, dict):
+            previous = path.read_bytes() if path.is_file() else None
+            snapshot = json.dumps({"exists": previous is not None,
+                                  "content": base64.b64encode(previous or b"").decode("ascii")},
+                                 separators=(",", ":"))
+            rollback_envelope = encrypt_value(node_public_key(), snapshot,
+                                              f"runtime-setting-rollback:{rollback_context}")
+            if checkpoint is not None:
+                rollback_envelope = checkpoint(rollback_envelope)
+        snapshot = json.loads(decrypt_value(rollback_envelope, f"runtime-setting-rollback:{rollback_context}"))
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("exists"), bool):
+            raise ValueError("invalid rollback snapshot")
+        previous_content = base64.b64decode(str(snapshot.get("content") or ""), validate=True)
+        previous = previous_content if snapshot["exists"] else None
+        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
+                   track_timestamps=True, compose_literal=scope == "secret")
+    except OSError:
+        raise OperationError("runtime env file could not be written") from None
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise OperationError("runtime setting rollback snapshot could not be secured") from None
+
+    completed: list[str] = []
+    attempted: list[str] = []
+    try:
+        if scope == "project":
+            units = payload.get("units") or []
+            if not isinstance(units, list) or any(not isinstance(unit, str) for unit in units):
+                raise OperationError("runtime worker service plan is invalid")
+            if not _wait_for_worker_idle(units):
+                raise OperationError("active worker did not become idle; no service was restarted")
+            for unit in units:
+                attempted.append(unit)
+                if not _restart_worker(unit):
+                    raise OperationError(f"service {unit} failed its restart health check")
+                completed.append(unit)
+        else:
+            try:
+                compose, env = _control_compose_file()
+            except Exception as exc:
+                raise OperationError(f"service control-api-a could not be restarted ({type(exc).__name__})") from None
+            for service in ("control-api-a", "control-api-b"):
+                if not _control_api_healthy(service, compose, env):
+                    raise OperationError(f"service {service} failed its restart health check")
+                completed.append(service)
+    except Exception as exc:
+        try:
+            _restore_runtime_file(path, previous)
+        except OSError:
+            raise OperationError("runtime setting failed and its previous value could not be restored") from None
+        rollback_failures = []
+        if scope == "project":
+            for unit in attempted:
+                if not _restart_worker(unit):
+                    rollback_failures.append(unit)
+        else:
+            try:
+                compose, env = _control_compose_file()
+                for service in ("control-api-a", "control-api-b"):
+                    if not _control_api_healthy(service, compose, env):
+                        rollback_failures.append(service)
+            except Exception:
+                rollback_failures.extend([service for service in ("control-api-a", "control-api-b")
+                                          if service not in rollback_failures])
+        if rollback_failures:
+            raise OperationError(f"{exc}; previous value restored but rollback health failed for "
+                                 f"{', '.join(rollback_failures)}") from None
+        if isinstance(exc, OperationError):
+            raise OperationError(f"{exc}; previous value restored") from None
+        raise OperationError("runtime service restart failed; previous value restored") from None
+    return {"healthy": True, "key": key, "scope": scope, "project": project,
+            "services": completed, "set": True, "rollback_envelope": rollback_envelope}
+
+
+def _execute_runtime_setting_rollback(payload: dict[str, Any]) -> dict[str, Any]:
+    """Restore a peer's encrypted pre-change file snapshot and health-check its affected services."""
+    scope = str(payload.get("scope") or "")
+    project = str(payload.get("project") or "")
+    key = str(payload.get("key") or "")
+    if (scope not in {"secret", "project"} or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)):
+        raise OperationError("runtime setting rollback request is invalid")
+    if scope == "project":
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project):
+            raise OperationError("runtime project name is invalid")
+        path = PROJECT_ENV_DIR / f"{project}.env"
+    else:
+        path = RUNTIME_SECRET_FILE
+    if path.is_symlink():
+        raise OperationError("runtime env file is not a regular file")
+    try:
+        snapshot = payload.get("snapshot") or {}
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("exists"), bool):
+            raise ValueError
+        content = base64.b64decode(str(snapshot.get("content") or ""), validate=True)
+        _restore_runtime_file(path, content if snapshot["exists"] else None)
+    except (ValueError, OSError):
+        raise OperationError("previous value could not be restored") from None
+
+    if scope == "project":
+        units = payload.get("units") or []
+        if not isinstance(units, list) or any(not isinstance(unit, str) for unit in units):
+            raise OperationError("runtime worker rollback service plan is invalid")
+        if not _wait_for_worker_idle(units):
+            raise OperationError("previous value restored but active workers did not become idle for rollback")
+        for unit in units:
+            if not _restart_worker(unit):
+                raise OperationError(f"previous value restored but service {unit} failed its rollback health check")
+        services = units
+    else:
+        try:
+            compose, env = _control_compose_file()
+        except Exception as exc:
+            raise OperationError(f"previous value restored but control API rollback could not start ({type(exc).__name__})") from None
+        services = []
+        for service in ("control-api-a", "control-api-b"):
+            if not _control_api_healthy(service, compose, env):
+                raise OperationError(f"previous value restored but service {service} failed its rollback health check")
+            services.append(service)
+    return {"healthy": True, "key": key, "scope": scope, "project": project,
+            "services": services, "restored": True}
+
+
+def execute(operation: dict[str, Any],
+            checkpoint: Callable[[dict[str, str]], dict[str, str]] | None = None) -> dict[str, Any]:
     """Install missing components or reconcile all tools and services in a server-created operation payload."""
     payload = operation.get("payload") or {}
     from .agent import tool_versions
 
     action = payload.get("action")
+    if action in {"runtime_setting_project", "runtime_setting_control"}:
+        expected_scope = "project" if action == "runtime_setting_project" else "secret"
+        if payload.get("scope") != expected_scope:
+            raise OperationError("runtime setting operation scope is invalid")
+        try:
+            from ..core.runtime_settings_crypto import decrypt_value
+            envelope = payload.get("value_envelope")
+            if not isinstance(envelope, dict):
+                raise ValueError("missing envelope")
+            decrypted = {**payload, "operation_id": str(operation.get("id") or ""),
+                         "value": decrypt_value(envelope, str(payload.get("change_id") or ""))}
+        except Exception:
+            raise OperationError("runtime setting value could not be decrypted on this machine") from None
+        return _execute_runtime_setting(decrypted, checkpoint=checkpoint)
+    if action == "runtime_setting_rollback":
+        try:
+            from ..core.runtime_settings_crypto import decrypt_value
+            envelope = payload.get("rollback_envelope")
+            context = str(payload.get("rollback_context") or "")
+            if not isinstance(envelope, dict) or not context:
+                raise ValueError("missing rollback envelope")
+            snapshot = json.loads(decrypt_value(envelope, f"runtime-setting-rollback:{context}"))
+        except Exception:
+            raise OperationError("runtime setting rollback snapshot could not be decrypted on this machine") from None
+        return _execute_runtime_setting_rollback({**payload, "snapshot": snapshot})
     if action == "install":
         desired_tools = payload.get("tools") or []
         services: list[dict[str, Any]] = []

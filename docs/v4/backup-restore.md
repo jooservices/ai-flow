@@ -9,7 +9,10 @@ downloads the encryption key once; and builds the restore command for a selected
 Each encrypted backup includes:
 
 - A PostgreSQL custom-format dump of the full control database.
-- Stored files from the control, Jira, GitHub and console secret directories. The backup encryption key is excluded.
+- Stored files from the control, Jira, GitHub and console secret directories, the owner-managed
+  `/etc/aiflow/secrets/runtime.env` file, and the project env directory on the control host. Project values managed
+  from Settings keep a canonical copy there; replacement workers receive missing values encrypted on their first
+  heartbeat before assigned workers start. The backup encryption key is excluded.
 - The control repository's current files, without its `.git` directory.
 - A separate snapshot of managed knowledge, memory and project reports. Restore verifies the snapshot against the
   restored database.

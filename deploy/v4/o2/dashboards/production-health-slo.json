@@ -1,0 +1,142 @@
+{
+  "version": 8,
+  "title": "AI Flow production health and SLO",
+  "description": "Seven-day production health, ticket autonomy, rescue results, repeated study-case signatures and AI usage from aiflow_events.",
+  "defaultDatetimeDuration": {"type": "relative", "relativeTimePeriod": "7d"},
+  "tabs": [
+    {
+      "tabId": "default",
+      "name": "Production health",
+      "panels": [
+        {
+          "id": "blocked-by-signature",
+          "type": "table",
+          "title": "Blocked by signature",
+          "description": "Blocked tickets grouped by exact block kind and reason.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT kind, reason AS signature, count(*) AS blocked FROM \"aiflow_events\" WHERE event = 'ticket.blocked' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY kind, reason ORDER BY blocked DESC",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Signature", "alias": "signature", "column": "signature"}], "y": [{"label": "Blocked", "alias": "blocked", "column": "blocked"}], "z": [], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 0, "y": 0, "w": 96, "h": 18, "i": 0}
+        },
+        {
+          "id": "time-in-status",
+          "type": "table",
+          "title": "Time in each status",
+          "description": "Total and average minutes spent in each status for transitions in the seven-day window.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT from_status, round(sum(minutes_in_from), 1) AS total_minutes, round(avg(minutes_in_from), 1) AS average_minutes, count(*) AS transitions FROM \"aiflow_events\" WHERE event = 'ticket.status' AND minutes_in_from IS NOT NULL AND _timestamp >= now() - INTERVAL '7 days' GROUP BY from_status ORDER BY total_minutes DESC",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Status", "alias": "from_status", "column": "from_status"}], "y": [{"label": "Total minutes", "alias": "total_minutes", "column": "total_minutes"}, {"label": "Average minutes", "alias": "average_minutes", "column": "average_minutes"}, {"label": "Transitions", "alias": "transitions", "column": "transitions"}], "z": [], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 96, "y": 0, "w": 96, "h": 18, "i": 1}
+        },
+        {
+          "id": "done-without-human-action",
+          "type": "table",
+          "title": "Done without human action",
+          "description": "Count and share of tickets reaching Done without a human-review or externally observed Jira status change.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "WITH done AS ( SELECT ticket, max(_timestamp) AS done_at FROM \"aiflow_events\" WHERE event = 'ticket.done' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY ticket ), human_action AS ( SELECT ticket FROM \"aiflow_events\" WHERE event = 'ticket.human_review' UNION SELECT ticket FROM \"aiflow_events\" WHERE event = 'ticket.status' AND source = 'observed' ) SELECT 'last 7 days' AS window, count(*) AS done_tickets, sum(CASE WHEN human_action.ticket IS NULL THEN 1 ELSE 0 END) AS done_without_human_action, round(100.0 * sum(CASE WHEN human_action.ticket IS NULL THEN 1 ELSE 0 END) / nullif(count(*), 0), 1) AS done_without_human_action_pct FROM done LEFT JOIN human_action ON human_action.ticket = done.ticket",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Window", "alias": "window", "column": "window"}], "y": [{"label": "Done", "alias": "done_tickets", "column": "done_tickets"}, {"label": "Done without human action", "alias": "done_without_human_action", "column": "done_without_human_action"}, {"label": "Percent", "alias": "done_without_human_action_pct", "column": "done_without_human_action_pct"}], "z": [], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 0, "y": 18, "w": 96, "h": 18, "i": 2}
+        },
+        {
+          "id": "rework-per-ticket",
+          "type": "table",
+          "title": "Rework per ticket",
+          "description": "Rework event count and highest recorded round for each ticket.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT ticket, count(*) AS rework_events, max(round) AS highest_round FROM \"aiflow_events\" WHERE event = 'ticket.rework' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY ticket ORDER BY rework_events DESC, ticket",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Ticket", "alias": "ticket", "column": "ticket"}], "y": [{"label": "Rework events", "alias": "rework_events", "column": "rework_events"}, {"label": "Highest round", "alias": "highest_round", "column": "highest_round"}], "z": [], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 96, "y": 18, "w": 96, "h": 18, "i": 3}
+        },
+        {
+          "id": "master-rescues",
+          "type": "table",
+          "title": "Master rescues and result",
+          "description": "Operator rescue runs grouped by incident and result.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT incident, result, count(*) AS rescue_runs, round(sum(minutes), 1) AS ai_minutes FROM \"aiflow_events\" WHERE event = 'operator.run' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY incident, result ORDER BY rescue_runs DESC, incident",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Incident", "alias": "incident", "column": "incident"}], "y": [{"label": "Rescue runs", "alias": "rescue_runs", "column": "rescue_runs"}, {"label": "AI minutes", "alias": "ai_minutes", "column": "ai_minutes"}], "z": [], "breakdown": [{"label": "Result", "alias": "result", "column": "result"}], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 0, "y": 36, "w": 96, "h": 18, "i": 4}
+        },
+        {
+          "id": "repeats-after-study-case",
+          "type": "table",
+          "title": "Repeated signatures after a study case",
+          "description": "Identical rework headlines after a same-ticket recall that included a study case.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "WITH case_recalls AS ( SELECT ticket, min(_timestamp) AS recalled_at FROM \"aiflow_events\" WHERE event = 'memory.recall' AND case_ids IS NOT NULL AND case_ids <> '' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY ticket ), rework_after_case AS ( SELECT rework.ticket, rework.headline AS signature FROM \"aiflow_events\" AS rework JOIN case_recalls ON case_recalls.ticket = rework.ticket AND rework._timestamp >= case_recalls.recalled_at WHERE rework.event = 'ticket.rework' AND rework.headline IS NOT NULL AND rework.headline <> '' AND rework._timestamp >= now() - INTERVAL '7 days' ) SELECT signature, count(*) AS repeats, count(DISTINCT ticket) AS affected_tickets FROM rework_after_case GROUP BY signature HAVING count(*) > 1 ORDER BY repeats DESC, signature",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Signature", "alias": "signature", "column": "signature"}], "y": [{"label": "Repeats", "alias": "repeats", "column": "repeats"}, {"label": "Tickets", "alias": "affected_tickets", "column": "affected_tickets"}], "z": [], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 96, "y": 36, "w": 96, "h": 18, "i": 5}
+        },
+        {
+          "id": "ai-minutes",
+          "type": "table",
+          "title": "AI minutes",
+          "description": "AI run minutes by agent and role.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT agent, role, round(sum(minutes), 1) AS ai_minutes FROM \"aiflow_events\" WHERE event = 'ai.run' AND _timestamp >= now() - INTERVAL '7 days' GROUP BY agent, role ORDER BY ai_minutes DESC",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Agent", "alias": "agent", "column": "agent"}], "y": [{"label": "AI minutes", "alias": "ai_minutes", "column": "ai_minutes"}], "z": [], "breakdown": [{"label": "Role", "alias": "role", "column": "role"}], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 0, "y": 54, "w": 96, "h": 18, "i": 6}
+        },
+        {
+          "id": "tokens",
+          "type": "table",
+          "title": "Tokens",
+          "description": "Known input, output and total tokens by agent and role.",
+          "config": {"show_legends": false},
+          "queryType": "sql",
+          "queries": [{
+            "query": "SELECT agent, role, sum(input) AS input_tokens, sum(output) AS output_tokens, sum(total) AS total_tokens FROM \"aiflow_events\" WHERE event = 'ai.usage' AND usage_known = true AND _timestamp >= now() - INTERVAL '7 days' GROUP BY agent, role ORDER BY total_tokens DESC",
+            "vrlFunctionQuery": "",
+            "customQuery": true,
+            "fields": {"stream": "aiflow_events", "stream_type": "logs", "x": [{"label": "Agent", "alias": "agent", "column": "agent"}], "y": [{"label": "Input tokens", "alias": "input_tokens", "column": "input_tokens"}, {"label": "Output tokens", "alias": "output_tokens", "column": "output_tokens"}, {"label": "Total tokens", "alias": "total_tokens", "column": "total_tokens"}], "z": [], "breakdown": [{"label": "Role", "alias": "role", "column": "role"}], "filter": {"filterType": "group", "logicalOperator": "AND", "conditions": []}},
+            "config": {}
+          }],
+          "layout": {"x": 96, "y": 54, "w": 96, "h": 18, "i": 7}
+        }
+      ]
+    }
+  ]
+}

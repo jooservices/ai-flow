@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import agents, deploy, events, github, runner, usage
+from . import agents, deploy, events, github, rework_rounds, runner, usage
 from .config import PROJECT_DIR, Settings
 from .github import GitHub, GitHubError
 from .gitops import GitError, Repo
@@ -811,8 +811,6 @@ class Supervisor:
         rework_rounds = int(self.redis.get(f"cycles:{key}") or 0) if kind == "Rework" else 0
         for name in ("attempts:%s:developer", "attempts:%s:reviewer", "attempts:%s:qa", "cycles:%s"):
             self.redis.delete(name % key)  # the owner who unblocks the ticket gets a fresh start, not an instant second block
-        if kind != "Rework":
-            self.redis.delete(f"rework-history:{key}")
         try:
             status = str(self.jira.view(key).get("status", ""))
             blocked = {"status": status, "kind": kind}
@@ -891,9 +889,7 @@ class Supervisor:
         """The owner moved a blocked ticket back to To Do himself: forget why it was blocked (the answer is in the comments)."""
         if self.redis.get(f"blocked:{key}") is None:
             return
-        self.redis.delete(f"blocked:{key}")
-        self.redis.delete(f"cycles:{key}")
-        self.redis.delete(f"rework-history:{key}")
+        rework_rounds.forget_block(self.redis, key)
         events.emit("ticket.unblocked", ticket=key)
         self.clear_blocked_reason(key)
 
@@ -1449,52 +1445,11 @@ class Supervisor:
             seen.update(i["id"] for i in items if i["kind"] != "thread")
             self.redis.set(f"seen:{key}", json.dumps(sorted(seen)), 30 * DAY)
         text = "\n".join(lines)
-        previous_text = str(self.redis.get(f"rework:{key}") or "")
-        self.redis.set(f"rework:{key}", text[:12000], 30 * DAY)
-        try:
-            history = json.loads(self.redis.get(f"rework-history:{key}") or "[]")
-        except (TypeError, ValueError):
-            history = []
-        if not isinstance(history, list):
-            history = []
-        reason_parts = [headline]
-        if details.strip():
-            reason_parts.append(details.strip())
-        if items:
-            summaries = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item_id = str(item.get("id", "unknown"))
-                who = str(item.get("who", "unknown"))
-                where = str(item.get("where", "unknown"))
-                item_text = str(item.get("text", "")).strip()
-                summary = f"Feedback item {item_id} from {who} at {where}"
-                if item_text:
-                    summary += f": {item_text[:800]}"
-                summaries.append(summary)
-            if summaries:
-                reason_parts.append("Feedback item summaries:\n" + "\n".join(f"- {summary}" for summary in summaries))
-        failing_reason = "\n".join(reason_parts)[:8000]
-        # Rounds counted in cycles:<KEY> before round history existed have no recorded reason: backfill them so
-        # the Blocked comment lists every counted round. Only the newest earlier round has its text stored.
-        history = [entry for entry in history if isinstance(entry, dict)]
-        recorded = {entry.get("round") for entry in history}
-        for missing in range(1, cycles):
-            if missing not in recorded:
-                reason = (previous_text[:8000] if missing == cycles - 1 and previous_text
-                          else "not recorded (round counted before round history was kept)")
-                history.append({"round": missing, "reason": reason})
-        history.sort(key=lambda entry: entry.get("round", 0))
-        history.append({"round": cycles, "reason": failing_reason})
-        self.redis.set(f"rework-history:{key}", json.dumps(history), 30 * DAY)
+        over_limit = rework_rounds.record_round(self.redis, key, cycles, text, (headline, details, items), self.cfg.loop_limit_for(key), 30 * DAY)
         self.redis.delete(f"qa:{key}")
         self.jira.comment(key, f"AI Flow: {text[:6000]}")
-        loop_limit = self.cfg.loop_limit_for(key)
-        if cycles > loop_limit:
-            reasons = "\n".join(f"- Round {entry['round']}: {entry['reason']}" for entry in history if isinstance(entry, dict))
-            self.block(key, f"Rework loop limit of {loop_limit} exceeded at round {cycles}.\n"
-                            f"Failing reason for each counted round:\n{reasons}", kind="Rework")
+        if over_limit:
+            self.block(key, over_limit, kind="Rework")
             return
         self.jira.add_label(key, "rework")
         self.jira.transition(key, "To Do")

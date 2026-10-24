@@ -1,0 +1,1 @@
+- [Stop giant files growing](../../../docs/v4/giant-files.md): the pull-request check reports the develop baseline, blocks giant-file growth and schedules shared hot files

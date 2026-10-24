@@ -11,8 +11,8 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from ..core import backups
-from ..control.incidents import close_incident, open_incident
-from ..control.db import J
+from .incidents import close_incident, open_incident
+from .db import J
 
 log = logging.getLogger("aiflow4.backups")
 

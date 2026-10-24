@@ -289,6 +289,7 @@ def watchdog(ctx: Ctx) -> None:
         if i["subject"] not in service_issues:
             close_incident(ctx, "node_services", i["subject"], "test services are healthy or the node no longer serves the project")
     # tickets waiting for a tool no machine has: the 24 hour clock and the one maintenance ticket per tool
+    tooling.declare_undeclared_services(ctx)
     tooling.sweep(ctx)
     tooling.check_stalled_waits(ctx)
     # environment items a run reported missing, and the daily scan of open tickets for server wording
@@ -548,9 +549,9 @@ def run_loops(ctx: Ctx, stop: threading.Event | None = None) -> None:
                     log.info("memory indexed: %s", written)
                 last_mem = now
             if now - last_backup_jobs >= 60 and ctx.leases.leader("backup_jobs", OWNER, 14_400_000):
-                from ..worker import backups as backup_worker
-                backup_worker.scheduled_backup(ctx)
-                backup_worker.weekly_restore_test(ctx)
+                from . import backups as backup_jobs
+                backup_jobs.scheduled_backup(ctx)
+                backup_jobs.weekly_restore_test(ctx)
                 last_backup_jobs = now
         except Exception as e:  # noqa: BLE001
             log.exception("loop error: %s", e)

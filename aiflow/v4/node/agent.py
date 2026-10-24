@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import select
+from datetime import datetime, timezone
 from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from .. import VERSION
 from ..core.settings import read_env_file
 from ..core.toolchains import (BROKEN_PREFIX, CONTAINER_RUNTIME_TOOL, PLAYWRIGHT_BROWSERS_DIR, STACK_TOOLS,
                                tools_for_stacks)
+from ..install.secrets import read_env_timestamps, update_env
 from ..worker.client import ControlClient
 from ..worker.loop import STATE_DIR
 from .policy_relay import PolicyRelay
@@ -283,6 +285,52 @@ def worker_states() -> list[dict]:
             except (OSError, ValueError):
                 pass
     return out
+
+
+def runtime_settings_inventory(projects_dir: str | Path = "/etc/aiflow/projects") -> dict[str, list[dict]]:
+    """Report project env key names, set state, and per-key change time; never include values in the heartbeat."""
+    out: dict[str, list[dict]] = {}
+    root = Path(projects_dir)
+    if not root.is_dir():
+        return out
+    for path in sorted(root.glob("*.env")):
+        project = path.stem
+        if not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project) or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            entries = read_env_file(path)
+            timestamps = read_env_timestamps(path, entries)
+        except OSError:
+            continue
+        out[project] = [{"name": key, "is_set": bool(value), "changed_at": timestamps.get(key, "")}
+                        for key, value in sorted(entries.items()) if re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)]
+    return out
+
+
+def apply_runtime_settings_bootstrap(node: str, entries: list[dict],
+                                     projects_dir: str | Path = "/etc/aiflow/projects") -> None:
+    """Install encrypted project settings supplied at heartbeat before the node starts assigned workers."""
+    from ..core.runtime_settings_crypto import decrypt_value
+
+    root = Path(projects_dir)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        project, key = str(entry.get("project") or ""), str(entry.get("name") or "")
+        changed_at = str(entry.get("changed_at") or "")[:40]
+        if (not re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", project)
+                or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
+                or not changed_at or not isinstance(entry.get("envelope"), dict)):
+            raise ValueError("runtime setting bootstrap entry is invalid")
+        context = f"runtime-settings-bootstrap:{node}:{project}:{key}:{changed_at}"
+        value = decrypt_value(entry["envelope"], context)
+        if not re.fullmatch(r"[\x21-\x7e]{1,4096}", value):
+            raise ValueError("runtime setting bootstrap value is invalid")
+        path = root / f"{project}.env"
+        if path.is_symlink():
+            raise ValueError("runtime setting bootstrap path is invalid")
+        update_env(path, force={key: value}, header="Managed from the AI Flow Settings screen",
+                   track_timestamps=True, timestamps={key: changed_at})
 
 
 def credential_expiries(states: list[dict]) -> dict[str, str | None]:
@@ -831,7 +879,18 @@ def process_node_operation(api: ControlClient, node: str) -> None:
             result = read_source(str(payload.get("kind") or ""), str(payload.get("target") or ""),
                                  payload.get("lines", 100))
         else:
-            result = execute(operation)
+            payload = operation.get("payload") or {}
+            if payload.get("action") in {"runtime_setting_project", "runtime_setting_control"}:
+                def checkpoint(envelope):
+                    response = api.call("POST", f"/v1/nodes/{node}/operations/{operation_id}/checkpoint",
+                                        {"rollback_envelope": envelope}, retries=2)
+                    saved = response.get("rollback_envelope")
+                    if not isinstance(saved, dict):
+                        raise OperationError("runtime setting snapshot could not be checkpointed")
+                    return saved
+                result = execute(operation, checkpoint=checkpoint)
+            else:
+                result = execute(operation)
         body = {"status": "completed", "result": result}
     except OperationError as exc:
         log.warning("node operation %s failed: %s", operation_id, str(exc)[:300])
@@ -871,7 +930,10 @@ def _services_snapshot(state: dict[str, dict], lock: threading.Lock) -> dict[str
 
 def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: int = 15, manage_workers: bool = True,
               stop: threading.Event | None = None) -> None:
+    from ..core.runtime_settings_crypto import node_public_key
+
     api = ControlClient(control_url, token, timeout=15)
+    runtime_settings_public_key = node_public_key()
     stop = stop or threading.Event()
     relay = PolicyRelay(control_url) if os.environ.get("AIFLOW4_POLICY_RELAY", "1") == "1" else None
     if relay:
@@ -917,6 +979,8 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                     "metrics": {**m, "hostname": socket.gethostname(),
                                 "policy_relay": relay.health() if relay else {"enabled": False, "healthy": False}},
                     "workers": ws, "credential_expiries": credential_expiries(ws),
+                    "runtime_settings": runtime_settings_inventory(),
+                    "runtime_settings_public_key": runtime_settings_public_key,
                     "environment_items": environment_items}, retries=2)["desired"]
                 if not ready_notified:
                     ready_notified = notify_systemd("READY=1\nSTATUS=First control heartbeat succeeded")
@@ -934,6 +998,14 @@ def run_agent(control_url: str, name: str, token: str, slots: int = 2, every_s: 
                 forward_operator_audit(api, name)
             except Exception as e:  # noqa: BLE001 - retain the cursor so the next heartbeat retries delivery
                 log.warning("host audit forwarding failed (%s)", type(e).__name__)
+            bootstrap = desired.get("runtime_settings_bootstrap") or []
+            if bootstrap:
+                try:
+                    apply_runtime_settings_bootstrap(name, bootstrap)
+                except Exception as exc:  # noqa: BLE001 - do not start workers without backed-up settings applied
+                    log.warning("runtime settings bootstrap failed: %s", type(exc).__name__)
+                    stop.wait(every_s)
+                    continue
             project_environment = desired.get("project_environment", {})
             sign_in_requests = [*(desired.get("sign_ins") or []), *(desired.get("signin") or [])]
             sync_provider_sign_ins(api, name, sign_in_requests, sign_in_processes)

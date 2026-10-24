@@ -545,6 +545,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
       <button class="tab" role="tab" id="tab-projects" aria-controls="view-projects" aria-selected="false" data-act="view" data-menu-view data-view="projects">Projects</button>
       <button class="tab" role="tab" id="tab-licensing" aria-controls="view-licensing" aria-selected="false" data-act="view" data-menu-view data-view="licensing">Licence</button>
       <button class="tab" role="tab" id="tab-notifications" aria-controls="view-notifications" aria-selected="false" data-act="view" data-menu-view data-view="notifications">Notifications</button>
+      <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" data-act="view" data-menu-view data-view="settings">Settings</button>
       <button class="tab" role="tab" id="tab-support" aria-controls="view-support" aria-selected="false" data-act="view" data-menu-view data-view="support">Support</button>
     </div>
     <label id="view-as-switch" class="iconbtn" hidden>View as <select id="view-as-role" aria-label="View as role"></select></label>
@@ -592,6 +593,7 @@ svg .provider-claude{fill:var(--provider-claude)}svg .provider-codex{fill:var(--
   <section class="view" id="view-projects" role="tabpanel" aria-labelledby="tab-projects" hidden></section>
   <section class="view" id="view-licensing" role="tabpanel" aria-labelledby="tab-licensing" hidden></section>
   <section class="view" id="view-notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden></section>
+  <section class="view" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
   <section class="view" id="view-support" role="tabpanel" aria-labelledby="tab-support" hidden></section>
 </main>
 <footer class="footer" id="footer">
@@ -696,6 +698,7 @@ var S = {
   users: { data: null, error: '', busy: false, loadedAt: 0, initialPassword: '' },
   notifications: { data: null, error: '', notice: '', busy: false, editId: null,
     form: { kind: 'email', name: '', enabled: true }, preferencesDraft: null, preferencesDirty: false },
+  runtimeSettings: { data: null, error: '', notice: '', busy: false, scope: 'secret', project: '', key: '', value: '', changes: [] },
   machines: { addMachine: false, join: {name: '', role: 'worker', project: '', provision_key: '', command: '', expires_at: '', error: '', busy: false},
     addAccount: '', accountEditor: null, signIns: {}, signInLoading: {}, signInRefreshAt: {}, error: '', notice: '' },
   backup: { data: null, form: null, selected: '', error: '', notice: '', loading: false, saving: false, loadedAt: 0 },
@@ -720,15 +723,16 @@ S.support = { ticketKey: '', busy: false, error: '', bundle: null };
 var VIEW_PERMISSION = { cc: 'view.dashboard', work: 'view.work_board', delivery: 'view.delivery', sa: 'view.sa',
   lead: 'view.team_lead', business: 'view.business', review: 'view.human_review', stakeholder: 'view.stakeholder',
   machines: 'view.machines_ai', knowledge: 'view.knowledge', integrations: 'view.integrations', projects: 'projects.manage', users: 'console.manage',
-  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', support: 'console.manage' };
+  backup: 'backup.read', licensing: 'licensing.manage', notifications: 'notifications.manage', settings: 'console.manage', support: 'console.manage' };
 var VIEW_PATH = { cc: '/cc', work: '/work', delivery: '/delivery', sa: '/sa', lead: '/lead', business: '/business',
   review: '/review', stakeholder: '/stakeholder', machines: '/machines', knowledge: '/knowledge', integrations: '/integrations',
-  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', support: '/support' };
+  projects: '/projects', users: '/users', backup: '/backup', licensing: '/licensing', notifications: '/notifications', settings: '/settings', support: '/support' };
 var VIEW_GROUPS = [['cc', 'work'], ['delivery', 'sa', 'lead', 'business', 'review', 'stakeholder'],
-  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support']];
+  ['machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support']];
 function viewOf(path) {
   if (path.indexOf('/licensing') === 0) return 'licensing';
   if (path.indexOf('/notifications') === 0) return 'notifications';
+  if (path.indexOf('/settings') === 0) return 'settings';
   if (path.indexOf('/support') === 0) return 'support';
   if (path.indexOf('/work') === 0 || path.indexOf('/board') === 0) return 'work';
   if (path.indexOf('/dashboard') === 0) return 'cc';
@@ -767,7 +771,8 @@ var MENU_ITEMS = [
   { view: 'integrations', label: 'Integrations' },
   { view: 'projects', label: 'Projects' },
   { view: 'licensing', label: 'Licence' },
-  { view: 'notifications', label: 'Notifications' }
+  { view: 'notifications', label: 'Notifications' },
+  { view: 'settings', label: 'Settings', permission: 'console.manage' }
 ];
 MENU_ITEMS.push({ view: 'support', label: 'Support', permission: 'console.manage' });
 // Visibility reads the effective permissions sent from ROLE_PERMISSIONS; the server enforces the same grants.
@@ -1025,6 +1030,7 @@ function pollConsoleSession() {
     if (S.view === 'integrations' && consoleCan('integrations.manage') && !S.integrations.data && !S.integrations.busy) loadIntegrations();
     if (S.view === 'users' && consoleCan('console.manage') && Date.now() - S.userAdmin.loadedAt > 30000 && !S.userAdmin.loading) loadUsers(true);
     if (S.view === 'notifications' && consoleCan('notifications.manage') && !S.notifications.data && !S.notifications.busy) loadNotifications();
+    if (S.view === 'settings' && consoleCan('console.manage') && !S.runtimeSettings.data && !S.runtimeSettings.busy) loadRuntimeSettings();
     if (S.view === 'knowledge' && consoleCan('knowledge.read')) loadKnowledge();
     if (consoleCan('view.machines_ai')) pollServices();
     if (S.view === 'backup' && consoleCan('backup.read')) loadBackups();
@@ -3398,6 +3404,123 @@ function loadNotifications() {
     .catch(function (e) { state.error = String(e.message || e); })
     .then(function () { state.busy = false; renderNotifications(); });
 }
+function loadRuntimeSettings() {
+  if (!consoleCan('console.manage')) return;
+  var state = S.runtimeSettings; state.busy = true; state.error = ''; renderRuntimeSettings();
+  fetch('/v1/runtime-settings', { cache: 'no-store' }).then(function (r) { return projectResponseError(r); })
+    .then(function (d) {
+      state.data = d; state.error = '';
+      state.changes = d.changes || [];
+      if (!state.project && (d.projects || []).length) state.project = d.projects[0];
+      state.changes.filter(function (change) { return change.status === 'running' || change.status === 'rolling_back'; })
+        .forEach(function (change) { pollRuntimeSettingChange(change.id); });
+    }).catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderRuntimeSettings(); });
+}
+function pollRuntimeSettingChange(changeId) {
+  fetch('/v1/runtime-settings/changes/' + encodeURIComponent(changeId), { cache: 'no-store' })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (change) {
+      var state = S.runtimeSettings;
+      state.changes = [change].concat((state.changes || []).filter(function (item) { return item.id !== change.id; }));
+      if (S.view === 'settings') renderRuntimeSettings();
+      if (change.status === 'running' || change.status === 'rolling_back') setTimeout(function () { pollRuntimeSettingChange(change.id); }, 2500);
+      else if (change.status === 'completed') {
+        state.notice = 'All affected services restarted and passed their health checks.';
+        loadRuntimeSettings();
+      } else {
+        var failed = (change.operations || []).filter(function (item) {
+          return item.status === 'failed' && !(item.result && item.result.cancelled);
+        })[0];
+        var service = failed && failed.result && (failed.result.failed_service || failed.result.error);
+        if (change.recovery_status === 'restored') {
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. The previous value was restored on all affected machines.';
+        } else if (change.recovery_status === 'failed') {
+          var recovery = change.recovery_error || 'rollback did not pass its health check';
+          state.error = 'Restart failed' + (service ? ' on ' + failed.node + ': ' + service : '') +
+            '. Recovery failed on ' + (change.recovery_node || 'an affected machine') + ': ' + recovery +
+            '. The previous value could not be confirmed across the fleet, and affected machines remain paused.';
+        } else {
+          state.error = service ? 'Restart failed on ' + failed.node + ': ' + service + '. Recovery is still pending.' :
+            'Restart failed. Recovery is still pending.';
+        }
+        renderRuntimeSettings();
+      }
+    }).catch(function () { setTimeout(function () { pollRuntimeSettingChange(changeId); }, 5000); });
+}
+function saveRuntimeSetting() {
+  var state = S.runtimeSettings;
+  if (state.busy) return;
+  var scope = $('[data-runtime-scope]'), project = $('[data-runtime-project]'), key = $('[data-runtime-key]'), value = $('[data-runtime-value]');
+  state.scope = scope ? scope.value : state.scope;
+  state.project = project ? project.value : state.project;
+  state.key = key ? key.value.trim() : '';
+  var secretValue = value ? value.value : '';
+  if (value) value.value = '';
+  state.value = '';
+  if (!state.key || !secretValue) { state.error = 'Enter a key name and value.'; renderRuntimeSettings(); return; }
+  var body = { scope: state.scope, project: state.scope === 'project' ? state.project : '', key: state.key, value: secretValue };
+  state.busy = true; state.error = ''; state.notice = ''; state.key = '';
+  renderRuntimeSettings();
+  fetch('/v1/runtime-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return projectResponseError(r); })
+    .then(function (change) {
+      state.notice = 'Change queued. New work is paused on affected machines until active work drains and services pass health checks.';
+      state.changes = [{ id: change.change_id, status: 'running', operations: (change.operations || []).map(function (op) {
+        return { node: op.node, status: 'queued', services: change.services || [], result: {} };
+      }) }].concat(state.changes || []);
+      pollRuntimeSettingChange(change.change_id);
+    }).catch(function (e) { state.error = String(e.message || e); })
+    .then(function () { state.busy = false; renderRuntimeSettings(); });
+}
+function renderRuntimeSettings() {
+  var root = $('#view-settings'); if (!root) return;
+  var state = S.runtimeSettings, data = state.data || {}, projects = data.projects || [], items = data.settings || [];
+  if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><p>Settings are available to owners and administrators.</p></section>'; return; }
+  if (!state.project && projects.length) state.project = projects[0];
+  var services = state.scope === 'project' ? (data.project_services || {})[state.project] || [] : data.secret_services || [];
+  var h = '<section class="panel"><div class="panel-h"><h2>Runtime settings</h2><button class="btn sm" data-act="runtime-settings-refresh"' + (state.busy ? ' disabled' : '') + '>Refresh</button></div>' +
+    '<p class="hint">Values are never shown after entry. The control APIs restart one at a time; project workers drain active work before they restart.</p>' +
+    '<div class="project-form"><label>Location<select class="in" data-runtime-scope>' +
+    '<option value="secret"' + (state.scope === 'secret' ? ' selected' : '') + '>Control runtime secret or setting</option>' +
+    '<option value="project"' + (state.scope === 'project' ? ' selected' : '') + '>Project environment</option></select></label>';
+  if (state.scope === 'project') h += '<label>Project<select class="in" data-runtime-project>' + projects.map(function (project) {
+    return '<option value="' + esc(project) + '"' + (state.project === project ? ' selected' : '') + '>' + esc(project) + '</option>';
+  }).join('') + '</select></label>';
+  h += '<label>Key name<input class="in" data-runtime-key autocomplete="off" spellcheck="false" placeholder="EXTERNAL_API_TOKEN" value="' + esc(state.key || '') + '"></label>' +
+    '<label>Value<input class="in" data-runtime-value type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter value" value="' + esc(state.value || '') + '"></label>' +
+    '<div class="wide"><div class="small">Affected services</div><div class="chiprow">' +
+    (services.length ? services.map(function (service) { return '<span class="pill">' + esc(service) + '</span>'; }).join('') : '<span class="hint">No online service targets are available for this selection.</span>') +
+    '</div></div><div class="wide project-actions"><button class="btn primary" data-act="runtime-setting-save"' +
+    (state.busy || !services.length ? ' disabled' : '') + '>Save and restart safely</button><span class="hint">Active work finishes before workers restart. A failed health check restores the previous file value.</span></div></div>';
+  if (state.notice) h += '<p class="notice" role="status">' + esc(state.notice) + '</p>';
+  if (state.error) h += '<p class="error" role="alert">' + esc(state.error) + '</p>';
+  h += '</section><section class="panel"><div class="panel-h"><h2>Stored keys</h2><span class="hint">Names and set state only</span></div><div class="tablewrap"><table><thead><tr><th>Location</th><th>Key</th><th>Type</th><th>State</th><th>Last changed</th><th>Machines</th></tr></thead><tbody>';
+  if (!items.length) h += '<tr><td colspan="6" class="empty">No runtime keys are stored yet.</td></tr>';
+  else h += items.map(function (item) { return '<tr><td>' + esc(item.scope === 'project' ? 'Project · ' + item.project : 'Control') +
+    '</td><td><code>' + esc(item.name) + '</code></td><td>' + (item.is_secret ? 'Secret' : 'Setting') + '</td><td>' +
+    (item.is_set ? '<span class="badge ok">Set</span>' : '<span class="badge">Empty</span>') + '</td><td>' +
+    esc(item.changed_at ? when(item.changed_at) : '—') + '</td><td>' + esc((item.nodes || []).join(', ') || 'Control') + '</td></tr>'; }).join('');
+  h += '</tbody></table></div></section>';
+  var changes = state.changes || [];
+  if (changes.length) {
+    h += '<section class="panel"><div class="panel-h"><h2>Restart results</h2></div><div class="stack">' + changes.slice(0, 8).map(function (change) {
+      var status = change.status === 'completed' ? '<span class="badge ok">Succeeded</span>' : change.status === 'failed' ? '<span class="badge danger">Failed</span>' : change.status === 'rolling_back' ? '<span class="badge">Rolling back</span>' : '<span class="badge">Running</span>';
+      var operations = (change.operations || []).map(function (op) {
+        var detail = op.result && op.result.cancelled ? 'Not applied after a peer failed' :
+          op.status === 'failed' ? ((op.result && (op.result.failed_service || op.result.error)) || 'Restart failed') : op.status;
+        return '<div class="small">' + esc(op.node) + ' · ' + esc(detail) + '</div>';
+      }).join('');
+      var rollbacks = (change.rollbacks || []).map(function (op) {
+        var detail = op.status === 'failed' ? ((op.result && op.result.error) || 'Rollback failed') : op.status;
+        return '<div class="small">' + esc(op.node) + ' · recovery · ' + esc(detail) + '</div>';
+      }).join('');
+      return '<div class="review-card"><div class="panel-h">' + status + '<code>' + esc(change.id) + '</code></div>' + operations + rollbacks + '</div>';
+    }).join('') + '</div></section>';
+  }
+  root.innerHTML = h;
+}
 function renderIntegrations() {
   var root = $('#view-integrations'); if (!root) return;
   root.innerHTML = renderGitHubIntegrations() + renderJiraIntegrations();
@@ -4923,6 +5046,7 @@ function render() {
   else if (S.view === 'projects') renderProjects();
   else if (S.view === 'licensing') renderLicensing();
   else if (S.view === 'notifications') renderNotifications();
+  else if (S.view === 'settings') renderRuntimeSettings();
   else if (S.view === 'support') renderSupport();
   else { renderDHead(); renderDBody(); }
   if (S.drawer) { if (S.drawer.kind === 'ticket' && S.data) loadTicket(S.drawer.id); renderDrawer(); }
@@ -4965,7 +5089,8 @@ var HINTS = {
   projects: 'Add a Jira project, then check the preflight. Pause or remove a project here.',
   licensing: 'Activate a licence key online or from a signed file, check plan limits and usage, and export the usage report.',
   support: 'Build a diagnostic bundle with one button, read its inventory, then download it to inspect before you send it. Secrets and personal data are removed.',
-  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.'
+  notifications: 'Set up alert channels and routing, then review recent delivery results. Saved credentials stay hidden.',
+  settings: 'Review write-only runtime keys, see affected services, and save a value with a safe restart.'
 };
 function helpUrl(view) { return HELP_BASE + view + '.html'; }
 function hintSeen(view) { try { return localStorage.getItem('aiflow4-hint-' + view) === '1'; } catch (e) { return false; } }
@@ -4980,7 +5105,7 @@ function renderHelp() {
 }
 function showView() {
   $$('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view)); });
-  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'support'].forEach(function (v) {
+  ['cc', 'work', 'delivery', 'sa', 'lead', 'business', 'review', 'stakeholder', 'machines', 'users', 'knowledge', 'backup', 'integrations', 'projects', 'licensing', 'notifications', 'settings', 'support'].forEach(function (v) {
     var panel = $('#view-' + v); if (panel) panel.hidden = S.view !== v;
   });
   renderHelp();
@@ -5009,6 +5134,7 @@ function setView(v) {
   if (v === 'users') loadUsers();
   if (v === 'machines') pollServices();
   if (v === 'notifications') loadNotifications();
+  if (v === 'settings') loadRuntimeSettings();
 }
 function flash(id) { var el = document.getElementById(id); if (!el) return; el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); el.classList.remove('flash-target'); void el.offsetWidth; el.classList.add('flash-target'); }
 
@@ -5313,6 +5439,8 @@ document.addEventListener('click', function (e) {
     submitLicense('/v1/licensing/limits', { plan: limitPlan, limits: limits }, 'Plan limits saved');
   }
   else if (act === 'notifications-refresh') loadNotifications();
+  else if (act === 'runtime-settings-refresh') loadRuntimeSettings();
+  else if (act === 'runtime-setting-save') saveRuntimeSetting();
   else if (act === 'notification-test') notificationTest(el.getAttribute('data-id'));
   else if (act === 'notification-preferences-save') notificationPreferencesSubmit();
   else if (act === 'notification-edit') {
@@ -5601,6 +5729,8 @@ document.addEventListener('input', function (e) {
   if (e.target && e.target.matches('[data-owner-token]')) S.knowledge.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-integ-owner-token]')) S.integ.ownerToken = e.target.value;
   if (e.target && e.target.matches('[data-backup-field]')) S.backup.form[e.target.getAttribute('data-backup-field')] = e.target.value;
+  if (e.target && e.target.matches('[data-runtime-key]')) S.runtimeSettings.key = e.target.value;
+  if (e.target && e.target.matches('[data-runtime-value]')) S.runtimeSettings.value = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-owner]')) S.knowledge.owner = e.target.value;
   if (e.target && e.target.matches('[data-knowledge-field]') && S.knowledge.editor) {
     S.knowledge.editor[e.target.getAttribute('data-knowledge-field')] = e.target.value;
@@ -5621,6 +5751,8 @@ document.addEventListener('change', function (e) {
   if (e.target && e.target.matches('[data-notify-field]')) S.notifications.form[e.target.getAttribute('data-notify-field')] = e.target.value;
   if (e.target && e.target.matches('[data-notify-checkbox]')) S.notifications.form[e.target.getAttribute('data-notify-checkbox')] = e.target.checked;
   if (e.target && e.target.matches('[data-backup-select]')) { S.backup.selected = e.target.value; renderBackup(); }
+  if (e.target && e.target.matches('[data-runtime-scope]')) { S.runtimeSettings.scope = e.target.value; renderRuntimeSettings(); }
+  if (e.target && e.target.matches('[data-runtime-project]')) { S.runtimeSettings.project = e.target.value; renderRuntimeSettings(); }
   if (e.target && e.target.matches('[data-backup-field]')) {
     var backupField = e.target.getAttribute('data-backup-field');
     S.backup.form[backupField] = e.target.value;

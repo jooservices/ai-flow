@@ -69,6 +69,36 @@ separate rationale. The Dashboard counts all captured interventions over rolling
 7-day windows and links the resulting Bug key. Reasons are attached to product incidents so recurring manual work
 can be eliminated.
 
+### Audited console routes
+
+Each of these routes records an operator intervention for the authenticated console principal when it accepts a change:
+`DELETE /v1/integrations/github/connections/{connection_id}`, `DELETE /v1/notifications/channels/{channel_id}`,
+`GET /v1/analytics/usage`, `GET /v1/github/ci-log`, `GET /v1/github/pr`,
+`GET /v1/integrations/github/imports/{pending_id}/install`, `GET /v1/integrations/github/installation-settings`,
+`GET /v1/integrations/github/manifest/callback`, `GET /v1/integrations/github/manifest/start`,
+`GET /v1/integrations/github/setup`, `GET /v1/knowledge/items`, `GET /v1/licensing/status`,
+`GET /v1/memory/study-cases`, `GET /v1/notifications`, `GET /v1/releases/{sha}.tar.gz`, `GET /v1/reviews`,
+`GET /v1/reviews/export.csv`, `POST /v1/backups/key`, `POST /v1/backups/run`,
+`POST /v1/business/{key}/change-requests`, `POST /v1/console/view-as`, `POST /v1/console/view-as/stop`,
+`POST /v1/decisions`, `POST /v1/decisions/{decision_id}/answer`, `POST /v1/decisions/{decision_id}/retire`,
+`POST /v1/escalations/raise`, `POST /v1/escalations/triage`, `POST /v1/github/comment`,
+`POST /v1/github/delete-branch`, `POST /v1/github/pr`, `POST /v1/github/token`, `POST /v1/github/update-branch`,
+`POST /v1/integrations/github/connections/token`, `POST /v1/integrations/github/connections/{connection_id}/test`,
+`POST /v1/integrations/github/imports`, `POST /v1/integrations/github/imports/{pending_id}/connect`,
+`POST /v1/jira/{key}/comment`, `POST /v1/jira/{key}/description`, `POST /v1/jira/{key}/fields`,
+`POST /v1/jira/{key}/transition`, `POST /v1/knowledge/items`, `POST /v1/knowledge/items/{item_id}/{action}`,
+`POST /v1/knowledge/proposals/{proposal_id}/approve`, `POST /v1/knowledge/resources`,
+`POST /v1/knowledge/resources/{kind}/{resource_id}/restore`, `POST /v1/licensing/activate`,
+`POST /v1/licensing/offline`, `POST /v1/master/actions`, `POST /v1/nodes/{name}/check-probes/token`,
+`POST /v1/nodes/{name}/join-command`, `POST /v1/notify/triage`, `POST /v1/policy/decide`,
+`POST /v1/reviews/{key}/answer`, `POST /v1/reviews/{key}/approve`, `POST /v1/reviews/{key}/ask-ai`,
+`POST /v1/reviews/{key}/reject`, `POST /v1/reviews/{key}/rework`, `POST /v1/reviews/{key}/skip-gate`,
+`POST /v1/stakeholder/{key}/verdict`, `PUT /v1/backups/config`,
+`PUT /v1/integrations/github/connections/{connection_id}/token`, `PUT /v1/licensing/limits`,
+`PUT /v1/master/autonomy/budget`, `PUT /v1/nodes/{name}/work-acceptance`, `PUT /v1/notifications/channels`,
+`PUT /v1/notifications/preferences`, `PUT /v1/projects/{key}/repositories`, `PUT /v1/role-health/settings`.
+Read-only routes in this list are named for the API reference and are not recorded as interventions.
+
 ## Reboot and clean install
 
 PostgreSQL and Redis are durable Docker services with restart policies; the control API and loops containers also

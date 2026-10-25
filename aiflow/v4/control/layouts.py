@@ -43,6 +43,7 @@ PAGES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("autonomy", "Master autonomy", "full"),
         ("escalations", "Escalations and owner decisions", "full"),
         ("disagreements", "Jira and GitHub disagree", "full"),
+        ("first-run-setup", "Finish setting up AI Flow", "full"),
     ]),
     "review": ("Human review", [
         ("queue", "Human review queue", "full"),

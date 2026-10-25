@@ -352,7 +352,7 @@ class FakeMemory:
 class SupervisorMemoryTests(unittest.TestCase):
     def build(self, items=()):
         sup = make()
-        sup.memory = FakeMemory(items)
+        sup.memory_workflow.default = FakeMemory(items)
         sup.jira.comments = lambda key, last=6: CaseTests.comments
         sup.jira.view = lambda key, full=False: {"summary": "Crawl retry", "type": "Bug"}
         sup.jira.read_field = lambda key, field: None
@@ -366,32 +366,32 @@ class SupervisorMemoryTests(unittest.TestCase):
         item = dict(id="aaaaaaaa-1", kind="case", title="Old retry case", project="JAVM", namespace="JOOservices", status="verified", body="use backoff")
         sup = self.build([item])
         view = {"summary": "Fix retry storms", "description": "## AC\nretry waits 60 seconds\n## Scopes\nCrawlJob"}
-        text = sup.recall("JAIF-5", view, self.repo())
+        text = sup.memory_workflow.recall("JAIF-5", view, self.repo())
         self.assertIn("Old retry case", text)
-        self.assertIn("retry waits 60 seconds", sup.memory.searches[0][0])
-        self.assertEqual(sup.memory.searches[0][1:], ("JOOservices", "JAIF", "javmeta"))
+        self.assertIn("retry waits 60 seconds", sup.memory_workflow.default.searches[0][0])
+        self.assertEqual(sup.memory_workflow.default.searches[0][1:], ("JOOservices", "JAIF", "javmeta"))
         self.assertEqual(json.loads(sup.redis.get("recalled:JAIF-5")), ["aaaaaaaa-1"])
         prompt = (Path(__file__).resolve().parents[1] / "prompts" / "common.md").read_text(encoding="utf-8")
         self.assertIn("{memory}", prompt)
 
     def test_without_a_memory_service_the_prompt_says_so(self):
         sup = self.build()
-        sup.memory = type("Off", (), {"enabled": False})()
-        self.assertIn("not configured", sup.recall("JAIF-5", {"summary": "x"}, self.repo()))
+        sup.memory_workflow.default = type("Off", (), {"enabled": False})()
+        self.assertIn("not configured", sup.memory_workflow.recall("JAIF-5", {"summary": "x"}, self.repo()))
 
     def test_ai_lessons_are_proposed_as_entries_of_the_ticket(self):
         sup = self.build()
-        sup.remember_lessons("JAIF-5", self.repo(), "Claude", "done\nMEMORY: lesson | Cache traps | Flushing drops the locks, avoid it")
-        proposal = sup.memory.proposed[0]
+        sup.memory_workflow.remember_lessons("JAIF-5", self.repo(), "Claude", "done\nMEMORY: lesson | Cache traps | Flushing drops the locks, avoid it")
+        proposal = sup.memory_workflow.default.proposed[0]
         self.assertEqual((proposal["kind"], proposal["jira_key"], proposal["created_by"], proposal["namespace"]), ("lesson", "JAIF-5", "Claude", "JOOservices"))
 
     def test_done_writes_a_case_and_credits_the_recalled_entries_when_no_rework(self):
         sup = self.build()
         sup.redis.set("recalled:JAIF-5", json.dumps(["e1", "e2"]), 10)
-        sup.remember_case("JAIF-5", self.repo(), {"url": "https://x/pull/9"})
-        case = sup.memory.proposed[0]
+        sup.memory_workflow.remember_case("JAIF-5", self.repo(), {"url": "https://x/pull/9"})
+        case = sup.memory_workflow.default.proposed[0]
         self.assertEqual((case["kind"], case["status"], case["jira_key"]), ("case", "verified", "JAIF-5"))
-        self.assertEqual(sup.memory.feedbacks, [("e1", "JAIF-5", True), ("e2", "JAIF-5", True)])
+        self.assertEqual(sup.memory_workflow.default.feedbacks, [("e1", "JAIF-5", True), ("e2", "JAIF-5", True)])
 
     def test_finish_automatically_proposes_a_case_when_the_ticket_reaches_done(self):
         from types import SimpleNamespace
@@ -407,30 +407,31 @@ class SupervisorMemoryTests(unittest.TestCase):
         sup.after_merge = lambda *_args: None
         repo = SimpleNamespace(name="javmeta", refresh_base=lambda *_args: None, cleanup=lambda *_args, **_kwargs: None)
         sup.finish("JAIF-5", repo, "develop", {"url": "pull-request"}, "merged")
-        self.assertEqual(sup.memory.proposed[0]["kind"], "case")
-        self.assertEqual(sup.memory.proposed[0]["jira_key"], "JAIF-5")
+        self.assertEqual(sup.memory_workflow.default.proposed[0]["kind"], "case")
+        self.assertEqual(sup.memory_workflow.default.proposed[0]["jira_key"], "JAIF-5")
 
     def test_observed_done_tickets_also_get_a_case(self):
         sup = self.build()
         sup.jira.view = lambda key, full=False: {"status": "Done", "summary": "Completed outside the gate"}
         sup.clear_blocked_reason = lambda *_args: None
         self.assertTrue(sup.gate_is_terminal("JAIF-5", self.repo(), "develop", object(), {"number": 5}))
-        self.assertEqual(sup.memory.proposed[0]["kind"], "case")
-        self.assertIn("Completed outside the gate", sup.memory.proposed[0]["body"])
+        self.assertEqual(sup.memory_workflow.default.proposed[0]["kind"], "case")
+        self.assertIn("Completed outside the gate", sup.memory_workflow.default.proposed[0]["body"])
 
     def test_rework_gives_no_feedback(self):
         sup = self.build()
         sup.redis.set("recalled:JAIF-5", json.dumps(["e1"]), 10)
         sup.redis.set("cycles:JAIF-5", "2", 10)
-        sup.remember_case("JAIF-5", self.repo(), {})
-        self.assertEqual(sup.memory.feedbacks, [])
-        self.assertIn("Rework rounds: 2", sup.memory.proposed[0]["body"])
+        sup.memory_workflow.remember_case("JAIF-5", self.repo(), {})
+        self.assertEqual(sup.memory_workflow.default.feedbacks, [])
+        self.assertIn("Rework rounds: 2", sup.memory_workflow.default.proposed[0]["body"])
 
     def test_the_ai_gets_its_own_read_token_and_ticket_defaults(self):
         sup = self.build()
-        self.assertEqual(sup.memory_env("JAIF-5", self.repo()), {})
+        self.assertEqual(sup.memory_workflow.env("JAIF-5", self.repo()), {})
         sup.cfg = sup.cfg.__class__(**{**sup.cfg.__dict__, "memory": {"AIFLOW_MEMORY_URL": "http://m", "AIFLOW_MEMORY_AI_TOKEN": "ai", "AIFLOW_MEMORY_TOKEN": "admin"}})
-        env = sup.memory_env("JAIF-5", self.repo())
+        sup.memory_workflow.cfg = sup.cfg
+        env = sup.memory_workflow.env("JAIF-5", self.repo())
         self.assertEqual((env["AIFLOW_MEMORY_TOKEN"], env["AIFLOW_MEMORY_NAMESPACE"], env["AIFLOW_MEMORY_PROJECT"]), ("ai", "JOOservices", "JAIF"))
         self.assertEqual(env["AIFLOW_MEMORY_SCOPED_STORAGE"], "postgres")
         self.assertNotIn("admin", env.values())
@@ -443,9 +444,10 @@ class SupervisorMemoryTests(unittest.TestCase):
         sup.cfg = replace(sup.cfg, registry=registry,
                           memory={"AIFLOW_MEMORY_AI_TOKEN": "client-token", "AIFLOW_MEMORY_TOKEN": "admin-token",
                                   "AIFLOW_MEMORY_URL": "runtime-memory-service"})
-        env = sup.memory_env("JAIF-5", self.repo())
+        sup.memory_workflow.cfg = sup.cfg
+        env = sup.memory_workflow.env("JAIF-5", self.repo())
         self.assertEqual(env["AIFLOW_MEMORY_URL"], "project-memory-service")
-        self.assertEqual(sup.memory_for("JAIF-5").url, "project-memory-service")
+        self.assertEqual(sup.memory_workflow.client_for("JAIF-5").url, "project-memory-service")
 
     def test_the_control_sends_the_spool_and_curates_every_half_hour(self):
         from aiflow.control import memory_tasks

@@ -3,9 +3,10 @@
     events.configure(settings, worker="JAVM-2")   once per process (worker, control, health)
     events.emit("ticket.transition", ticket="JAVM-1", to="In Review")   anywhere; never raises, never waits for the network
 
-Events are queued in memory and sent in batches by a background thread. A failing OpenObserve loses nothing for a while (the
-queue keeps the newest events and drops the oldest when it is full) and never slows or stops a worker. With no URL configured
-nothing is sent. Credentials come from the environment (`AIFLOW_OBS_USER`, `AIFLOW_OBS_PASSWORD` in Workspaces/.env), never from a file of the repository."""
+Events are written to a durable JSONL spool before `emit()` accepts them; a background thread sends batches and removes
+rows only after OpenObserve accepts them. A failed delivery stays on disk for retry or replay by the next process.
+`emit()` never waits for the network. With no URL and login configured nothing is sent. Credentials come from the
+environment (`AIFLOW_OBS_USER`, `AIFLOW_OBS_PASSWORD` in Workspaces/.env), never from a repository file."""
 from __future__ import annotations
 
 import atexit
@@ -13,6 +14,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 import urllib.request
@@ -31,98 +33,192 @@ def post(url: str, body: bytes, auth: str, timeout: int = 8) -> None:
 
 class Events:
     def __init__(self, url: str, org: str, stream: str, user: str, password: str, base: dict[str, Any] | None = None,
-                 sender: Callable[[str, bytes, str], None] = post, flush_seconds: float = 2.0, batch: int = 100, capacity: int = 5000,
+                 sender: Callable[[str, bytes, str], None] = post, flush_seconds: float = 2.0, batch: int = 100,
                  thread: bool = True, spool: Path | None = None) -> None:
         self.endpoint = f"{url.rstrip('/')}/api/{org}/{stream}/_json" if url and user and password else ""
         self.auth = base64.b64encode(f"{user}:{password}".encode()).decode() if self.endpoint else ""
         self.base, self.sender, self.batch, self.flush_seconds = dict(base or {}), sender, batch, flush_seconds
-        self.queue: deque[dict[str, Any]] = deque(maxlen=capacity)
+        self.queue: deque[dict[str, Any]] = deque()
         self.lock = threading.Lock()
-        self.dropped = 0
+        self.spool_lock = threading.Lock()
+        self.flush_lock = threading.Lock()
         self.failures = 0
         self.stop = threading.Event()
+        self.wakeup = threading.Event()
+        self.closed = False
         self.spool = spool if self.endpoint else None
-        self.reload_spool()
         self.thread = threading.Thread(target=self._loop, name="aiflow-events", daemon=True) if (self.endpoint and thread) else None
         if self.thread:
+            if self.spool and self.spool.exists():
+                self.wakeup.set()
             self.thread.start()
 
     @property
     def enabled(self) -> bool:
         return bool(self.endpoint)
 
-    def emit(self, event: str, **fields: Any) -> None:
+    def emit(self, event: str, **fields: Any) -> bool:
         if not self.endpoint:
-            return
+            return False
         try:
             row: dict[str, Any] = {**self.base, "_timestamp": int(time.time() * 1_000_000), "event": event}
             for name, value in fields.items():
                 if value is None:
                     continue
                 row[name] = value if isinstance(value, (int, float, bool)) else str(value)[:MAX_TEXT]
+            if event == "ai.run" and "run_id" not in row and row.get("log_file"):
+                row["run_id"] = Path(str(row["log_file"])).stem
             if "ticket" not in row:
                 found = TICKET.search(str(row.get("message", "")))
                 if found:
                     row["ticket"] = found.group(1)
             if "ticket" in row and "project" not in row:
                 row["project"] = str(row["ticket"]).rsplit("-", 1)[0]
-            with self.lock:
-                if len(self.queue) == self.queue.maxlen:
-                    self.dropped += 1
-                self.queue.append(row)
+            if self.spool:
+                if not self._append_spool([row]):
+                    with self.lock:
+                        self.queue.append(row)
+                    self.failures += 1
+                    self.wakeup.set()
+                    return False
+            else:
+                with self.lock:
+                    self.queue.append(row)
+            self.wakeup.set()
+            return True
         except Exception:  # an event never breaks the work
-            pass
+            return False
 
     def flush(self) -> bool:
-        """Send everything queued, batch by batch. False when OpenObserve did not accept a batch (the rows stay for the next try)."""
-        while True:
-            with self.lock:
-                rows = [self.queue.popleft() for _ in range(min(self.batch, len(self.queue)))]
-            if not rows:
-                return True
-            try:
-                self.sender(self.endpoint, json.dumps(rows).encode(), self.auth)
-                self.failures = 0
-            except Exception:
+        """Persist queued rows before sending; a failed send leaves the JSONL spool ready for retry."""
+        with self.flush_lock:
+            if not self._stage_queue():
                 self.failures += 1
-                with self.lock:  # keep them, oldest first, unless the queue filled up meanwhile
-                    room = (self.queue.maxlen or 0) - len(self.queue)
-                    self.queue.extendleft(reversed(rows[-room:] if room > 0 else []))
-                    self.dropped += max(0, len(rows) - max(room, 0))
                 return False
+            while True:
+                if self.spool:
+                    try:
+                        rows = self._spool_rows()[:self.batch]
+                    except OSError:
+                        self.failures += 1
+                        return False
+                else:
+                    with self.lock:
+                        rows = [self.queue.popleft() for _ in range(min(self.batch, len(self.queue)))]
+                if not rows:
+                    return True
+                try:
+                    self.sender(self.endpoint, json.dumps(rows).encode(), self.auth)
+                except Exception:
+                    self.failures += 1
+                    if not self.spool:
+                        with self.lock:
+                            self.queue.extendleft(reversed(rows))
+                    return False
+                if self.spool:
+                    try:
+                        self._ack_spool(len(rows))
+                    except OSError:
+                        # OpenObserve accepted this batch. Retaining it is safer than losing rows if the
+                        # acknowledgement could not be made durable; delivery is therefore at least once.
+                        self.failures += 1
+                        return False
+                self.failures = 0
 
-    def _loop(self) -> None:
-        while not self.stop.wait(min(60.0, self.flush_seconds * (2 ** min(self.failures, 5)))):
-            self.flush()
+    def _stage_queue(self) -> bool:
+        if not self.spool:
+            return True
+        with self.lock:
+            rows = list(self.queue)
+            self.queue.clear()
+        if not rows:
+            return True
+        if self._append_spool(rows):
+            return True
+        with self.lock:
+            self.queue.extendleft(reversed(rows))
+        return False
 
-    def reload_spool(self) -> None:
-        """Rows an earlier process could not send (OpenObserve down when it stopped) are sent by this one."""
-        if not self.spool or not self.spool.is_file():
-            return
+    def _append_spool(self, rows: list[dict[str, Any]]) -> bool:
+        if not self.spool:
+            return False
         try:
-            lines = self.spool.read_text(encoding="utf-8").splitlines()
-            self.spool.unlink()
+            with self.spool_lock:
+                self.spool.parent.mkdir(parents=True, exist_ok=True)
+                with self.spool.open("a", encoding="utf-8") as handle:
+                    handle.writelines(json.dumps(row) + "\n" for row in rows)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            return True
         except OSError:
-            return
+            return False
+
+    def _spool_rows(self) -> list[dict[str, Any]]:
+        if not self.spool or not self.spool.is_file():
+            return []
+        with self.spool_lock:
+            lines = self.spool.read_text(encoding="utf-8").splitlines()
+        rows = []
         for line in lines:
             try:
-                self.queue.append(json.loads(line))
+                row = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    def _ack_spool(self, count: int) -> None:
+        if not self.spool:
+            return
+        with self.spool_lock:
+            if not self.spool.is_file():
+                return
+            rows = []
+            for line in self.spool.read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+            remaining = rows[count:]
+            if not remaining:
+                self.spool.unlink(missing_ok=True)
+                return
+            self.spool.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.spool.parent, delete=False) as handle:
+                temp = Path(handle.name)
+                handle.writelines(json.dumps(row) + "\n" for row in remaining)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp.replace(self.spool)
+
+    def _loop(self) -> None:
+        delay = self.flush_seconds
+        while not self.stop.is_set():
+            self.wakeup.wait(min(60.0, delay))
+            self.wakeup.clear()
+            if self.stop.is_set():
+                break
+            if self.flush():
+                delay = self.flush_seconds
+            else:
+                delay = min(60.0, self.flush_seconds * (2 ** min(self.failures, 5)))
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         self.stop.set()
+        self.wakeup.set()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=0.2)
         if self.endpoint:
-            if not self.flush() and self.spool:  # keep what could not be sent for the next process
-                with self.lock:
-                    rows = list(self.queue)
-                    self.queue.clear()
-                try:
-                    self.spool.parent.mkdir(parents=True, exist_ok=True)
-                    with self.spool.open("a", encoding="utf-8") as handle:
-                        handle.writelines(json.dumps(row) + "\n" for row in rows)
-                except OSError:
-                    pass
+            if self.spool:
+                self._stage_queue()  # shutdown persists locally and never waits for OpenObserve
+            else:
+                self.flush()
 
 
 _sink: Events | None = None
@@ -141,9 +237,8 @@ def configure(obs: dict[str, str], machine: str, worker: str, spool_dir: Path | 
     return _sink
 
 
-def emit(event: str, **fields: Any) -> None:
-    if _sink is not None:
-        _sink.emit(event, **fields)
+def emit(event: str, **fields: Any) -> bool:
+    return _sink.emit(event, **fields) if _sink is not None else False
 
 
 def close() -> None:

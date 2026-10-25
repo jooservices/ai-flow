@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Clean-install acceptance on real machines (docs/v4/clean-install-acceptance.md): one clean Ubuntu 24.04 systemd
 # container for the control plane and two clean ones for the machines, on a private network.
-#   1. the control plane is installed with the documented command (`aiflow4-control-install --version V --domain D
-#      --admin-email E`), which turns console sign-in on
-#   2. anonymous callers are refused (/v1/state 401, /cc redirects to /login); the Super Administrator signs in with
-#      the password the installer wrote to super-admin-password (it never leaves the container)
+#   1. the control plane is installed with the documented command (`aiflow4-control-install --version V --domain D`),
+#      which turns console sign-in on; the first Administrator is created in browser setup
+#   2. anonymous callers are refused (/v1/state 401, /cc redirects to /login); the browser setup creates an
+#      Administrator and keeps its password inside the control container
 #   3. each machine container runs the documented join bootstrap (`curl .../v1/install.sh | sh -s -- --token-file F`
 #      with a one-use join token): it installs the signed release, and the node agent it starts heartbeats with only
 #      its node token (the sign-in gate must not block it); both nodes show online in the state
@@ -123,9 +123,9 @@ STAGE_CANDIDATE
   docker exec --env AIFLOW4_ACCEPTANCE_CANDIDATE="$VERSION" \
     --env AIFLOW4_ACCEPTANCE_REVISION="${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD)}" \
     --env AIFLOW4_ACCEPTANCE_ARTIFACTS=/candidate \
-    "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
+    "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN"
 else
-  docker exec "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN" --admin-email "$ADMIN"
+  docker exec "$CONTROL" bash /opt/aiflow4-control-install --version "$VERSION" --domain "$DOMAIN"
 fi
 
 echo "== 1a. connect disposable Jira and GitHub test accounts for the documented project flow"
@@ -175,7 +175,7 @@ FAKES
 docker exec "$CONTROL" grep -qx 'AIFLOW4_CONSOLE_LOGIN=1' /etc/aiflow/secrets/control/aiflow4.env \
   || fail "the install did not turn console sign-in on"
 
-echo "== 2. anonymous callers are refused, the Super Administrator signs in"
+echo "== 2. browser setup creates the first Administrator"
 in_control <<CHECK || fail "sign-in checks"
 set -euo pipefail
 code() { curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' "\$@"; }
@@ -184,9 +184,17 @@ code() { curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' "\$@"; }
 [[ \$(code $URL/cc) == 302 ]]
 jar=/root/aiflow4-acceptance-cookie.jar
 umask 077
-# the password stays in the container: it goes from the file into curl's stdin
-body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/etc/aiflow/secrets/console/super-admin-password").read().strip()}))' '$ADMIN')
-[[ \$(curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' -H 'Content-Type: application/json' -c "\$jar" --data-binary @- $URL/v1/auth/login <<<"\$body") == 200 ]]
+password_file=/root/aiflow4-acceptance-admin-password
+python3 -c 'import secrets,sys; open(sys.argv[1],"w").write(secrets.token_urlsafe(24))' "\$password_file"
+chmod 600 "\$password_file"
+setup=\$(curl -fsS -c "\$jar" -H '$HOSTHDR' $URL/v1/setup/status)
+setup_token=\$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bootstrap_token"])' "\$setup")
+ownership_config=/root/aiflow4-acceptance-owner.curl
+python3 -c 'import json,sys; values=dict(line.rstrip("\n").split("=",1) for line in open(sys.argv[1]) if line.startswith("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY=")); open(sys.argv[2],"w").write("header = "+json.dumps("X-AIFLOW4-Ownership: "+values["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"])+"\n")' /etc/aiflow/secrets/control/aiflow4.env "\$ownership_config"
+chmod 600 "\$ownership_config"
+body=\$(python3 -c 'import json,sys; print(json.dumps({"public_url":"http://control.clean.test","email":sys.argv[1],"password":open(sys.argv[2]).read()}))' '$ADMIN' "\$password_file")
+[[ \$(curl -s -o /dev/null -w '%{http_code}' --config "\$ownership_config" -H '$HOSTHDR' -H "X-AIFLOW4-Setup: \$setup_token" -H 'Content-Type: application/json' -b "\$jar" -c "\$jar" --data-binary @- $URL/v1/setup/bootstrap <<<"\$body") == 200 ]]
+rm -f "\$ownership_config"
 [[ \$(code -b "\$jar" $URL/v1/state) == 200 ]]
 CHECK
 
@@ -298,7 +306,7 @@ python=/srv/aiflow/control/cli/current/.venv/bin/python
 RESTORE
 in_control <<CHECK || fail "sign-in after the restore"
 set -euo pipefail
-body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/etc/aiflow/secrets/console/super-admin-password").read().strip()}))' '$ADMIN')
+body=\$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": open("/root/aiflow4-acceptance-admin-password").read().strip()}))' '$ADMIN')
 [[ \$(curl -s -o /dev/null -w '%{http_code}' -H '$HOSTHDR' -H 'Content-Type: application/json' --data-binary @- $URL/v1/auth/login <<<"\$body") == 200 ]]
 CHECK
 echo "clean install on real machines passed: sign-in on, Command Center join commands, two machines online, backup and restore"

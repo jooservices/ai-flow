@@ -242,7 +242,7 @@ def main() -> int:
     stop, wake = threading.Event(), threading.Event()
     server = make_server(store, tokens, env.get("AIFLOW_MEMORY_HOST", "127.0.0.1"), int(env.get("AIFLOW_MEMORY_PORT", "8750")), wake=wake.set)
     print(f"memory service on {server.server_address[0]}:{server.server_address[1]} with {len(tokens.entries)} token(s); "
-          f"search by meaning: {embedder.model + ' at ' + embedder.url if embedder else 'off (words only)'}", flush=True)
+          f"search by meaning: {embedder.model if embedder else 'off (words only)'}", flush=True)
     if embedder:
         threading.Thread(target=fill_vectors, args=(store, stop, wake), daemon=True).start()
     try:

@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..console_auth import COOKIE_NAME, resolve_session_user, role_satisfies, verify_session
+from . import assets
 
 HERE = Path(__file__).parent
 
@@ -33,12 +34,7 @@ CONSOLE_PAGE_PATHS = (
 def mount_ui(app: FastAPI, ctx) -> None:
     page = HERE / "console.html"
     logs_page = HERE / "logs.html"
-    licensing_notice_script = HERE / "licensing_notice.js"
-
-    @app.get("/console-assets/licensing-notice.js", include_in_schema=False)
-    def licensing_notice() -> FileResponse:
-        return FileResponse(licensing_notice_script, media_type="application/javascript",
-                            headers={"Cache-Control": "no-cache"})
+    assets.register_assets(app)
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:

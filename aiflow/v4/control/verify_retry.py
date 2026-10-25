@@ -39,6 +39,34 @@ def cooling(db) -> set[str]:
     return VerifyRunsRepository(db).cooling_tickets("verify")
 
 
+def final_offers(ctx, account: str, node: str, resolve, compatible, releases: Path,
+                 license_error) -> list[dict]:
+    """Run the normal final candidate gates for a retry probe without re-entering its retry rule."""
+    try:
+        tickets, _reason = resolve(account, node, verify_retry_guard=False)
+    except license_error:
+        return []
+    return tickets[:20] if compatible(ctx, node, releases)["compatible"] else []
+
+
+def scope_dashboard(data: dict, visible_projects: list[str] | None, reveal_accounts: bool) -> None:
+    """Apply project visibility and verifier-identity permissions to slow-verification dashboard data."""
+    slow = data["slow_verifications"]
+    if visible_projects is not None:
+        visible = set(visible_projects)
+        slow[:] = [item for item in slow if item.get("project") in visible]
+    if reveal_accounts:
+        return
+    by_ticket = {item["key"]: item for item in slow}
+    for item in slow:
+        for index, account in enumerate(item.get("accounts", []), start=1):
+            account["account"] = f"Verifier {index}"
+    for ticket in data["tickets"]:
+        item = by_ticket.get(ticket["key"])
+        if item:
+            ticket["slow_verify"] = describe(item)
+
+
 def history(db, ticket_key: str) -> dict[str, list[bool]]:
     """Per account, newest first: did each verify run of this development round end without a verdict."""
     out: dict[str, list[bool]] = {}
@@ -69,8 +97,7 @@ def candidates(ctx, projects: list[str], account, held: set[str], offers, can_ha
         if not allowed("verify", ticket):
             continue
         if retry_guard and not may_take(
-                ctx, ticket, account.id, dev["account_id"],
-                lambda peer, node: offers(peer, node, retry_guard=False)):
+                ctx, ticket, account.id, dev["account_id"], lambda peer, node: offers(peer, node)):
             continue
         out.append({**ticket, "step": "verify", "probation": probation("verify")})
     return out

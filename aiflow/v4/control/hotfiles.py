@@ -42,11 +42,14 @@ HOT_FILES: tuple[str, ...] = (
     "CHANGELOG.md",
     # Console components loaded alongside the oversized page share its scheduling reservation.
     "aiflow/v4/control/ui/licensing_notice.js",
+    "aiflow/v4/control/ui/dashboard_attention.js",
+    "aiflow/v4/control/ui/user_admin_form.js",
 )
 
 _CONSOLE = (
     "Command Center console page",
-    ("aiflow/v4/control/ui/console.html", "aiflow/v4/control/ui/licensing_notice.js"),
+    ("aiflow/v4/control/ui/console.html", "aiflow/v4/control/ui/licensing_notice.js",
+     "aiflow/v4/control/ui/dashboard_attention.js", "aiflow/v4/control/ui/user_admin_form.js"),
 )
 # Words in a ticket that point to a hot file even when no path is written down.
 AREAS: dict[str, tuple[str, tuple[str, ...]]] = {

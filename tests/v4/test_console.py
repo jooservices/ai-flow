@@ -30,7 +30,7 @@ var location = {pathname: '/cc'};
 var localStorage = {getItem: function () { return null; }, setItem: function () {}};
 var fetch = function () { return new Promise(function () {}); };
 var setInterval = function () {};
-"""
+""" + "\n".join((PAGE.with_name("dashboard_attention.js").read_text(), PAGE.with_name("user_admin_form.js").read_text()))
 OWNER_PERMISSIONS = sorted(ROLE_PERMISSIONS["owner"])
 LEAD_PERMISSIONS = sorted(ROLE_PERMISSIONS["lead"])
 

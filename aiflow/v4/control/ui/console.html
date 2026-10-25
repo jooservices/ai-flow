@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AI Flow Console</title>
+<script src="/console-assets/dashboard-attention.js"></script>
+<script src="/console-assets/user-admin-form.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;500;600;700;800&display=swap">
@@ -1266,17 +1268,6 @@ function roleChecks(root, className, selected) {
       (selected.indexOf(r.id) >= 0 ? ' checked' : '') + '> ' + esc(r.label) + '</label>';
   }).join('');
 }
-function captureUserAddForm(root) {
-  var email = $('[data-user-email]', root), draft = S.userAdmin.addForm;
-  if (!email || S.userAdmin.temporaryPassword) return;
-  var form = email.closest('.project-form');
-  if (!form.contains(document.activeElement)) return;
-  draft.email = email.value;
-  draft.name = $('[data-user-name]', form).value;
-  draft.roles = $$('.new-role:checked', form).map(function (item) { return item.value; });
-  draft.all = $('[data-user-all]', form).checked;
-  draft.projects = $$('[data-user-projects] option:checked', form).map(function (item) { return item.value; });
-}
 function projectChoices(selected, all) {
   return '<label class="fld">Projects <select class="in" data-user-projects multiple size="' + Math.min(5, Math.max(2, S.userAdmin.projects.length)) + '"' + (all ? ' disabled' : '') + '>' +
     S.userAdmin.projects.map(function (key) { return '<option value="' + esc(key) + '"' + (selected.indexOf(key) >= 0 ? ' selected' : '') + '>' + esc(key) + '</option>'; }).join('') +
@@ -1285,7 +1276,7 @@ function projectChoices(selected, all) {
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
-  captureUserAddForm(root);
+  window.AIFlowUserAdminForm.capture(root, S.userAdmin, $, $$);
   var u = S.userAdmin, h = '<section class="panel" data-block="users"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
   if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
   if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
@@ -2869,11 +2860,7 @@ function renderDBody() {
   h += '<section class="panel" data-block="attention" id="d-att" aria-labelledby="h-att"><div class="panel-h"><h2 id="h-att">Needs attention</h2><span class="hint">Waiting on a person, over 30 minutes, or the last run did not finish</span></div><div class="att">';
   var att = [];
   work.forEach(function (t) {
-    var lr = t.last_run; if (t.status === 'Needs owner') att.push([t, 'crit', 'Needs owner', 'The master role triages the developer question; owner-escalated tickets need an owner decision']);
-    else if (t.status === 'Human review') att.push([t, 'info', 'Human review', 'Require human = Yes; checks passed']);
-    else if (t.run && (t.run.elapsed_s || 0) >= wm.target * 60) att.push([t, (t.run.elapsed_s >= wm.warn * 60 ? 'crit' : 'warn'), 'Over ' + wm.target + ' min', t.run.account + ' · ' + mmss(t.run.elapsed_s)]);
-    else if (t.slow_verify) att.push([t, 'warn', 'Waiting for verification', t.slow_verify]);
-    else if (!t.run && lr && t.status === 'To Do' && ['failed', 'lost', 'timeout', 'quota'].indexOf(lr.outcome) >= 0) att.push([t, 'warn', 'Retry', lr.account + ': ' + lr.outcome + (lr.error_kind ? ' (' + lr.error_kind + ')' : '')]);
+    window.AIFlowDashboardAttention.addForTicket(att, t, wm, mmss);
   });
   if (!att.length) h += '<div class="col-empty">Nothing needs attention</div>';
   att.forEach(function (x) {

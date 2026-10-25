@@ -4522,7 +4522,9 @@ def create_app(ctx: Ctx) -> FastAPI:
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
             out.extend(verify_retry.candidates(
-                ctx, projects, acc, held, final_offers,
+                ctx, projects, acc, held,
+                lambda peer, machine: verify_retry.final_offers(
+                    ctx, peer, machine, entitled_candidates, rollout.node_compatible, RELEASES, licensing.LicenseError),
                 lambda ticket: not ticket_needs_missing_container_runtime(ticket, "verify"),
                 allowed, probation, retry_guard=verify_retry_guard))
         if "release" in roles:
@@ -4771,17 +4773,6 @@ def create_app(ctx: Ctx) -> FastAPI:
                 allowed.append(ticket)
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
-
-    def final_offers(account: str, node: str, *, retry_guard: bool = False) -> list[dict]:
-        """What /v1/work/candidates would return to this account now (entitlement, rollout, 20-ticket limit).
-
-        Retry probes explicitly skip only the no-verdict routing rule, so candidate requests remain independent.
-        """
-        try:
-            tickets, _reason = entitled_candidates(account, node, verify_retry_guard=retry_guard)
-        except licensing.LicenseError:
-            return []
-        return tickets[:20] if rollout.node_compatible(ctx, node, RELEASES)["compatible"] else []
 
     @app.get("/v1/work/candidates")
     def candidates(account: str, node: str = Depends(node_auth)) -> dict:
@@ -7107,13 +7098,14 @@ def create_app(ctx: Ctx) -> FastAPI:
         user = optional_console_user(request)
         include_signin = bool(user and has_permission(user.effective_roles, "nodes.manage"))
         data = snapshot(ctx, include_signin=include_signin)
+        verify_retry.scope_dashboard(
+            data, user.project_keys if user else None,
+            bool(user and has_permission(user.effective_roles, "view.machines_ai")))
         all_tickets = data["tickets"]
         if user and user.project_keys is not None:
             visible = set(user.project_keys)
             data["projects"] = [project for project in data["projects"] if project["key"] in visible]
             data["tickets"] = [ticket for ticket in all_tickets if ticket["project"] in visible]
-            data["slow_verifications"] = [item for item in data["slow_verifications"]
-                                           if item.get("project") in visible]
             ticket_keys = {ticket["key"] for ticket in data["tickets"]}
             data["active_runs"] = [run for run in data["active_runs"] if run.get("project") in visible]
             data["recent_runs"] = [run for run in data["recent_runs"] if run.get("ticket") in ticket_keys]
@@ -7155,14 +7147,6 @@ def create_app(ctx: Ctx) -> FastAPI:
             data["incidents_recent"] = []
             data["events"] = [{key: event.get(key) for key in ("ts", "type", "ticket", "outcome", "reason")}
                                for event in data["events"]]
-            slow_by_ticket = {item["key"]: item for item in data["slow_verifications"]}
-            for item in data["slow_verifications"]:
-                for index, account in enumerate(item.get("accounts", []), start=1):
-                    account["account"] = f"Verifier {index}"
-            for ticket in data["tickets"]:
-                slow = slow_by_ticket.get(ticket["key"])
-                if slow:
-                    ticket["slow_verify"] = verify_retry.describe(slow)
             for ticket in data["tickets"]:
                 if ticket.get("run"):
                     ticket["run"] = {key: ticket["run"].get(key) for key in

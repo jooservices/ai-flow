@@ -143,10 +143,11 @@ def trigger_of(ticket: dict[str, Any], settings: MasterSettings, minutes_in_stat
     """Why this ticket qualifies for a rescue ('' when it does not)."""
     status, kind = ticket["status"], ticket.get("blocked_kind", "")
     if status == "Blocked":
-        wait = settings.waits.get(kind)
-        if kind in NEVER_RESCUED or wait is None:
+        if kind in NEVER_RESCUED:
             return ""
-        return f"Blocked ({kind}) for {int(minutes_in_status)} min, wait {wait} min" if minutes_in_status >= wait else ""
+        wait = settings.waits.get(kind)
+        if wait is not None and minutes_in_status >= wait:
+            return f"Blocked ({kind}) for {int(minutes_in_status)} min, wait {wait} min"
     if status == "In Progress" and ticket.get("stretch_minutes", 0) >= settings.in_progress_minutes:
         return f"In Progress for {int(ticket['stretch_minutes'])} min in one stretch (limit {settings.in_progress_minutes})"
     if ticket.get("worked_minutes", 0) >= settings.total_work_minutes:

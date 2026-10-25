@@ -90,6 +90,14 @@ class RulesTests(unittest.TestCase):
         for kind in ("Quota", "Offline", "CI", "Human", "Other", ""):
             with self.subTest(kind=kind):
                 self.assertIsNone(verdict("Blocked", 999, blocked_kind=kind))
+        for kind in ("Quota", "Offline"):
+            with self.subTest(kind=kind, accumulated_work=True):
+                self.assertIsNone(verdict("Blocked", 999, blocked_kind=kind, worked_minutes=120))
+
+    def test_blocked_tickets_can_qualify_by_accumulated_work_before_their_wait(self):
+        self.assertIsNone(verdict("Blocked", 0, blocked_kind="Config", worked_minutes=119))
+        found = verdict("Blocked", 0, blocked_kind="Config", worked_minutes=120)
+        self.assertIn("total work time", found.trigger)
 
     def test_in_progress_stretch_and_total_work_limits(self):
         self.assertIsNone(verdict("In Progress", 59, stretch_minutes=59, worked_minutes=59))
@@ -635,6 +643,26 @@ class RescueRunTests(unittest.TestCase):
         self.assertEqual((round(first["stretch_minutes"]), round(first["worked_minutes"])), (15, 115))
         self.assertEqual((second["reason"], second["blocked_kind"]), ("env missing", "Config"))
         self.assertEqual(find_incidents({**snapshot, "now": now})[0].id, "rescue:JAIF-2")
+
+    def test_operator_snapshot_includes_to_do_tickets_with_accumulated_work(self):
+        op, sup, redis = self.build()
+        now = time.time()
+        issue = {"key": "JAIF-3", "status": "To Do",
+                 "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                 "labels": [], "summary": "Resume the implementation"}
+        sup.jira.found = [issue]
+        queries = []
+        search = sup.jira.search
+        sup.jira.search = lambda jql, limit=50: (queries.append(jql) or search(jql, limit))
+        sup.jira.comments = lambda key, last=3: []
+        redis.set("worked:JAIF-3", "120", 60)
+        snapshot = op.state()
+
+        self.assertIn('"To Do"', queries[0])
+        self.assertEqual([(item["key"], item["worked_minutes"]) for item in snapshot["tickets"]], [("JAIF-3", 120)])
+        incidents = [item for item in find_incidents({**snapshot, "now": now}) if item.kind == "rescue"]
+        self.assertEqual([(item.id, item.facts["mode"]) for item in incidents],
+                         [("rescue:JAIF-3", "rescue")])
 
     def test_work_time_accumulates_when_a_work_status_is_left_and_ci_is_not_counted(self):
         from tests.test_supervisor import FakeRedis, make

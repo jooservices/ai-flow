@@ -21,7 +21,7 @@ def epoch(value: str, default: float) -> float:
 
 def tickets(operator: Any, now: float) -> list[dict[str, Any]]:
     projects = ", ".join(operator.cfg.projects)
-    statuses = ", ".join(f'"{status}"' for status in ("Blocked", *WORKED))
+    statuses = ", ".join(f'"{status}"' for status in ("To Do", "Blocked", *WORKED))
     issues = operator.jira.search(
         f"project in ({projects}) AND status in ({statuses}) AND issuetype != Epic ORDER BY created ASC", 200)
     parents = operator.sup.parents_of_open_work(issues)

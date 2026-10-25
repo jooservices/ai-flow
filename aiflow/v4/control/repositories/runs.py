@@ -55,3 +55,8 @@ class RunsRepository:
     def ticket_stuck_streaks(self, step: str) -> list[dict]:
         """Recent generic failure streaks; no-verdict verification runs break rather than extend the streak."""
         return self.db.all(TICKET_STUCK_STREAKS_SQL, {"step": step})
+
+    def running_counts_by_project(self) -> dict[str, int]:
+        """Number of active runs in each project for candidate capacity checks."""
+        return {row["project"]: int(row["count"]) for row in self.db.all(
+            "SELECT project,count(*) AS count FROM runs WHERE status='running' GROUP BY project")}

@@ -21,6 +21,33 @@ SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'
   AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
 """
 
+_TRIAGE_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'
+  AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))
+  AND lower(coalesce(type,'')) <> 'epic' AND EXISTS (SELECT 1 FROM escalations e
+    WHERE e.ticket_key = tickets.key AND e.resolution = 'open')
+"""
+
+_INTAKE_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'
+  AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
+ORDER BY jira_created NULLS LAST, key
+"""
+
+_IMPACT_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'
+  AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))
+  AND lower(coalesce(type,'')) <> 'epic' AND NOT EXISTS (SELECT 1 FROM runs r
+    WHERE r.ticket_key = tickets.key AND r.step = 'impact' AND r.outcome = 'assessed')
+ORDER BY jira_created NULLS LAST, key
+"""
+
+_DEVELOPMENT_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'
+  AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))
+  AND lower(coalesce(type,'')) <> 'epic'
+"""
+
 
 class TicketsRepository:
     def __init__(self, db) -> None:
@@ -34,6 +61,30 @@ class TicketsRepository:
     def verification_candidates(self, projects: list[str]) -> list[dict]:
         """Tickets in verification that are not on hold or epics."""
         return self.db.all(_VERIFY_CANDIDATES_SQL, (projects,))
+
+    def by_key(self, key: str) -> dict | None:
+        """Ticket row for a work item selected by another control-plane query."""
+        return self.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
+
+    def triage_candidates(self, projects: list[str]) -> list[dict]:
+        """Tickets with an open escalation in the triage queue."""
+        return self.db.all(_TRIAGE_CANDIDATES_SQL, (projects,))
+
+    def intake_candidates(self, projects: list[str]) -> list[dict]:
+        """Tickets in the intake queue, ordered by age and key."""
+        return self.db.all(_INTAKE_CANDIDATES_SQL, (projects,))
+
+    def impact_candidates(self, projects: list[str]) -> list[dict]:
+        """Unassessed change requests in the impact queue."""
+        return self.db.all(_IMPACT_CANDIDATES_SQL, (projects,))
+
+    def development_candidates(self, projects: list[str]) -> list[dict]:
+        """Ready, unheld tickets in the development queue."""
+        return self.db.all(_DEVELOPMENT_CANDIDATES_SQL, (projects,))
+
+    def done_keys(self) -> set[str]:
+        """Ticket keys that satisfy development blockers."""
+        return {row["key"] for row in self.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
 
     def tickets_in_verify(self) -> list[dict]:
         """Ticket subjects watched for verification exhaustion."""

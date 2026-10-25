@@ -6892,7 +6892,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         can_view_machines = bool(user and has_permission(user.effective_roles, "view.machines_ai"))
         redact_machine_data = bool(user and not can_view_machines)
         return scope_snapshot(ctx, data, user.project_keys if user else None,
-                              can_view_machines, redact_machine_data)
+                              user is None or can_view_machines, redact_machine_data)
 
     @app.get("/v1/deploy/state")
     def deploy_state(_deploy: str = Depends(deploy_auth)) -> dict:

@@ -797,6 +797,15 @@ def test_topic_is_linked_from_deploy_readme():
     assert "(../../docs/v4/documentation-site.md)" in readme
 
 
+def test_jaif_271_verification_behavior_has_its_own_linked_topic():
+    page = ROOT / "docs/v4/verify-no-verdict.md"
+    content = " ".join(page.read_text(encoding="utf-8").split())
+    topics = (ROOT / "deploy/v4/README.md").read_text(encoding="utf-8").split("## Topics", 1)[1]
+    assert "Owner-token and open-console callers see account IDs" in content
+    assert "restricted authenticated users see verifier labels" in content
+    assert "[Epics and verification without a verdict](../../docs/v4/verify-no-verdict.md)" in topics
+
+
 def test_removing_a_modules_last_route_requires_documentation(monkeypatch):
     module = "aiflow/v4/control/old_routes.py"
     monkeypatch.setattr(docsite, "api_route_contract_spans", lambda: {})

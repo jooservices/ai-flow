@@ -46,8 +46,9 @@ make a retry available. Incidents are shown in the control UI like all others.
 
 The Dashboard and Delivery section "Needs attention" lists every ticket that has waited more than 30 minutes for
 verification (since the dev run finished), with the accounts that tried, their no-verdict counts and which are not
-offered the ticket again. The list is complete rather than truncated at 20 entries. The data is
-`slow_verifications` in `/v1/state`.
+offered the ticket again. The list is complete rather than truncated at 20 entries. Owner-token and open-console
+callers see account IDs; restricted authenticated users see verifier labels and only projects they can view. The data
+is `slow_verifications` in `/v1/state`.
 
 ## API contracts touched
 

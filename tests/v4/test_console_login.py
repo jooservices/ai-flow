@@ -2,6 +2,7 @@
 import asyncio
 import os
 import stat
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from conftest import join_node
+from conftest import add_ticket, join_node
 from aiflow.v4 import cli
 from aiflow.v4.control import login
 from aiflow.v4.control.api import create_app
@@ -48,6 +49,17 @@ def sign_in(client, password, email=EMAIL, ip=""):
 
 def user_row(ctx):
     return ctx.db.one("SELECT failed_attempts, locked_until, last_login_at FROM console_users WHERE email=%s", (EMAIL,))
+
+
+def add_slow_verification(ctx, key: str) -> None:
+    add_ticket(ctx.db, key, "In Verify", labels=())
+    project = key.split("-")[0]
+    ctx.db.run("UPDATE tickets SET jira_updated=now()-interval '90 minutes' WHERE key=%s", (key,))
+    ctx.db.run(
+        "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,ended_at,details)"
+        " VALUES (%s,%s,%s,'verify','claude-01','claude','cc',1,'finished','failed',"
+        "now()-interval '60 minutes',now()-interval '59 minutes',%s)",
+        (str(uuid.uuid4()), key, project, J({"no_verdict": True})))
 
 
 # --- AC2: passwords ------------------------------------------------------------------------------------------------
@@ -299,6 +311,35 @@ def test_state_accepts_only_the_owner_token_when_sign_in_is_on(ctx):
 
     sign_in_off = make_client(ctx, gate=False)
     assert sign_in_off.get("/v1/state").status_code == 200
+
+
+def test_state_reveals_tried_accounts_to_sessionless_owners_and_redacts_scoped_users(ctx):
+    add_slow_verification(ctx, "TESTWP-900")
+    add_slow_verification(ctx, "OTHER-900")
+
+    open_console = make_client(ctx, gate=False)
+    open_state = open_console.get("/v1/state").json()
+    assert {item["key"] for item in open_state["slow_verifications"]} == {"TESTWP-900", "OTHER-900"}
+    assert open_state["slow_verifications"][0]["accounts"][0]["account"] == "claude-01"
+    open_ticket = next(ticket for ticket in open_state["tickets"] if ticket["key"] == "TESTWP-900")
+    assert "claude-01" in open_ticket["slow_verify"]
+
+    ctx.settings.owner_token = "owner-secret"
+    gated = make_client(ctx, gate=True)
+    owner_state = gated.get("/v1/state", headers={"Authorization": "Bearer owner-secret"}).json()
+    assert owner_state["slow_verifications"][0]["accounts"][0]["account"] == "claude-01"
+    owner_ticket = next(ticket for ticket in owner_state["tickets"] if ticket["key"] == "TESTWP-900")
+    assert "claude-01" in owner_ticket["slow_verify"]
+
+    password = login.seed_user(ctx.db, "business@example.test", "business", "Dashboard Business")
+    ctx.db.run("UPDATE console_users SET project_keys=%s WHERE email=%s", (["TESTWP"], "business@example.test"))
+    assert sign_in(gated, password, "business@example.test").status_code == 200
+    restricted_state = gated.get("/v1/state").json()
+    assert [item["key"] for item in restricted_state["slow_verifications"]] == ["TESTWP-900"]
+    assert restricted_state["slow_verifications"][0]["accounts"][0]["account"] == "Verifier 1"
+    restricted_ticket = next(ticket for ticket in restricted_state["tickets"] if ticket["key"] == "TESTWP-900")
+    assert "Verifier 1" in restricted_ticket["slow_verify"]
+    assert "claude-01" not in restricted_ticket["slow_verify"]
 
 
 def test_gate_redirects_pages_and_rejects_api_calls_without_a_session(ctx, seeded):

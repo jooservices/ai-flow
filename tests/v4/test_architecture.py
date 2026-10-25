@@ -119,6 +119,29 @@ def test_verify_run_repository_keeps_ticket_node_and_incident_queries_in_their_r
     assert "def open_subjects" in incidents
 
 
+def test_work_candidate_sql_queries_live_in_ticket_and_run_repositories():
+    source = (ROOT / "aiflow/v4/control/work_candidates.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    inline_selects = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"all", "one"} or not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        query = node.args[0].value
+        if isinstance(query, str) and query.lstrip().upper().startswith("SELECT"):
+            inline_selects.append(query.strip().splitlines()[0])
+    assert not inline_selects, f"candidate service contains SQL: {inline_selects}"
+    tickets = (ROOT / "aiflow/v4/control/repositories/tickets.py").read_text(encoding="utf-8")
+    runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
+    for method in ("by_key", "triage_candidates", "intake_candidates", "impact_candidates",
+                   "development_candidates", "done_keys"):
+        assert f"def {method}" in tickets
+        assert f".{method}(" in source
+    assert "def running_counts_by_project" in runs
+    assert ".running_counts_by_project()" in source
+
+
 def test_developer_and_verify_prompts_use_architecture_document():
     developer = (ROOT / "prompts/v4/dev.md").read_text(encoding="utf-8")
     verify = (ROOT / "prompts/v4/verify.md").read_text(encoding="utf-8")

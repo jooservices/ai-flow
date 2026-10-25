@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from ..core.services import service_gaps
 from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
 from . import environment as environment_reports, hotfiles, role_health, tooling, verify_retry
+from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
 
 
 @dataclass
@@ -57,8 +59,7 @@ def resolve_account(ctx, account_id: str, node: str):
 
 def _active_projects(ctx, repo, projects: list[str]) -> list[str]:
     projects = [key for key in projects if key in repo.projects and not repo.projects[key].paused]
-    running = {row["project"]: int(row["count"]) for row in ctx.db.all(
-        "SELECT project,count(*) AS count FROM runs WHERE status='running' GROUP BY project")}
+    running = RunsRepository(ctx.db).running_counts_by_project()
     return [key for key in projects if _within_parallel_limit(repo.projects[key], running)]
 
 
@@ -120,9 +121,10 @@ def _verify(state: CandidateContext) -> list[dict]:
 def _release(state: CandidateContext) -> list[dict]:
     cooling = state.backoff("post_merge")
     pending = [item for key in state.projects for item in environment_reports.pending_post_merge(state.ctx, key)]
+    tickets = TicketsRepository(state.ctx.db)
     out = []
     for waiting in pending:
-        ticket = state.ctx.db.one("SELECT * FROM tickets WHERE key=%s", (waiting["ticket"],))
+        ticket = tickets.by_key(waiting["ticket"])
         if not ticket or verify_retry.is_epic(ticket) or ticket["key"] in state.held or ticket["key"] in cooling:
             continue
         if state.account.explicit_only and f"ai-{state.account.provider}" not in ticket["labels"]:
@@ -135,11 +137,7 @@ def _release(state: CandidateContext) -> list[dict]:
 
 def _triage(state: CandidateContext) -> list[dict]:
     cooling = state.backoff("triage")
-    tickets = state.ctx.db.all(
-        "SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Needs owner'"
-        " AND NOT ('owner-escalated' = ANY(labels)) AND NOT ('aiflow-hold' = ANY(labels))"
-        " AND lower(coalesce(type,'')) <> 'epic' AND EXISTS (SELECT 1 FROM escalations e"
-        " WHERE e.ticket_key = tickets.key AND e.resolution = 'open')", (state.projects,))
+    tickets = TicketsRepository(state.ctx.db).triage_candidates(state.projects)
     out = []
     for ticket in tickets:
         if _needs_missing_runtime(state, ticket, "triage") or ticket["key"] in state.held:
@@ -159,21 +157,13 @@ def _triage(state: CandidateContext) -> list[dict]:
 
 def _intake(state: CandidateContext) -> list[dict]:
     waiting = state.intake_backoff("intake")
-    tickets = state.ctx.db.all(
-        "SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Intake'"
-        " AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'"
-        " ORDER BY jira_created NULLS LAST, key", (state.projects,))
+    tickets = TicketsRepository(state.ctx.db).intake_candidates(state.projects)
     return _simple_intake(state, tickets, waiting, "intake")
 
 
 def _impact(state: CandidateContext) -> list[dict]:
     waiting = state.intake_backoff("impact")
-    tickets = state.ctx.db.all(
-        "SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'Backlog'"
-        " AND 'change-request' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-        " AND lower(coalesce(type,'')) <> 'epic' AND NOT EXISTS (SELECT 1 FROM runs r"
-        " WHERE r.ticket_key = tickets.key AND r.step = 'impact' AND r.outcome = 'assessed')"
-        " ORDER BY jira_created NULLS LAST, key", (state.projects,))
+    tickets = TicketsRepository(state.ctx.db).impact_candidates(state.projects)
     return _simple_intake(state, tickets, waiting, "impact")
 
 
@@ -193,7 +183,8 @@ def _simple_intake(state: CandidateContext, tickets: list[dict], waiting: set[st
 
 
 def _development(state: CandidateContext) -> list[dict]:
-    done = {row["key"] for row in state.ctx.db.all("SELECT key FROM tickets WHERE status = 'Done'")}
+    tickets_repo = TicketsRepository(state.ctx.db)
+    done = tickets_repo.done_keys()
     cooling = state.backoff("dev")
     parked = tooling.parked_tickets(state.ctx, state.node_row) | environment_reports.parked_tickets(state.ctx)
     footprints: dict[str, dict] = {}
@@ -205,10 +196,7 @@ def _development(state: CandidateContext) -> list[dict]:
         return footprints[key]
 
     flying = None
-    tickets = state.ctx.db.all(
-        "SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'To Do'"
-        " AND 'aiflow-ready' = ANY(labels) AND NOT ('aiflow-hold' = ANY(labels))"
-        " AND lower(coalesce(type,'')) <> 'epic'", (state.projects,))
+    tickets = tickets_repo.development_candidates(state.projects)
     out = []
     for ticket in tickets:
         if _skip_development(state, ticket, done, cooling, parked):

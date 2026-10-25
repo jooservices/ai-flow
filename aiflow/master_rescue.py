@@ -19,6 +19,7 @@ from .config import ConfigError
 HANDOVER = "Handover"            # the status defined by JAIF-102
 RESCUE_LABEL = "master-rescue"
 RESCUE_AGENT = "Claude"
+CONTEXT_UNAVAILABLE = "ticket context unavailable"
 WORK_STATUSES = ("In Progress", "In Review")  # their time is work time; the pull-request gate (CI) is not
 WAIT_DEFAULTS = {"Config": 10, "Attempts": 0, "Rework": 0, "Unclear": 30}
 NEVER_RESCUED = ("Quota", "Offline")  # they return by themselves when an AI is back
@@ -148,6 +149,8 @@ def evaluate(ticket: dict[str, Any], settings: MasterSettings | None, minutes_in
         return None
     if RESCUE_LABEL in ticket.get("labels", []) or ticket.get("rescued"):
         return None
+    if not ticket.get("context_complete", False):
+        return Verdict("owner", "Required Jira description or recent comments could not be read", CONTEXT_UNAVAILABLE)
     trigger = trigger_of(ticket, settings, minutes_in_status)
     comments = ticket.get("last_comments", [])
     if not isinstance(comments, list):

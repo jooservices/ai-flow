@@ -32,18 +32,21 @@ a cap below the work limit plus the rescue budget, a model that is not Claude) a
    operator turns a qualifying ticket into the incident `rescue:<KEY>`, instead of the generic `blocked` / `stuck` one.
 2. **Owner at once**, without waiting: owner-only terms are checked in the summary, Blocked reason, description, and the last
    three comments, even when the ticket is only one minute into In Progress. This includes money, credentials, deleting data,
-   a release, the requirements, merging by hand, runtime setup, or installed software. A ticket with no budget left under its
+   a release, the requirements, merging by hand, runtime setup, or installed software. If Jira cannot provide the description
+   or recent comments, the safety review is incomplete and the ticket goes to the owner. A ticket with no budget left under its
    cap or Claude unavailable (no machine has Claude: offline; Claude cooling down after a usage limit: quota) also goes to the
    owner. The ticket gets `needs-owner` and the usual question comment.
 3. **Handover** otherwise: status `Handover` (JAIF-102), `Taken by = Claude`, the AI Model field set to the rescue model, the label
    `master-rescue`, and the lease of a running worker is released. The rescue record is stored as soon as Jira accepts Handover,
    so a failed label write is retried on later operator passes. The label and record `rescue:<KEY>` make it one rescue per ticket;
    a later problem follows the normal operator path.
-4. **Audit comment** on the ticket: where it is stuck (status, time, Blocked kind and reason), what was tried (trigger, failed
-   attempts or rework rounds, the last comments), the work time and the remaining budget
-   (`min(master_minutes, total_cap_minutes - work time)`), and the model.
+4. **Audit comment** on the ticket: where it is stuck (status, time, and Blocked kind), what was tried (trigger, failed
+   attempts or rework rounds, and whether recent comments were reviewed), the work time and the remaining budget
+   (`min(master_minutes, total_cap_minutes - work time)`), and the model. Raw Blocked reasons and comment excerpts are omitted
+   from audit text and logs so ticket content cannot copy credentials into stdout or OpenObserve.
 5. **Unsuccessful rescue**: if the budget expires while rescue is active, or Jira moves the ticket out of the rescue workflow
-   without a confirmed result, the flow doctor records the cause and recent findings, clears `Taken by`, and returns the ticket to
+   without a confirmed result, the flow doctor records the cause and a reference to recent findings (the original comments remain
+   on the ticket; their raw excerpts are omitted), clears `Taken by`, and returns the ticket to
    development (`To Do`). An explicit successful result or a Jira-confirmed Done, Closed, or Resolved status closes the rescue
    successfully. Failed doctor comments or transitions stay pending and retry on later operator passes. An unsuccessful rescue is
    not escalated to a person and gets no `needs-owner`.

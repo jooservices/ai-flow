@@ -182,11 +182,113 @@ class RescueRunTests(unittest.TestCase):
         record = json.loads(redis.get("rescue:JAIF-1"))
         self.assertEqual((record["state"], record["budget"], record["model"]), ("active", 50, "opus:max"))
         body = [b for k, b in jira.comments if k == "JAIF-1"][0]
-        self.assertIn("Stuck: Blocked for 40 min (Config: the test setup fails)", body)
+        self.assertIn("Stuck: Blocked for 40 min (Config)", body)
         self.assertIn("Tried:", body)
-        self.assertIn("tried twice", body)
+        self.assertIn("raw excerpts omitted", body)
+        self.assertNotIn("the test setup fails", body)
+        self.assertNotIn("tried twice", body)
         self.assertIn("Remaining budget: 50 min", body)
         self.assertIn("Taken by: Claude, model opus (effort max)", body)
+
+    def test_owner_context_fetch_failures_fail_closed_to_the_owner(self):
+        now = time.time()
+        cases = (
+            ("description", {"key": "JAIF-1", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                              "labels": [], "summary": "Routine maintenance"}),
+            ("comments", {"key": "JAIF-2", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                           "labels": [], "summary": "Routine maintenance", "description": "Routine maintenance"}),
+            ("description_type", {"key": "JAIF-3", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                                   "labels": [], "summary": "Routine maintenance"}),
+            ("comments_type", {"key": "JAIF-4", "status": "In Progress", "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                                "labels": [], "summary": "Routine maintenance", "description": "Routine maintenance"}),
+        )
+        for failed_fetch, issue in cases:
+            with self.subTest(failed_fetch=failed_fetch):
+                op, sup, _ = self.build()
+                sup.jira.found = [issue]
+                sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+                written = []
+                sup.jira.comment = lambda key, body: written.append((key, body))
+
+                def fail_description(key, full=False):
+                    raise JiraError("description unavailable")
+
+                def fail_comments(key, last=3):
+                    raise JiraError("comments unavailable")
+
+                def read_description(key, full=False):
+                    if failed_fetch == "description":
+                        return fail_description(key, full)
+                    if failed_fetch == "description_type":
+                        return {"description": ["unexpected shape"]}
+                    return {"description": issue["description"]}
+
+                def read_comments(key, last=3):
+                    if failed_fetch == "comments":
+                        return fail_comments(key, last)
+                    if failed_fetch == "comments_type":
+                        return {"body": "unexpected shape"}
+                    return []
+
+                sup.jira.view = read_description
+                sup.jira.comments = read_comments
+                snapshot = op.state()
+                self.assertFalse(snapshot["tickets"][0]["context_complete"])
+                incidents = [incident for incident in find_incidents(snapshot) if incident.kind == "rescue"]
+                self.assertEqual([(incident.kind, incident.facts["mode"], incident.facts["topic"])
+                                  for incident in incidents],
+                                 [("rescue", "owner", master_rescue.CONTEXT_UNAVAILABLE)])
+                op.handle(incidents[0])
+                self.assertEqual(sup.jira.moves, [])
+                self.assertIn((issue["key"], "needs-owner"), sup.jira.added)
+                self.assertTrue(any("required Jira description or recent comments could not be read" in body
+                                    for _, body in written))
+
+    def test_empty_description_and_comments_are_complete_when_reads_succeed(self):
+        from tests.test_supervisor import FakeRedis, make
+        redis = FakeRedis()
+        sup = make(redis=redis)
+        now = time.time()
+        sup.jira.found = [{"key": "JAIF-1", "status": "In Progress",
+                           "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)),
+                           "labels": [], "summary": "Routine maintenance"}]
+        sup.jira.view = lambda key, full=False: {"description": ""}
+        sup.jira.comments = lambda key, last=3: []
+        sup.online_pool = lambda: ["Claude"]
+        sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
+        op = Operator(sup, Policy(enabled=True), Notifier(), lambda *a: ("ok", "", False))
+        snapshot = op.state()
+        self.assertTrue(snapshot["tickets"][0]["context_complete"])
+        self.assertFalse(any(item.kind == "rescue" for item in find_incidents(snapshot)))
+
+    def test_owner_routing_audit_omits_raw_reasons_comments_and_logs(self):
+        secret = "CANARY_SECRET_92_DO_NOT_COPY"
+        op, sup, _ = self.build()
+        item = ticket("JAIF-1", "Blocked", 1, blocked_kind="Config", reason=f"Rotate API token {secret}",
+                      last_comments=[{"author": "Owner", "body": f"Rotate the API token; value {secret}"}])
+        incident = find_incidents(state([item], master=SETTINGS))[0]
+        logs = []
+        op.sup_log = logs.append
+        op.handle(incident)
+        audit = "\n".join(logs + [body for _, body in sup.jira.comments])
+        self.assertNotIn(secret, audit)
+        self.assertNotIn("Rotate the API token", audit)
+        self.assertIn("raw excerpts omitted", audit)
+
+    def test_flow_doctor_does_not_copy_sensitive_comment_excerpts(self):
+        secret = "CANARY_SECRET_92_DOCTOR"
+        op, sup, redis = self.build()
+        notes = []
+        sup.jira.comment = lambda key, body: notes.append((key, body))
+        op.handle(self.incident())
+        sup.jira.status = "Blocked"
+        sup.jira.comments = lambda key, last=3: [{"author": "Claude", "body": f"Finding: token={secret}"}]
+        op.check_rescues()
+        doctor = [body for _, body in notes if body.startswith("AI Flow doctor")][0]
+        record = json.loads(redis.get("rescue:JAIF-1"))
+        self.assertNotIn(secret, doctor)
+        self.assertIn("review them on the ticket", doctor)
+        self.assertNotIn(secret, record["doctor_findings"])
 
     def test_only_one_rescue_per_ticket(self):
         op, sup, redis = self.build()
@@ -240,6 +342,7 @@ class RescueRunTests(unittest.TestCase):
         sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
         snapshot = op.state()
         incidents = [item for item in find_incidents({**snapshot, "now": now}) if item.kind == "rescue"]
+        self.assertTrue(all(item["context_complete"] for item in snapshot["tickets"]))
         self.assertEqual([(item.subject, item.facts["topic"]) for item in incidents],
                          [("JAIF-1", "credentials, tokens or secrets"), ("JAIF-2", "credentials, tokens or secrets")])
         op.state()
@@ -407,6 +510,7 @@ class RescueRunTests(unittest.TestCase):
         redis.set("lease:JAIF-1", "w", 60)
         redis.set("blocked:JAIF-2", json.dumps({"kind": "Config", "reason": "env missing"}), 60)
         redis.set("statussince:JAIF-2", str(now - 20 * 60), 60)
+        sup.jira.comments = lambda key, last=3: []
         sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
         snapshot = op.state()
         first, second = snapshot["tickets"]

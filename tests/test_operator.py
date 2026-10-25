@@ -20,7 +20,7 @@ NOW = 1_000_000.0
 def ticket(key, status, minutes, **extra):
     found = dict(key=key, status=status, status_since=NOW - minutes * 60, updated=NOW - minutes * 60, labels=[], leased=False,
                  blocked_kind="", reason="", cycles=0, last_comments=[], pull_request=None, ci_state="unknown", ci_since=None,
-                 minutes_waiting_for_ci=0)
+                 minutes_waiting_for_ci=0, context_complete=True)
     found.update(extra)
     return found
 
@@ -219,6 +219,7 @@ class OperatorTests(unittest.TestCase):
         sup.jira.found = [{"key": "JAIF-1", "status": "In QA",
                            "updated": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3 * 3600)),
                            "labels": [], "summary": "A ticket"}]
+        sup.jira.comments = lambda key, last=3: []
         sup.online_pool = lambda: ["Claude"]
         sup.eligible_agents = lambda role, key, field_agent, pool: list(pool)
         for key, value in (("statussince:JAIF-1", now - 3 * 3600), ("pr:JAIF-1", 17),

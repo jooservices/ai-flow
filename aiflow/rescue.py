@@ -50,7 +50,10 @@ class Rescue:
         facts = incident.facts
         reason = ""
         if facts.get("mode") == "owner":
-            reason = f"this work is owner-only ({facts.get('topic')})"
+            if facts.get("topic") == master_rescue.CONTEXT_UNAVAILABLE:
+                reason = "required Jira description or recent comments could not be read"
+            else:
+                reason = f"this work is owner-only ({facts.get('topic')})"
         elif unavailable := self.claude_unavailable():
             reason = f"Claude is unavailable ({unavailable})"
         if reason:
@@ -70,17 +73,15 @@ class Rescue:
         facts = incident.facts
         stuck = f"{facts.get('status')} for {facts['times']['minutes_in_status']} min"
         if facts.get("blocked_kind"):
-            stuck += f" ({facts['blocked_kind']}: {str(facts.get('reason', ''))[:300]})"
+            stuck += f" ({facts['blocked_kind']})"
         tried = [f"{facts.get('trigger')}"]
         if facts.get("blocked_kind") == "Attempts":
             tried.append(f"{self.cfg.max_attempts} failed AI attempts")
         if facts.get("blocked_kind") == "Rework" or facts.get("rework_rounds"):
             tried.append(f"{facts.get('rework_rounds') or 'several'} rework round(s)")
         comments = facts.get("last_comments", [])
-        if not isinstance(comments, list):
-            comments = []
-        tried += [f"comment by {c.get('author', '?')}: {str(c.get('body', ''))[:200]}"
-                  for c in comments[-2:] if isinstance(c, dict)]
+        if isinstance(comments, list) and comments:
+            tried.append(f"{len(comments)} recent comment(s) reviewed; raw excerpts omitted")
         return [f"Stuck: {stuck}",
                 "Tried: " + "; ".join(tried),
                 f"Work time: {facts.get('worked_minutes', 0)} min in total, {facts.get('stretch_minutes', 0)} min in the current stretch",
@@ -213,9 +214,11 @@ class Rescue:
             comments = self.jira.comments(key, 3)
         except (JiraError, ValueError, TypeError):
             comments = []
-        bodies = [str(item.get("body", "")) for item in comments if isinstance(item, dict)
-                  and item.get("body") and not str(item.get("body", "")).startswith("AI Flow operator (master)")]
-        return "\n".join(bodies) or "; ".join(record.get("findings", [])) or record.get("stuck", "")
+        findings = [item for item in comments if isinstance(item, dict) and item.get("body")
+                    and not str(item.get("body", "")).startswith("AI Flow operator (master)")]
+        if findings:
+            return f"{len(findings)} recent ticket comment(s) contain findings; review them on the ticket (raw excerpts omitted)."
+        return "; ".join(record.get("findings", [])) or record.get("stuck", "")
 
     def finish(self, key: str, record: dict[str, Any], state: str) -> None:
         self.redis.set_persistent(f"rescue:{key}", json.dumps({**record, "state": state}))

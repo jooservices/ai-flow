@@ -25,7 +25,9 @@ The owner is not in the loop. When a ticket is Blocked, a pull request is stuck,
 Tickets with the label `aiflow-hold` or `needs-owner` are never incidents. Human review waits for the owner by design.
 
 Master rescue checks the summary, Blocked reason, description, and recent comments for owner-only work before waiting for a
-rescue threshold. It records a handover in the JAIF-102 `Handover` status with `Taken by = Claude`. This legacy supervisor does
+rescue threshold. If Jira cannot read the description or recent comments, the safety check is incomplete and the ticket goes to
+the owner immediately. Rescue audit comments and logs include the status, Blocked kind, trigger and attempt counts, but omit raw
+Blocked reasons and comment excerpts. It records a handover in the JAIF-102 `Handover` status with `Taken by = Claude`. This legacy supervisor does
 not schedule work from `Handover`; Claude pickup, use of the AI Model field, and enforcement of the rescue budget depend on the
 JAIF-102 Jira workflow/automation. A failed Handover transition leaves no rescue label or record, so the incident can retry after
 its temporary cooldown. If Handover succeeds and adding `master-rescue` fails, the operator retries the label from the rescue

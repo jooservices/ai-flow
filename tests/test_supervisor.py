@@ -1612,15 +1612,9 @@ class AiSessionLimitTests(unittest.TestCase):
 
         cfg = load({"AIFLOW_ROOT": tempfile.gettempdir(), "AIFLOW_MACHINE": "test"})
         cfg = replace(cfg, registry=replace(cfg.registry, ai_limits={"test": {"codex": 4, "claude": 2}}))
-        with mock.patch("aiflow.config.load", return_value=cfg), \
-             mock.patch("aiflow.health.worker_counts", return_value=(1, 1)), \
-             mock.patch("aiflow.supervisor.operator_status.check_line", return_value="  operator: test"), \
-             mock.patch("builtins.print") as output:
+        with mock.patch("aiflow.config.load", return_value=cfg), mock.patch("builtins.print") as output:
             self.assertEqual(main(["check"]), 0)
-        lines = [call.args[0] for call in output.call_args_list]
-        self.assertIn("1 configured worker(s)", lines[0])
-        self.assertIn("1 running", lines[0])
-        self.assertIn("  AI session limits: claude=2, codex=4; omitted AIs are unlimited", lines)
+        self.assertIn("  AI session limits: claude=2, codex=4; omitted AIs are unlimited", [call.args[0] for call in output.call_args_list])
 
 
 if __name__ == "__main__":

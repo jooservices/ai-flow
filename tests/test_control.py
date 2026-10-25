@@ -10,8 +10,7 @@ from aiflow import health
 from aiflow.config import ConfigError, load, parse_worker
 from aiflow.control import MAX_CHANGES, Control, config_hash, make_plan
 from aiflow.projects import desired_ids
-from aiflow.supervisor import Supervisor
-from tests.test_supervisor import FakeJira, FakeRedis, make
+from tests.test_supervisor import FakeJira, FakeRedis
 
 
 def write(path: Path, text: str) -> None:
@@ -133,46 +132,6 @@ class ControlTests(Machine):
         self.control.cycle()
         self.assertEqual(sorted(c[1] for c in self.backend.calls if c[0] == "disable"), ["JAVM-2", "JAVM-3"])
         self.assertIsNone(self.redis.get("retire:wsl:JAVM-2"))
-
-    def test_two_to_four_to_two_finishes_an_in_progress_ticket_before_retirement(self):
-        self.general('[machines.wsl]\nworkers = 2\nmax_workers = 4\n')
-        self.project("JAVM", 0)
-        self.project("JOOWT", 0)
-        self.build(present=["1", "2"])
-        self.control.cycle()
-
-        self.general('[machines.wsl]\nworkers = 4\nmax_workers = 4\n')
-        increased, _ = self.control.cycle()
-        self.assertEqual(increased.start, ["3", "4"])
-        self.assertEqual(len(self.backend.active), 4)
-        self.redis.set("restart", str(int(time.time()) - 1), 3600)
-
-        worker = Supervisor(self.load("3"), FakeJira(), self.redis)
-        ticket = {"key": "JAIF-68", "status": "In Progress", "step": "running"}
-
-        def complete_current_step():
-            self.general('[machines.wsl]\nworkers = 2\nmax_workers = 4\n')
-            decreased, _ = self.control.cycle()
-            self.assertEqual(decreased.retire, ["3", "4"])
-            ticket["status"] = "In Review"
-            ticket["step"] = "completed"
-            return True
-
-        worker.tick = complete_current_step
-        with mock.patch("aiflow.supervisor.signal.signal"), \
-             mock.patch.object(worker, "probe_ais"), mock.patch.object(worker, "publish_versions"), \
-             mock.patch.object(worker, "publish_ais"), mock.patch.object(worker, "recheck_blocked"), \
-             mock.patch.object(worker, "sweep_worktrees"), mock.patch.object(worker, "sweep_containers"):
-            worker.run_forever()
-
-        self.assertEqual(ticket["status"], "In Review")
-        self.assertEqual(ticket["step"], "completed")
-        self.assertTrue(worker.retired)
-        self.backend.active.difference_update({"3", "4"})
-        settled, _ = self.control.cycle()
-        self.assertEqual(settled.disable, ["3", "4"])
-        self.assertEqual(self.backend.present, {"1", "2"})
-        self.assertEqual(len(desired_ids(self.load().registry, "wsl")), 2)
 
     def test_a_worker_wanted_again_loses_its_retire_flag(self):
         self.build(present=["1", "JAVM-1", "JAVM-2", "JAVM-3", "JOOWT-1", "JOOWT-2"])

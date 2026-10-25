@@ -236,12 +236,28 @@ def test_internal_secrets_are_written_0600_under_etc_aiflow_secrets(machine):
     app = sec.read_env(d / "aiflow4.env")
     pg = sec.read_env(d / "postgres.env")["POSTGRES_PASSWORD"]
     assert len(pg) >= 32 and app["AIFLOW4_DATABASE_URL"] == f"postgresql://aiflow:{pg}@aiflow4-postgres:5432/aiflow4"
-    for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
+    for key in ("AIFLOW4_JOIN_TOKEN", "AIFLOW4_OWNER_TOKEN", "AIFLOW4_SETUP_OWNERSHIP_CAPABILITY",
+                "AIFLOW4_REVIEWER_TOKEN", "AIFLOW4_CONSOLE_SESSION_SECRET",
                 "O2_BASIC"):
         assert len(app[key]) >= 32
     assert app["AIFLOW4_PUBLIC_URL"] == "https://aiflow.example.com"
     assert app["AIFLOW4_GATUS_URL"] == "http://aiflow.example.com:8081/"
     assert app["AIFLOW4_TRUSTED_PROXIES"] == "172.28.0.0/16"
+
+
+def test_ownership_capability_with_dollar_is_literal_in_compose_env_file(tmp_path):
+    secret_dir = tmp_path / "secrets" / "control"
+    secret_dir.mkdir(parents=True)
+    capability = "chosen$ownership-capability-with-at-least-32-characters"
+    app_env = secret_dir / "aiflow4.env"
+    app_env.write_text(f"AIFLOW4_SETUP_OWNERSHIP_CAPABILITY={capability}\n", encoding="utf-8")
+
+    sec.ensure_internal(secret_dir, "https://console.example.test", "http://console.example.test:8081/")
+
+    lines = app_env.read_text(encoding="utf-8").splitlines()
+    capability_line = next(line for line in lines if line.startswith("AIFLOW4_SETUP_OWNERSHIP_CAPABILITY="))
+    assert capability_line == f"AIFLOW4_SETUP_OWNERSHIP_CAPABILITY='{capability}'"
+    assert sec.read_env(app_env)["AIFLOW4_SETUP_OWNERSHIP_CAPABILITY"] == capability
 
 
 def test_trusted_proxy_cidrs_are_canonical_private_and_narrow():
@@ -341,11 +357,13 @@ def test_rerun_remembers_the_admin_email_and_keeps_an_owner_choice_for_login(mac
     assert sec.read_env(app_env)["AIFLOW4_CONSOLE_LOGIN"] == "0"
 
 
-def test_first_install_without_an_admin_email_stops_before_any_change(machine):
+def test_first_install_without_an_admin_email_leaves_administrator_creation_to_browser_setup(machine):
     out: list[str] = []
-    assert installer(machine, out, admin_email="").run() == ci.EXIT_USAGE
-    assert "--admin-email is required" in "\n".join(out) and machine.calls == []
-    assert installer(machine, out, admin_email="not an email").run() == ci.EXIT_USAGE
+    assert installer(machine, out, admin_email="").run() == 0, out
+    assert not console_seeds(machine)
+    assert sec.read_env(machine.p("/etc/aiflow/secrets/control/aiflow4.env"))["AIFLOW4_CONSOLE_LOGIN"] == "1"
+    assert any("/setup" in line and "No Administrator was seeded" in line for line in out)
+    assert installer(machine, [], admin_email="not an email").run() == ci.EXIT_USAGE
 
 
 def test_a_failed_admin_seed_stops_before_the_deploy(machine, monkeypatch):

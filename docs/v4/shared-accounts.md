@@ -71,8 +71,6 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `POST /v1/version-releases/claim` | A version release claim obeys the same account and machine limits. |
 | `GET /v1/version-releases/candidates` | Candidates go to a signed-in peer machine with free capacity when the source account is at quota risk. |
 
-The shared account readiness checks also apply to `GET /v1/master/candidate`, `GET /v1/version-releases/candidates`
-and `POST /v1/version-releases/claim`, so paused or full accounts do not appear ready for these roles.
 | `GET /v1/master/candidate` | An account counts as ready when any assigned, signed-in, online machine has it. |
 | `POST /v1/accounts/{account_id}/probe` | A probe result is recorded per machine: an auth failure returns only that machine to *Sign-in needed*; quota cooldown stays account-wide. |
 | `GET /v1/accounts/{account_id}/spec` | The node reads the account spec for its own assignment. |
@@ -80,6 +78,9 @@ and `POST /v1/version-releases/claim`, so paused or full accounts do not appear 
 | `POST /v1/runs/{run_id}/result` | A finished run frees its session on the account total and its machine. |
 | `GET /v1/state` | The state shows each account once with its machines and per-machine usage. |
 | `GET /v1/deploy/state` | Deploy state lists accounts by machine membership rather than a single node. |
+
+The shared account readiness checks also apply to `GET /v1/master/candidate`, `GET /v1/version-releases/candidates`
+and `POST /v1/version-releases/claim`, so paused or full accounts do not appear ready for these roles.
 
 **Console screens:** `cc`, `machines`
 

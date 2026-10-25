@@ -203,6 +203,10 @@ SCREEN_RENDERER_VIEWS: dict[str, tuple[str, ...] | None] = {
 # `HINTS` are mapped to their own screen instead.
 # Lines outside a mapped renderer (initial state, event handlers) that belong to one screen.
 SCREEN_LINE_VIEWS = (
+    # External assets have no renderer span; map their script tags to the views that consume them.
+    (re.compile(r"console-assets/dashboard-attention\.js"), "work"),
+    (re.compile(r"console-assets/dashboard-attention\.js"), "delivery"),
+    (re.compile(r"console-assets/user-admin-form\.js"), "users"),
     (re.compile(r"runtimeSettings|data-runtime|runtime-setting"), "settings"),
     (re.compile(r"notify-form-grid|data-notify|S\.notifications|notificationConfigFromForm|notificationFormSubmit"), "notifications"),
     (re.compile(r"^\s*integrations: \{|S\.integrations|githubAppTarget|/v1/integrations/github|act === 'github-"), "integrations"),

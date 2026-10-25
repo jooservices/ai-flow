@@ -17,5 +17,6 @@ format or a ticket whose check output is too large for the verifier.
 ## Fix
 
 Open the latest verify runs of the ticket and read why the answer had no verdict. Fix the cause (for example the
-verify notes or the machine), or verify the ticket by hand. A new development run starts the count again and closes the
-incident. See [Epics and verification without a verdict](../verify-no-verdict.md).
+verify notes or the machine), or verify the ticket by hand. The incident stays open during a temporary capacity loss;
+it closes when the ticket leaves verification or an unbarred eligible account can receive it. A new development run
+starts the count again and can make a retry available. See [Epics and verification without a verdict](../verify-no-verdict.md).

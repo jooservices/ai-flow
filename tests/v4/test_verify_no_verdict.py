@@ -190,6 +190,41 @@ def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_
                       " AND closed_at IS NULL")["n"] == 0
 
 
+def test_exhaustion_incident_stays_open_across_offline_and_return_cycle(client, ctx):
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    for account in ("codex-01", "claude-01"):
+        for minutes in (8, 2):
+            no_verdict(ctx, "TESTWP-50", account, minutes_ago=minutes)
+
+    watchdog(ctx)
+    original = ctx.db.one("SELECT id FROM incidents WHERE kind='verify_no_verdict' AND subject='TESTWP-50'"
+                          " AND closed_at IS NULL")
+    assert original
+
+    ctx.db.run("UPDATE nodes SET last_heartbeat=now()-interval '2 minutes' WHERE name IN ('cc','node1')")
+    assert verify_retry.pool(ctx, {"key": "TESTWP-50", "project": "TESTWP", "labels": ["aiflow-ready"]},
+                             "opencode-01") == []
+    watchdog(ctx)
+    still_open = ctx.db.one("SELECT id FROM incidents WHERE kind='verify_no_verdict' AND subject='TESTWP-50'"
+                            " AND closed_at IS NULL")
+    assert still_open == original
+
+    for headers, node in ((cc, "cc"), (node1, "node1")):
+        heartbeat = client.post(f"/v1/nodes/{node}/heartbeat", json={"slots_total": 2}, headers=headers)
+        assert heartbeat.status_code == 200
+    watchdog(ctx)
+    returned = ctx.db.one("SELECT id FROM incidents WHERE kind='verify_no_verdict' AND subject='TESTWP-50'"
+                          " AND closed_at IS NULL")
+    total = ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
+                       " AND subject='TESTWP-50'")["n"]
+    assert returned == original and total == 1
+
+    insert_run(ctx, "TESTWP-50", "verify", "claude-01", "rework", {"verdict": "FAIL"}, minutes_ago=0)
+    watchdog(ctx)
+    assert ctx.db.one("SELECT closed_at FROM incidents WHERE id=%s", (original["id"],))["closed_at"] is not None
+
+
 def test_dashboard_lists_only_tickets_waiting_longer_than_30_minutes(ctx):
     in_verify(ctx, "TESTWP-80")
     add_ticket(ctx.db, "TESTWP-81", "In Verify")

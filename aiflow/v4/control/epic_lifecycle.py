@@ -105,7 +105,7 @@ def apply_transition(ctx, project: str, epic: dict, children: list[dict], epics:
         if not moved:
             return
         ctx.events.emit("jira.transition", ticket=key, account="control", outcome=status, reason=detail)
-        _comment_completion(ctx, project, key, len(children), now, epics, epic, target)
+        _comment_completion(ctx, project, key, children, now, epics, epic, target)
     except Exception as exc:  # noqa: BLE001
         log.warning("could not reconcile epic %s: %s", key, exc)
 
@@ -117,13 +117,16 @@ def _report_epic(ctx, project: str, key: str) -> None:
         log.warning("could not generate completion report for epic %s: %s", key, exc)
 
 
-def _comment_completion(ctx, project: str, key: str, child_count: int, now: datetime,
+def _comment_completion(ctx, project: str, key: str, children: list[dict], now: datetime,
                         epics: list[dict], epic: dict, target: str) -> None:
     if target != "Done":
         return
+    done_count = sum(child["status"] == "Done" for child in children)
+    declined_count = sum(child["status"] == "Declined" for child in children)
     report = (ctx.settings.public_url.rstrip("/") + f"/v1/projects/{quote(project, safe='')}/report"
               f"?epic={quote(key, safe='')}&format=html")
-    comment = ("AI Flow · epic completed\n" f"Child tickets: {child_count} (all Done)\n"
+    comment = ("AI Flow · epic completed\n"
+               f"Child tickets: {len(children)} (Done: {done_count}, Declined: {declined_count})\n"
                f"Completed at: {now.isoformat(timespec='seconds')}\nReport: {report}")
     project_done = bool(epics) and all(row["status"] == "Done" or row["key"] == key for row in epics)
     if project_done:

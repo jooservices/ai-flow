@@ -359,6 +359,29 @@ def test_ci_check_maps_screen_state_and_event_handlers_to_their_pages(monkeypatc
     assert docsite.documentation_gaps(pages, views=views) == []
 
 
+def test_console_asset_imports_map_to_their_consuming_screens(monkeypatch):
+    ui = "aiflow/v4/control/ui/console.html"
+    source_lines = (ROOT / ui).read_text().splitlines()
+    changed_lines = [
+        next(i for i, line in enumerate(source_lines, 1) if "dashboard-attention.js" in line),
+        next(i for i, line in enumerate(source_lines, 1) if "user-admin-form.js" in line),
+    ]
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(command, **kwargs):
+        if command[1] == "show":
+            return Result("\n".join(source_lines) + "\n")
+        return Result("".join(f"@@ -{line},1 +{line},1 @@\n" for line in changed_lines))
+
+    monkeypatch.setattr(docsite.subprocess, "run", fake_run)
+    assert docsite.changed_views("origin/develop") == {"work", "delivery", "users"}
+
+
 def test_container_project_ui_changes_map_to_projects_screen(monkeypatch):
     ui = "aiflow/v4/control/ui/console.html"
     source_lines = (ROOT / ui).read_text().splitlines()

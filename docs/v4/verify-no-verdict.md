@@ -38,8 +38,9 @@ development round: a newer finished dev run starts them again.
 
 When every eligible account is barred from a ticket in verification, the watchdog opens one `verify_no_verdict`
 incident (subject: the ticket) that names the ticket and the reason and lists the accounts. Repeated checks do not open a
-second one. It closes when the ticket leaves verification or a new development round starts. Incidents are shown in the
-control UI like all others.
+second one. It stays open if temporary capacity loss leaves no eligible account online. It closes when the ticket leaves
+verification or an unbarred eligible account can receive it; a new development round resets the account history and can
+make a retry available. Incidents are shown in the control UI like all others.
 
 ## Dashboard
 

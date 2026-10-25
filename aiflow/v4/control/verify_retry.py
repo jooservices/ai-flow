@@ -204,20 +204,33 @@ def _node_ready_for_ticket(ctx, ticket: dict, project, node_row: dict) -> bool:
 
 def exhausted(ctx, ticket: dict, offers=None, releases: Path | None = None) -> list[str]:
     """The accounts that failed the ticket when every eligible account is barred, else an empty list."""
+    _accounts, failed, _runs = exhaustion_state(ctx, ticket, offers, releases)
+    return failed
+
+
+def exhaustion_state(ctx, ticket: dict, offers=None, releases: Path | None = None
+                     ) -> tuple[list[str], list[str], dict[str, list[bool]]]:
+    """Return eligible accounts, barred eligible accounts, and current-round history for incident recovery."""
     runs = history(ctx.db, ticket["key"])
-    accounts = pool(ctx, ticket, VerifyRunsRepository(ctx.db).last_dev_account(ticket["key"]), offers, releases)
-    if not accounts or not all(barred(runs.get(account, [])) for account in accounts):
-        return []
-    return sorted(accounts)
+    dev_account = VerifyRunsRepository(ctx.db).last_dev_account(ticket["key"])
+    accounts = pool(ctx, ticket, dev_account, offers, releases)
+    failed = sorted(accounts) if accounts and all(barred(runs.get(account, [])) for account in accounts) else []
+    return accounts, failed, runs
 
 
 def check_incidents(ctx, releases: Path | None = None) -> None:
     """Watchdog: one incident per ticket whose eligible accounts all ended verification without a verdict."""
     repo = VerifyRunsRepository(ctx.db)
+    already_open = set(repo.open_incident_subjects(KIND))
     open_now = set()
     for ticket in repo.tickets_in_verify():
-        failed = exhausted(ctx, ticket, releases=releases)
+        accounts, failed, runs = exhaustion_state(ctx, ticket, releases=releases)
         if not failed:
+            if ticket["key"] in already_open and not any(not barred(runs.get(account, []))
+                                                         for account in accounts):
+                # No eligible capacity is temporary, not a recovery. Keep the existing incident until the ticket
+                # leaves verification or an unbarred account can actually receive it.
+                open_now.add(ticket["key"])
             continue
         open_now.add(ticket["key"])
         open_incident(ctx, KIND, ticket["key"], "warning",
@@ -225,7 +238,7 @@ def check_incidents(ctx, releases: Path | None = None) -> None:
                       f"Reason: the verification of {ticket['key']} ended without a VERDICT line twice in a row on each"
                       f" eligible account ({', '.join(failed)}). None of them is offered the ticket again. Fix the"
                       " cause or verify the ticket by hand.")
-    for subject in repo.open_incident_subjects(KIND):
+    for subject in already_open:
         if subject not in open_now:
             close_incident(ctx, KIND, subject, "the ticket can be verified again or left verification")
 

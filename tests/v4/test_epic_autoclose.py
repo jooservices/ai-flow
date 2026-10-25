@@ -143,10 +143,26 @@ def test_flow_epic_completion_comment_has_child_count_time_and_report_link(ctx):
     assert len(ctx.jira.comments) == 1
     commented_key, comment = ctx.jira.comments[0]
     assert commented_key == epic_key
-    assert comment.startswith("AI Flow · epic completed\nChild tickets: 1 (all Done)\n")
+    assert comment.startswith("AI Flow · epic completed\nChild tickets: 1 (Done: 1, Declined: 0)\n")
     assert re.search(r"Completed at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", comment)
     assert "http://127.0.0.1:18480/v1/projects/TESTWP/report?epic=TESTWP-120&format=html" in comment
     assert "Project suggestion: all 1 epics are Done" in comment
+
+
+def test_epic_completion_comment_counts_declined_children(ctx):
+    epic_key = "TESTWP-122"
+    ctx.jira.status_of[epic_key] = "In Progress"
+    sync_issues(ctx, [issue(epic_key, "In Progress", "Epic"),
+                      issue("TESTWP-123", "Done", parent=epic_key),
+                      issue("TESTWP-124", "Declined", parent=epic_key)])
+
+    jira_sync(ctx, full=True)
+
+    assert ctx.jira.status(epic_key) == "Done"
+    assert len(ctx.jira.comments) == 1
+    _, comment = ctx.jira.comments[0]
+    assert "Child tickets: 2 (Done: 1, Declined: 1)" in comment
+    assert "all Done" not in comment
 
 
 def test_project_report_suggests_closing_only_when_every_project_epic_is_done(client, ctx):

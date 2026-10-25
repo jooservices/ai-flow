@@ -1871,10 +1871,12 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]))
             return 0
         if "check" in args:  # the registry is loaded (and validated) above; show what was understood
-            from .projects import desired_ids
-            ids = desired_ids(config.registry, config.machine) if config.registry.from_files else [str(n) for n in range(1, config.workers + 1)]
+            from . import health
+            ids = health.configured_worker_ids(config)
+            running = health.running_worker_count(config)
             cap = config.registry.max_workers.get(config.machine)
-            print(f"machine {config.machine}: {len(ids)} worker(s) ({', '.join(ids) or 'none'}), max_workers {cap or 'not set'}, "
+            print(f"machine {config.machine}: {len(ids)} configured worker(s) ({', '.join(ids) or 'none'}), "
+                  f"{running} running, max_workers {cap or 'not set'}, "
                   f"config {'from TOML files' if config.registry.from_files else 'legacy .env'}")
             limits = config.ai_limits
             print(f"  AI session limits: {', '.join(f'{n}={v}' for n, v in sorted(limits.items())) or 'none (all unlimited)'}; omitted AIs are unlimited")

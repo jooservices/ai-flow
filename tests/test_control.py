@@ -1,13 +1,16 @@
+import io
 import tempfile
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from aiflow import health
 from aiflow.config import ConfigError, load, parse_worker
 from aiflow.control import MAX_CHANGES, Control, config_hash, make_plan
 from aiflow.projects import desired_ids
+from aiflow.supervisor import Supervisor
 from tests.test_supervisor import FakeJira, FakeRedis, make
 
 
@@ -131,6 +134,46 @@ class ControlTests(Machine):
         self.assertEqual(sorted(c[1] for c in self.backend.calls if c[0] == "disable"), ["JAVM-2", "JAVM-3"])
         self.assertIsNone(self.redis.get("retire:wsl:JAVM-2"))
 
+    def test_two_to_four_to_two_finishes_an_in_progress_ticket_before_retirement(self):
+        self.general('[machines.wsl]\nworkers = 2\nmax_workers = 4\n')
+        self.project("JAVM", 0)
+        self.project("JOOWT", 0)
+        self.build(present=["1", "2"])
+        self.control.cycle()
+
+        self.general('[machines.wsl]\nworkers = 4\nmax_workers = 4\n')
+        increased, _ = self.control.cycle()
+        self.assertEqual(increased.start, ["3", "4"])
+        self.assertEqual(len(self.backend.active), 4)
+        self.redis.set("restart", str(int(time.time()) - 1), 3600)
+
+        worker = Supervisor(self.load("3"), FakeJira(), self.redis)
+        ticket = {"key": "JAIF-68", "status": "In Progress", "step": "running"}
+
+        def complete_current_step():
+            self.general('[machines.wsl]\nworkers = 2\nmax_workers = 4\n')
+            decreased, _ = self.control.cycle()
+            self.assertEqual(decreased.retire, ["3", "4"])
+            ticket["status"] = "In Review"
+            ticket["step"] = "completed"
+            return True
+
+        worker.tick = complete_current_step
+        with mock.patch("aiflow.supervisor.signal.signal"), \
+             mock.patch.object(worker, "probe_ais"), mock.patch.object(worker, "publish_versions"), \
+             mock.patch.object(worker, "publish_ais"), mock.patch.object(worker, "recheck_blocked"), \
+             mock.patch.object(worker, "sweep_worktrees"), mock.patch.object(worker, "sweep_containers"):
+            worker.run_forever()
+
+        self.assertEqual(ticket["status"], "In Review")
+        self.assertEqual(ticket["step"], "completed")
+        self.assertTrue(worker.retired)
+        self.backend.active.difference_update({"3", "4"})
+        settled, _ = self.control.cycle()
+        self.assertEqual(settled.disable, ["3", "4"])
+        self.assertEqual(self.backend.present, {"1", "2"})
+        self.assertEqual(len(desired_ids(self.load().registry, "wsl")), 2)
+
     def test_a_worker_wanted_again_loses_its_retire_flag(self):
         self.build(present=["1", "JAVM-1", "JAVM-2", "JAVM-3", "JOOWT-1", "JOOWT-2"])
         self.project("JAVM", 1)
@@ -232,6 +275,25 @@ class WorkerBehaviourTests(Machine):
 
 
 class HealthTests(Machine):
+    def test_health_report_shows_configured_and_running_worker_counts(self):
+        cfg = replace(self.load(), expected_slots=("wsl:1", "wsl:2"), heartbeat_stale_seconds=60)
+        redis = FakeRedis()
+        now = int(time.time())
+        redis.set("hb:wsl:1", str(now), 300)
+        redis.set("hb:wsl:2", str(now - 61), 300)
+        redis.set("hb:wsl:control", str(now), 300)
+
+        with mock.patch("aiflow.health.load", return_value=cfg), \
+             mock.patch("aiflow.health.Redis", return_value=redis), \
+             mock.patch("aiflow.health.Jira", return_value=FakeJira()), \
+             mock.patch("aiflow.health.problems", return_value=[]), \
+             mock.patch("aiflow.health.usage_summary", return_value=None), \
+             mock.patch("aiflow.health.events.configure"), mock.patch("aiflow.health.events.emit"), \
+             mock.patch("aiflow.health.events.close"), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(health.main(), 0)
+
+        self.assertIn("WORKERS wsl: configured 2, running 1", output.getvalue())
+
     def test_control_alerts(self):
         cfg = self.load()
         redis = FakeRedis()

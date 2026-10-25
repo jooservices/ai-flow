@@ -85,9 +85,9 @@ Policy and limits: `docs/OPERATOR.md`; thresholds: `JOOservices/config/operator.
 ## The control and the workers of each project
 `aiflow-control.service` (one per machine) keeps the running workers equal to the TOML files and runs the operator. Install: `bin/install-wsl-service --control`.
 - **Workers of a project**: `workers = N` in `config/aiflow/<KEY>.toml`; worker `<KEY>-1` serves only that project, `<KEY>-2` ... take their project first and then other projects (turn by turn). `[machines.<name>] workers` are shared workers; `max_workers` is the machine's cap (a total above it is refused).
-- **Add or change**: edit the TOML; within 30 seconds the control starts the missing workers, or asks the surplus ones to leave after their current step (they exit with code 3 and the control disables the unit). Nothing running is killed.
+- **Scale**: change `workers` in the relevant TOML file. Within one control cycle (30 seconds by default), the single control service starts missing workers and asks surplus workers to leave after their current ticket step; it disables their units after they exit. A restart request (`bin/aiflow-work restart`) also makes workers leave after their current step. The control manages the worker units, so operators do not enable or disable individual workers.
 - **A changed file** (any of `aiflow.toml`, `aiflow/*.toml`, `operator.toml`) makes every worker restart after its step and the control restart itself.
-- **Look**: `bin/aiflow-control --dry-run` prints what it would start, retire and disable; `bin/aiflow-work check` shows the workers, the caps and warnings; `bin/aiflow-work list` prints the ids.
+- **Look**: `bin/aiflow-work check` and `bin/aiflow-health` show configured worker count and workers with fresh heartbeats. While surplus workers finish a step, the running count may temporarily exceed the configured count. `bin/aiflow-control --dry-run` prints what it would start, retire and disable; `bin/aiflow-work list` prints the configured ids.
 - **A wrong file** changes nothing: the control keeps the current workers and the health check reports it on the health ticket. It never stops every worker.
 - **If the control stops**, the workers keep working; systemd restarts it after 15 seconds and the health check alerts when its heartbeat is missing.
 

@@ -66,6 +66,22 @@ class TicketsRepository:
         """Ticket row for a work item selected by another control-plane query."""
         return self.db.one("SELECT * FROM tickets WHERE key=%s", (key,))
 
+    def epic_key(self, ticket: dict) -> str:
+        """Resolve the ticket's parent chain to its Jira epic key."""
+        if str(ticket.get("type") or "").strip().lower() == "epic":
+            return str(ticket.get("key") or "")
+        parent = str(ticket.get("parent_key") or "")
+        seen: set[str] = set()
+        while parent and parent not in seen:
+            seen.add(parent)
+            ancestor = self.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
+            if not ancestor:
+                return parent
+            if str(ancestor.get("type") or "").strip().lower() == "epic":
+                return parent
+            parent = str(ancestor.get("parent_key") or "")
+        return ""
+
     def triage_candidates(self, projects: list[str]) -> list[dict]:
         """Tickets with an open escalation in the triage queue."""
         return self.db.all(_TRIAGE_CANDIDATES_SQL, (projects,))

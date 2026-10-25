@@ -60,6 +60,10 @@ from . import quota as quota_reporting
 from . import projects as project_lifecycle
 from .incidents import flow_bug_candidates, suggested_flow_fix
 from .db import DB, J
+from .repositories.accounts import AccountsRepository
+from .repositories.nodes import NodesRepository
+from .repositories.runs import RunsRepository
+from .repositories.tickets import TicketsRepository
 from .events import Events
 from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
@@ -81,32 +85,6 @@ RELEASES = Path("/srv/aiflow/control/releases")
 _NON_ROUTABLE_JOIN_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32",
 ))
-# A ticket whose recent dev runs failed waits before the next try: 2, 4, 8, 16 then 30 minutes after the last
-# failure (consecutive failures since the last run that produced work), so a broken ticket cannot spin.
-BACKOFF_SQL = """
-WITH last AS (
-  SELECT ticket_key, outcome, ended_at,
-         row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
-  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
-), streak AS (
-  SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
-  FROM last l
-  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
-    AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
-                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
-  GROUP BY l.ticket_key
-)
-SELECT ticket_key, fails FROM streak
-WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
-"""
-# An Intake ticket whose last intake run failed waits 10 minutes before the next refinement try (the same for the
-# impact assessment of a change request).
-INTAKE_BACKOFF_SQL = """
-SELECT DISTINCT ON (ticket_key) ticket_key, outcome, ended_at FROM runs
-WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
-ORDER BY ticket_key, started_at DESC
-"""
-
 # `/v1/state` is consumed by the console and deployment tools. Its implementation is a shared helper in
 # control/state.py, so keep its complete response contract explicit in OpenAPI for generated docs.
 def _state_object(properties: dict, required: tuple[str, ...] = ()) -> dict:
@@ -1800,18 +1778,11 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def quota_forecast_at_risk(account_id: str) -> bool:
         """Read the latest watchdog forecast without rebuilding weeks of run and probe history per poll."""
-        row = ctx.db.one("SELECT quota_at_risk FROM accounts WHERE id=%s", (account_id,))
-        return bool(row and row["quota_at_risk"])
+        return AccountsRepository(ctx.db).quota_at_risk(account_id)
 
     def quota_peer_accounts(account_id: str, roles: set[str] | None = None) -> list[dict]:
         """Ready same-provider accounts that can serve at least one of this account's workflow roles."""
-        account_row = ctx.db.one("SELECT provider FROM accounts WHERE id=%s", (account_id,))
-        if not account_row:
-            return []
-        peers = ctx.db.all(
-            "SELECT a.id,a.roles,a.status,a.quota_at_risk FROM accounts a"
-            " WHERE a.provider=%s AND a.id<>%s AND a.status NOT IN ('cooldown','signed_out','error') ORDER BY a.id",
-            (account_row["provider"], account_id))
+        peers = AccountsRepository(ctx.db).quota_peer_candidates(account_id)
         online = shared_accounts.online_nodes(ctx.db)
         available: list[dict] = []
         for peer in peers:
@@ -2980,19 +2951,7 @@ def create_app(ctx: Ctx) -> FastAPI:
 
     def ticket_epic(ticket: dict[str, Any]) -> str:
         """Resolve a ticket's parent chain to its Jira epic key."""
-        if ticket.get("type") == "Epic":
-            return str(ticket.get("key") or "")
-        parent = str(ticket.get("parent_key") or "")
-        seen: set[str] = set()
-        while parent and parent not in seen:
-            seen.add(parent)
-            ancestor = ctx.db.one("SELECT key,type,parent_key FROM tickets WHERE key=%s", (parent,))
-            if not ancestor:
-                return parent
-            if ancestor["type"] == "Epic":
-                return parent
-            parent = str(ancestor.get("parent_key") or "")
-        return ""
+        return TicketsRepository(ctx.db).epic_key(ticket)
 
     @app.get("/v1/projects")
     def managed_projects(request: Request) -> dict:
@@ -4450,8 +4409,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     def last_dev(key: str, done: bool = False) -> dict | None:
         """The latest finished dev run; done=True: the latest one that delivered work (a failed or blocked run
         in between does not answer the reviewer's findings)."""
-        return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
-                          + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
+        return RunsRepository(ctx.db).latest_development(key, delivered_only=done)
 
     def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
                  verify_retry_guard: bool = True) -> list[dict]:
@@ -4459,8 +4417,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         repo, acc = work_candidates.resolve_account(ctx, account_id, node)
         if not work_eligibility.can_take_work(ctx.db, ctx.leases, acc, node):
             return []
-        node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"
-                              " AND removed_at IS NULL", (node,)) or {}
+        node_row = NodesRepository(ctx.db).candidate_node(node)
         if not node_row.get("accepting_work", True):
             return []
         projects = work_candidates.available_projects(ctx, repo, node, node_row)
@@ -4469,6 +4426,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         roles = set(acc.roles or ["dev", "verify"])
         modes = role_health.modes(ctx.db, acc.id, sorted(roles))
         node_tools = node_row.get("tools") or {}
+        runs_repo = RunsRepository(ctx.db)
+        tickets_repo = TicketsRepository(ctx.db)
         state = work_candidates.CandidateContext(
             ctx=ctx, repo=repo, account=acc, node=node, node_row=node_row, projects=projects,
             missing_container_runtime=False, roles=roles, modes=modes,
@@ -4476,11 +4435,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             priorities={key: int(getattr(project, "priority", 5) or 5)
                         for key, project in repo.projects.items()},
             quota_at_risk=quota_forecast_at_risk(account_id), capacity_routing=capacity_routing,
-            verify_retry_guard=verify_retry_guard, last_dev=last_dev, ticket_epic=ticket_epic,
-            backoff=lambda step: {row["ticket_key"] for row in ctx.db.all(BACKOFF_SQL, {"step": step})},
-            intake_backoff=lambda step: {row["ticket_key"] for row in ctx.db.all(
-                INTAKE_BACKOFF_SQL, {"step": step}) if row["outcome"] in ("failed", "timeout", "lost")
-                and row["ended_at"] and row["ended_at"] > utcnow() - timedelta(minutes=10)},
+            verify_retry_guard=verify_retry_guard, runs_repo=runs_repo, tickets_repo=tickets_repo,
             quota_peers=quota_peer_accounts,
             peer_compatible=rollout.node_compatible,
             peer_offers=lambda peer, machine, guard: eligible(
@@ -4537,8 +4492,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 return None
             # A lost or quota-stopped holder is an account failure, not a failing cycle: no scope backoff.
             failover = failed_over
-        backoff = ctx.db.all(BACKOFF_SQL, {"step": "master"})
-        if not failover and any(row["ticket_key"] == MASTER_SCOPE for row in backoff):
+        if not failover and MASTER_SCOPE in RunsRepository(ctx.db).cooling_tickets("master"):
             return None
         if recent and recent["ended_at"] and recent["ended_at"] > utcnow() - timedelta(seconds=MASTER_CYCLE_S):
             if recent["outcome"] == "done":

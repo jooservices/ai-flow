@@ -95,11 +95,11 @@ def test_idle_flow_names_backoff_quota_licence_and_project_pause(client, ctx, re
 
 
 def test_ticket_whose_dev_run_changed_nothing_still_waits_before_the_next_try(client, ctx, repo):
-    from aiflow.v4.control.api import BACKOFF_SQL
+    from aiflow.v4.control.repositories.runs import RunsRepository
     add_ticket(ctx.db, "TESTWP-960")
     run(ctx, "TESTWP-960", minutes_ago=1)
     ctx.db.run("UPDATE runs SET outcome='no_changes',ended_at=now() WHERE ticket_key='TESTWP-960'")
-    assert "TESTWP-960" in {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "dev"})}
+    assert "TESTWP-960" in RunsRepository(ctx.db).cooling_tickets("dev")
 
 
 def test_idle_flow_names_version_skew(client, ctx, repo, monkeypatch):

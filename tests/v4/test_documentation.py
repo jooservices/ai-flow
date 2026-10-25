@@ -38,13 +38,6 @@ def test_runbooks_match_incident_kinds_raised_in_code():
         assert f"[{kind}]({kind}.md)" in index
 
 
-def test_shared_account_api_inventory_table_has_no_split_between_rows():
-    lines = (ROOT / "docs/v4/shared-accounts.md").read_text(encoding="utf-8").splitlines()
-    row = next(index for index, line in enumerate(lines)
-               if "GET /v1/version-releases/candidates" in line)
-    assert lines[row + 1].startswith("| `GET /v1/master/candidate`"), "API inventory table was split"
-
-
 def test_every_runbook_has_symptom_cause_and_fix():
     for kind in docsite.incident_kinds():
         guide_page = GUIDE / "runbooks" / f"{kind}.md"

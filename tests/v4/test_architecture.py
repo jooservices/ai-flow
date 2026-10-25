@@ -154,12 +154,66 @@ def test_capacity_routing_reads_account_and_run_history_through_repositories():
                       and node.args[0].value.lstrip().upper().startswith("SELECT")]
     accounts = (ROOT / "aiflow/v4/control/repositories/accounts.py").read_text(encoding="utf-8")
     runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
+    incidents = (ROOT / "aiflow/v4/control/incidents.py").read_text(encoding="utf-8")
 
     assert not inline_queries
     assert "AccountsRepository(ctx.db).capacity_routing_accounts()" in capacity
     assert "def capacity_routing_accounts" in accounts
     assert "def capacity_history" in runs
     assert "RunsRepository(db).capacity_history(project_keys)" in capacity
+
+
+def test_candidate_setup_uses_aggregate_repositories_for_its_query_shapes():
+    api_path = ROOT / "aiflow/v4/control/api.py"
+    api_tree = ast.parse(api_path.read_text(encoding="utf-8"), filename=str(api_path))
+    query_helpers = {node.name: node for node in ast.walk(api_tree)
+                     if isinstance(node, ast.FunctionDef)
+                     and node.name in {"eligible", "ticket_epic", "last_dev", "quota_forecast_at_risk",
+                                       "quota_peer_accounts"}}
+    inline_queries = {
+        name: [node.args[0].value for node in ast.walk(function)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr in {"all", "one"} and node.args
+               and isinstance(node.args[0], ast.Constant)
+               and isinstance(node.args[0].value, str)
+               and node.args[0].value.lstrip().upper().startswith("SELECT")]
+        for name, function in query_helpers.items()
+    }
+    inline_queries = {name: queries for name, queries in inline_queries.items() if queries}
+    api = api_path.read_text(encoding="utf-8")
+    candidates = (ROOT / "aiflow/v4/control/work_candidates.py").read_text(encoding="utf-8")
+    accounts = (ROOT / "aiflow/v4/control/repositories/accounts.py").read_text(encoding="utf-8")
+    runs = (ROOT / "aiflow/v4/control/repositories/runs.py").read_text(encoding="utf-8")
+    incidents = (ROOT / "aiflow/v4/control/incidents.py").read_text(encoding="utf-8")
+
+    assert not inline_queries
+    assert "NodesRepository(ctx.db).candidate_node(node)" in api
+    assert "AccountsRepository(ctx.db).quota_at_risk(account_id)" in api
+    assert "AccountsRepository(ctx.db).quota_peer_candidates(account_id)" in api
+    assert "BACKOFF_SQL" not in api
+    assert "RunsRepository(ctx.db).cooling_tickets(\"dev\")" in incidents
+    assert "VerifyRunsRepository(ctx.db).cooling_tickets()" in incidents
+    assert "runs_repo=runs_repo, tickets_repo=tickets_repo" in api
+    assert "state.runs_repo.latest_development" in candidates
+    assert "state.runs_repo.cooling_tickets" in candidates
+    assert "state.runs_repo.intake_waiting_tickets" in candidates
+    for method in ("latest_development", "cooling_tickets", "intake_waiting_tickets"):
+        assert f"def {method}" in runs
+    for method in ("quota_at_risk", "quota_peer_candidates"):
+        assert f"def {method}" in accounts
+
+
+def test_watchdog_is_split_into_functions_within_the_architecture_size_budget():
+    loops_path = ROOT / "aiflow/v4/control/loops.py"
+    tree = ast.parse(loops_path.read_text(encoding="utf-8"), filename=str(loops_path))
+    checks = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+              and (node.name == "watchdog" or node.name.startswith("_watch_")
+                   or node.name in {"_requeue_orphan_ticket", "_mark_lost_run", "_audit_lost_run",
+                                    "_watch_quota_window", "_open_quota_prediction"})]
+
+    oversized = {node.name: node.end_lineno - node.lineno + 1 for node in checks
+                 if node.end_lineno - node.lineno + 1 > 80}
+    assert not oversized, f"watchdog responsibilities exceed the 80-line limit: {oversized}"
 
 
 def test_developer_and_verify_prompts_use_architecture_document():

@@ -30,10 +30,8 @@ class CandidateContext:
     quota_at_risk: bool
     capacity_routing: bool
     verify_retry_guard: bool
-    last_dev: Callable
-    ticket_epic: Callable
-    backoff: Callable[[str], set[str]]
-    intake_backoff: Callable[[str], set[str]]
+    runs_repo: RunsRepository
+    tickets_repo: TicketsRepository
     quota_peers: Callable
     peer_compatible: Callable
     peer_offers: Callable
@@ -102,7 +100,7 @@ def _reject_runtime(state: CandidateContext, ticket: dict, facts: dict) -> str |
 
 
 def _reject_same_dev(state: CandidateContext, ticket: dict, _facts: dict) -> str | None:
-    dev = state.last_dev(ticket["key"])
+    dev = state.runs_repo.latest_development(ticket["key"])
     return "the development account cannot triage its own ticket" if dev and dev["account_id"] == state.account.id else None
 
 
@@ -243,9 +241,9 @@ def _verify(state: CandidateContext) -> list[dict]:
 
 
 def _release(state: CandidateContext) -> list[dict]:
-    cooling = state.backoff("post_merge")
+    cooling = state.runs_repo.cooling_tickets("post_merge")
     pending = [item for key in state.projects for item in environment_reports.pending_post_merge(state.ctx, key)]
-    tickets = TicketsRepository(state.ctx.db)
+    tickets = state.tickets_repo
     out = []
     for waiting in pending:
         ticket = tickets.by_key(waiting["ticket"])
@@ -256,8 +254,8 @@ def _release(state: CandidateContext) -> list[dict]:
 
 
 def _triage(state: CandidateContext) -> list[dict]:
-    cooling = state.backoff("triage")
-    tickets = TicketsRepository(state.ctx.db).triage_candidates(state.projects)
+    cooling = state.runs_repo.cooling_tickets("triage")
+    tickets = state.tickets_repo.triage_candidates(state.projects)
     out = []
     for ticket in tickets:
         if not _eligible(state, ticket, "triage", {"cooling": cooling}):
@@ -267,14 +265,14 @@ def _triage(state: CandidateContext) -> list[dict]:
 
 
 def _intake(state: CandidateContext) -> list[dict]:
-    waiting = state.intake_backoff("intake")
-    tickets = TicketsRepository(state.ctx.db).intake_candidates(state.projects)
+    waiting = state.runs_repo.intake_waiting_tickets("intake")
+    tickets = state.tickets_repo.intake_candidates(state.projects)
     return _simple_intake(state, tickets, waiting, "intake")
 
 
 def _impact(state: CandidateContext) -> list[dict]:
-    waiting = state.intake_backoff("impact")
-    tickets = TicketsRepository(state.ctx.db).impact_candidates(state.projects)
+    waiting = state.runs_repo.intake_waiting_tickets("impact")
+    tickets = state.tickets_repo.impact_candidates(state.projects)
     return _simple_intake(state, tickets, waiting, "impact")
 
 
@@ -288,16 +286,16 @@ def _simple_intake(state: CandidateContext, tickets: list[dict], waiting: set[st
 
 
 def _development(state: CandidateContext) -> list[dict]:
-    tickets_repo = TicketsRepository(state.ctx.db)
+    tickets_repo = state.tickets_repo
     done = tickets_repo.done_keys()
-    cooling = state.backoff("dev")
+    cooling = state.runs_repo.cooling_tickets("dev")
     parked = tooling.parked_tickets(state.ctx, state.node_row) | environment_reports.parked_tickets(state.ctx)
     footprints: dict[str, dict] = {}
 
     def footprint(ticket: dict) -> dict:
         key = ticket["key"]
         if key not in footprints:
-            footprints[key] = hotfiles.predict(state.ctx.db, ticket, state.ticket_epic(ticket))
+            footprints[key] = hotfiles.predict(state.ctx.db, ticket, tickets_repo.epic_key(ticket))
         return footprints[key]
 
     tickets = tickets_repo.development_candidates(state.projects)
@@ -324,10 +322,10 @@ def _needs_missing_runtime(state: CandidateContext, ticket: dict, step: str) -> 
 
 def _selected_settings_use_containers(state: CandidateContext, ticket: dict, project, step: str) -> bool:
     selected = project.settings_for_ticket({"key": ticket.get("key"), "type": ticket.get("type"),
-                                            "epic": state.ticket_epic(ticket)})
+                                            "epic": state.tickets_repo.epic_key(ticket)})
     if step in {"dev", "verify", "qa", "triage"}:
-        prior = state.last_dev(str(ticket.get("key") or ""), done=True) or state.last_dev(
-            str(ticket.get("key") or ""))
+        prior = state.runs_repo.latest_development(str(ticket.get("key") or ""), delivered_only=True) \
+            or state.runs_repo.latest_development(str(ticket.get("key") or ""))
         details = (prior or {}).get("details") or {}
         repository = str(details.get("repository") or "")
         if repository:

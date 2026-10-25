@@ -43,6 +43,34 @@ SELECT ticket_key, fails FROM streak
 WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
 """
 
+_BACKOFF_SQL = """
+WITH last AS (
+  SELECT ticket_key, outcome, ended_at,
+         row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
+  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
+), streak AS (
+  SELECT l.ticket_key, count(*) AS fails, max(l.ended_at) AS last_end
+  FROM last l
+  WHERE l.outcome IN ('failed', 'timeout', 'lost', 'no_changes')
+    AND NOT EXISTS (SELECT 1 FROM last g WHERE g.ticket_key = l.ticket_key AND g.n < l.n
+                    AND g.outcome NOT IN ('failed', 'timeout', 'lost', 'no_changes'))
+  GROUP BY l.ticket_key
+)
+SELECT ticket_key, fails FROM streak
+WHERE last_end > now() - make_interval(mins => LEAST(30, (2 ^ LEAST(fails, 5))::int))
+"""
+
+_INTAKE_BACKOFF_SQL = """
+WITH latest AS (
+  SELECT ticket_key, outcome, ended_at,
+         row_number() OVER (PARTITION BY ticket_key ORDER BY started_at DESC) AS n
+  FROM runs WHERE step = %(step)s AND status <> 'running' AND started_at > now() - interval '1 day'
+)
+SELECT ticket_key FROM latest
+WHERE n = 1 AND outcome IN ('failed', 'timeout', 'lost')
+  AND ended_at > now() - interval '10 minutes'
+"""
+
 _CAPACITY_HISTORY_SQL = (
     "SELECT t.key,t.project,t.type,t.labels,t.summary,t.description,t.fields,"
     "sum(greatest(0,r.tokens_in)+greatest(0,r.tokens_out))::bigint AS tokens,"
@@ -66,6 +94,20 @@ class RunsRepository:
     def ticket_stuck_streaks(self, step: str) -> list[dict]:
         """Recent generic failure streaks; no-verdict verification runs break rather than extend the streak."""
         return self.db.all(TICKET_STUCK_STREAKS_SQL, {"step": step})
+
+    def latest_development(self, ticket_key: str, delivered_only: bool = False) -> dict | None:
+        """Latest finished development run, optionally limited to one that delivered work."""
+        delivered = " AND outcome='done'" if delivered_only else ""
+        return self.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
+                           + delivered + " ORDER BY started_at DESC LIMIT 1", (ticket_key,))
+
+    def cooling_tickets(self, step: str) -> set[str]:
+        """Ticket keys waiting out the shared exponential backoff for a failed step."""
+        return {row["ticket_key"] for row in self.db.all(_BACKOFF_SQL, {"step": step})}
+
+    def intake_waiting_tickets(self, step: str) -> set[str]:
+        """Intake or impact tickets whose latest failed attempt is still inside its ten-minute wait."""
+        return {row["ticket_key"] for row in self.db.all(_INTAKE_BACKOFF_SQL, {"step": step})}
 
     def running_counts_by_project(self) -> dict[str, int]:
         """Number of active runs in each project for candidate capacity checks."""

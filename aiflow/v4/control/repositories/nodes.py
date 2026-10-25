@@ -7,6 +7,6 @@ class NodesRepository:
         self.db = db
 
     def candidate_node(self, node: str) -> dict:
-        """Node data needed to decide whether an account can verify a ticket there."""
+        """Node data needed to decide which work an account can receive there."""
         return self.db.one("SELECT name,status,last_heartbeat,projects,dynamic,tools,metrics,accepting_work,"
                            "release_version FROM nodes WHERE name=%s AND removed_at IS NULL", (node,)) or {}

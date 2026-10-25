@@ -78,9 +78,6 @@ codes are visible only to console users with `nodes.manage`; read-only leads can
 | `GET /v1/state` | The state shows each account once with its machines and per-machine usage. |
 | `GET /v1/deploy/state` | Deploy state lists accounts by machine membership rather than a single node. |
 
-The shared account readiness checks also apply to `GET /v1/master/candidate`, `GET /v1/version-releases/candidates`
-and `POST /v1/version-releases/claim`, so paused or full accounts do not appear ready for these roles.
-
 **Console screens:** `cc`, `machines`
 
 Accounts appear on Command Center (`/cc`) and Machines and AI (`/machines`): one account card with a breakdown per

@@ -86,12 +86,6 @@ release file commits, PR merge, tags, GitHub Releases, Jira Released state and m
 registry events and `write_audit`; the Release tracker also records the checked tickets, test result, master
 commit, tag, Release URL and Jira status.
 
-## Worker API
-
-Workers discover enabled versions with `GET /v1/version-releases/candidates` and claim one with
-`POST /v1/version-releases/claim`. Both paths apply account pause, quota, node readiness and licensing gates before
-work is offered or claimed.
-
 ## Configure other projects
 
 The exact TESTWP repository has the two trial version names enabled by default. For another project, configure

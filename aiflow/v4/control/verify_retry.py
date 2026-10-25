@@ -14,9 +14,13 @@ All of it is scoped to the current development round: a newer finished dev run s
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import HTTPException
 
-from . import role_health, shared_accounts
+from ..core.services import service_gaps
+from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
+from . import environment, licensing, role_health, rollout, shared_accounts, tooling
 from .incidents import close_incident, open_incident
 from .repositories.verify_runs import VerifyRunsRepository
 
@@ -47,50 +51,62 @@ def barred(runs: list[bool]) -> bool:
     return len(runs) >= CONSECUTIVE and all(runs[:CONSECUTIVE])
 
 
-def pool(ctx, ticket: dict, dev_account: str, runs: dict[str, list[bool]] | None = None) -> list[str]:
-    """Accounts eligible to verify the ticket: the verify role, not paused, not the author, label rules.
+def candidates(ctx, projects: list[str], account, held: set[str], offers, can_handle, allowed, probation,
+               retry_guard: bool = True) -> list[dict]:
+    """Build this account's verify offers; `retry_guard=False` probes ordinary eligibility without recursion."""
+    repository = VerifyRunsRepository(ctx.db)
+    cooling_tickets = repository.cooling_tickets("verify")
+    out = []
+    for ticket in repository.verification_candidates(projects):
+        if ticket["key"] in held or ticket["key"] in cooling_tickets or not can_handle(ticket):
+            continue
+        dev = repository.latest_dev_with_pr(ticket["key"])
+        if not dev or not dev["pr_url"] or dev["account_id"] == account.id:
+            continue
+        if account.explicit_only and f"ai-{account.provider}" not in ticket["labels"]:
+            continue
+        if not allowed("verify", ticket):
+            continue
+        if retry_guard and not may_take(
+                ctx, ticket, account.id, dev["account_id"],
+                lambda peer, node: offers(peer, node, retry_guard=False)):
+            continue
+        out.append({**ticket, "step": "verify", "probation": probation("verify")})
+    return out
 
-    An account that is not barred also needs a machine that is online and accepting work. An offline account
-    cannot receive the ticket, so it must not keep the ticket from counting as exhausted.
-    """
-    runs = history(ctx.db, ticket["key"]) if runs is None else runs
-    online = shared_accounts.online_nodes(ctx.db)
-    accepting = VerifyRunsRepository(ctx.db).accepting_nodes()
-    labels = set(ticket.get("labels") or [])
+
+def pool(ctx, ticket: dict, dev_account: str, offers=None, releases: Path | None = None) -> list[str]:
+    """Accounts whose normal candidate path can receive this ticket, regardless of no-verdict history."""
     out = []
     for acc in ctx.repo().accounts:
         if acc.paused or acc.id == dev_account or "verify" not in role_health.account_roles(acc):
             continue
-        if acc.explicit_only and f"ai-{acc.provider}" not in labels:
-            continue
-        if role_health.modes(ctx.db, acc.id, ["verify"])["verify"] == "off":
-            continue
-        if not barred(runs.get(acc.id, [])) and not any(m in online and m in accepting for m in acc.machines):
-            continue
-        out.append(acc.id)
+        for node in dict.fromkeys(acc.machines):
+            if offers is not None:
+                eligible = _offered(offers, acc.id, node, ticket["key"])
+            else:
+                eligible = candidate_offer(ctx, ticket, acc.id, node, releases)
+            if eligible:
+                out.append(acc.id)
+                break
     return out
 
 
 def may_take(ctx, ticket: dict, account_id: str, dev_account: str, offers) -> bool:
     """Whether `account_id` may be offered the ticket's verification now.
 
-    `offers(account, node)` is the final candidate path of the control API (entitlement, rollout and the
-    20-ticket limit included): an untried account holds the ticket back only when that path really offers it
-    this ticket. `offers=None` skips the deferral (used while that path is already being evaluated).
+    `offers(account, node)` is the final candidate path without the retry rule. An untried account holds the ticket
+    back only when that path really offers it this ticket. `offers=None` skips the deferral (used during that probe).
     """
     runs = history(ctx.db, ticket["key"])
     if barred(runs.get(account_id, [])):
         return False
     if offers is None or not any(runs.get(account_id, [])):  # never ended this ticket without a verdict
         return True
-    online = shared_accounts.online_nodes(ctx.db)
-    accounts = {acc.id: acc for acc in ctx.repo().accounts}
-    for other in pool(ctx, ticket, dev_account, runs):
+    for other in pool(ctx, ticket, dev_account, offers):
         if other == account_id or barred(runs.get(other, [])) or any(runs.get(other, [])):
             continue
-        for machine in dict.fromkeys(accounts[other].machines):
-            if machine in online and _offered(offers, other, machine, ticket["key"]):
-                return False  # an eligible account has not tried yet: it goes first
+        return False  # an eligible account has not tried yet: it goes first
     return True
 
 
@@ -101,21 +117,77 @@ def _offered(offers, account_id: str, node: str, key: str) -> bool:
         return False
 
 
-def exhausted(ctx, ticket: dict) -> list[str]:
+def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Path | None = None) -> bool:
+    """Ticket-specific normal verify eligibility used by the watchdog when no API request is present."""
+    repo, repository = ctx.repo(), VerifyRunsRepository(ctx.db)
+    account = repo.account(account_id)
+    project = repo.projects.get(str(ticket.get("project") or ""))
+    node_row = repository.candidate_node(node)
+    labels = set(ticket.get("labels") or [])
+    if (not account or account.paused or account.id == repository.last_dev_account(ticket["key"])
+            or not account.runs_on(node) or "verify" not in role_health.account_roles(account)
+            or (account.explicit_only and f"ai-{account.provider}" not in labels)):
+        return False
+    if (not project or project.paused or not node_row.get("accepting_work", True)
+            or node not in shared_accounts.online_nodes(ctx.db)
+            or project.key not in repo.projects_for_node(node, node_row.get("projects") or [], node_row.get("dynamic", False))):
+        return False
+    if project.parallel_limit and repository.running_project_count(project.key) >= project.parallel_limit:
+        return False
+    mode = role_health.modes(ctx.db, account.id, ["verify"])["verify"]
+    if mode != "on" and not (mode == "probation" and role_health.probation_ticket(ticket)):
+        return False
+    if ctx.leases.cooling(account.id) or ticket["key"] in set(ctx.leases.held_keys()):
+        return False
+    if ticket["key"] in cooling(ctx.db) or not _node_ready_for_ticket(ctx, ticket, project, node_row):
+        return False
+    try:
+        license_state = licensing.enforce_work_entitlement(
+            ctx, account.id, node, public_key=ctx.settings.license_public_key)
+        licensing.enforce_project_entitlement(ctx, project.key, public_key=ctx.settings.license_public_key,
+                                              state=license_state)
+    except licensing.LicenseError:
+        return False
+    return bool(rollout.node_compatible(ctx, node, releases)["compatible"])
+
+
+def _node_ready_for_ticket(ctx, ticket: dict, project, node_row: dict) -> bool:
+    node_tools = node_row.get("tools") or {}
+    if project.stacks or project.uses_containers:
+        if toolchain_gaps(node_tools, [tool for tool in project.tools if tool != CONTAINER_RUNTIME_TOOL],
+                          ctx.repo().versions, project.stacks, require_pins=bool(project.stacks)):
+            return False
+    if service_gaps((node_row.get("metrics") or {}).get("services"), project.required_services):
+        return False
+    prior = VerifyRunsRepository(ctx.db).latest_dev_with_pr(ticket["key"]) or {}
+    details = prior.get("details") or {}
+    repository_name = str(details.get("repository") or "")
+    saved_settings = details.get("repository_settings")
+    selected = (dict(saved_settings) if isinstance(saved_settings, dict) else
+                project.settings_for_repo(repository_name) if repository_name else
+                project.settings_for_ticket(ticket))
+    if selected.get("containers") and toolchain_gaps(node_tools, [CONTAINER_RUNTIME_TOOL], ctx.repo().versions):
+        return False
+    if ticket["key"] in tooling.parked_tickets(ctx, node_row):
+        return False
+    return ticket["key"] not in environment.parked_tickets(ctx)
+
+
+def exhausted(ctx, ticket: dict, offers=None, releases: Path | None = None) -> list[str]:
     """The accounts that failed the ticket when every eligible account is barred, else an empty list."""
     runs = history(ctx.db, ticket["key"])
-    accounts = pool(ctx, ticket, VerifyRunsRepository(ctx.db).last_dev_account(ticket["key"]), runs)
+    accounts = pool(ctx, ticket, VerifyRunsRepository(ctx.db).last_dev_account(ticket["key"]), offers, releases)
     if not accounts or not all(barred(runs.get(account, [])) for account in accounts):
         return []
     return sorted(accounts)
 
 
-def check_incidents(ctx) -> None:
+def check_incidents(ctx, releases: Path | None = None) -> None:
     """Watchdog: one incident per ticket whose eligible accounts all ended verification without a verdict."""
     repo = VerifyRunsRepository(ctx.db)
     open_now = set()
     for ticket in repo.tickets_in_verify():
-        failed = exhausted(ctx, ticket)
+        failed = exhausted(ctx, ticket, releases=releases)
         if not failed:
             continue
         open_now.add(ticket["key"])
@@ -145,6 +217,10 @@ def slow_verifications(db, minutes: int = SLOW_MINUTES) -> list[dict]:
 
 def describe(slow: dict) -> str:
     """One line for the Dashboard: how long the ticket waits and which accounts tried."""
-    tried = ", ".join(a["account"] + (f" (no verdict x{a['no_verdict']}" + (", not offered again)" if a["barred"] else ")")
-                                       if a["no_verdict"] else "") for a in slow["accounts"])
-    return f"{slow['waiting_minutes']} min · tried: {tried or 'no account has tried yet'}"
+    tried = []
+    for account in slow["accounts"]:
+        label = account["account"]
+        if account["no_verdict"]:
+            label += f" (no verdict x{account['no_verdict']}" + (", not offered again)" if account["barred"] else ")")
+        tried.append(label)
+    return f"{slow['waiting_minutes']} min · tried: {', '.join(tried) or 'no account has tried yet'}"

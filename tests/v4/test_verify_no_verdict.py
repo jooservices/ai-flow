@@ -1,11 +1,16 @@
 """Epics are never offered as work; a verify run without a verdict moves to another account (JAIF-271)."""
 import uuid
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 from conftest import add_ticket, join_node
 from aiflow.v4.control import role_health, state, verify_retry
 from aiflow.v4.control.db import J
+from aiflow.v4.core.controlrepo import Account
 from aiflow.v4.control.loops import _reconcile_epics, watchdog
+from aiflow.v4.control.repositories.runs import RunsRepository
 
 PR = "https://github.com/jooservices/test-aiflow-wp/pull/7"
 
@@ -44,6 +49,7 @@ def no_verdict(ctx, key, account, minutes_ago=5):
 
 
 def test_epic_with_ready_label_is_never_offered(client, ctx):
+    ctx.repo().account("claude-01").roles.append("intake_refiner")
     cc = join(client, "cc")
     add_ticket(ctx.db, "TESTWP-60")  # an ordinary ready ticket is offered
     add_ticket(ctx.db, "TESTWP-61", "To Do", labels=("aiflow-ready",))
@@ -103,15 +109,14 @@ def test_no_verdict_counts_against_the_verify_role_only_from_the_second_in_a_row
     in_verify(ctx)
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=6)
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=3)
-    runs = {r["started_at"]: r for r in ctx.db.all(role_health.RUNS_SQL, {"steps": ["verify"], "account": "codex-01",
-                                                                         "limit": 10})}
+    runs = {r["started_at"]: r for r in RunsRepository(ctx.db).role_health_history(["verify"], "codex-01", 10)}
     first, second = (runs[key] for key in sorted(runs))
     assert role_health.classify(first).failure is None
     assert role_health.classify(second).failure == 1.0
     # a verdict in between breaks the streak
     insert_run(ctx, "TESTWP-50", "verify", "codex-01", "rework", {"verdict": "FAIL"}, minutes_ago=2)
     no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=1)
-    latest = max(ctx.db.all(role_health.RUNS_SQL, {"steps": ["verify"], "account": "codex-01", "limit": 10}),
+    latest = max(RunsRepository(ctx.db).role_health_history(["verify"], "codex-01", 10),
                  key=lambda r: r["started_at"])
     assert role_health.classify(latest).failure is None
 
@@ -119,7 +124,8 @@ def test_no_verdict_counts_against_the_verify_role_only_from_the_second_in_a_row
 def test_failure_on_all_eligible_accounts_raises_one_incident_and_the_dashboard_lists_it(client, ctx):
     join(client, "cc"), join(client, "node1")
     in_verify(ctx)
-    assert not verify_retry.exhausted(ctx, {"key": "TESTWP-50", "labels": ["aiflow-ready"]})
+    assert not verify_retry.exhausted(ctx, {"key": "TESTWP-50", "project": "TESTWP", "status": "In Verify",
+                                           "labels": ["aiflow-ready"]})
     for account in ("codex-01", "claude-01"):
         no_verdict(ctx, "TESTWP-50", account, minutes_ago=8)
     watchdog(ctx)
@@ -150,6 +156,18 @@ def test_dashboard_lists_only_tickets_waiting_longer_than_30_minutes(ctx):
     assert [v["key"] for v in verify_retry.slow_verifications(ctx.db)] == ["TESTWP-80"]
 
 
+def test_dashboard_describes_tried_account_without_no_verdict_details(ctx):
+    in_verify(ctx, "TESTWP-82")
+    insert_run(ctx, "TESTWP-82", "verify", "claude-01", "quota", {"no_verdict": False}, minutes_ago=5)
+
+    slow = verify_retry.slow_verifications(ctx.db)[0]
+    described = verify_retry.describe(slow)
+
+    assert "claude-01" in described
+    assert "no verdict" not in described
+    assert "no account has tried yet" not in described
+
+
 def test_untried_account_that_cannot_receive_the_ticket_does_not_hold_the_retry_back(client, ctx):
     cc = join(client, "cc")
     join(client, "node1")
@@ -168,17 +186,15 @@ def test_candidate_refused_after_eligible_does_not_hold_the_retry_back(client, c
     in_verify(ctx)
     no_verdict(ctx, "TESTWP-50", "claude-01")
     assert ("TESTWP-50", "verify") not in offered(client, cc, "claude-01")  # codex-01 is untried and offered
-    real = licensing.enforce_project_entitlement
-    calls = []
+    real = licensing.enforce_work_entitlement
 
-    def refuse_first(ctx_, project, **kwargs):
-        calls.append(project)
-        if len(calls) % 2 == 1:  # the check for the untried account, made while claude-01's list is built
+    def refuse_codex(ctx_, account, node, **kwargs):
+        if account == "codex-01":
             raise licensing.LicenseError("plan limit")
-        return real(ctx_, project, **kwargs)
+        return real(ctx_, account, node, **kwargs)
 
-    monkeypatch.setattr(licensing, "enforce_project_entitlement", refuse_first)
-    # eligible() still lists the ticket for codex-01, but the final candidate list does not: claude-01 gets the retry
+    monkeypatch.setattr(licensing, "enforce_work_entitlement", refuse_codex)
+    # Codex's ordinary candidate path is entitlement-blocked, so it cannot hold the retry back.
     assert ("TESTWP-50", "verify") in offered(client, cc, "claude-01")
 
 
@@ -187,7 +203,57 @@ def test_offline_account_does_not_keep_the_ticket_from_being_exhausted(client, c
     in_verify(ctx)
     for minutes in (8, 2):
         no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=minutes)
-    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "labels": ["aiflow-ready"]}) == ["claude-01"]
+    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "project": "TESTWP", "status": "In Verify",
+                                       "labels": ["aiflow-ready"]}) == ["claude-01"]
     watchdog(ctx)
     assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict'"
                       " AND closed_at IS NULL")["n"] == 1
+
+
+def test_online_account_without_project_access_does_not_prevent_exhaustion(client, ctx):
+    join(client, "cc")
+    join(client, "node1")
+    join(client, "node2")
+    ctx.db.run("UPDATE nodes SET projects=%s,dynamic=false WHERE name='node2'", ([],))
+    ctx.repo().accounts.append(Account(id="grok-01", provider="grok", node="node2", roles=["verify"]))
+    in_verify(ctx)
+    for account in ("codex-01", "claude-01"):
+        for minutes in (8, 2):
+            no_verdict(ctx, "TESTWP-50", account, minutes_ago=minutes)
+
+    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "project": "TESTWP", "labels": ["aiflow-ready"]}) == [
+        "claude-01", "codex-01"]
+
+
+def test_concurrent_candidate_checks_keep_retry_probe_request_local(client, ctx, monkeypatch):
+    cc, node1 = join(client, "cc"), join(client, "node1")
+    ctx.repo().accounts.append(Account(id="grok-01", provider="grok", node="cc", roles=["verify"]))
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "codex-01")
+    no_verdict(ctx, "TESTWP-50", "claude-01", minutes_ago=4)
+    entered_probe, release_probe = Event(), Event()
+
+    from aiflow.v4.control import licensing
+    real_enforce = licensing.enforce_work_entitlement
+
+    def pause_probe(ctx_, account, node, **kwargs):
+        if account == "grok-01":
+            entered_probe.set()
+            assert release_probe.wait(5)
+        return real_enforce(ctx_, account, node, **kwargs)
+
+    monkeypatch.setattr(licensing, "enforce_work_entitlement", pause_probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.get, "/v1/work/candidates", params={"account": "codex-01"}, headers=node1)
+        assert entered_probe.wait(3)
+        second = pool.submit(client.get, "/v1/work/candidates", params={"account": "claude-01"}, headers=cc)
+        try:
+            time.sleep(0.15)
+            assert not second.done()
+        finally:
+            release_probe.set()
+        first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert ("TESTWP-50", "verify") not in {
+        (ticket["key"], ticket["step"]) for ticket in second_result.json()["tickets"]}

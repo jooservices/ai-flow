@@ -61,6 +61,12 @@ the App installation. The **Add project** form also has **Add repository on GitH
 controls. The project catalog asks GitHub for the installation's current repositories on each refresh, so a repo
 added on GitHub is available without restarting AI Flow.
 
+The console loads a project's repository assignments with `GET /v1/projects/{key}/repositories` and saves them with
+`PUT /v1/projects/{key}/repositories`. It loads the available repositories from GitHub connections, which can be
+added with `POST /v1/integrations/github/connections/token` or updated with
+`PUT /v1/integrations/github/connections/{connection_id}/token`; an unused connection can be removed with
+`DELETE /v1/integrations/github/connections/{connection_id}`.
+
 Opening the installation settings page and changes to the repository list are recorded in `write_audit` under the
 `github` target. The audit stores the owner, App and installation identifiers, and added or removed repository
 names; it never stores private keys or installation tokens.

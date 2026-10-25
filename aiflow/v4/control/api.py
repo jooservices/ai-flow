@@ -48,7 +48,7 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, runtime_settings, shared_accounts, support_bundle, tooling, version_release)
+               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling, version_release)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -62,6 +62,7 @@ from .db import DB, J
 from .events import Events
 from .github import GitHubApp, GitHubError
 from .github_connect import GitHubSecretStore, app_metadata
+from .github_registry import github_connections as _github_registry
 from .github_connections import DEFAULT_ID, Connection, GitHubConnections, GitHubTokenApp, verify_token
 from .jira import Jira
 from .policy import Decision, decide, decide_master_action, decide_read_only, explain
@@ -476,13 +477,9 @@ github_connection_used: ContextVar[str] = ContextVar("github_connection_used", d
 
 
 def github_connections(ctx: Ctx) -> GitHubConnections:
-    """The registry of the connections after the default one, shared by every API replica through the secret store."""
-    registry = getattr(ctx, "github_registry", None)
-    if registry is None or registry.root != Path(ctx.settings.github_app_dir):
-        registry = GitHubConnections(ctx.settings.github_app_dir, lambda directory, org: GitHubApp(directory, org),
-                                     lambda token, account, kind: GitHubTokenApp(token, account, kind))
-        ctx.github_registry = registry
-    return registry
+    """The registry of the connections after the default one (see `github_registry`)."""
+    return _github_registry(ctx, lambda directory, org: GitHubApp(directory, org),
+                            lambda token, account, kind: GitHubTokenApp(token, account, kind))
 
 
 def github_connection_list(ctx: Ctx) -> list[Connection]:
@@ -3799,7 +3796,7 @@ def create_app(ctx: Ctx) -> FastAPI:
             audit("node", "join_command", name, "", None, user.subject, False, "project is required")
             raise HTTPException(422, "select a project for this node")
         try:
-            control = validated_join_control_url(ctx.settings.join_control_url)
+            control = validated_join_control_url(ctx.settings.join_control_url or ctx.settings.public_url)
         except ValueError as exc:
             audit("node", "join_command", name, "", None, user.subject, False, str(exc))
             raise HTTPException(503, "configure AIFLOW4_JOIN_CONTROL_URL to an address reachable from joining nodes") from exc
@@ -4455,7 +4452,8 @@ def create_app(ctx: Ctx) -> FastAPI:
         return ctx.db.one("SELECT * FROM runs WHERE ticket_key=%s AND step='dev' AND status<>'running'"
                           + (" AND outcome='done'" if done else "") + " ORDER BY started_at DESC LIMIT 1", (key,))
 
-    def eligible(account_id: str, node: str, *, capacity_routing: bool = True) -> list[dict]:
+    def eligible(account_id: str, node: str, *, capacity_routing: bool = True,
+                 verify_retry_guard: bool = True) -> list[dict]:
         """Tickets this account may take now: verify and triage before new development."""
         repo = ctx.repo()
         acc = repo.account(account_id)
@@ -4527,23 +4525,10 @@ def create_app(ctx: Ctx) -> FastAPI:
             return []
         prio = {k: int(getattr(p, "priority", 5) or 5) for k, p in repo.projects.items()}
         if "verify" in roles:
-            verify_cooling = verify_retry.cooling(ctx.db)
-            for t in ctx.db.all("SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'"
-                                " AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'", (projects,)):
-                if ticket_needs_missing_container_runtime(t, "verify"):
-                    continue
-                if t["key"] in held or t["key"] in verify_cooling:
-                    continue
-                dev = last_dev(t["key"], done=True)
-                if not dev or not dev["pr_url"]:
-                    continue
-                if dev["account_id"] == acc.id or not verify_retry.may_take(ctx, t, acc.id, dev["account_id"], final_offers):
-                    continue  # never grade your own work; no-verdict rules: verify_retry.py
-                if acc.explicit_only and f"ai-{acc.provider}" not in t["labels"]:
-                    continue
-                if not allowed("verify", t):
-                    continue
-                out.append({**t, "step": "verify", "probation": probation("verify")})
+            out.extend(verify_retry.candidates(
+                ctx, projects, acc, held, final_offers,
+                lambda ticket: not ticket_needs_missing_container_runtime(ticket, "verify"),
+                allowed, probation, retry_guard=verify_retry_guard))
         if "release" in roles:
             post_merge_cooling = {r["ticket_key"] for r in ctx.db.all(BACKOFF_SQL, {"step": "post_merge"})}
             pending = [item for project_key in projects
@@ -4769,11 +4754,11 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "description": "Review incidents and follow up on blocked or slow work.",
                 "jira_created": None, "step": "master"}
 
-    def entitled_candidates(account: str, node: str) -> tuple[list[dict], str]:
+    def entitled_candidates(account: str, node: str, *, verify_retry_guard: bool = True) -> tuple[list[dict], str]:
         """Filter offers by account, machine, and project plan limits without affecting active runs."""
         state = licensing.enforce_work_entitlement(ctx, account, node,
                                                     public_key=ctx.settings.license_public_key)
-        candidates = eligible(account, node)
+        candidates = eligible(account, node, verify_retry_guard=verify_retry_guard)
         allowed: list[dict] = []
         refused: list[str] = []
         for ticket in candidates:
@@ -4787,23 +4772,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         reason = refused[0] if candidates and not allowed and refused else ""
         return allowed, reason
 
-    probing = [False]
-
-    def final_offers(account: str, node: str) -> list[dict]:
+    def final_offers(account: str, node: str, *, retry_guard: bool = False) -> list[dict]:
         """What /v1/work/candidates would return to this account now (entitlement, rollout, 20-ticket limit).
 
-        The verify retry rule asks it for other accounts; while it runs, nested asks answer nothing so that two
-        accounts cannot wait on each other.
+        Retry probes explicitly skip only the no-verdict routing rule, so candidate requests remain independent.
         """
-        if probing[0]:
-            return []
-        probing[0] = True
         try:
-            tickets, _reason = entitled_candidates(account, node)
+            tickets, _reason = entitled_candidates(account, node, verify_retry_guard=retry_guard)
         except licensing.LicenseError:
             return []
-        finally:
-            probing[0] = False
         return tickets[:20] if rollout.node_compatible(ctx, node, RELEASES)["compatible"] else []
 
     @app.get("/v1/work/candidates")
@@ -7617,7 +7594,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         audit("backup", "run_now", "", "", None, user.subject, True, "backup queued")
         return {"queued": True}
 
-    jira_connect.mount(app, ctx)
+    jira_connect.mount(app, ctx); setup_wizard.install(app, ctx)
     runtime_settings.install(app, ctx, console_user, audit)
     from .login import install_login
     install_login(app, ctx)

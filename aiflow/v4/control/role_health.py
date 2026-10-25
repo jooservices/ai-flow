@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .incidents import close_incident, open_incident
+from .repositories.runs import RunsRepository
 from ..core.toolchains import parse_missing_requirements
 
 log = logging.getLogger("aiflow4.role_health")
@@ -42,27 +43,8 @@ UNSCORED_KINDS = {"quota", "auth", "infra", "network", "machine", "node", "tool"
                   "missing-tool", "offline", "toolchain", "services"}
 SUCCESS_OUTCOMES = {"merged", "human", "refined", "questions", "assessed", "answered", "escalated"}
 STOPPED_OUTCOMES = {"timeout", "lost"}
+STOPPED_KINDS = {"timeout", "lost"}  # a timed-out run is stored as outcome failed with this error kind
 STOPPED_WEIGHT = 0.25        # share of a failure that a run stopped by the time limit or a lost lease counts
-
-RUNS_SQL = """
-WITH recent AS (
-  SELECT id, ticket_key, step, account_id, outcome, error_kind, summary, details, pr_url, node, started_at, cost_usd,
-         row_number() OVER (PARTITION BY account_id ORDER BY started_at DESC) AS n
-  FROM runs
-  WHERE status <> 'running' AND outcome <> '' AND step = ANY(%(steps)s::text[])
-    AND (%(account)s::text = '' OR account_id = %(account)s::text)
-)
-SELECT r.*, CASE WHEN r.step = 'dev' AND r.outcome = 'done' THEN
-  (SELECT v.outcome FROM runs v WHERE v.ticket_key = r.ticket_key AND v.step IN ('verify', 'qa')
-     AND v.started_at > r.started_at AND v.outcome IN ('merged', 'human', 'rework')
-   ORDER BY v.started_at LIMIT 1) END AS decision,
-  CASE WHEN r.step = 'verify' THEN
-  (SELECT coalesce(p.details->>'no_verdict' = 'true', false) FROM runs p WHERE p.ticket_key = r.ticket_key
-     AND p.account_id = r.account_id AND p.step = 'verify' AND p.status <> 'running' AND p.started_at < r.started_at
-   ORDER BY p.started_at DESC LIMIT 1) END AS prev_no_verdict
-FROM recent r WHERE r.n <= %(limit)s ORDER BY r.started_at DESC
-"""
-
 
 @dataclass(frozen=True)
 class Scored:
@@ -113,7 +95,7 @@ def classify(run: dict) -> Scored | None:
         return Scored("finished", 0.0, rework=True)
     if outcome == "done" or outcome in SUCCESS_OUTCOMES:
         return Scored("finished", 0.0)
-    if outcome in STOPPED_OUTCOMES:
+    if outcome in STOPPED_OUTCOMES or (outcome == "failed" and kind in STOPPED_KINDS):
         # Stopped by the time limit or the loss of its lease: mostly the size of the ticket or the load of the
         # machine, not the quality of the AI. It weighs a quarter of a failed run, so at the default 60% threshold a
         # busy machine alone cannot switch a role off (it did: 7 of the last 10 runs of the best account were
@@ -166,7 +148,7 @@ def set_settings(db, window_runs: int, failure_percent: int, by: str) -> dict[st
 def _history(db, account_id: str = "") -> dict[tuple[str, str], list[tuple[dict, Scored | None]]]:
     """Newest first, per (account, role): every finished run with its score (None = not decided yet)."""
     out: dict[tuple[str, str], list[tuple[dict, Scored | None]]] = {}
-    for run in db.all(RUNS_SQL, {"steps": list(STEP_ROLE), "account": account_id, "limit": HISTORY_RUNS}):
+    for run in RunsRepository(db).role_health_history(list(STEP_ROLE), account_id, HISTORY_RUNS):
         out.setdefault((run["account_id"], STEP_ROLE[run["step"]]), []).append((run, classify(run)))
     return out
 

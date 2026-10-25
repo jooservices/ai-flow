@@ -40,6 +40,11 @@ WHERE t.status='In Verify' AND lower(coalesce(t.type,'')) <> 'epic'
 ORDER BY since
 """
 
+_CANDIDATES_SQL = """
+SELECT * FROM tickets WHERE project = ANY(%s) AND status = 'In Verify'
+  AND NOT ('aiflow-hold' = ANY(labels)) AND lower(coalesce(type,'')) <> 'epic'
+"""
+
 
 class VerifyRunsRepository:
     def __init__(self, db) -> None:
@@ -58,12 +63,24 @@ class VerifyRunsRepository:
                           " ORDER BY started_at DESC LIMIT 1", (ticket_key,))
         return (row or {}).get("account_id", "")
 
-    def tickets_in_verify(self) -> list[dict]:
-        return self.db.all("SELECT key, labels, type FROM tickets WHERE status='In Verify'"
-                           " AND lower(coalesce(type,'')) <> 'epic'")
+    def latest_dev_with_pr(self, ticket_key: str) -> dict | None:
+        return self.db.one("SELECT account_id, pr_url, details FROM runs WHERE ticket_key=%s AND step='dev'"
+                           " AND outcome='done' ORDER BY started_at DESC LIMIT 1", (ticket_key,))
 
-    def accepting_nodes(self) -> set[str]:
-        return {r["name"] for r in self.db.all("SELECT name FROM nodes WHERE removed_at IS NULL AND accepting_work")}
+    def verification_candidates(self, projects: list[str]) -> list[dict]:
+        return self.db.all(_CANDIDATES_SQL, (projects,))
+
+    def candidate_node(self, node: str) -> dict:
+        return self.db.one("SELECT name,status,last_heartbeat,projects,dynamic,tools,metrics,accepting_work,"
+                           "release_version FROM nodes WHERE name=%s AND removed_at IS NULL", (node,)) or {}
+
+    def running_project_count(self, project: str) -> int:
+        row = self.db.one("SELECT count(*) AS count FROM runs WHERE status='running' AND project=%s", (project,))
+        return int((row or {}).get("count", 0))
+
+    def tickets_in_verify(self) -> list[dict]:
+        return self.db.all("SELECT key, project, status, summary, labels, type FROM tickets WHERE status='In Verify'"
+                           " AND lower(coalesce(type,'')) <> 'epic'")
 
     def open_incident_subjects(self, kind: str) -> list[str]:
         return [r["subject"] for r in self.db.all(

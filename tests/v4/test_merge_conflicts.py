@@ -170,7 +170,7 @@ def test_simultaneous_claims_reserve_a_hot_file_for_one_ticket_only(db):
 
 
 @pytest.mark.parametrize(("holder_status", "pr_state"), [
-    ("Human review", ""), ("Ready to merge", ""), ("To Do", "open")
+    ("Human review", ""), ("Ready to merge", ""), ("In Verify", "open")
 ])
 def test_live_or_open_pr_reservation_cannot_be_replaced_after_six_hours(db, holder_status, pr_state):
     add_ticket(db, "TESTWP-1", status=holder_status)
@@ -718,3 +718,18 @@ def test_verify_answer_without_a_verdict_line_is_marked_no_verdict(monkeypatch, 
     assert result["outcome"] == "failed" and result["details"]["no_verdict"] is True
     assert result["summary"].startswith("no verdict")
     assert not any(p.startswith("/v1/github/merge") for _, p, _, _ in api.calls)
+
+def test_a_ticket_waiting_for_rework_with_an_open_pull_request_holds_no_hot_file(db):
+    add_ticket(db, "TESTWP-1", status="To Do")
+    db.run("UPDATE tickets SET pr_state='open' WHERE key='TESTWP-1'")
+    add_ticket(db, "TESTWP-2", status="In Verify")
+    describe(db, "TESTWP-1", "Card", "Edit " + CONSOLE)
+    describe(db, "TESTWP-2", "Card two", "Edit " + CONSOLE)
+
+    flying = hotfiles.in_flight_hot_files(db, lambda ticket: hotfiles.predict(db, ticket, ""))
+
+    assert "TESTWP-1" not in flying and "TESTWP-2" in flying
+    assert hotfiles.reserve(db, "TESTWP-1", "gone", [CONSOLE]) is None
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) == ("TESTWP-1", [CONSOLE])  # fresh claim still counts
+    db.run("UPDATE hot_file_reservations SET reserved_at = now() - interval '1 hour'")
+    assert hotfiles.reserve(db, "TESTWP-3", "run-3", [CONSOLE]) is None  # an open pull request alone does not keep it

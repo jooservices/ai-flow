@@ -17,7 +17,7 @@ Before a dev run is offered, AI Flow predicts the files the ticket will touch:
 
 A predicted file is *hot* when it matches `HOT_FILES` (the console page, `aiflow/v4/control/api.py`,
 `tests/v4/conftest.py`, `pyproject.toml`, `uv.lock`, `CHANGELOG.md`). A ticket is **not offered** while another ticket
-shares a hot file with it and has a running dev run or an open pull request (In Verify, Human review, Ready to merge). The account is
+shares a hot file with it and has a running dev run or is waiting in In Verify, Human review or Ready to merge. A ticket sent back for rework with an open pull request holds nothing while it waits; it updates its branch when it resumes. The account is
 offered another ticket instead, or waits. It remains blocked for as long as the holder is running or waiting in
 review; elapsed time never allows overlapping tickets on a hot file.
 

@@ -1,1 +1,1 @@
-"""Data access of the control service: SQL and persistence mapping, one repository per aggregate."""
+"""Persistence repositories for control-plane aggregates, one repository per aggregate."""

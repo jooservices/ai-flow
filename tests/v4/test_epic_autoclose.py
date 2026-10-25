@@ -37,6 +37,7 @@ def test_jira_sync_closes_epic_when_every_child_is_done(ctx, monkeypatch):
                        (epic_key,))
     assert audit["result"] == "Done"
     assert audit["payload"]["child_count"] == 2
+    assert audit["payload"]["transition_guard"] == "all_children_finished"
     report = ctx.db.one("SELECT scope, subject, report FROM project_reports WHERE project=%s", ("TESTWP",))
     assert report["scope"] == "epic" and report["subject"] == epic_key
     assert report["report"]["tickets"]["done"] == 2

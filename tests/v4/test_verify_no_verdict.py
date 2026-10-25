@@ -210,6 +210,42 @@ def test_offline_account_does_not_keep_the_ticket_from_being_exhausted(client, c
                       " AND closed_at IS NULL")["n"] == 1
 
 
+def test_master_paused_account_does_not_delay_verify_exhaustion(client, ctx):
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    ctx.db.run("INSERT INTO master_account_pauses (account_id, paused_until, reason, run_id)"
+               " VALUES ('claude-01', now() + interval '1 hour', 'master pause', %s)", (str(uuid.uuid4()),))
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=8)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=2)
+
+    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "project": "TESTWP", "labels": ["aiflow-ready"]}) == [
+        "codex-01"]
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict' AND closed_at IS NULL")["n"] == 1
+
+
+def test_account_without_shared_capacity_does_not_delay_verify_exhaustion(client, ctx, monkeypatch):
+    from aiflow.v4.control import shared_accounts
+
+    join(client, "cc"), join(client, "node1")
+    in_verify(ctx)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=8)
+    no_verdict(ctx, "TESTWP-50", "codex-01", minutes_ago=2)
+    normal_capacity = shared_accounts.may_take
+
+    def full_account(db, account, node, **kwargs):
+        if account.id == "claude-01":
+            return False, "account capacity is full"
+        return normal_capacity(db, account, node, **kwargs)
+
+    monkeypatch.setattr(shared_accounts, "may_take", full_account)
+
+    assert verify_retry.exhausted(ctx, {"key": "TESTWP-50", "project": "TESTWP", "labels": ["aiflow-ready"]}) == [
+        "codex-01"]
+    watchdog(ctx)
+    assert ctx.db.one("SELECT count(*) AS n FROM incidents WHERE kind='verify_no_verdict' AND closed_at IS NULL")["n"] == 1
+
+
 def test_online_account_without_project_access_does_not_prevent_exhaustion(client, ctx):
     join(client, "cc")
     join(client, "node1")

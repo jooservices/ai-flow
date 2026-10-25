@@ -23,6 +23,7 @@ from ..core.toolchains import CONTAINER_RUNTIME_TOOL, toolchain_gaps
 from . import environment, licensing, role_health, rollout, shared_accounts, tooling
 from .incidents import close_incident, open_incident
 from .repositories.verify_runs import VerifyRunsRepository
+from . import work_eligibility
 
 KIND = "verify_no_verdict"
 SLOW_MINUTES = 30
@@ -124,8 +125,9 @@ def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Pat
     project = repo.projects.get(str(ticket.get("project") or ""))
     node_row = repository.candidate_node(node)
     labels = set(ticket.get("labels") or [])
-    if (not account or account.paused or account.id == repository.last_dev_account(ticket["key"])
-            or not account.runs_on(node) or "verify" not in role_health.account_roles(account)
+    if (not work_eligibility.can_take_work(ctx.db, ctx.leases, account, node)
+            or account.id == repository.last_dev_account(ticket["key"])
+            or "verify" not in role_health.account_roles(account)
             or (account.explicit_only and f"ai-{account.provider}" not in labels)):
         return False
     if (not project or project.paused or not node_row.get("accepting_work", True)
@@ -137,7 +139,7 @@ def candidate_offer(ctx, ticket: dict, account_id: str, node: str, releases: Pat
     mode = role_health.modes(ctx.db, account.id, ["verify"])["verify"]
     if mode != "on" and not (mode == "probation" and role_health.probation_ticket(ticket)):
         return False
-    if ctx.leases.cooling(account.id) or ticket["key"] in set(ctx.leases.held_keys()):
+    if ticket["key"] in set(ctx.leases.held_keys()):
         return False
     if ticket["key"] in cooling(ctx.db) or not _node_ready_for_ticket(ctx, ticket, project, node_row):
         return False

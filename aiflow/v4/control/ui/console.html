@@ -1266,6 +1266,17 @@ function roleChecks(root, className, selected) {
       (selected.indexOf(r.id) >= 0 ? ' checked' : '') + '> ' + esc(r.label) + '</label>';
   }).join('');
 }
+function captureUserAddForm(root) {
+  var email = $('[data-user-email]', root), draft = S.userAdmin.addForm;
+  if (!email || S.userAdmin.temporaryPassword) return;
+  var form = email.closest('.project-form');
+  if (!form.contains(document.activeElement)) return;
+  draft.email = email.value;
+  draft.name = $('[data-user-name]', form).value;
+  draft.roles = $$('.new-role:checked', form).map(function (item) { return item.value; });
+  draft.all = $('[data-user-all]', form).checked;
+  draft.projects = $$('[data-user-projects] option:checked', form).map(function (item) { return item.value; });
+}
 function projectChoices(selected, all) {
   return '<label class="fld">Projects <select class="in" data-user-projects multiple size="' + Math.min(5, Math.max(2, S.userAdmin.projects.length)) + '"' + (all ? ' disabled' : '') + '>' +
     S.userAdmin.projects.map(function (key) { return '<option value="' + esc(key) + '"' + (selected.indexOf(key) >= 0 ? ' selected' : '') + '>' + esc(key) + '</option>'; }).join('') +
@@ -1274,6 +1285,7 @@ function projectChoices(selected, all) {
 function renderUsers() {
   var root = $('#view-users'); if (!root) return;
   if (!consoleCan('console.manage')) { root.innerHTML = '<section class="panel"><h2>View unavailable</h2><p>This view is not available for your role.</p></section>'; return; }
+  captureUserAddForm(root);
   var u = S.userAdmin, h = '<section class="panel" data-block="users"><div class="panel-h"><h2>People and roles</h2><span class="hint">Role changes, project access and account status take effect immediately.</span><span class="spacer"></span><button class="btn sm" data-user-refresh>Refresh</button></div>';
   if (u.error) h += '<div class="stakeholder-error">' + esc(u.error) + '</div>';
   if (u.temporaryPassword) h += '<div class="project-checks"><strong>One-time password for ' + esc(u.temporaryPassword.email) + '</strong><p>Copy this password and share it with the person. It will not be shown again.</p><code>' + esc(u.temporaryPassword.value) + '</code><button class="btn sm" data-user-password-dismiss>Dismiss</button></div>';
@@ -2864,7 +2876,7 @@ function renderDBody() {
     else if (!t.run && lr && t.status === 'To Do' && ['failed', 'lost', 'timeout', 'quota'].indexOf(lr.outcome) >= 0) att.push([t, 'warn', 'Retry', lr.account + ': ' + lr.outcome + (lr.error_kind ? ' (' + lr.error_kind + ')' : '')]);
   });
   if (!att.length) h += '<div class="col-empty">Nothing needs attention</div>';
-  att.slice(0, 20).forEach(function (x) {
+  att.forEach(function (x) {
     h += '<button class="att-item" data-act="open-ticket" data-key="' + esc(x[0].key) + '"><span class="flag" data-tone="' + x[1] + '">' + esc(x[2]) + '</span><span style="min-width:0"><div class="t"><span class="mono muted">' + esc(x[0].key) + '</span> ' + esc(x[0].summary) + '</div><div class="d">' + esc(x[3]) + '</div></span><span class="muted">Open</span></button>';
   });
   h += '</div></section>';

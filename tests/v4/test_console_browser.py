@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -94,6 +95,23 @@ def _seed_review_ticket(ctx, key: str, pr_number: int) -> None:
             " VALUES (%s,%s,'TESTWP',%s,'codex-01','codex','node1',1,'finished',%s,%s,%s,%s)",
             (str(uuid.uuid4()), key, step, outcome, pr_url, summary, J(details)),
         )
+
+
+def _seed_slow_verification_ticket(ctx, key: str) -> None:
+    add_ticket(ctx.db, key, status="In Verify", labels=())
+    ctx.db.run("UPDATE tickets SET type='Task', summary=%s WHERE key=%s", (f"Slow browser verification {key}", key))
+    started = datetime.now(timezone.utc) - timedelta(minutes=50)
+    for step, account, provider, outcome, offset, pr_url in (
+        ("dev", "codex-01", "codex", "done", 0,
+         f"https://github.com/jooservices/test-aiflow-wp/pull/{key.rsplit('-', 1)[-1]}"),
+        ("verify", "claude-01", "claude", "quota", 2, ""),
+    ):
+        run_started = started + timedelta(minutes=offset)
+        ctx.db.run(
+            "INSERT INTO runs (id,ticket_key,project,step,account_id,provider,node,fence,status,outcome,started_at,"
+            "ended_at,pr_url,summary,details) VALUES (%s,%s,'TESTWP',%s,%s,%s,'node1',1,'finished',%s,%s,%s,%s,%s,%s)",
+            (str(uuid.uuid4()), key, step, account, provider, outcome, run_started,
+             run_started + timedelta(minutes=1), pr_url, f"Browser sample {step}", J({})))
 
 
 def _redact(value, secrets: tuple[str, ...]):
@@ -232,6 +250,11 @@ def test_console_journeys_for_roles_screens_themes_and_phone(ctx, tmp_path, monk
                " WHERE key='TESTWP-981'")
     add_ticket(ctx.db, "TESTWP-982", status="To Do", labels=())
     ctx.db.run("UPDATE tickets SET type='Task', summary='Not ready sample' WHERE key='TESTWP-982'")
+    for index in range(25):
+        _seed_slow_verification_ticket(ctx, f"TESTWP-{900 + index}")
+    from aiflow.v4.control.verify_retry import slow_verifications
+    seeded_slow_keys = {row["key"] for row in slow_verifications(ctx.db)}
+    assert {f"TESTWP-{900 + index}" for index in range(25)} <= seeded_slow_keys
     action_keys = {}
     pr_data = {}
     next_pr = 25200

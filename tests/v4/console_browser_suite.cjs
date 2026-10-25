@@ -330,6 +330,7 @@ async function exerciseMachineAndUserAdministration(page, mode) {
   assert.equal(await emailField.inputValue(), email, 'Add person email field did not retain its value');
   await page.getByLabel('Name', { exact: true }).fill(`Browser Person ${mode}`);
   await reviewerRole.check();
+  await page.waitForFunction((expected) => document.querySelector('[data-user-email]')?.value === expected, email);
   assert.equal(await reviewerRole.isChecked(), true, 'Reviewer role was not selected for the new person');
   assert.equal(await emailField.inputValue(), email, 'Add person form lost its email while selecting a role');
   const userResponse = page.waitForResponse((item) => item.request().method() === 'POST' &&
@@ -367,6 +368,24 @@ async function exerciseConflictLossDashboard(page) {
     'Command Center dashboard is missing the conflict loss trend');
 }
 
+async function exerciseSlowVerificationDashboard(page) {
+  await page.getByRole('tab', { name: 'Delivery', exact: true }).click();
+  const section = page.locator('#view-delivery [data-block="attention"]');
+  const expected = Array.from({ length: 25 }, (_, index) => `TESTWP-${900 + index}`);
+  await page.waitForFunction((keys) => {
+    const visible = new Set(Array.from(document.querySelectorAll('#view-delivery [data-block="attention"] .att-item'),
+      (item) => item.dataset.key));
+    return keys.every((key) => visible.has(key));
+  }, expected, { timeout: 15000 });
+  const entries = await section.locator('.att-item').evaluateAll((items) =>
+    items.map((item) => ({ key: item.dataset.key, text: item.innerText })));
+  for (const key of expected) {
+    const entry = entries.find((item) => item.key === key);
+    assert.ok(entry, `Needs attention omitted slow verification ${key}`);
+    assert.match(entry.text, /tried: claude-01/, `${key} does not show the account that tried`);
+  }
+}
+
 async function exerciseMode(browser, mode) {
   const administrator = config.roles.find((person) => person.role === 'administrator');
   const dimensions = mode === 'phone' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
@@ -377,6 +396,7 @@ async function exerciseMode(browser, mode) {
     await signInInPage(page, administrator, mode);
     await visitScreens(page, administrator.views);
     await exerciseConflictLossDashboard(page);
+    if (mode === 'light') await exerciseSlowVerificationDashboard(page);
     await exerciseWorkAndSearch(page);
     await exerciseReviews(page, mode);
     await exerciseMachineAndUserAdministration(page, mode);

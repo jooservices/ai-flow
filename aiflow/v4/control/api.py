@@ -48,7 +48,8 @@ from ..core.toolchains import (CONTAINER_RUNTIME_TOOL, STACK_TOOLS, missing_tool
                                tools_for_stack)
 from ..core.environment import KINDS as ENV_KINDS, RUN_STEPS as ENV_RUN_STEPS, parse_items as parse_env_items
 from . import (ba_chat, business, escalations, jira_connect, knowledge, layouts, licensing, log_viewer, memory,
-               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling, version_release)
+               role_health, rollout, runtime_settings, setup_wizard, shared_accounts, support_bundle, tooling,
+               version_release, work_eligibility)
 from . import environment as environment_reports
 from .console_auth import (CANONICAL_ROLES, ConsoleUser, COOKIE_NAME, ROLE_LABELS, ROLE_PERMISSIONS, has_permission,
                            issue_session, landing_page, normalize_role, normalize_roles, role_satisfies, resolve_session_user,
@@ -1782,8 +1783,7 @@ def create_app(ctx: Ctx) -> FastAPI:
                 "enabled": budget > 0 and remaining > 0}
 
     def account_master_paused(account_id: str) -> bool:
-        return bool(ctx.db.one("SELECT 1 AS paused FROM master_account_pauses"
-                               " WHERE account_id=%s AND paused_until > now()", (account_id,)))
+        return work_eligibility.master_paused(ctx.db, account_id)
 
     def mark_machine_auth_failure(account_id: str, node: str, summary: str) -> None:
         """Require sign-in again on the failing machine while keeping other assignments usable."""
@@ -4459,11 +4459,7 @@ def create_app(ctx: Ctx) -> FastAPI:
         acc = repo.account(account_id)
         if not acc or not acc.runs_on(node):
             raise HTTPException(403, f"account {account_id} does not run on {node}")
-        if acc.paused or account_master_paused(account_id):
-            return []
-        if ctx.leases.cooling(account_id):
-            return []
-        if not shared_accounts.may_take(ctx.db, acc, node)[0]:  # total session limit and this machine's share
+        if not work_eligibility.can_take_work(ctx.db, ctx.leases, acc, node):
             return []
         quota_at_risk = quota_forecast_at_risk(account_id)
         node_row = ctx.db.one("SELECT projects,dynamic,tools,metrics,accepting_work FROM nodes WHERE name=%s"

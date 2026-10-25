@@ -1,5 +1,7 @@
 # Epics and verification runs without a verdict
 
+**Console screens:** Dashboard (`cc`), Work board (`work`) and Delivery (`delivery`).
+
 Two faults stopped merging on 2026-10-24: epics with the ready label were offered as work, and verification runs
 that ended without a `VERDICT:` line were retried on the same weak accounts. Both are handled by rule, without AI.
 
@@ -41,9 +43,10 @@ control UI like all others.
 
 ## Dashboard
 
-The Delivery Dashboard section "Needs attention" lists tickets that have waited more than 30 minutes for verification
-(since the dev run finished), with the accounts that tried, their no-verdict counts and which are not offered the
-ticket again. The data is `slow_verifications` in `/v1/state`.
+The Dashboard and Delivery section "Needs attention" lists every ticket that has waited more than 30 minutes for
+verification (since the dev run finished), with the accounts that tried, their no-verdict counts and which are not
+offered the ticket again. The list is complete rather than truncated at 20 entries. The data is
+`slow_verifications` in `/v1/state`.
 
 ## API contracts touched
 

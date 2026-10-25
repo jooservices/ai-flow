@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from .db import J
 from .repositories.tickets import TicketsRepository
 from . import projects as project_lifecycle
 
@@ -95,8 +94,8 @@ def apply_transition(ctx, project: str, epic: dict, children: list[dict], epics:
         if status != target:
             return
         now = datetime.now(timezone.utc)
-        ctx.db.run("UPDATE tickets SET status=%s, done_at=CASE WHEN status <> 'Done' AND %s='Done'"
-                   " THEN %s ELSE done_at END, synced_at=now() WHERE key=%s", (status, status, now, key))
+        TicketsRepository(ctx.db).record_epic_transition(key, status, now, transition.guard, detail,
+                                                          len(children), moved)
         epic["status"] = status
         ready = "aiflow-ready" in (epic.get("labels") or [])
         ctx.events.emit("ticket.status", ticket=key, project=project, outcome=status,
@@ -105,7 +104,7 @@ def apply_transition(ctx, project: str, epic: dict, children: list[dict], epics:
             _report_epic(ctx, project, key)
         if not moved:
             return
-        _audit_transition(ctx, key, status, transition, detail, len(children))
+        ctx.events.emit("jira.transition", ticket=key, account="control", outcome=status, reason=detail)
         _comment_completion(ctx, project, key, len(children), now, epics, epic, target)
     except Exception as exc:  # noqa: BLE001
         log.warning("could not reconcile epic %s: %s", key, exc)
@@ -116,14 +115,6 @@ def _report_epic(ctx, project: str, key: str) -> None:
         project_lifecycle.report_done_epic(ctx, project, key)
     except Exception as exc:  # noqa: BLE001
         log.warning("could not generate completion report for epic %s: %s", key, exc)
-
-
-def _audit_transition(ctx, key: str, status: str, transition: Transition, detail: str, child_count: int) -> None:
-    ctx.db.run("INSERT INTO write_audit (target, action, ticket, actor, accepted, result, payload)"
-               " VALUES ('jira','transition',%s,'control',true,%s,%s)",
-               (key, status, J({"source": "jira_sync", "reason": detail, "child_count": child_count,
-                                "transition_guard": transition.guard})))
-    ctx.events.emit("jira.transition", ticket=key, account="control", outcome=status, reason=detail)
 
 
 def _comment_completion(ctx, project: str, key: str, child_count: int, now: datetime,
